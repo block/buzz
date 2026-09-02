@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
+import { updateChannelLastMessageAt } from "@/features/channels/lib/channelRecency";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
@@ -13,7 +14,13 @@ import { relayClient } from "@/shared/api/relayClient";
 import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
+  KIND_AGENT_MENTION_ACK,
 } from "@/shared/constants/kinds";
+import {
+  applyMentionAck,
+  clearPendingMention,
+} from "@/features/agents/pendingMentionAckStore";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import {
   createTrailingDebounce,
@@ -79,6 +86,13 @@ const CHANNELS_INVALIDATE_DEBOUNCE_MS = 500;
 // Only "new content" kinds should bump unread state. Shared with the
 // catch-up query in useUnreadChannels so the two paths stay in lockstep.
 const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
+/** Kinds whose arrival counts as an answer to a pending agent mention. */
+const CHANNEL_MESSAGE_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
+
+/** First value of the first tag named `name`, or `null`. */
+function tagValue(tags: readonly string[][], name: string): string | null {
+  return tags.find((tag) => tag[0] === name)?.[1] ?? null;
+}
 
 export const EMPTY_SET: ReadonlySet<string> = new Set();
 
@@ -234,6 +248,31 @@ export function useLiveChannelUpdates(
       return;
     }
 
+    // NIP-MR: acks must resolve wherever they land. This subscription spans
+    // every joined channel; the per-channel one in useChannelSubscription
+    // covers only the channel currently open and is torn down on switch. If
+    // acks were consumed only there, sending a mention and then switching
+    // channels would discard the ack and, 30s later, claim the agent never
+    // picked the message up — printed above the reply it did send. Handled
+    // before the liveChannelIds gate so an ack is never dropped, and applied
+    // idempotently so double delivery from both subscriptions is harmless.
+    if (event.kind === KIND_AGENT_MENTION_ACK) {
+      applyMentionAck(
+        tagValue(event.tags, "e") ?? "",
+        normalizePubkey(event.pubkey),
+        tagValue(event.tags, "status") ?? "",
+        tagValue(event.tags, "reason"),
+      );
+      return;
+    }
+    // A reply is a stronger signal than any ack: whatever did or did not
+    // arrive on the ack path, this mention has been answered.
+    if (CHANNEL_MESSAGE_KINDS.has(event.kind)) {
+      for (const tag of event.tags) {
+        if (tag[0] === "e" && tag[1]) clearPendingMention(tag[1]);
+      }
+    }
+
     if (!liveChannelIds.has(channelId)) {
       if (channelId !== activeChannelId) {
         invalidateChannelsDebounced();
@@ -246,6 +285,13 @@ export function useLiveChannelUpdates(
       event.kind,
       isDmChannel,
     );
+
+    // Recency is presentation state, not notification state. Every recognized
+    // message advances Recent ordering, including self-authored and muted
+    // messages that the notification policy deliberately filters below.
+    if (isUnreadTriggerKind) {
+      updateChannelLastMessageAt(queryClient, channelId, event.created_at);
+    }
 
     // Let the caller observe self-authored trigger events (e.g. to track
     // thread participation) before the author-exclusion guard filters them.

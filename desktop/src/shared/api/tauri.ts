@@ -7,18 +7,15 @@ import {
   fromRawInstallRuntimeResult,
   type RawInstallRuntimeResult,
 } from "@/shared/api/installTypes";
-import type { RawSendChannelMessageResult } from "@/shared/api/tauriMessageTypes";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
   BackendProviderCandidate,
   BackendProviderProbeResult,
-  CanvasResponse,
   GetHomeFeedInput,
   HomeFeedResponse,
   ManagedAgent,
   ManagedAgentBackend,
-  RelayAgent,
   RelayMember,
   RelayMemberRole,
   PresenceLookup,
@@ -26,9 +23,6 @@ import type {
   RelayEvent,
   SearchMessagesInput,
   SearchMessagesResponse,
-  SendChannelMessageResult,
-  SetCanvasInput,
-  SetCanvasResult,
   ThreadCursor,
   ThreadRepliesResponse,
   CreateManagedAgentInput,
@@ -44,6 +38,13 @@ import type {
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
+export {
+  getCanvas,
+  getCanvasHistory,
+  setCanvas,
+} from "@/shared/api/tauriCanvas";
+export { sendChannelMessage } from "@/shared/api/tauriMessages";
+export { getEventById, getEventsByIds } from "@/shared/api/tauriEvents";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
@@ -65,7 +66,7 @@ type RawFeedItem = {
   channel_name: string;
   channel_type: string | null;
   tags: string[][];
-  category: "mention" | "needs_action" | "activity" | "agent_activity";
+  category: HomeFeedResponse["feed"]["mentions"][number]["category"];
 };
 
 type RawHomeFeedResponse = {
@@ -96,18 +97,6 @@ type RawSearchHit = {
 type RawSearchResponse = {
   hits: RawSearchHit[];
   found: number;
-};
-
-type RawRelayAgent = {
-  pubkey: string;
-  name: string;
-  agent_type: string;
-  channels: string[];
-  channel_ids: string[];
-  capabilities: string[];
-  status: RelayAgent["status"];
-  respond_to?: RelayAgent["respondTo"];
-  respond_to_allowlist?: string[];
 };
 
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
@@ -232,17 +221,6 @@ type RawRelayMember = {
 
 type RawListRelayMembersResponse = {
   members: RawRelayMember[];
-};
-
-type RawCanvasResponse = {
-  content: string | null;
-  updated_at: number | null;
-  author: string | null;
-};
-
-type RawSetCanvasResult = {
-  ok: boolean;
-  event_id: string;
 };
 
 /** Error normalized from a rejected Tauri invocation with its wire payload. */
@@ -401,33 +379,6 @@ export async function leaveChannel(channelId: string): Promise<void> {
   await invokeTauri("leave_channel", { channelId });
 }
 
-export async function getCanvas(channelId: string): Promise<CanvasResponse> {
-  const response = await invokeTauri<RawCanvasResponse>("get_canvas", {
-    channelId,
-  });
-  return {
-    content: response.content,
-    // Normalize absent keys to null: ensureWelcomeCanvas treats null as
-    // "no canvas yet", and `undefined !== null` would make every fresh
-    // channel look already-seeded.
-    updatedAt: response.updated_at ?? null,
-    author: response.author ?? null,
-  };
-}
-
-export async function setCanvas(
-  input: SetCanvasInput,
-): Promise<SetCanvasResult> {
-  const response = await invokeTauri<RawSetCanvasResult>("set_canvas", {
-    channelId: input.channelId,
-    content: input.content,
-  });
-  return {
-    ok: response.ok,
-    eventId: response.event_id,
-  };
-}
-
 export async function getHomeFeed(
   input: GetHomeFeedInput = {},
 ): Promise<HomeFeedResponse> {
@@ -464,11 +415,6 @@ export async function searchMessages(
     hits: response.hits.map(fromRawSearchHit),
     found: response.found,
   };
-}
-
-export async function getEventById(eventId: string): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("get_event", { eventId });
-  return JSON.parse(eventJson) as RelayEvent;
 }
 
 type RawThreadCursor = {
@@ -530,42 +476,6 @@ export async function getThreadReplies(
           eventId: response.next_cursor.event_id,
         }
       : null,
-  };
-}
-
-export async function sendChannelMessage(
-  channelId: string,
-  content: string,
-  parentEventId?: string | null,
-  mediaTags?: string[][],
-  mentionPubkeys?: string[],
-  kind?: number,
-  emojiTags?: string[][],
-  mentionTags?: string[][],
-  linkPreviewTags?: string[][],
-  sentFromThreadTag?: string[],
-): Promise<SendChannelMessageResult> {
-  const response = await invokeTauri<RawSendChannelMessageResult>(
-    "send_channel_message",
-    {
-      channelId,
-      content,
-      parentEventId,
-      mediaTags: mediaTags ?? null,
-      emojiTags: emojiTags ?? null,
-      mentionTags: mentionTags ?? null,
-      linkPreviewTags,
-      sentFromThreadTag: sentFromThreadTag ?? null,
-      mentionPubkeys: mentionPubkeys ?? null,
-      kind: kind ?? null,
-    },
-  );
-  return {
-    eventId: response.event_id,
-    parentEventId: response.parent_event_id,
-    rootEventId: response.root_event_id,
-    depth: response.depth,
-    createdAt: response.created_at,
   };
 }
 
@@ -652,21 +562,6 @@ export async function createAuthEvent(input: {
   const eventJson = await invokeTauri<string>("create_auth_event", input);
   return JSON.parse(eventJson) as RelayEvent;
 }
-
-function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
-  return {
-    pubkey: agent.pubkey,
-    name: agent.name,
-    agentType: agent.agent_type,
-    channels: agent.channels,
-    channelIds: agent.channel_ids ?? [],
-    capabilities: agent.capabilities,
-    status: agent.status,
-    respondTo: agent.respond_to ?? null,
-    respondToAllowlist: agent.respond_to_allowlist ?? [],
-  };
-}
-
 export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   return {
     pubkey: agent.pubkey,
@@ -810,12 +705,6 @@ export async function changeRelayMemberRole(
   await invokeTauri("change_relay_member_role", { targetPubkey, newRole });
 }
 
-export async function listRelayAgents(): Promise<RelayAgent[]> {
-  return (await invokeTauri<RawRelayAgent[]>("list_relay_agents")).map(
-    fromRawRelayAgent,
-  );
-}
-
 export async function listManagedAgents(): Promise<ManagedAgent[]> {
   return (await invokeTauri<RawManagedAgent[]>("list_managed_agents")).map(
     fromRawManagedAgent,
@@ -898,12 +787,6 @@ export async function discoverGitBashPrerequisite(): Promise<GitBashPrerequisite
       installHint: prerequisite.install_hint,
     }
   );
-}
-
-export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
-  return (
-    await invokeTauri<RawAcpRuntimeCatalogEntry[]>("discover_acp_providers")
-  ).map(fromRawAcpRuntimeCatalogEntry);
 }
 
 /** Input shape for creating or updating a custom harness. */
@@ -1035,7 +918,7 @@ export async function getBakedBuildEnvKeys(): Promise<string[]> {
  *
  * The value is already masked in Rust for secret keys (keys not in the
  * explicit safe-to-reveal allowlist: `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL`,
- * `DATABRICKS_HOST`, `DATABRICKS_MODEL`). Non-allowlisted keys have their
+ * `DATABRICKS_HOST`, `DATABRICKS_MODEL`, `DATABRICKS_MODEL_FILTER`). Non-allowlisted keys have their
  * values replaced with `••••••`. Non-secret values are shown as-is.
  * Empty-value keys are filtered out.
  */

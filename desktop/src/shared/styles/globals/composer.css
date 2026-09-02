@@ -93,10 +93,10 @@
 }
 
 .rich-text-composer .tiptap {
+  @apply text-message font-normal tracking-normal;
   outline: none;
   min-height: 1lh;
-  font-size: var(--text-sm);
-  line-height: var(--text-sm--line-height);
+  padding-block: 0.0625rem;
 }
 
 .rich-text-composer .tiptap p {
@@ -255,4 +255,20 @@
 
 /* Inline chips — timeline markdown + composer share `.message-markdown` scope.
    Body copy is text-sm; inline code labels sit one step down (text-xs).
-   All chip variants share one box height so mono labels stay balanced. */
+   All chip variants share one box height so mono labels stay balanced.
+
+   Plain-text mention decorations stay inline because inline-flex pulls the
+   caret into their decorated range and swallows the trailing space after an
+   @mention. Composer Buzz links are atom nodes, but their labels may still
+   fragment between characters; only the icon and leading label fragment stay
+   together. The line-height keeps each inline decoration box tall enough to
+   paint both block-padding edges without clipping. */
+.rich-text-composer .tiptap .mention-chip {
+  display: inline;
+  min-height: 0;
+  line-height: calc(
+    1em +
+    var(--inline-chip-padding-block-start) +
+    var(--inline-chip-padding-block-end)
+  );
+}

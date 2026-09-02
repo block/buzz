@@ -9,6 +9,13 @@
 pub mod agent_turn_metric;
 /// Channel and membership enums shared across crates.
 pub mod channel;
+/// Buzz CML task snapshots and canonical export.
+pub mod cml;
+/// Signed CML task-event validation and deterministic reduction.
+pub mod cml_event;
+
+/// Observation-time projection of reduced CML state for UI surfaces.
+pub mod cml_view;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;
@@ -26,6 +33,8 @@ pub mod invite;
 pub mod kind;
 /// Network utilities — SSRF-safe IP classification.
 pub mod network;
+/// NIP-10 thread-marker parsing — shared `root`/`reply` marker resolver.
+pub mod nip10;
 /// Agent observer frame helpers.
 pub mod observer;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
@@ -36,6 +45,8 @@ pub mod presence;
 pub mod private_managed_agent;
 /// Canonical relay runtime identities.
 pub mod relay;
+/// Task lifecycle enums shared across crates.
+pub mod task;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// Schnorr signature and event ID verification.

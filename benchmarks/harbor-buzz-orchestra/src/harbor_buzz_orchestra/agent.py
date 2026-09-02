@@ -39,6 +39,7 @@ class BuzzOrchestraAgent(BaseAgent):
         buzz_cli_binary: str = "buzz",
         relay_gateway: str = "",
         forwarder_binary: str = "relay-forwarder",
+        ca_bundle: str = "",
         run_id: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -57,6 +58,7 @@ class BuzzOrchestraAgent(BaseAgent):
             buzz_cli_binary,
             relay_gateway,
             forwarder_binary,
+            ca_bundle,
         )
         self.run_id = run_id
 
@@ -116,6 +118,7 @@ class BuzzOrchestraAgent(BaseAgent):
         buzz_cli_binary: str,
         relay_gateway: str,
         forwarder_binary: str,
+        ca_bundle: str = "",
     ) -> OrchestraRuntime | None:
         endpoint_data = cls._load_mapping(endpoint_source)
         if endpoint_data is None and artifact_root is None:
@@ -142,6 +145,7 @@ class BuzzOrchestraAgent(BaseAgent):
             buzz_cli_binary=buzz_cli_binary,
             relay_gateway=relay_gateway,
             forwarder_binary=forwarder_binary,
+            ca_bundle_path=ca_bundle,
         )
 
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -170,7 +174,11 @@ class BuzzOrchestraAgent(BaseAgent):
         # GUI shows one recognisable channel per problem per attempt.
         channel_label = getattr(environment, "environment_name", None)
         handle = self.provisioner.create_trial(
-            run_id, trial_id, self.manifest, channel_label=channel_label
+            run_id,
+            trial_id,
+            self.manifest,
+            channel_label=channel_label,
+            task_name=channel_label,
         )
         if handle.trial_id != trial_id:
             raise RuntimeError("provisioner returned a handle for a different trial_id")

@@ -1871,24 +1871,49 @@ test("an older agent message opens the same persona instance as the Agents libra
   await page.goto("/");
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+
+  // The two instances carry different names, so the persona shows one card per
+  // name — neither is hidden — and each card opens its own instance. The
+  // persona's own name stays on both cards as a second line.
+  const earlierCard = page.getByTestId(
+    `persona-agent-row-${personaId}::earlier parity agent`,
+  );
+  const currentCard = page.getByTestId(
+    `persona-agent-row-${personaId}::current parity agent`,
+  );
+  await expect(earlierCard).toBeVisible();
+  await expect(currentCard).toBeVisible();
+  await expect(page.getByText("Parity Agent", { exact: true })).toHaveCount(2);
+
+  // Post-#5706 contract: a card's main click opens the PERSONA target, never
+  // an explicit pubkey. The archive-aware selector then resolves the persona
+  // to its running instance, so both cards land on the same persona panel —
+  // the exact-instance pick is delegated to the panel's Instances section.
+  await currentCard.click();
+  await expectHashSearchParam(page, "profile", null);
+  await expectHashSearchParam(page, "profilePersona", personaId);
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Stop");
-  const agentsLibraryContract = await readOwnedAgentProfileContract(page);
+  await page.getByTestId("auxiliary-panel-close").click();
 
-  await page.getByTestId("user-profile-tab-runtime").click();
+  // The renamed, stopped instance is still reachable — deliberately — through
+  // the persona panel's Instances list rather than the card body, so a pick
+  // made outside the archive-snapshot fail-open window can't strand the panel.
+  await earlierCard.click();
+  await expectHashSearchParam(page, "profilePersona", personaId);
+  await page.getByRole("tab", { name: "Runtime" }).click();
   await page.getByTestId("user-profile-instances").click();
   await page.getByTestId(`user-profile-instance-${historicalPubkey}`).click();
   await expectHashSearchParam(page, "profile", historicalPubkey);
-  await expectHashSearchParam(page, "profileTab", "runtime");
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Start agent");
-  await expect(
-    page.getByTestId(`user-profile-instance-${historicalPubkey}`),
-  ).toContainText("Current");
+  const agentsLibraryContract = await readOwnedAgentProfileContract(page);
 
+  // Parity, restated for the new card model: an avatar click on an older
+  // message from the renamed instance must land on the same contract its card
+  // does — not on the persona's running instance.
   await page.getByTestId("auxiliary-panel-close").click();
   await page.getByTestId("channel-agents").click();
   const historicalMessage = page
@@ -1898,7 +1923,7 @@ test("an older agent message opens the same persona instance as the Agents libra
   await historicalMessage.locator("button").first().click();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
-  ).toHaveAttribute("aria-label", "Stop");
+  ).toHaveAttribute("aria-label", "Start agent");
   const messageContract = await readOwnedAgentProfileContract(page);
 
   expect(messageContract).toEqual(agentsLibraryContract);
@@ -2489,7 +2514,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
 
   const getTextScaleState = () =>
     page.evaluate(() => ({
-      fontSize: getComputedStyle(document.documentElement).fontSize,
+      rootFontSize: getComputedStyle(document.documentElement).fontSize,
       storedScale: localStorage.getItem("buzz:text-scale"),
       webviewZoom: (window as Window & { __BUZZ_E2E_WEBVIEW_ZOOM__?: number })
         .__BUZZ_E2E_WEBVIEW_ZOOM__,
@@ -2520,7 +2545,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "17.6px",
+    rootFontSize: "17.6px",
     storedScale: "1.1",
     webviewZoom: 1,
   });
@@ -2528,7 +2553,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("-", "Minus");
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "16px",
+    rootFontSize: "16px",
     storedScale: null,
     webviewZoom: 1,
   });
@@ -2537,7 +2562,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "19.2px",
+    rootFontSize: "19.2px",
     storedScale: "1.2",
     webviewZoom: 1,
   });
@@ -2545,10 +2570,90 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("0", "Digit0");
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "16px",
+    rootFontSize: "16px",
     storedScale: null,
     webviewZoom: 1,
   });
+});
+
+test("storage clear resets composed font size and keyboard zoom across windows", async ({
+  context,
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, "appearance");
+  await page.getByTestId("font-size-larger").click();
+
+  const dispatchZoomIn = () =>
+    page.evaluate(() => {
+      const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "Equal",
+          ctrlKey: !isMac,
+          key: "+",
+          metaKey: isMac,
+          shiftKey: true,
+        }),
+      );
+    });
+
+  for (let step = 0; step < 5; step += 1) {
+    await dispatchZoomIn();
+  }
+
+  // Zoom scales the real root; the Font size preference layers a text-only
+  // multiplier on top. Resolve the composed type rem through a rendered probe
+  // so the CSS calc is actually evaluated (root px × 15/14 for "larger").
+  const readTypographyState = () =>
+    page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.fontSize = "var(--buzz-type-rem)";
+      document.documentElement.appendChild(probe);
+      const typeRemPx =
+        Math.round(Number.parseFloat(getComputedStyle(probe).fontSize) * 100) /
+        100;
+      probe.remove();
+      return {
+        fontSize: document.documentElement.dataset.fontSize,
+        rootFontSize: getComputedStyle(document.documentElement).fontSize,
+        typeRemPx,
+        textScale: localStorage.getItem("buzz:text-scale"),
+      };
+    });
+
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "larger",
+    rootFontSize: "24px",
+    typeRemPx: 25.71,
+    textScale: "1.5",
+  });
+
+  const peerPage = await context.newPage();
+  await installMockBridge(peerPage);
+  await peerPage.goto("/");
+  await peerPage.evaluate(() => localStorage.clear());
+
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "default",
+    rootFontSize: "16px",
+    typeRemPx: 16,
+    textScale: null,
+  });
+
+  await page.keyboard.press(
+    process.platform === "darwin" ? "Meta+-" : "Control+-",
+  );
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "default",
+    rootFontSize: "14.4px",
+    typeRemPx: 14.4,
+    textScale: "0.9",
+  });
+
+  await peerPage.close();
 });
 
 test("shows agent runtimes in agent settings", async ({ page }) => {
@@ -2592,16 +2697,13 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
   await expect(runtimeRow).toHaveCSS("border-top-width", "0px");
 
   const agentsSecondaryColor = await agentsPage
-    .getByText(
-      "Keep agents you address selected for future messages in the same channel or thread. Remove them from the composer at any time.",
-    )
+    .getByTestId("settings-automatic-agent-mentions")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   await page.getByTestId("settings-nav-appearance").click();
   const appearanceSecondaryColor = await page
-    .getByTestId("link-preview-style-trigger")
-    .locator("..")
-    .locator("p")
-    .nth(1)
+    .getByTestId("link-preview-style-group")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   expect(agentsSecondaryColor).toBe(appearanceSecondaryColor);
 });

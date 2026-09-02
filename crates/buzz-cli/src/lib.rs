@@ -234,6 +234,9 @@ enum Cmd {
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
+    /// Validate and canonicalize local Buzz CML task snapshots
+    #[command(subcommand)]
+    Cml(CmlCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
@@ -426,6 +429,12 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// Read exact link-preview snapshot tag arrays from a JSON file
+        #[arg(long, value_name = "PATH", conflicts_with = "no_link_preview")]
+        link_preview_json: Option<String>,
+        /// Suppress automatic link previews for this message
+        #[arg(long, conflicts_with = "link_preview_json")]
+        no_link_preview: bool,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -511,14 +520,20 @@ pub enum MessagesCmd {
         #[arg(long)]
         kinds: Option<String>,
     },
-    /// Get a message thread (replies to a root message)
+    /// Get the containing thread for a message or Buzz message link
+    #[command(
+        after_help = "Examples:\n  buzz messages thread --channel <UUID> --event <EVENT_ID>\n  buzz messages thread --link 'buzz://message?channel=<UUID>&id=<EVENT_ID>&thread=<ROOT_ID>'"
+    )]
     Thread {
-        /// Channel UUID
-        #[arg(long)]
-        channel: String,
-        /// Root message event ID (64-char hex)
-        #[arg(long)]
-        event: String,
+        /// Channel UUID; required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        channel: Option<String>,
+        /// Message event ID (64-char hex); required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        event: Option<String>,
+        /// Canonical buzz://message deep link; uses the configured relay and identity
+        #[arg(long, conflicts_with_all = ["channel", "event"])]
+        link: Option<String>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
@@ -613,8 +628,9 @@ pub enum ChannelsCmd {
         /// Channel description
         #[arg(long)]
         description: Option<String>,
-        /// Make the channel ephemeral: lifetime in seconds. The relay archives
-        /// it once this many seconds pass without a new message.
+        /// Make the channel temporary/ephemeral: idle lifetime in seconds. If
+        /// omitted, the channel is permanent. The relay archives it once this
+        /// many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
         /// Apply a desktop-local channel template by name (case-insensitive):
@@ -745,6 +761,10 @@ pub enum CanvasCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Fetch a specific historical revision by event ID (64-char hex);
+        /// defaults to the current head
+        #[arg(long)]
+        revision: Option<String>,
     },
     /// Set (replace) the canvas document for a channel
     Set {
@@ -754,6 +774,24 @@ pub enum CanvasCmd {
         /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
+    },
+    /// List canvas revision history for a channel, newest first
+    History {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Maximum number of revisions to return (1–10000)
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        limit: u32,
+    },
+    /// Restore the canvas to a previous revision by re-publishing its content
+    Restore {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Revision event ID to restore (64-char hex)
+        #[arg(long)]
+        revision: String,
     },
 }
 
@@ -1309,14 +1347,15 @@ impl ProjectVisibility {
 pub enum ProjectsCmd {
     /// Create a new multi-repo project (NIP-MP kind:30621)
     ///
-    /// Requires at least one --repo. Fails with Conflict if the project already exists.
+    /// With no `--repo`, creates a default repository bound to `--channel`.
+    /// Fails with Conflict if the project already exists.
     Create {
         /// Project identifier (slug), up to 1024 bytes
         slug: String,
         /// Member repository coordinate: bare Buzz repo id (e.g. `buzz`) or full
         /// `30617:<owner-hex>:<repo-d>` for cross-owner or colon-bearing repo ids.
-        /// At least one --repo is required.
-        #[arg(long = "repo", required = true)]
+        /// Omit to create a default repository named after the slug (requires `--channel`).
+        #[arg(long = "repo")]
         repo: Vec<String>,
         /// Display name (≤256 bytes)
         #[arg(long)]
@@ -1356,6 +1395,28 @@ pub enum ProjectsCmd {
         /// Member repository coordinate (bare id or full `30617:<owner-hex>:<repo-d>`)
         #[arg(long = "repo", required = true)]
         repo: Vec<String>,
+    },
+    /// Draft a project-linked channel for owner review in Buzz Desktop
+    #[command(name = "add-channel")]
+    AddChannel {
+        /// Project home channel UUID from the current ACP [Context]
+        #[arg(long)]
+        home_channel: String,
+        /// New channel name
+        #[arg(long)]
+        name: String,
+        /// Optional channel description
+        #[arg(long)]
+        description: Option<String>,
+        /// Channel visibility
+        #[arg(long, value_enum, default_value = "open")]
+        visibility: ChannelVisibility,
+        /// Optional temporary-channel lifetime in seconds
+        #[arg(long)]
+        ttl: Option<u64>,
+        /// Optional Desktop channel-template name
+        #[arg(long)]
+        template: Option<String>,
     },
     /// Remove one or more member repositories from a project
     #[command(name = "remove-repo")]
@@ -1657,12 +1718,18 @@ pub enum PrCmd {
 pub enum IssuesCmd {
     /// Create a git issue (NIP-34 kind:1621)
     Create {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner pubkey (64-char hex). Optional when `--channel` (or
+        /// `BUZZ_GIT_ORIGIN_CHANNEL_ID`) names a project home.
         #[arg(long)]
-        repo_owner: String,
-        /// Repo identifier (d-tag)
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag). Optional when `--channel` (or
+        /// `BUZZ_GIT_ORIGIN_CHANNEL_ID`) names a project home.
         #[arg(long)]
-        repo_id: String,
+        repo_id: Option<String>,
+        /// Project home channel. Infers the repository, creating one bound to
+        /// this project when none exists. Defaults to `BUZZ_GIT_ORIGIN_CHANNEL_ID`.
+        #[arg(long)]
+        channel: Option<String>,
         /// Issue title
         #[arg(long, alias = "subject")]
         title: String,
@@ -1874,6 +1941,68 @@ pub enum MemCmd {
     },
 }
 
+/// Subcommands for local CML task snapshots.
+#[derive(Subcommand)]
+pub enum CmlCmd {
+    /// Validate a CML file; use `-` to read standard input
+    Validate {
+        /// CML file path or `-`
+        path: String,
+    },
+    /// Emit canonical, key-sorted CML; use `-` to read standard input
+    Canonicalize {
+        /// CML file path or `-`
+        path: String,
+        /// Write to a file instead of standard output
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Publish and reduce signed CML lifecycle events on a relay
+    #[command(subcommand)]
+    Events(CmlEventsCmd),
+}
+
+/// Signed CML lifecycle operations against a relay.
+#[derive(Subcommand)]
+pub enum CmlEventsCmd {
+    /// Fetch a task's CML events and print the reduced snapshot
+    Reduce {
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Task UUID
+        #[arg(long)]
+        task: String,
+    },
+    /// Sign and publish one lifecycle transition
+    Publish {
+        /// Transition name, e.g. plan, claim, start, submit, reject, fix-submit, approve, merge, prove
+        #[arg(long)]
+        transition: String,
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Path to the canonical CML snapshot for the target state
+        #[arg(long)]
+        task_file: String,
+        /// Previous transition event ID (required for non-plan transitions)
+        #[arg(long)]
+        prev: Option<String>,
+    },
+    /// Fetch a task's CML events and print the observation-time workstream card
+    Card {
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Task UUID
+        #[arg(long)]
+        task: String,
+        /// Observation time as unix seconds (default: now)
+        #[arg(long)]
+        as_of: Option<u64>,
+    },
+}
+
 /// Subcommands for `buzz pack`.
 #[derive(Subcommand)]
 pub enum PackCmd {
@@ -2023,12 +2152,22 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
-    if let Cmd::Pack(ref sub) = cli.command {
-        return match sub {
-            PackCmd::Validate { path } => commands::pack::cmd_validate(path),
-            PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
-        };
+    // CML and pack commands are local-only — no relay connection needed.
+    match &cli.command {
+        Cmd::Cml(sub) => match sub {
+            CmlCmd::Validate { path } => return commands::cml::cmd_validate(path),
+            CmlCmd::Canonicalize { path, output } => {
+                return commands::cml::cmd_canonicalize(path.as_str(), output.as_deref())
+            }
+            CmlCmd::Events(_) => {}
+        },
+        Cmd::Pack(sub) => {
+            return match sub {
+                PackCmd::Validate { path } => commands::pack::cmd_validate(path),
+                PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
+            };
+        }
+        _ => {}
     }
 
     // Auth: private key is required for all relay operations.
@@ -2091,6 +2230,41 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Sms(sub) => commands::sms::dispatch(sub, &client, &cli.format).await,
+        Cmd::Cml(sub) => match sub {
+            CmlCmd::Validate { path } => commands::cml::cmd_validate(path.as_str()),
+            CmlCmd::Canonicalize { path, output } => {
+                commands::cml::cmd_canonicalize(path.as_str(), output.as_deref())
+            }
+            CmlCmd::Events(events) => match events {
+                CmlEventsCmd::Reduce { channel, task } => {
+                    commands::cml::cmd_events_reduce(&client, channel.as_str(), task.as_str()).await
+                }
+                CmlEventsCmd::Publish {
+                    transition,
+                    channel,
+                    task_file,
+                    prev,
+                } => {
+                    commands::cml::cmd_events_publish(
+                        &client,
+                        &private_key_str,
+                        transition.as_str(),
+                        channel.as_str(),
+                        task_file.as_str(),
+                        prev.as_deref(),
+                    )
+                    .await
+                }
+                CmlEventsCmd::Card {
+                    channel,
+                    task,
+                    as_of,
+                } => {
+                    commands::cml::cmd_events_card(&client, channel.as_str(), task.as_str(), as_of)
+                        .await
+                }
+            },
+        },
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2152,6 +2326,70 @@ mod tests {
     }
 
     #[test]
+    fn messages_thread_accepts_link_or_explicit_identifiers() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(
+            Cli::try_parse_from(["buzz", "messages", "thread", "--link", link.as_str(),]).is_ok()
+        );
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "thread",
+            "--channel",
+            channel,
+            "--event",
+            event.as_str(),
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn messages_thread_rejects_partial_or_mixed_targets() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(Cli::try_parse_from(["buzz", "messages", "thread"]).is_err());
+        assert!(Cli::try_parse_from(["buzz", "messages", "thread", "--channel", channel]).is_err());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "thread",
+            "--link",
+            link.as_str(),
+            "--event",
+            event.as_str(),
+        ])
+        .is_err());
+    }
+
+    /// `canvas history --limit` is bounded 1–10000 at parse time: zero and
+    /// max+1 reject, the maximum is accepted, and the max stays above one
+    /// 1,000-row relay page so the >1,000 pagination path remains reachable.
+    #[test]
+    fn canvas_history_limit_is_bounded() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let parse = |limit: &str| {
+            Cli::try_parse_from([
+                "buzz",
+                "canvas",
+                "history",
+                "--channel",
+                channel,
+                "--limit",
+                limit,
+            ])
+        };
+        assert!(parse("0").is_err(), "zero must reject");
+        assert!(parse("10001").is_err(), "max+1 must reject");
+        assert!(parse("10000").is_ok(), "maximum must be accepted");
+        assert!(parse("1000").is_ok(), "one relay page must be reachable");
+    }
+
+    #[test]
     fn set_status_clear_rejects_text_and_emoji() {
         for extra in [["--text", "busy"], ["--emoji", "🎶"]] {
             let args = ["buzz", "users", "set-status", "--clear"]
@@ -2181,6 +2419,7 @@ mod tests {
             "agents",
             "canvas",
             "channels",
+            "cml",
             "dms",
             "emoji",
             "feed",
@@ -2286,7 +2525,14 @@ mod tests {
                 "update"
             ]
         );
-        assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "canvas"),
+            vec!["get", "history", "restore", "set"]
+        );
+        assert_eq!(
+            names(&cmd, "cml"),
+            vec!["canonicalize", "events", "validate"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -2353,6 +2599,7 @@ mod tests {
         assert_eq!(
             names(&cmd, "projects"),
             vec![
+                "add-channel",
                 "add-repo",
                 "create",
                 "delete",
@@ -2388,7 +2635,7 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
-            ("canvas", 2),
+            ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),
@@ -2399,7 +2646,7 @@ mod tests {
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
-            ("projects", 7),
+            ("projects", 8),
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
@@ -2469,6 +2716,25 @@ mod tests {
     }
 
     // ── projects update mutation group ────────────────────────────────────────
+
+    /// Project-channel requests accept the owner-review metadata.
+    #[test]
+    fn projects_add_channel_accepts_owner_review_fields() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "projects",
+            "add-channel",
+            "--home-channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--name",
+            "release-planning",
+            "--visibility",
+            "private",
+            "--template",
+            "Release team",
+        ])
+        .is_ok());
+    }
 
     /// Multiple independent fields must be accepted in the same invocation.
     #[test]
@@ -2573,5 +2839,41 @@ mod tests {
             .is_err(),
             "--visibility chartreuse on update must be rejected at parse time"
         );
+    }
+
+    #[test]
+    fn messages_send_accepts_typed_link_preview_options() {
+        let base = [
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--content",
+            "https://example.com",
+        ];
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--no-link-preview"])).is_ok());
+        assert!(Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--link-preview-json", "snapshots.json"])
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn messages_send_rejects_conflicting_link_preview_options() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--content",
+            "https://example.com",
+            "--no-link-preview",
+            "--link-preview-json",
+            "snapshots.json",
+        ])
+        .is_err());
     }
 }

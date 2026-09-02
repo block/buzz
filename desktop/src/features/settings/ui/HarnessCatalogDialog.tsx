@@ -3,7 +3,7 @@ import { ChevronRight, ExternalLink, Plus, Search } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
-  useAcpRuntimesQuery,
+  useAcpRuntimesQueryForced,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
@@ -62,8 +62,19 @@ export function HarnessCatalogDialog({
   open: boolean;
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
-  const runtimesQuery = useAcpRuntimesQuery();
+  // The Settings panel owns this surface's force-on-mount (it renders this
+  // dialog always-mounted). Passing `forceOnMount: false` here consumes the
+  // shared catalog + `forceRefresh` without firing a second 20–65s forced
+  // probe on every open/reopen — see useAcpRuntimesQueryForced's owner/child
+  // contract.
+  const runtimesQuery = useAcpRuntimesQueryForced({
+    enabled: open,
+    forceOnMount: false,
+  });
   const isLoading = runtimesQuery.isLoading;
+  const isColdError = runtimesQuery.isError && runtimesQuery.data === undefined;
+  const isWarmError = runtimesQuery.isError && runtimesQuery.data !== undefined;
+  const isRefreshing = runtimesQuery.isFetching && !isLoading;
   const entries = React.useMemo(
     () => catalogDialogEntries(runtimesQuery.data ?? []),
     [runtimesQuery.data],
@@ -150,11 +161,57 @@ export function HarnessCatalogDialog({
               data-testid="harness-catalog-list"
             >
               <div className="space-y-1">
+                {/* Forced-refresh status over a warm cache. Hoisted above the
+                    cold/empty/filter chain so it stays visible in every
+                    non-cold state — including a cached-empty catalog and a
+                    search that filters every row away, where the branches
+                    below render only the empty-state copy. `isRefreshing` and
+                    `isWarmError` are false during cold load/error (data is
+                    undefined), so this renders nothing there. */}
+                {isRefreshing ? (
+                  <div
+                    className="flex items-center gap-1.5 px-4 py-1 text-xs text-sidebar-foreground/50"
+                    data-testid="harness-catalog-refreshing"
+                  >
+                    <Spinner className="h-2.5 w-2.5" />
+                    Refreshing…
+                  </div>
+                ) : isWarmError ? (
+                  <div
+                    className="flex items-center justify-between gap-2 px-4 py-1 text-xs text-destructive"
+                    data-testid="harness-catalog-refresh-error"
+                  >
+                    <span>Couldn't refresh runtimes.</span>
+                    <button
+                      className="shrink-0 underline underline-offset-2 hover:text-foreground"
+                      data-testid="harness-catalog-refresh-retry"
+                      onClick={() => void runtimesQuery.forceRefresh()}
+                      type="button"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : null}
                 {isLoading ? (
                   <CatalogListSkeleton />
+                ) : isColdError ? (
+                  <div
+                    className="flex items-center justify-between gap-2 px-4 py-2 text-sm text-sidebar-foreground/60"
+                    data-testid="harness-catalog-load-error"
+                  >
+                    <span>Couldn't load runtimes.</span>
+                    <button
+                      className="shrink-0 text-destructive underline underline-offset-2 hover:text-foreground"
+                      data-testid="harness-catalog-load-retry"
+                      onClick={() => void runtimesQuery.forceRefresh()}
+                      type="button"
+                    >
+                      Retry
+                    </button>
+                  </div>
                 ) : filtered.length === 0 ? (
                   <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
-                    No runtimes match.
+                    {isSearching ? "No runtimes match." : "No runtimes found."}
                   </p>
                 ) : (
                   <>

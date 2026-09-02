@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>ai.buzz.agent.mack</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/mfethe/buzz-work/buzz-trunk/scripts/agent-mack-service.sh</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/mfethe/buzz-work/buzz-trunk</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>/tmp/mack-agent-launchd.log</string>
+    <key>StandardErrorPath</key><string>/tmp/mack-agent-launchd.log</string>
+    <key>ThrottleInterval</key><integer>15</integer>
+</dict>
+</plist>

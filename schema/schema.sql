@@ -219,9 +219,9 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005 + 0009).
+    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0033).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,
@@ -920,7 +920,7 @@ BEGIN
     -- Keep this allowlist identical to the relay's validated NIP-PL descriptor.
     -- Centralizing it on the events table covers every durable producer,
     -- including internal paths that bypass live dispatch.
-    IF NEW.kind IN (7, 9, 1059, 40007, 46010) THEN
+    IF NEW.kind IN (9, 40002, 45001, 45003) THEN
         PERFORM pg_advisory_xact_lock_shared(
             hashtextextended('buzz_push_gate:' || NEW.community_id::text, 0));
         IF EXISTS (
@@ -989,6 +989,85 @@ CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
 AFTER INSERT ON events
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
+
+-- Channel roster snapshot fence (keep in sync with migrations/0032).
+-- Prevent mixed-version relay pods from publishing a stale NIP-29 member
+-- snapshot after a newer canonical roster has been committed.
+--
+-- Old binaries already serialize kind 39002 replacement on the replacement
+-- advisory key. This trigger adds the channel-membership key at INSERT time,
+-- after that canonical key, and validates every p tag against the current
+-- active membership set and roles. New binaries take both keys in the same
+-- order before capture and replacement. Thus old and new writers remain
+-- compatible during a rolling deploy.
+CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()
+RETURNS TRIGGER AS $$
+DECLARE
+    canonical_members TEXT[];
+    snapshot_members TEXT[];
+BEGIN
+    IF NEW.kind <> 39002 OR NEW.channel_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'buzz_channel_membership:' || NEW.community_id::text || ':' || NEW.channel_id::text,
+        0
+    ));
+
+    SELECT COALESCE(
+               array_agg(encode(cm.pubkey, 'hex') || ':' || cm.role::text ORDER BY cm.pubkey),
+               ARRAY[]::TEXT[]
+           )
+      INTO canonical_members
+      FROM channel_members cm
+     WHERE cm.community_id = NEW.community_id
+       AND cm.channel_id = NEW.channel_id
+       AND cm.removed_at IS NULL;
+
+    -- A roster is canonical only when every p tag uses the emitted four-field
+    -- shape, contains a 32-byte hex pubkey and valid authoritative role, has no
+    -- duplicate members, and exactly matches the active membership rows.
+    IF EXISTS (
+        SELECT 1
+          FROM jsonb_array_elements(NEW.tags) AS roster_tag(tag_json)
+         WHERE roster_tag.tag_json->>0 = 'p'
+           AND (
+               jsonb_array_length(roster_tag.tag_json) <> 4
+               OR COALESCE(roster_tag.tag_json->>1, '') !~ '^[0-9a-fA-F]{64}$'
+               OR roster_tag.tag_json->>2 <> ''
+               OR COALESCE(roster_tag.tag_json->>3, '') NOT IN ('owner', 'admin', 'bot', 'member', 'guest')
+           )
+    ) THEN
+        RAISE EXCEPTION 'kind 39002 roster contains an invalid p tag'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COALESCE(
+               array_agg(
+                   lower((roster_tag.tag_json->>1)) || ':' || (roster_tag.tag_json->>3)
+                   ORDER BY decode((roster_tag.tag_json->>1), 'hex')
+               ),
+               ARRAY[]::TEXT[]
+           )
+      INTO snapshot_members
+      FROM jsonb_array_elements(NEW.tags) AS roster_tag(tag_json)
+     WHERE roster_tag.tag_json->>0 = 'p';
+
+    IF snapshot_members IS DISTINCT FROM canonical_members THEN
+        RAISE EXCEPTION 'kind 39002 roster does not match canonical channel membership'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events;
+CREATE TRIGGER trg_events_guard_channel_roster_snapshot
+    BEFORE INSERT ON events
+    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();
+
 
 -- Replica-fence floor guard (keep in sync with migrations/0021). A deferred
 -- constraint trigger re-checks, inside COMMIT processing, that channel-bearing
@@ -1107,6 +1186,92 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('push_gateway_delivery_auth_replays', 'public gateway signed-event replay admission spans relay communities'),
     ('push_gateway_delivery_request_replays', 'public gateway stable request-id admission spans relay communities');
 
+-- ── Task system (migration 0033) ─────────────────────────────────────────────
+-- Durable work items owned by humans or harness agents (Claude Code, Codex,
+-- the ACP mesh). Deliberately NOT workflows: `workflows`/`workflow_runs` are
+-- the scheduled execution engine, a task is a unit of work someone owns.
+--
+-- Relay-owned rows rather than Nostr events, matching `workflow_runs` and
+-- `workflow_approvals` (see crates/buzz-relay/src/api/workflows.rs).
+--
+-- Creator/assignee/actor are `users`, never a separate agent table: agents in
+-- Buzz *are* users carrying `users.agent_type` and an optional NIP-OA
+-- `users.agent_owner_pubkey`, so one nullable community-scoped pubkey FK
+-- covers humans and agents alike.
+
+CREATE TABLE tasks (
+    community_id       UUID        NOT NULL REFERENCES communities(id),
+    id                 UUID        NOT NULL DEFAULT gen_random_uuid(),
+    channel_id         UUID,
+    created_by_pubkey  BYTEA,
+    assignee_pubkey    BYTEA,
+    parent_task_id     UUID,
+    title              TEXT        NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
+    body               TEXT,
+    status             TEXT        NOT NULL DEFAULT 'todo'
+                       CHECK (status IN ('todo', 'in_progress', 'blocked', 'done', 'cancelled')),
+    priority           INT         NOT NULL DEFAULT 0,
+    source             TEXT,
+    source_ref         TEXT,
+    due_at             TIMESTAMPTZ,
+    done_at            TIMESTAMPTZ,
+    archived_at        TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, id),
+    CONSTRAINT chk_tasks_done_at_matches_status
+        CHECK ((status = 'done') = (done_at IS NOT NULL)),
+    CONSTRAINT chk_tasks_not_own_parent CHECK (parent_task_id IS DISTINCT FROM id),
+    CONSTRAINT chk_tasks_created_by_len
+        CHECK (created_by_pubkey IS NULL OR length(created_by_pubkey) = 32),
+    CONSTRAINT chk_tasks_assignee_len
+        CHECK (assignee_pubkey IS NULL OR length(assignee_pubkey) = 32),
+    FOREIGN KEY (community_id, channel_id)
+        REFERENCES channels (community_id, id),
+    FOREIGN KEY (community_id, created_by_pubkey)
+        REFERENCES users (community_id, pubkey) ON DELETE SET NULL,
+    FOREIGN KEY (community_id, assignee_pubkey)
+        REFERENCES users (community_id, pubkey) ON DELETE SET NULL,
+    FOREIGN KEY (community_id, parent_task_id)
+        REFERENCES tasks (community_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_tasks_community_status ON tasks (community_id, status);
+CREATE INDEX idx_tasks_community_assignee ON tasks (community_id, assignee_pubkey)
+    WHERE assignee_pubkey IS NOT NULL;
+CREATE INDEX idx_tasks_community_updated ON tasks (community_id, updated_at DESC);
+CREATE INDEX idx_tasks_community_channel ON tasks (community_id, channel_id)
+    WHERE channel_id IS NOT NULL;
+CREATE INDEX idx_tasks_community_parent ON tasks (community_id, parent_task_id)
+    WHERE parent_task_id IS NOT NULL;
+
+-- Append-only lifecycle and comment log; also the read model behind the
+-- human-visible task feed, hence the (community, time) feed index.
+CREATE TABLE task_events (
+    community_id  UUID        NOT NULL REFERENCES communities(id),
+    id            BIGSERIAL,
+    task_id       UUID        NOT NULL,
+    actor_pubkey  BYTEA,
+    action        TEXT        NOT NULL CHECK (length(action) BETWEEN 1 AND 64),
+    from_status   TEXT,
+    to_status     TEXT,
+    body          TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, id),
+    CONSTRAINT chk_task_events_actor_len
+        CHECK (actor_pubkey IS NULL OR length(actor_pubkey) = 32),
+    FOREIGN KEY (community_id, task_id)
+        REFERENCES tasks (community_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, actor_pubkey)
+        REFERENCES users (community_id, pubkey) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_task_events_task_created ON task_events (community_id, task_id, created_at);
+CREATE INDEX idx_task_events_community_created ON task_events (community_id, created_at DESC);
+CREATE UNIQUE INDEX idx_task_events_one_summary_per_task
+    ON task_events (community_id, task_id)
+    WHERE action = 'summary_persisted';
+
 -- ── Replica heartbeat (read-replica freshness fence) ─────────────────────────
 -- Portable read-side freshness observation for the replica fence (see
 -- crates/buzz-db/src/replica_fence.rs and migrations/0026). Exactly one row;
@@ -1120,6 +1285,8 @@ CREATE TABLE replica_heartbeat (
     id    smallint PRIMARY KEY CHECK (id = 1),
     epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
     token bigint   NOT NULL DEFAULT 0
+) WITH (
+    vacuum_truncate = false
 );
 
 INSERT INTO replica_heartbeat (id) VALUES (1);
@@ -1663,6 +1830,8 @@ SELECT attach_community_write_fence('relay_invites');
 SELECT attach_community_write_fence('relay_members');
 SELECT attach_community_write_fence('scheduled_workflow_fires');
 SELECT attach_community_write_fence('subscriptions');
+SELECT attach_community_write_fence('task_events');
+SELECT attach_community_write_fence('tasks');
 SELECT attach_community_write_fence('thread_metadata');
 SELECT attach_community_write_fence('users');
 SELECT attach_community_write_fence('workflow_approvals');

@@ -1,9 +1,11 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (39 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    cml::{CmlStatus, CmlTask},
+    cml_event::{CmlRole, CmlTransition},
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
@@ -19,7 +21,7 @@ use buzz_core::{
         OBSERVER_FRAME_TELEMETRY,
     },
 };
-use nostr::{EventBuilder, Kind, Tag};
+use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
 use crate::{
@@ -537,9 +539,194 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
 }
 
 /// Build a canvas update event (kind 40100).
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["h", &channel_id.to_string()])?];
+///
+/// When `expected_revision` is set, an `["expected-revision", …]` tag is
+/// attached documenting the head the write was composed against: a 64-hex
+/// event ID names the head it expects, and the literal `none` asserts no head
+/// exists yet. Concurrency enforcement is **client-side** (the CLI/Desktop
+/// compare against a freshly read head before publishing); the relay does not
+/// interpret this tag today, so it is advisory/documentary and preserves the
+/// option to add relay enforcement later with zero client change. Omit it for
+/// an unconditional append (backward compatible).
+pub fn build_set_canvas(
+    channel_id: Uuid,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(expected_revision) = expected_revision {
+        if expected_revision != "none"
+            && (expected_revision.len() != 64
+                || !expected_revision.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(SdkError::InvalidInput(format!(
+                "expected_revision must be the literal \"none\" or a 64-character hex event id (got {expected_revision:?})"
+            )));
+        }
+        tags.push(tag(&["expected-revision", expected_revision])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+}
+
+/// Build a canvas write (kind 40100) that edits or restores against a known
+/// head, applying writer discipline in one place.
+///
+/// Sets the `expected-revision` precondition to `head_id` and stamps
+/// `created_at = max(now, head_created_at + 1)` so the event sorts strictly
+/// ahead of the head it asserts under `created_at DESC, id ASC`. This keeps a
+/// legitimate first-party restore/edit whose local clock lags the head from
+/// landing behind that head in read order (which would "succeed" without
+/// changing the visible canvas). First-party signers (CLI `set`/restore,
+/// Desktop save/restore) MUST route disciplined canvas writes through this
+/// helper rather than re-deriving the timestamp.
+///
+/// Ordering note: the `+ 1` bump guarantees a strictly greater `created_at`, so
+/// the write never ties the head. Writes that *do* share a second resolve by
+/// `id ASC` under `created_at DESC, id ASC` — the smallest event id wins the
+/// visible head, not the last write. This helper sidesteps that tie by stamping
+/// ahead; unconditional appends that omit the bump remain subject to it.
+pub fn build_set_canvas_after_head(
+    channel_id: Uuid,
+    content: &str,
+    head_id: &str,
+    head_created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    if head_created_at == u64::MAX {
+        return Err(SdkError::InvalidInput(
+            "head_created_at must be below u64::MAX so the write can stamp strictly ahead of it"
+                .into(),
+        ));
+    }
+    let created_at = canvas_write_created_at(head_created_at);
+    Ok(build_set_canvas(channel_id, content, Some(head_id))?
+        .custom_created_at(nostr::Timestamp::from(created_at)))
+}
+
+/// Contract-v3 writer-discipline timestamp for a canvas write asserting a head
+/// at `head_created_at`: `max(now, head_created_at + 1)` (Unix seconds).
+///
+/// The single home for canvas timestamp discipline. `build_set_canvas_after_head`
+/// stamps CLI restore/`set` writes with this, and Desktop's `set_canvas` calls
+/// it directly for the same reason, so the `max(now, head + 1)` rule is never
+/// re-derived per surface.
+pub fn canvas_write_created_at(head_created_at: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    now.max(head_created_at.saturating_add(1))
+}
+
+/// Build a canonical signed-CML lifecycle event using the existing job kinds.
+///
+/// The builder pins `created_at` to `task.updated_at`. Plan roots omit
+/// `previous`; every other v1 transition requires it. Fork resolution uses
+/// [`build_cml_fork_resolution`].
+pub fn build_cml_transition(
+    channel_id: Uuid,
+    task: &CmlTask,
+    transition: CmlTransition,
+    role: CmlRole,
+    previous: Option<EventId>,
+) -> Result<EventBuilder, SdkError> {
+    task.validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    if !transition.allows_role(role) {
+        return Err(SdkError::InvalidInput(
+            "role is not authorized for transition".into(),
+        ));
+    }
+    if transition == CmlTransition::Plan && previous.is_some() {
+        return Err(SdkError::InvalidInput(
+            "plan root must not have a predecessor".into(),
+        ));
+    }
+    if transition != CmlTransition::Plan
+        && transition != CmlTransition::OwnerResolve
+        && previous.is_none()
+    {
+        return Err(SdkError::InvalidInput(
+            "non-root transition requires a predecessor".into(),
+        ));
+    }
+    if transition == CmlTransition::OwnerResolve {
+        return Err(SdkError::InvalidInput(
+            "owner.resolve requires explicit fork markers".into(),
+        ));
+    }
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["d", &task.id.to_string()])?,
+        tag(&["protocol", "buzz-cml", "1"])?,
+        tag(&["transition", transition.as_str()])?,
+        tag(&["status", cml_status_wire(task.status)])?,
+        tag(&["role", role.as_str()])?,
+    ];
+    if let Some(previous) = previous {
+        tags.push(tag(&["e", &previous.to_hex(), "prev"])?);
+    }
+    let content = task
+        .to_canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    Ok(
+        EventBuilder::new(Kind::Custom(transition.event_kind() as u16), content)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(task.updated_at)),
+    )
+}
+
+/// Build an owner-authorized resolution that selects one of two fork heads.
+pub fn build_cml_fork_resolution(
+    channel_id: Uuid,
+    task: &CmlTask,
+    fork_a: EventId,
+    fork_b: EventId,
+    selected: EventId,
+) -> Result<EventBuilder, SdkError> {
+    task.validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    if fork_a == fork_b || (selected != fork_a && selected != fork_b) {
+        return Err(SdkError::InvalidInput(
+            "resolution must select one of two distinct fork heads".into(),
+        ));
+    }
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["d", &task.id.to_string()])?,
+        tag(&["protocol", "buzz-cml", "1"])?,
+        tag(&["transition", CmlTransition::OwnerResolve.as_str()])?,
+        tag(&["status", cml_status_wire(task.status)])?,
+        tag(&["role", CmlRole::Planner.as_str()])?,
+        tag(&["e", &fork_a.to_hex(), "fork_a"])?,
+        tag(&["e", &fork_b.to_hex(), "fork_b"])?,
+        tag(&["e", &selected.to_hex(), "selected"])?,
+    ];
+    let content = task
+        .to_canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    Ok(EventBuilder::new(
+        Kind::Custom(CmlTransition::OwnerResolve.event_kind() as u16),
+        content,
+    )
+    .tags(tags)
+    .custom_created_at(nostr::Timestamp::from(task.updated_at)))
+}
+
+fn cml_status_wire(status: CmlStatus) -> &'static str {
+    match status {
+        CmlStatus::Proposed => "proposed",
+        CmlStatus::Planned => "planned",
+        CmlStatus::Claimed => "claimed",
+        CmlStatus::Working => "working",
+        CmlStatus::Blocked => "blocked",
+        CmlStatus::Review => "review",
+        CmlStatus::Fixing => "fixing",
+        CmlStatus::Verified => "verified",
+        CmlStatus::Integrated => "integrated",
+        CmlStatus::Shipped => "shipped",
+        CmlStatus::Cancelled => "cancelled",
+        CmlStatus::Conflicted => "conflicted",
+    }
 }
 
 /// Build a NIP-01 profile metadata event (kind 0).
@@ -1618,11 +1805,13 @@ pub fn build_workflow_update(
     channel_id: Uuid,
     workflow_id: Uuid,
     yaml: &str,
+    expected_revision: &str,
 ) -> Result<EventBuilder, SdkError> {
     check_content(yaml, 64 * 1024)?;
     let tags = vec![
         tag(&["d", &workflow_id.to_string()])?,
         tag(&["h", &channel_id.to_string()])?,
+        tag(&["expected-revision", expected_revision])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml).tags(tags))
 }
@@ -2920,10 +3109,77 @@ mod tests {
     #[test]
     fn set_canvas_happy_path() {
         let cid = uuid();
-        let ev = sign(build_set_canvas(cid, "# Canvas\nHello").unwrap());
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHello", None).unwrap());
         assert_eq!(ev.kind.as_u16(), 40100);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert_eq!(ev.content, "# Canvas\nHello");
+        assert!(!ev.tags.iter().any(|t| t
+            .as_slice()
+            .first()
+            .is_some_and(|k| k == "expected-revision")));
+    }
+
+    #[test]
+    fn set_canvas_pins_expected_revision() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHi", Some(&head)).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+
+        let create = sign(build_set_canvas(cid, "# New", Some("none")).unwrap());
+        assert!(has_tag(&create, "expected-revision", "none"));
+    }
+
+    #[test]
+    fn set_canvas_after_head_pins_revision_and_bumps_timestamp() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+
+        // Head created far in the future relative to the signer's clock: the
+        // discipline must still stamp strictly ahead of the asserted head.
+        let future_head = 4_000_000_000_u64;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, future_head).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+        assert!(
+            ev.created_at.as_secs() > future_head,
+            "created_at {} must be strictly ahead of future head {future_head}",
+            ev.created_at.as_secs()
+        );
+
+        // Head in the past: the signer's `now` wins and is still ahead.
+        let past_head = 1_000_u64;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, past_head).unwrap());
+        assert!(ev.created_at.as_secs() > past_head);
+    }
+
+    #[test]
+    fn set_canvas_rejects_malformed_expected_revision() {
+        let cid = uuid();
+        // Wrong length (63 hex chars).
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"a".repeat(63))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Correct length but non-hex.
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"z".repeat(64))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Literal "none" and a valid 64-hex id are accepted.
+        assert!(build_set_canvas(cid, "x", Some("none")).is_ok());
+        assert!(build_set_canvas(cid, "x", Some(&"a".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn set_canvas_after_head_rejects_max_head_created_at() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        // u64::MAX cannot be stamped strictly ahead of: reject instead of
+        // silently saturating and breaking the head-advancement guarantee.
+        assert!(matches!(
+            build_set_canvas_after_head(cid, "# Restored", &head, u64::MAX),
+            Err(SdkError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -4006,16 +4262,18 @@ mod tests {
     fn workflow_update_includes_h_tag() {
         let cid = uuid();
         let wid = uuid();
-        let ev = sign(build_workflow_update(cid, wid, "name: updated").unwrap());
+        let revision = "a".repeat(64);
+        let ev = sign(build_workflow_update(cid, wid, "name: updated", &revision).unwrap());
         assert_eq!(ev.kind.as_u16(), 30620);
         assert!(has_tag(&ev, "d", &wid.to_string()));
         assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "expected-revision", &revision));
     }
 
     #[test]
     fn workflow_update_rejects_oversized_yaml() {
         let big = "x".repeat(65 * 1024);
-        let err = build_workflow_update(uuid(), uuid(), &big).unwrap_err();
+        let err = build_workflow_update(uuid(), uuid(), &big, &"a".repeat(64)).unwrap_err();
         assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 

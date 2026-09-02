@@ -1,0 +1,15 @@
+# Gitleaks configuration
+# Extends the default ruleset; allowlists ONLY cover known dummy test fixtures
+# generated for unit tests (upstream block/buzz PR #6269). They are synthetic
+# P-256 keys with no production identity. Do NOT add real secrets here.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic APNs test fixtures used by buzz-push-gateway unit tests"
+paths = [
+  '''crates/buzz-push-gateway/tests/fixtures/apns-test-encrypted-identity\.pem''',
+  '''crates/buzz-push-gateway/tests/fixtures/apns-test-key-only\.pem''',
+  '''crates/buzz-push-gateway/tests/fixtures/apns-test-identity\.pem''',
+  '''crates/buzz-push-gateway/tests/fixtures/apns-test-mismatched-identity\.pem''',
+]

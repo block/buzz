@@ -4,7 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import 'channel_typing_provider.dart';
 import 'small_avatar.dart';
 

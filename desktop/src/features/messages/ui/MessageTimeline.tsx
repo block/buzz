@@ -22,6 +22,7 @@ import { ChannelIntroBlock, type ChannelIntro } from "./ChannelIntroBlock";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import type { TimelineVirtualizerApi } from "./TimelineMessageList";
+import { TimelineAnnouncementRegion } from "./TimelineAnnouncementRegion";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 import { useBufferedTimelineMessages } from "./useBufferedTimelineMessages";
@@ -692,8 +693,13 @@ const MessageTimelineBase = React.forwardRef<
   ) : null;
 
   return (
-    <TooltipProvider delayDuration={200}>
+    <TooltipProvider>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <TimelineAnnouncementRegion
+          channelId={channelId ?? ""}
+          isHydrated={!isLoading}
+          messages={messages}
+        />
         {showUnreadPill ? (
           <div
             className={cn(
@@ -863,8 +869,12 @@ const MessageTimelineBase = React.forwardRef<
           <div
             className={cn(
               "pointer-events-none absolute inset-x-0 bottom-4 z-50 flex justify-center px-4",
+              // Position the pill with layout rather than a transform. WebKit
+              // can keep an inherited custom property stale on a promoted
+              // transform layer when the composer grows, leaving the pill
+              // stranded inside the dock.
               hasComposerOverlay &&
-                "translate-y-[calc(-1*var(--composer-overlay-height,8rem))] transform-gpu transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
+                "bottom-[calc(1rem+var(--composer-overlay-height,8rem))] transition-[bottom] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
             )}
           >
             <UnreadPill

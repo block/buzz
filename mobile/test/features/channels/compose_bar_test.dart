@@ -182,6 +182,9 @@ Widget _buildComposeBar({
   RelayConfigNotifier Function()? relayConfig,
   PhotoLibrary photoLibrary = const _EmptyPhotoLibrary(),
   VoidCallback? onFocusRequested,
+  FocusNode? focusNode,
+  ValueChanged<VoidCallback>? onFocusRestorerChanged,
+  String composeBarKey = 'compose-bar',
 }) {
   return ProviderScope(
     overrides: [
@@ -229,7 +232,10 @@ Widget _buildComposeBar({
           child: Align(
             alignment: Alignment.bottomCenter,
             child: ComposeBar(
+              key: ValueKey(composeBarKey),
               channelId: 'channel-1',
+              focusNode: focusNode,
+              onFocusRestorerChanged: onFocusRestorerChanged,
               onFocusRequested: onFocusRequested,
               onSend: onSend,
             ),
@@ -372,6 +378,10 @@ class _RecordingRelaySocket extends RelaySocket {
   final List<Map<String, dynamic>> events;
   final void Function(List<dynamic> message) handleMessage;
 
+  /// Invoked after an event is handed to the socket but before its relay
+  /// acknowledgement is delivered. Tests may defer that acknowledgement.
+  final Future<void> Function(Map<String, dynamic> event)? beforeAcknowledged;
+
   /// Invoked after an event has been recorded and acknowledged, before the
   /// caller's `await` resumes. Lets a test interleave state changes (such as
   /// a community switch) between two relay round trips.
@@ -380,6 +390,7 @@ class _RecordingRelaySocket extends RelaySocket {
   _RecordingRelaySocket(
     this.events,
     this.handleMessage, {
+    this.beforeAcknowledged,
     this.onEventAcknowledged,
   }) : super(
          wsUrl: 'ws://localhost',
@@ -397,8 +408,18 @@ class _RecordingRelaySocket extends RelaySocket {
     if (payload case ['EVENT', final Map<String, dynamic> event]) {
       events.add(event);
       final id = event['id'] as String;
-      super.debugHandleOkForTest(['OK', id, true, '']);
-      onEventAcknowledged?.call(event);
+      final pending = beforeAcknowledged?.call(event);
+      if (pending == null) {
+        super.debugHandleOkForTest(['OK', id, true, '']);
+        onEventAcknowledged?.call(event);
+      } else {
+        unawaited(
+          pending.then((_) {
+            super.debugHandleOkForTest(['OK', id, true, '']);
+            onEventAcknowledged?.call(event);
+          }),
+        );
+      }
     }
   }
 
@@ -426,7 +447,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   Future<List<Channel>> build() async => _channels;
 
   @override
-  Future<void> refresh() async {
+  Future<void> refresh({bool fetchDirectory = false}) async {
     state = AsyncData(_channels);
   }
 
@@ -558,6 +579,184 @@ void main() {
         tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
         isTrue,
       );
+    });
+
+    testWidgets('uses a parent-owned focus node when provided', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(focusNode.hasFocus, isTrue);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode,
+        same(focusNode),
+      );
+    });
+
+    testWidgets('restores the collapsed editor before requesting focus', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      VoidCallback? restoreFocus;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onFocusRestorerChanged: (callback) => restoreFocus = callback,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+      focusNode.unfocus();
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+
+      restoreFocus!();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('keeps hook order when the parent focus node changes', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('invalidates a registered focus restorer on unmount', (
+      tester,
+    ) async {
+      final callbacks = <VoidCallback>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      final registeredRestorer = callbacks.single;
+
+      await tester.pumpWidget(const SizedBox.shrink());
+
+      registeredRestorer();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('does not let an old restorer mutate a replacement composer', (
+      tester,
+    ) async {
+      final callbacks = <VoidCallback>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          composeBarKey: 'first-compose-bar',
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      final oldRestorer = callbacks.single;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          composeBarKey: 'second-compose-bar',
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      expect(callbacks, hasLength(2));
+
+      oldRestorer();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsNothing);
+
+      callbacks.last();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('starts Android composer motion with the first IME metrics', (
@@ -727,6 +926,124 @@ void main() {
 
       expect(sendCount, 1);
       expect(sentContent, 'First line\nSecond line');
+    });
+
+    testWidgets('clears text before the optimistic send completes', (
+      tester,
+    ) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      delivery.complete();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('a failed send restores an untouched cleared draft', (
+      tester,
+    ) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'retry me');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      delivery.completeError(Exception('relay rejected'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'retry me',
+      );
+    });
+
+    testWidgets('a failed send does not overwrite a new draft', (tester) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'first draft');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      await tester.enterText(find.byType(TextField), 'new draft');
+      delivery.completeError(StateError('relay rejected'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'new draft',
+      );
     });
 
     testWidgets('smoothly resizes the text field when a new line is added', (
@@ -3550,6 +3867,78 @@ void main() {
       ]);
     });
 
+    testWidgets('preserves edits made while a mentioned agent is being added', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final publishedEvents = <Map<String, dynamic>>[];
+      final addMemberAcknowledgement = Completer<void>();
+      String? sentContent;
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Helper Bot',
+              respondTo: 'anyone',
+              channelIds: const ['shared-channel'],
+            ),
+          ],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      session.debugAttachSocketForTest(
+        _RecordingRelaySocket(
+          publishedEvents,
+          session.debugHandleSocketMessageForTest,
+          beforeAcknowledged: (event) async {
+            if (event['kind'] == 9000) await addMemberAcknowledgement.future;
+          },
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pump();
+
+      expect(
+        publishedEvents.where((event) => event['kind'] == 9000),
+        hasLength(1),
+      );
+
+      await tester.enterText(find.byType(TextField), 'newer draft');
+      addMemberAcknowledgement.complete();
+      await tester.pumpAndSettle();
+
+      expect(sentContent, 'hello @Helper Bot');
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'newer draft',
+      );
+    });
+
     testWidgets(
       'renders chips only for selected agents outside code and composition',
       (tester) async {
@@ -3879,6 +4268,97 @@ void main() {
 
       expect(uploadService.uploadedVideo, same(pickedVideo));
       expect(sentContent, '\n![video](https://relay.example/media/test.mp4)');
+    });
+  });
+
+  group('ComposeBar task action', () {
+    testWidgets('sits alongside the existing composer actions', (tester) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+
+      expect(find.byIcon(LucideIcons.listTodo), findsOneWidget);
+      expect(find.byTooltip('Create task'), findsOneWidget);
+      // The four original actions keep their places; the task action is added,
+      // not substituted.
+      expect(find.byIcon(LucideIcons.atSign), findsOneWidget);
+      expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+      expect(find.byIcon(LucideIcons.smilePlus), findsOneWidget);
+      expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
+    });
+
+    testWidgets('is hidden until the composer is expanded', (tester) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      // Collapsed, the bar carries only the attachment trigger, the draft
+      // preview and send — the action row is behind the expansion.
+      expect(find.byTooltip('Create task').hitTestable(), findsNothing);
+    });
+
+    testWidgets('opens the New task sheet', (tester) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+
+      await tester.tap(find.byTooltip('Create task'));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('create-task-title')), findsOneWidget);
+      expect(find.byKey(const ValueKey('create-task-submit')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the fifth action still fits a narrow phone', (tester) async {
+      // Five 36px actions plus the attachment trigger and send button is the
+      // tightest the row gets; 320dp is the narrowest phone width shipped.
+      await tester.binding.setSurfaceSize(const Size(320, 640));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+
+      expect(find.byTooltip('Create task').hitTestable(), findsOneWidget);
+      // A RenderFlex overflow is reported as a framework exception, so a null
+      // here is the assertion that the row did not overflow.
+      expect(tester.takeException(), isNull);
     });
   });
 

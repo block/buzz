@@ -104,6 +104,22 @@ cargo clippy -p buzz-cli -- -D warnings
 # Expected: zero warnings
 ```
 
+### Automated downstream contract gate
+
+The CLI-side subset of the block/berd `skills/buzz-handoff` contract is
+covered by an offline black-box gate:
+
+```bash
+cargo test -p buzz-cli --test berd_handoff_contract
+```
+
+This test drives the public `buzz_cli::run_from_args` entry point against a
+loopback stub relay and asserts the command forms, compact output keys, message
+link reads, auth inputs, exit-code mapping, and edge cases (empty result sets,
+concurrent writers) that Berd shells out to. It does not replace the
+live-relay command runbook below; it only keeps the CLI contract from
+drifting silently in CI.
+
 ---
 
 ## 6. Live Testing — Command by Command
@@ -216,8 +232,11 @@ echo 'Body with `backticks` and $vars stays literal.' \
 buzz messages get --channel "$CHANNEL_ID" | jq .
 buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
 
-# messages thread
+# messages thread from the root, a reply, and a canonical link
 buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
+buzz messages thread --channel "$CHANNEL_ID" --event "$REPLY_ID" | jq .
+buzz messages thread \
+  --link "buzz://message?channel=$CHANNEL_ID&id=$REPLY_ID&thread=$EVENT_ID" | jq .
 
 # messages search
 buzz messages search --query "Hello" | jq .
@@ -425,7 +444,8 @@ buzz workflows delete --workflow "$WF_ID" | jq .
 ```bash
 buzz feed get | jq .
 buzz feed get --limit 5 | jq .
-# Expected: [{id,pubkey,kind,content,created_at,tags}] — sig-stripped, sorted newest-first
+# Expected: complete signed Nostr events with
+# {id,pubkey,kind,content,created_at,sig,tags}, sorted newest-first
 ```
 
 ### 6.11 Forum & Voting

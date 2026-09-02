@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
 import 'directional_transition_scope.dart';
+import 'ios_glass_navigation_button.dart';
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = Grid.xxs + 32 + Grid.xxs; // 48
@@ -12,8 +13,8 @@ const _kBottomBorderWidth = 1.0;
 
 TextStyle _effectiveTitleStyle(BuildContext context, TextStyle? titleStyle) {
   final baseStyle =
-      context.textTheme.titleMedium ??
-      const TextStyle(fontSize: 20, height: 1.3);
+      context.textTheme.titleSmall ??
+      const TextStyle(fontSize: 16, height: 1.4);
   return baseStyle.copyWith(fontWeight: FontWeight.w600).merge(titleStyle);
 }
 
@@ -25,7 +26,7 @@ double _barContentHeight(
   final style = _effectiveTitleStyle(context, titleStyle);
   final scaledFontSize = MediaQuery.textScalerOf(
     context,
-  ).scale(style.fontSize ?? 20);
+  ).scale(style.fontSize ?? 16);
   final scaledTitleHeight = scaledFontSize * (style.height ?? 1);
   final effectiveTitleHeight = titleContentHeight > scaledTitleHeight
       ? titleContentHeight
@@ -47,7 +48,7 @@ double frostedAppBarLowerTitleHeight(
   final style = _effectiveTitleStyle(context, titleStyle);
   final scaledFontSize = MediaQuery.textScalerOf(
     context,
-  ).scale(style.fontSize ?? 20);
+  ).scale(style.fontSize ?? 16);
   final titleHeight = scaledFontSize * (style.height ?? 1);
   return titleHeight > 40 ? titleHeight : 40;
 }
@@ -83,6 +84,11 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Widget displayed in the center/title area.
   final Widget? title;
+
+  /// Whether [title] is centered in the full bar rather than flowing after the
+  /// leading control. Page titles should keep the default; identity-style
+  /// headers can opt out.
+  final bool centerTitle;
 
   /// Optional style merged over the default title style.
   final TextStyle? titleStyle;
@@ -140,20 +146,21 @@ class FrostedAppBar extends StatelessWidget {
     this.leading,
     this.automaticallyImplyLeading = true,
     this.title,
+    this.centerTitle = false,
     this.titleStyle,
     this.titleContentHeight = 0,
     this.bottom,
     this.bottomHeight = 0,
     this.bottomOverlap = 0,
     this.actions = const [],
-    this.horizontalInset = Grid.quarter,
+    this.horizontalInset = Grid.xxs,
     this.iconColor,
     this.gradient,
     this.frosted = true,
     this.frostedSurfaceOpacity = 0.5,
     this.frostedBlurSigma = 20,
     this.showBottomDivider = true,
-    this.bottomDividerOpacity = 0.15,
+    this.bottomDividerOpacity = 0.07,
   }) : assert(bottom == null || bottomHeight > 0),
        assert(bottomOverlap >= 0),
        assert(bottom != null || bottomOverlap == 0),
@@ -170,20 +177,35 @@ class FrostedAppBar extends StatelessWidget {
       titleStyle,
       titleContentHeight,
     );
+    final usesAutomaticIosGlassBackButton =
+        leading == null &&
+        automaticallyImplyLeading &&
+        canPop &&
+        Theme.of(context).platform == TargetPlatform.iOS;
+    final effectiveIconColor = iconColor ?? context.colors.primary;
 
     final effectiveLeading =
         leading ??
         (automaticallyImplyLeading && canPop
-            ? SizedBox(
-                width: 48,
-                height: 48,
-                child: IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  color: iconColor,
-                  icon: const Icon(LucideIcons.chevronLeft),
-                  tooltip: 'Back',
-                ),
-              )
+            ? usesAutomaticIosGlassBackButton
+                  ? IosGlassNavigationButton(
+                      icon: IosGlassNavigationIcon.back,
+                      semanticLabel: 'Back',
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      width: iosGlassChannelHeaderLeadingWidth,
+                      buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                      foregroundColor: effectiveIconColor,
+                    )
+                  : SizedBox(
+                      width: 48,
+                      height: 48,
+                      child: IconButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        color: effectiveIconColor,
+                        icon: const Icon(LucideIcons.chevronLeft),
+                        tooltip: 'Back',
+                      ),
+                    )
             : null);
 
     final titleRow = SizedBox(
@@ -191,37 +213,40 @@ class FrostedAppBar extends StatelessWidget {
       child: Padding(
         padding: EdgeInsets.symmetric(horizontal: horizontalInset),
         child: IconTheme.merge(
-          data: IconThemeData(color: iconColor),
-          child: Row(
-            children: [
-              ?effectiveLeading,
-              if (title != null)
-                Expanded(
-                  child: Padding(
-                    padding: EdgeInsets.only(
-                      left: effectiveLeading != null
-                          ? 0
-                          : horizontalInset < Grid.gutter
-                          ? Grid.gutter - horizontalInset
-                          : 0,
-                      right: actions.isEmpty
-                          ? horizontalInset < Grid.gutter
-                                ? Grid.gutter - horizontalInset
-                                : 0
-                          : 0,
-                    ),
-                    child: DefaultTextStyle.merge(
-                      style: effectiveTitleStyle,
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                      child: title!,
-                    ),
+          data: IconThemeData(color: effectiveIconColor),
+          child: _CenteredNavigationLayout(
+            leading: effectiveLeading,
+            title: title == null
+                ? null
+                : DefaultTextStyle.merge(
+                    style: effectiveTitleStyle,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                    textAlign: centerTitle ? TextAlign.center : TextAlign.start,
+                    child: centerTitle
+                        ? title!
+                        : Padding(
+                            padding: EdgeInsets.only(
+                              left: effectiveLeading != null
+                                  ? usesAutomaticIosGlassBackButton
+                                        ? iosGlassChannelHeaderTitleSpacing
+                                        : 0
+                                  : horizontalInset < Grid.gutter
+                                  ? Grid.gutter - horizontalInset
+                                  : 0,
+                              right:
+                                  actions.isEmpty &&
+                                      horizontalInset < Grid.gutter
+                                  ? Grid.gutter - horizontalInset
+                                  : 0,
+                            ),
+                            child: title!,
+                          ),
                   ),
-                )
-              else
-                const Spacer(),
-              ...actions,
-            ],
+            actions: actions.isEmpty
+                ? null
+                : Row(mainAxisSize: MainAxisSize.min, children: actions),
+            centered: centerTitle,
           ),
         ),
       ),
@@ -294,4 +319,101 @@ class FrostedAppBar extends StatelessWidget {
 
     return Positioned(top: 0, left: 0, right: 0, child: child);
   }
+}
+
+enum _NavigationSlot { leading, title, actions }
+
+class _CenteredNavigationLayout extends StatelessWidget {
+  const _CenteredNavigationLayout({
+    this.leading,
+    this.title,
+    this.actions,
+    required this.centered,
+  });
+
+  final Widget? leading;
+  final Widget? title;
+  final Widget? actions;
+  final bool centered;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!centered) {
+      return Row(
+        children: [
+          ?leading,
+          if (title != null) Expanded(child: title!) else const Spacer(),
+          ?actions,
+        ],
+      );
+    }
+    return CustomMultiChildLayout(
+      delegate: _CenteredNavigationLayoutDelegate(),
+      children: [
+        if (leading != null)
+          LayoutId(id: _NavigationSlot.leading, child: leading!),
+        if (title != null) LayoutId(id: _NavigationSlot.title, child: title!),
+        if (actions != null)
+          LayoutId(id: _NavigationSlot.actions, child: actions!),
+      ],
+    );
+  }
+}
+
+class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
+  @override
+  void performLayout(Size size) {
+    Size leadingSize = Size.zero;
+    if (hasChild(_NavigationSlot.leading)) {
+      leadingSize = layoutChild(
+        _NavigationSlot.leading,
+        BoxConstraints.loose(size),
+      );
+      positionChild(
+        _NavigationSlot.leading,
+        Offset(0, (size.height - leadingSize.height) / 2),
+      );
+    }
+
+    Size actionsSize = Size.zero;
+    if (hasChild(_NavigationSlot.actions)) {
+      actionsSize = layoutChild(
+        _NavigationSlot.actions,
+        BoxConstraints.loose(size),
+      );
+      positionChild(
+        _NavigationSlot.actions,
+        Offset(
+          size.width - actionsSize.width,
+          (size.height - actionsSize.height) / 2,
+        ),
+      );
+    }
+
+    if (hasChild(_NavigationSlot.title)) {
+      final occupiedSideWidth = leadingSize.width > actionsSize.width
+          ? leadingSize.width
+          : actionsSize.width;
+      final sideWidth = occupiedSideWidth == 0
+          ? 0.0
+          : occupiedSideWidth + Grid.xs;
+      final titleWidth = (size.width - sideWidth * 2).clamp(0.0, size.width);
+      final titleSize = layoutChild(
+        _NavigationSlot.title,
+        BoxConstraints(maxWidth: titleWidth, maxHeight: size.height),
+      );
+      positionChild(
+        _NavigationSlot.title,
+        Offset(
+          (size.width - titleSize.width) / 2,
+          (size.height - titleSize.height) / 2,
+        ),
+      );
+    }
+  }
+
+  @override
+  bool shouldRelayout(
+    covariant _CenteredNavigationLayoutDelegate oldDelegate,
+  ) => false;
 }

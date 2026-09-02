@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
+import 'package:buzz/shared/push/push_presentation_cache.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,6 +24,15 @@ void main() {
     ),
   );
 
+  test('accepts bounded raster data avatars for the push cache', () {
+    expect(isCacheablePushAvatarSource('data:image/png;base64,AA=='), isTrue);
+    expect(
+      isCacheablePushAvatarSource('data:image/svg+xml;base64,AA=='),
+      isFalse,
+    );
+    expect(isCacheablePushAvatarSource('data:image/png;base64,%%%'), isFalse);
+  });
+
   testWidgets('renders raccoon percent-encoded SVG data avatar', (
     tester,
   ) async {
@@ -32,6 +43,11 @@ void main() {
 
     final emoji = tester.widget<Text>(find.text('🦝'));
     expect(emoji.style?.height, 1);
+    final glyph = tester.widget<NativeEmojiGlyph>(
+      find.byType(NativeEmojiGlyph),
+    );
+    expect(glyph.size, closeTo(32 * 258 / 512, 0.001));
+    expect(glyph.opticalBoxSize, glyph.size);
     expect(find.byType(SvgPicture), findsNothing);
     expect(find.text('R'), findsNothing);
     expect(tester.takeException(), isNull);

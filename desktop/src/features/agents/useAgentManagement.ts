@@ -21,6 +21,7 @@ import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
   type BackendIntent,
+  type RuntimeBindingIntent,
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
 import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
@@ -32,6 +33,7 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 function updateInputFromRequest(
   request: Extract<AgentManagementRequest, { action: "update" }>,
@@ -161,12 +163,15 @@ export function useAgentManagement() {
     const targetChannel = (channelsQuery.data ?? []).find(
       (channel) => channel.id === channelId,
     );
-    const requestingPubkey = sourceAgentPubkey.current?.toLowerCase();
+    const sourcePubkey = sourceAgentPubkey.current;
+    const requestingPubkey = sourcePubkey
+      ? normalizePubkey(sourcePubkey)
+      : undefined;
     if (
       !targetChannel?.isMember ||
       !requestingPubkey ||
       !targetChannel.memberPubkeys.some(
-        (pubkey) => pubkey.toLowerCase() === requestingPubkey,
+        (pubkey) => normalizePubkey(pubkey) === requestingPubkey,
       )
     ) {
       throw new Error(
@@ -179,6 +184,7 @@ export function useAgentManagement() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    runtimeBindingIntent?: RuntimeBindingIntent,
   ): Promise<boolean> {
     if (request?.action !== "create" || "id" in input) {
       return false;
@@ -211,6 +217,7 @@ export function useAgentManagement() {
             runtime,
             undefined,
             backendIntent ?? undefined,
+            runtimeBindingIntent,
           ),
         );
         if (created.spawnError) throw new Error(created.spawnError);

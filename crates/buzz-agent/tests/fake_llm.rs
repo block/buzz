@@ -16,6 +16,17 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+mod common;
+use common::approve_permission;
+
+/// A `cwd` value that `Path::is_absolute()` accepts on every platform this
+/// suite runs on. `/tmp` is absolute on Unix but not on Windows (it lacks a
+/// drive prefix), so `session/new` rejects it there with "cwd must be an
+/// absolute path" before the test ever reaches the behavior under test.
+fn test_cwd() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
 async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -182,6 +193,10 @@ impl Harness {
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "4")
+            // This suite predates the reply guard and asserts exact LLM-call
+            // counts / response shapes that a nag would perturb; none of it
+            // exercises the guard itself, so it's pinned off.
+            .env("BUZZ_AGENT_REQUIRE_REPLY", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -276,7 +291,7 @@ async fn init_session(h: &mut Harness) -> String {
     let r = h.recv().await;
     assert_eq!(r["result"]["protocolVersion"], 2);
     assert_eq!(r["result"]["agentInfo"]["name"], "buzz-agent");
-    h.send("session/new", json!({"cwd":"/tmp","mcpServers":[]}))
+    h.send("session/new", json!({"cwd": test_cwd(),"mcpServers":[]}))
         .await;
     let r = h.recv().await;
     let sid = r["result"]["sessionId"].as_str().unwrap().to_owned();
@@ -371,7 +386,7 @@ async fn unsupported_image_response_recovers_without_replaying_image() {
         .send(
             "session/new",
             json!({
-                "cwd": "/tmp",
+                "cwd": test_cwd(),
                 "mcpServers": [{
                     "name": "fake",
                     "command": env!("CARGO_BIN_EXE_fake-mcp"),
@@ -396,12 +411,7 @@ async fn unsupported_image_response_recovers_without_replaying_image() {
     loop {
         let message = h.recv().await;
         if message.get("method") == Some(&json!("session/request_permission")) {
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": message["id"],
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&message)).await;
         } else if message["id"] == json!(prompt_id) {
             assert_eq!(message["result"]["stopReason"], "end_turn");
             break;
@@ -465,7 +475,10 @@ async fn unsupported_image_without_image_in_history_fails_instead_of_looping() {
     .await;
     let _ = h.recv().await;
     let session_id = h
-        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .send(
+            "session/new",
+            json!({ "cwd": test_cwd(), "mcpServers": [] }),
+        )
         .await;
     let session = h.recv_until(|v| v["id"] == json!(session_id)).await;
     let sid = session["result"]["sessionId"].as_str().unwrap();
@@ -611,7 +624,7 @@ async fn session_new_rejects_oversized_system_prompt() {
     let id = h
         .send(
             "session/new",
-            json!({"cwd":"/tmp","mcpServers":[],"systemPrompt": big_prompt}),
+            json!({"cwd": test_cwd(),"mcpServers":[],"systemPrompt": big_prompt}),
         )
         .await;
     let r = h.recv_until(|v| v["id"] == json!(id)).await;
@@ -648,7 +661,7 @@ async fn system_prompt_reaches_llm_system_role() {
     let sn_id = h
         .send(
             "session/new",
-            json!({"cwd":"/tmp","mcpServers":[],"systemPrompt": canary}),
+            json!({"cwd": test_cwd(),"mcpServers":[],"systemPrompt": canary}),
         )
         .await;
     let r = h.recv_until(|v| v["id"] == json!(sn_id)).await;
@@ -716,7 +729,7 @@ async fn system_prompt_absent_no_canary() {
 
     // session/new WITHOUT systemPrompt field.
     let sn_id = h
-        .send("session/new", json!({"cwd":"/tmp","mcpServers":[]}))
+        .send("session/new", json!({"cwd": test_cwd(),"mcpServers":[]}))
         .await;
     let r = h.recv_until(|v| v["id"] == json!(sn_id)).await;
     let sid = r["result"]["sessionId"].as_str().unwrap().to_owned();

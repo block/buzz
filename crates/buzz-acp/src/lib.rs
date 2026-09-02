@@ -7,9 +7,15 @@ mod filter;
 mod observer;
 mod pool;
 mod pool_lifecycle;
+mod prompt_framing;
+mod prompt_project;
 mod queue;
 mod relay;
+/// Durable session-binding + processed-event store (IDs and timestamps only).
+pub mod session_store;
 mod setup_mode;
+#[cfg(test)]
+mod testshell;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -19,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp::{AcpClient, EnvVar, McpServer};
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
     KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
@@ -43,6 +49,7 @@ use pool::{
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
+use session_store::skip_if_already_processed;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -66,6 +73,22 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Resolve the process working directory for ACP session metadata and prompts.
+///
+/// `std::env::current_dir()` returns an absolute path on every supported
+/// platform. Keep the explicit invariant check so a future source cannot
+/// silently introduce a relative path, and surface resolution failures instead
+/// of substituting a misleading Unix-specific fallback.
+fn current_working_directory() -> Result<String> {
+    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
+    ensure!(
+        cwd.is_absolute(),
+        "current working directory is not absolute: {}",
+        cwd.display()
+    );
+    Ok(cwd.to_string_lossy().into_owned())
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -88,6 +111,83 @@ async fn publish_presence(
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;
     Ok(())
+}
+
+/// Why a harness finished startup with no channel subscription it can hear on.
+///
+/// The two causes need different copy because they point at different fixes:
+/// one is a membership/rule problem, the other a relay problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChannelReachGap {
+    /// No rule matched any channel, so no REQ was even attempted.
+    NothingResolved,
+    /// Channels resolved, but every REQ failed to reach the relay.
+    AllSubscribesFailed,
+}
+
+/// Assess whether startup left the harness able to receive channel work.
+///
+/// `resolved` counts the channel filters startup intended to subscribe;
+/// `live` counts the ones whose REQ actually went out. Returns `None` for the
+/// healthy case — at least one live subscription.
+///
+/// Why this is measured AFTER the subscribe loop rather than before it: the
+/// pre-loop check could only see `resolved`, so an agent that resolved
+/// channels and then failed every single `subscribe_channel` call was deaf
+/// with nothing logged about it — the failures were reported one-by-one as
+/// individual channel warnings, and the aggregate condition ("this agent can
+/// no longer hear anything") was never stated. That is the silent case this
+/// exists to name.
+///
+/// Note this is deliberately only a diagnostic. Zero live subscriptions is a
+/// legitimate steady state — an agent in no channels yet — so it must not fail
+/// startup, and it must not withhold the `online` presence that desktop
+/// callers wait on as their readiness boundary before sending a first mention.
+fn assess_channel_reach(resolved: usize, live: usize) -> Option<ChannelReachGap> {
+    if live > 0 {
+        None
+    } else if resolved == 0 {
+        Some(ChannelReachGap::NothingResolved)
+    } else {
+        Some(ChannelReachGap::AllSubscribesFailed)
+    }
+}
+
+#[cfg(test)]
+mod channel_reach_tests {
+    use super::{assess_channel_reach, ChannelReachGap};
+
+    #[test]
+    fn one_live_subscription_is_healthy() {
+        assert_eq!(assess_channel_reach(1, 1), None);
+    }
+
+    #[test]
+    fn a_partial_failure_is_still_healthy() {
+        // Some channels failed, but the agent can still hear on one, so this is
+        // not deafness — the per-channel warnings already cover the failures.
+        assert_eq!(assess_channel_reach(3, 1), None);
+    }
+
+    #[test]
+    fn nothing_resolved_is_reported() {
+        assert_eq!(
+            assess_channel_reach(0, 0),
+            Some(ChannelReachGap::NothingResolved)
+        );
+    }
+
+    #[test]
+    fn every_subscribe_failing_is_reported_not_silent() {
+        // The regression this exists for: the old check ran before the
+        // subscribe loop and keyed on resolved filters, so resolving three
+        // channels and then failing all three REQs produced no deafness
+        // report at all.
+        assert_eq!(
+            assess_channel_reach(3, 0),
+            Some(ChannelReachGap::AllSubscribesFailed)
+        );
+    }
 }
 
 fn emit_runtime_lifecycle(
@@ -274,7 +374,7 @@ pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
-    match channel_info.resolve(channel_id).await {
+    match channel_info.resolve_channel_metadata(channel_id).await {
         Some(info) => info.channel_type == "dm",
         None => {
             tracing::warn!(
@@ -284,6 +384,50 @@ pub(crate) async fn is_dm_channel(
             true
         }
     }
+}
+
+/// NIP-MR: publish an acknowledgement for an event that tagged this agent.
+///
+/// Fires only when `event` actually carries a `p` tag naming `pubkey_hex`. Every
+/// other event is none of the sender's business — in `all` subscription mode the
+/// harness sees every message in the channel, and acknowledging those would bury
+/// it in receipts.
+///
+/// Self-authored events are skipped: the agent's own output p-tags the person it
+/// is replying to, and an agent acknowledging its own message is meaningless.
+///
+/// Acknowledgements themselves are never acknowledged. An ack p-tags the author
+/// it answers, so it *is* a mention of that agent. Without this guard two
+/// sibling agents subscribed with wildcard kinds would acknowledge each other's
+/// acknowledgements forever — each round publishing a stored event and firing a
+/// model turn, with no human involved and no terminating condition.
+///
+/// Spawned and not awaited. The ack is a courtesy to the sender; it must never
+/// add latency to the dispatch path or hold up the event loop behind a slow
+/// relay. `publish_mention_ack` swallows its own errors.
+fn ack_mention(
+    rest: &relay::RestClient,
+    event: &nostr::Event,
+    channel_id: uuid::Uuid,
+    pubkey_hex: &str,
+    status: &'static str,
+    reason: Option<&'static str>,
+) {
+    if event.kind.as_u16() as u32 == buzz_core::kind::KIND_AGENT_MENTION_ACK {
+        return;
+    }
+    if !filter::event_mentions(event, pubkey_hex) {
+        return;
+    }
+    let author = event.pubkey.to_hex();
+    if author == pubkey_hex {
+        return;
+    }
+    let rest = rest.clone();
+    let event_id = event.id.to_hex();
+    tokio::spawn(async move {
+        pool::publish_mention_ack(&rest, channel_id, &event_id, &author, status, reason).await;
+    });
 }
 
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
@@ -1065,13 +1209,14 @@ async fn publish_relay_observer_event(
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
 const OBSERVER_CONTROL_FRESHNESS_SECS: i64 = 300;
 
-fn handle_relay_observer_control_event(
+async fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
     event: nostr::Event,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
     event_publisher: RelayEventPublisher,
+    session_store: Option<&dyn session_store::SessionStore>,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -1115,7 +1260,7 @@ fn handle_relay_observer_control_event(
             handle_cancel_turn_control(&payload, pool, observer);
         }
         Some("switch_model") => {
-            handle_switch_model_control(&payload, pool, observer);
+            handle_switch_model_control(&payload, pool, observer, session_store).await;
         }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
@@ -1318,11 +1463,14 @@ fn handle_cancel_turn_control(
 ///
 /// Idle path: validate against the cached catalog *before* invalidating
 /// (pre-cancel guard), then set `desired_model` + invalidate. The override
-/// takes visible effect on the agent's next turn.
-fn handle_switch_model_control(
+/// takes visible effect on the agent's next turn. A successful idle switch
+/// also retires durable bindings so the next prompt cannot `session/load`
+/// the deliberately retired session.
+async fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
+    session_store: Option<&dyn session_store::SessionStore>,
 ) {
     let Some(channel_id) = payload
         .get("channelId")
@@ -1336,6 +1484,13 @@ fn handle_switch_model_control(
         tracing::warn!("observer switch_model control frame missing modelId");
         return;
     };
+    // Opaque per-pick correlator, echoed on every result frame so the Desktop
+    // can ignore a replayed result for an earlier pick. Optional: absent on
+    // older Desktop clients, in which case the frames simply carry no id.
+    let request_id = payload
+        .get("requestId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
 
     // A turn is in flight for this channel iff a task_map entry exists. The
     // agent is moved out of the pool during a turn, so the control oneshot is
@@ -1352,7 +1507,10 @@ fn handle_switch_model_control(
         if signal_in_flight_task(
             pool,
             channel_id,
-            ControlSignal::SwitchModel(model_id.to_string()),
+            ControlSignal::SwitchModel {
+                model_id: model_id.to_string(),
+                request_id: request_id.clone(),
+            },
         ) {
             "sent"
         } else {
@@ -1360,8 +1518,19 @@ fn handle_switch_model_control(
         }
     } else {
         // Idle path: validate against the cached catalog before invalidating.
-        match pool.switch_idle_agent_model(channel_id, model_id) {
-            IdleSwitchResult::Switched => "switched",
+        match pool.switch_idle_agent_model(channel_id, model_id, request_id.clone()) {
+            IdleSwitchResult::Switched => {
+                if let Some(store) = session_store {
+                    if let Err(error) = store.remove_bindings_for_channel(channel_id).await {
+                        tracing::warn!(
+                            %error,
+                            %channel_id,
+                            "session store remove_binding failed on idle switch_model"
+                        );
+                    }
+                }
+                "switched"
+            }
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
             IdleSwitchResult::NoIdleAgent => "no_active_turn",
         }
@@ -1381,6 +1550,9 @@ fn handle_switch_model_control(
                 "type": "switch_model",
                 "status": status,
                 "modelId": model_id,
+                // Echo the correlator on the immediate ack so a `sent` /
+                // `turn_ending` / idle-path terminal frame matches the pick.
+                "requestId": request_id,
             }),
         );
     }
@@ -1929,6 +2101,30 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
+    let session_store: Option<std::sync::Arc<dyn session_store::SessionStore>> =
+        if let Some(path) = config.session_store_path.as_ref() {
+            match session_store::sqlite::SqliteSessionStore::open(
+                path,
+                session_store::StoreScope::new(
+                    config.keys.public_key().to_hex(),
+                    &config.relay_url,
+                    config::normalize_agent_command_identity(&config.agent_command),
+                ),
+            ) {
+                Ok(store) => Some(std::sync::Arc::new(store)),
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        path = %path.display(),
+                        "failed to open session store; continuing without durable bindings"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     let observer = config
         .relay_observer
         .then(observer::ObserverHandle::in_process);
@@ -2111,9 +2307,6 @@ async fn tokio_main() -> Result<()> {
     };
 
     let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
-    if channel_filters.is_empty() {
-        tracing::warn!("no channel subscriptions resolved — agent will sit idle");
-    }
     let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
@@ -2122,6 +2315,23 @@ async fn tokio_main() -> Result<()> {
             subscribed_channel_ids.insert(*channel_id);
             tracing::info!("subscribed to channel {channel_id}");
         }
+    }
+
+    // Deafness is assessed against subscriptions that actually went out, not
+    // against the filters we hoped to send, so that "resolved N, subscribed 0"
+    // is reported instead of passing silently. See `assess_channel_reach`.
+    match assess_channel_reach(channel_filters.len(), subscribed_channel_ids.len()) {
+        Some(ChannelReachGap::NothingResolved) => tracing::warn!(
+            subscribe_mode = ?config.subscribe_mode,
+            rules = rules.len(),
+            "no channel subscriptions resolved — agent will sit idle"
+        ),
+        Some(ChannelReachGap::AllSubscribesFailed) => tracing::warn!(
+            subscribe_mode = ?config.subscribe_mode,
+            resolved = channel_filters.len(),
+            "every channel subscription failed — agent is connected but will sit idle"
+        ),
+        None => {}
     }
 
     if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
@@ -2164,6 +2374,7 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2182,12 +2393,9 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string(),
         channel_cwd: crate::config::build_channel_cwd_map(&config),
         project_cwd: crate::config::build_project_cwd_map(&config),
+        cwd,
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -2200,6 +2408,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        session_store: session_store.clone(),
     });
 
     if !config.memory_enabled {
@@ -2471,6 +2680,9 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        desired_model_request_id: None,
+                        desired_model_pending_ack: false,
+                        startup_effort: config.effort_level.clone(),
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
@@ -2587,7 +2799,9 @@ async fn tokio_main() -> Result<()> {
                                     observer.as_ref(),
                                     owner_hex,
                                     relay.event_publisher(),
-                                );
+                                    session_store.as_deref(),
+                                )
+                                .await;
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -2691,6 +2905,17 @@ async fn tokio_main() -> Result<()> {
                                     } else {
                                         0
                                     };
+                                    if let Some(store) = session_store.as_ref() {
+                                        if let Err(error) =
+                                            store.remove_bindings_for_channel(ch).await
+                                        {
+                                            tracing::warn!(
+                                                %error,
+                                                %ch,
+                                                "session store remove_binding failed on membership removal"
+                                            );
+                                        }
+                                    }
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
@@ -2818,6 +3043,20 @@ async fn tokio_main() -> Result<()> {
                                             );
                                         } else {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            if let Some(store) = session_store.as_ref() {
+                                                if let Err(error) = store
+                                                    .remove_bindings_for_channel(
+                                                        buzz_event.channel_id,
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        %error,
+                                                        channel_id = %buzz_event.channel_id,
+                                                        "session store remove_binding failed on !rotate"
+                                                    );
+                                                }
+                                            }
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,
@@ -2865,6 +3104,22 @@ async fn tokio_main() -> Result<()> {
                                         is_dm,
                                         "inbound author gate — dropping event"
                                     );
+                                    // NIP-MR: this is the most common way a
+                                    // mention dead-ends. `respond_to` defaults
+                                    // to owner-only, so a co-worker tagging the
+                                    // agent lands here and, before the ack, the
+                                    // drop was visible only in a debug! log.
+                                    // Tell the sender we saw it and why we are
+                                    // not acting, so they can ask the owner to
+                                    // widen respond_to instead of waiting.
+                                    ack_mention(
+                                        &ctx.rest_client,
+                                        &buzz_event.event,
+                                        buzz_event.channel_id,
+                                        &pubkey_hex,
+                                        buzz_core::kind::MENTION_ACK_STATUS_DECLINED,
+                                        Some(buzz_core::kind::MENTION_ACK_REASON_SENDER_NOT_ALLOWED),
+                                    );
                                     continue;
                                 }
                             }
@@ -2874,6 +3129,18 @@ async fn tokio_main() -> Result<()> {
                                 Some(m) => m.prompt_tag,
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
+                                    // NIP-MR: no rule matched, or a filter
+                                    // expression failed closed. Either way the
+                                    // agent was tagged and will not answer, so
+                                    // say so rather than going quiet.
+                                    ack_mention(
+                                        &ctx.rest_client,
+                                        &buzz_event.event,
+                                        buzz_event.channel_id,
+                                        &pubkey_hex,
+                                        buzz_core::kind::MENTION_ACK_STATUS_DECLINED,
+                                        Some(buzz_core::kind::MENTION_ACK_REASON_NO_MATCHING_RULE),
+                                    );
                                     continue;
                                 }
                             };
@@ -2893,6 +3160,9 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
+                            if skip_if_already_processed(session_store.as_deref(), &event_id_hex).await {
+                                continue;
+                            }
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
@@ -2911,6 +3181,32 @@ async fn tokio_main() -> Result<()> {
                                     pool::reaction_add(&rc, &eid, "👀").await;
                                 });
                             }
+                            // NIP-MR: durable counterpart to the 👀 above. The
+                            // reaction is explicitly cosmetic — 500ms timeout,
+                            // failures swallowed at debug! — so it cannot be
+                            // the signal a sender relies on. The ack can.
+                            //
+                            // `!accepted` means DedupMode::Drop discarded the
+                            // event because the channel is already in flight.
+                            // That path posts no 👀 and fires no steer, so
+                            // before the ack it was the most completely silent
+                            // outcome in the harness.
+                            ack_mention(
+                                &ctx.rest_client,
+                                &event_for_steer,
+                                buzz_event.channel_id,
+                                &pubkey_hex,
+                                if accepted {
+                                    buzz_core::kind::MENTION_ACK_STATUS_ACCEPTED
+                                } else {
+                                    buzz_core::kind::MENTION_ACK_STATUS_DECLINED
+                                },
+                                if accepted {
+                                    None
+                                } else {
+                                    Some(buzz_core::kind::MENTION_ACK_REASON_BUSY)
+                                },
+                            );
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel —
                             // OR take the non-cancelling (ACP steer) fork for Steer signals.
@@ -3629,7 +3925,7 @@ fn try_native_steer(
     // channel context and the actor's profile in the original prompt,
     // duplicating it here would defeat the point of non-cancelling
     // steering (which is to inject only what's new).
-    let (header, closing) = queue::native_steer_framing();
+    let (tag, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
     let be = queue::BatchEvent {
         event,
@@ -3637,7 +3933,13 @@ fn try_native_steer(
         received_at: std::time::Instant::now(),
     };
     let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+    let new_message = prompt_framing::semantic_section(tag, "");
+    let event_section = prompt_framing::semantic_section_with_attributes(
+        "buzz-event",
+        &[("type", prompt_tag.as_str())],
+        &event_block,
+    );
+    let body = format!("{new_message}\n\n{event_section}\n\n{closing}");
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
@@ -3982,6 +4284,7 @@ fn handle_prompt_result(
                     }
                     PromptOutcome::AgentExited => "the agent process exited".to_string(),
                     PromptOutcome::Error(e) => format!("{e}"),
+                    PromptOutcome::ProjectContextIndeterminate(reason) => reason.clone(),
                     _ => "repeated failures".to_string(),
                 };
                 let content = format!(
@@ -4014,6 +4317,7 @@ fn handle_prompt_result(
     let outcome_label = match &result.outcome {
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
+        PromptOutcome::ProjectContextIndeterminate(_) => "project_context_indeterminate",
         PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
         PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
         PromptOutcome::AgentExited => "exited",
@@ -4173,6 +4477,16 @@ fn handle_prompt_result(
                 pid = harness_pid,
                 "agent_returned (cancelled)"
             );
+            pool.return_agent(result.agent);
+        }
+        PromptOutcome::ProjectContextIndeterminate(reason) => {
+            tracing::warn!(
+                agent = agent_index,
+                outcome = outcome_label,
+                reason,
+                "agent_returned (local project context indeterminate — pipe intact)"
+            );
+            emit_turn_error(&reason, None);
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {
@@ -4431,6 +4745,14 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_names_current_context_framing() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("UUID from `<context>`"));
+        assert!(prompt.contains("reply destination supplied in the `<context>` block"));
+        assert!(!prompt.contains("`[Context]`"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("pass real newline bytes through stdin"));
@@ -4449,6 +4771,14 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("CI and live workflow evidence answer different questions"));
         assert!(prompt.contains("record the invariant in the same session"));
         assert!(prompt.contains("update the team's shared guidance"));
+    }
+
+    #[test]
+    fn shared_base_prompt_teaches_not_to_duplicate_projects() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("do **not** run `buzz projects create`"));
+        assert!(prompt.contains("buzz issues create --channel"));
+        assert!(prompt.contains("is not a Buzz repository"));
     }
 
     #[test]
@@ -4559,6 +4889,47 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
         .to_ascii_lowercase()
 }
 
+fn expected_hermes_profile<'a>(command: &str, args: &'a [String]) -> Option<&'a str> {
+    let executable = std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    let executable = executable
+        .strip_suffix(".exe")
+        .or_else(|| executable.strip_suffix(".cmd"))
+        .or_else(|| executable.strip_suffix(".bat"))
+        .unwrap_or(&executable);
+    if !matches!(executable, "hermes" | "hermes-agent" | "hermes-acp") {
+        return None;
+    }
+    args.windows(2)
+        .find(|pair| pair[0] == "--profile" || pair[0] == "-p")
+        .map(|pair| pair[1].as_str())
+}
+
+fn validate_hermes_profile_handshake(
+    init_result: &serde_json::Value,
+    expected_profile: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected) = expected_profile else {
+        return Ok(());
+    };
+    let actual = init_result
+        .pointer("/agentInfo/_meta/hermes/profile")
+        .or_else(|| init_result.pointer("/serverInfo/_meta/hermes/profile"))
+        .and_then(|value| value.as_str());
+    match actual {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(format!(
+            "Hermes profile handshake mismatch: requested {expected:?}, adapter reported {actual:?}"
+        )),
+        None => Err(format!(
+            "Hermes profile handshake missing: requested {expected:?}, adapter did not attest a profile"
+        )),
+    }
+}
+
 async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
     for slot in slots {
         if let Some(mut agent) = slot.take() {
@@ -4586,6 +4957,7 @@ struct PoolStartup {
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
     model: Option<String>,
+    effort_level: Option<String>,
     observer: Option<observer::ObserverHandle>,
 }
 
@@ -4598,6 +4970,7 @@ impl PoolStartup {
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
+            effort_level: config.effort_level.clone(),
             observer,
         }
     }
@@ -4636,6 +5009,15 @@ async fn initialize_agent_pool(
                 };
                 match initialize_result {
                     Ok(Ok(init_result)) => {
+                        if let Err(reason) = validate_hermes_profile_handshake(
+                            &init_result,
+                            expected_hermes_profile(&startup.command, &startup.args),
+                        ) {
+                            tracing::error!(agent = i, %reason, "agent profile handshake failed");
+                            acp.shutdown().await;
+                            agent_slots.push(None);
+                            continue;
+                        }
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
@@ -4665,6 +5047,9 @@ async fn initialize_agent_pool(
                             model_capabilities: None,
                             desired_model: startup.model.clone(),
                             model_overridden: false,
+                            desired_model_request_id: None,
+                            desired_model_pending_ack: false,
+                            startup_effort: startup.effort_level.clone(),
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
@@ -4872,10 +5257,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        .to_string_lossy()
-        .to_string();
+    let cwd = current_working_directory()?;
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
@@ -5066,8 +5448,8 @@ mod heartbeat_base_prompt_tests {
     use super::*;
 
     // Pins the heartbeat dispatch path (dispatch_heartbeat, ~line 2359): a
-    // legacy agent WITH a base_prompt must get [Base] prepended to the
-    // heartbeat user message, composed as `[Base]\n{bp}\n\n{prompt}`. This is
+    // legacy agent WITH a base_prompt must get <base> prepended to the
+    // heartbeat user message. This is
     // the second half of the round-2 regression (the first being initial_message).
 
     fn heartbeat_standing() -> queue::StandingContext<'static> {
@@ -5080,12 +5462,12 @@ mod heartbeat_base_prompt_tests {
     #[test]
     fn test_heartbeat_legacy_agent_gets_base_prepended() {
         // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
-        // with the [Base] section exactly as the legacy session/new path would.
+        // with the <base> section exactly as the legacy session/new path would.
         let prompt = "[System: Heartbeat]\nrun feed get";
         let composed = pool::prepend_standing_for_legacy(1, &heartbeat_standing(), prompt);
         assert_eq!(
             composed,
-            "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
+            "<base>\nyou are a helpful agent\n</base>\n\n[System: Heartbeat]\nrun feed get"
         );
     }
 
@@ -5641,7 +6023,7 @@ mod author_gate_tests {
         assert_eq!(
             requests.load(Ordering::SeqCst),
             1,
-            "second resolution uses cache"
+            "author-gate DM classification resolves and caches channel metadata only"
         );
         server.abort();
     }
@@ -6757,6 +7139,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
@@ -6768,6 +7151,7 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_store_path: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -6983,6 +7367,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
@@ -6994,6 +7379,7 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_store_path: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -7019,6 +7405,59 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[test]
+    fn validates_hermes_profile_attestation_from_exact_launcher_args() {
+        let args = vec!["--profile".to_string(), "jake".to_string()];
+        assert_eq!(
+            expected_hermes_profile("/opt/bin/hermes-acp", &args),
+            Some("jake")
+        );
+        let init = serde_json::json!({
+            "agentInfo": {
+                "name": "hermes-agent",
+                "_meta": { "hermes": { "profile": "jake" } }
+            }
+        });
+        assert!(validate_hermes_profile_handshake(&init, Some("jake")).is_ok());
+        assert!(validate_hermes_profile_handshake(&init, Some("archie"))
+            .unwrap_err()
+            .contains("mismatch"));
+    }
+
+    #[test]
+    fn rejects_missing_hermes_attestation_but_ignores_other_harnesses() {
+        let init = serde_json::json!({ "agentInfo": { "name": "hermes-agent" } });
+        assert!(validate_hermes_profile_handshake(&init, Some("jake"))
+            .unwrap_err()
+            .contains("missing"));
+        assert!(validate_hermes_profile_handshake(&init, None).is_ok());
+        assert_eq!(
+            expected_hermes_profile("codex-acp", &["--profile".into(), "jake".into()]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn real_hermes_profile_initialize_attests_requested_profile_when_configured() {
+        let Ok(command) = std::env::var("BUZZ_TEST_HERMES_ACP") else {
+            return;
+        };
+        let profile =
+            std::env::var("BUZZ_TEST_HERMES_PROFILE").unwrap_or_else(|_| "jake".to_string());
+        let args = vec!["--profile".to_string(), profile.clone()];
+        let mut client = AcpClient::spawn(&command, &args, &[], false)
+            .await
+            .expect("real Hermes ACP process should spawn");
+        let init = tokio::time::timeout(Duration::from_secs(60), client.initialize())
+            .await
+            .expect("real Hermes ACP initialize should stay bounded")
+            .expect("real Hermes ACP initialize should succeed");
+        assert_eq!(normalized_agent_name(&init), "hermes-agent");
+        validate_hermes_profile_handshake(&init, Some(&profile))
+            .expect("real Hermes adapter must attest the requested profile");
+        client.shutdown().await;
+    }
+
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
     /// an `OwnedAgent` to move into respawn or return to the pool. The error
     /// branches never talk to the subprocess.
@@ -7032,6 +7471,9 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy
@@ -8209,6 +8651,94 @@ mod error_outcome_emission_tests {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
     }
 
+    #[tokio::test]
+    async fn indeterminate_project_context_requeues_without_poisoning_agent_or_circuit() {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "project work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "healthy-session".into());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "indeterminate-project".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "indeterminate-project".into(),
+            outcome: PromptOutcome::ProjectContextIndeterminate(
+                "project context is indeterminate".into(),
+            ),
+            batch: Some(batch),
+        };
+
+        assert!(matches!(
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            ),
+            LoopAction::Continue
+        ));
+
+        let returned = pool.agents_mut()[0]
+            .as_ref()
+            .expect("healthy agent returns to its slot");
+        assert_eq!(
+            returned.state.sessions.get(&channel_id).map(String::as_str),
+            Some("healthy-session")
+        );
+        assert_eq!(queue.queued_event_count(&channel_id), 1);
+        assert!(crash_history[0].crash_times.is_empty());
+        assert!(crash_history[0].open_until.is_none());
+        assert!(!crash_history[0].respawn_in_flight);
+        assert!(respawn_tasks.is_empty());
+    }
+
     // ── is_auth_error classification ───────────────────────────────────────
 
     #[test]
@@ -8521,7 +9051,7 @@ mod observer_payload_trim_tests {
         // to 1).
         let sections = [
             "[Base]\nyou are a helpful agent".to_string(),
-            "[System]\npersona text".to_string(),
+            "[Agent Instructions]\npersona text".to_string(),
             "[Agent Memory — core]\nremember this".to_string(),
             "[Context]\nScope: thread".to_string(),
             // The triggering event body, oversized on its own.
@@ -8558,7 +9088,7 @@ mod observer_payload_trim_tests {
         let texts: Vec<&str> = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect();
         for header in [
             "[Base]",
-            "[System]",
+            "[Agent Instructions]",
             "[Agent Memory — core]",
             "[Context]",
             "[Buzz event: @mention]",
@@ -8684,5 +9214,125 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod session_store_dedupe_tests {
+    use super::session_store::{skip_if_already_processed, InMemorySessionStore, SessionStore};
+
+    #[tokio::test]
+    async fn processed_event_is_skipped_unmarked_passes() {
+        let store = InMemorySessionStore::new();
+        let channel_id = uuid::Uuid::new_v4();
+        assert!(
+            !skip_if_already_processed(None, "evt-1").await,
+            "no store means never skip"
+        );
+        assert!(!skip_if_already_processed(Some(&store), "evt-1").await);
+        store
+            .mark_events_processed(channel_id, &["evt-1".to_string()])
+            .await
+            .unwrap();
+        assert!(skip_if_already_processed(Some(&store), "evt-1").await);
+        assert!(!skip_if_already_processed(Some(&store), "evt-2").await);
+    }
+}
+
+#[cfg(test)]
+mod session_store_idle_switch_tests {
+    use super::*;
+    use session_store::{ContextKey, InMemorySessionStore, SessionStore};
+
+    async fn dummy_agent(channel_id: uuid::Uuid) -> OwnedAgent {
+        // Inert `cat` subprocess — the idle switch path never talks to ACP.
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp: AcpClient::spawn("cat", &[], &[], false)
+                .await
+                .expect("spawn cat as inert agent"),
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "retired-sid".into());
+        agent
+    }
+
+    #[tokio::test]
+    async fn session_store_idle_switch_model_removes_channel_bindings() {
+        let store = InMemorySessionStore::new();
+        let channel_id = uuid::Uuid::new_v4();
+        let key = ContextKey::Channel(channel_id).for_worker(0);
+        store.save_binding(&key, "retired-sid").await.unwrap();
+
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(channel_id).await)]);
+        handle_switch_model_control(
+            &serde_json::json!({
+                "channelId": channel_id.to_string(),
+                "modelId": "new-model",
+            }),
+            &mut pool,
+            None,
+            Some(&store),
+        )
+        .await;
+
+        assert!(
+            store.load_binding(&key).await.unwrap().is_none(),
+            "idle switch must retire durable bindings so restore cannot resurrect them"
+        );
+        if let Some(mut agent) = pool.try_claim(Some(channel_id)) {
+            agent.acp.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn session_store_unsupported_idle_switch_keeps_channel_bindings() {
+        let store = InMemorySessionStore::new();
+        let channel_id = uuid::Uuid::new_v4();
+        let key = ContextKey::Channel(channel_id).for_worker(0);
+        store.save_binding(&key, "keep-sid").await.unwrap();
+
+        let mut agent = dummy_agent(channel_id).await;
+        agent.model_capabilities = Some(crate::pool::AgentModelCapabilities {
+            config_options_raw: vec![],
+            available_models_raw: Some(serde_json::json!([])),
+            thought_level_config_id: None,
+        });
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        handle_switch_model_control(
+            &serde_json::json!({
+                "channelId": channel_id.to_string(),
+                "modelId": "missing-model",
+            }),
+            &mut pool,
+            None,
+            Some(&store),
+        )
+        .await;
+
+        assert_eq!(
+            store
+                .load_binding(&key)
+                .await
+                .unwrap()
+                .expect("rejected switch must not delete the binding")
+                .session_id,
+            "keep-sid"
+        );
+        if let Some(mut agent) = pool.try_claim(Some(channel_id)) {
+            agent.acp.shutdown().await;
+        }
     }
 }

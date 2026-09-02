@@ -1,0 +1,43 @@
+{
+  "acceptance": [
+    {
+      "id": "A1",
+      "text": "Persisted state round-trips",
+      "verified": false
+    }
+  ],
+  "blockers": [],
+  "evidence": [],
+  "git": {
+    "base_sha": "1111111111111111111111111111111111111111",
+    "branch": "feat/example",
+    "head_sha": null,
+    "repo": "block/buzz",
+    "worktree_alias": "buzz-example"
+  },
+  "id": "cdd4722d-7481-4d01-9c0a-423b4454c179",
+  "lease": null,
+  "objective": "One testable outcome",
+  "priority": "P1",
+  "protocol": "buzz-cml",
+  "review": {
+    "max_rounds": 3,
+    "round": 0
+  },
+  "roles": {
+    "fixer": null,
+    "planner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reviewer": null,
+    "worker": null
+  },
+  "runtime": {
+    "host_id": null,
+    "last_heartbeat_at": null,
+    "presence": "offline",
+    "ttl_seconds": 180
+  },
+  "status": "proposed",
+  "title": "Example task",
+  "updated_at": 1787673000,
+  "version": 1
+}

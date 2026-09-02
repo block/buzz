@@ -261,9 +261,57 @@ fn is_retriable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
+/// What an `OK` frame means for the event still sitting in our in-flight queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OkDisposition {
+    /// The relay has the event. Retire it.
+    Stored,
+    /// The relay refused it for a reason that may not hold next time. Keep it
+    /// queued so the next requeue resends it.
+    Retriable,
+    /// The relay refused it for a reason a resend cannot change. Retire it, but
+    /// loudly — the event is being dropped.
+    Permanent,
+}
+
+/// Classify a NIP-01 `OK` frame by its machine-readable message prefix.
+///
+/// NIP-01 requires the message on a rejection to begin with one of a fixed set
+/// of prefixes, which is what makes this decidable rather than guesswork. Only
+/// `rate-limited:` and `error:` describe conditions that can clear on their
+/// own; `invalid:`, `blocked:`, `restricted:` and `pow:` are properties of the
+/// event or of our standing with the relay, so resending byte-identical bytes
+/// gets a byte-identical refusal.
+///
+/// `duplicate:` is a rejection that means the publish already succeeded, so it
+/// is `Stored`. Treating it as a failure would be a false alarm on exactly the
+/// path — resend after reconnect — that produces duplicates in the first place.
+///
+/// An unrecognized message is treated as `Retriable`: keeping an event queued
+/// costs a bounded slot, whereas dropping one loses it for good, and unknown
+/// prefixes come from relays we do not control.
+pub(crate) fn classify_ok(accepted: bool, message: &str) -> OkDisposition {
+    if accepted {
+        return OkDisposition::Stored;
+    }
+    if message.starts_with("duplicate:") {
+        return OkDisposition::Stored;
+    }
+    const PERMANENT: [&str; 4] = ["invalid:", "blocked:", "restricted:", "pow:"];
+    if PERMANENT.iter().any(|p| message.starts_with(p)) {
+        return OkDisposition::Permanent;
+    }
+    OkDisposition::Retriable
+}
+
 /// Base retry delays for transient HTTP failures: 500ms, 1s, 2s.
-/// Jitter (±20%) is applied at call time via `jittered_duration`.
-const REST_RETRY_BASE_DELAYS: [Duration; 3] = [
+/// Jitter (±20%) is applied at call time via `jittered_duration`, so the first
+/// sleep lands in `[400ms, 600ms)`.
+///
+/// `pub(crate)` so callers can assert their own timeout is actually long
+/// enough to reach attempt two before choosing [`RestClient::submit_event`]
+/// over [`RestClient::submit_event_once`].
+pub(crate) const REST_RETRY_BASE_DELAYS: [Duration; 3] = [
     Duration::from_millis(500),
     Duration::from_millis(1000),
     Duration::from_millis(2000),
@@ -388,10 +436,33 @@ impl RestClient {
         path: &str,
         body_bytes: &[u8],
     ) -> Result<reqwest::Response, RelayError> {
+        self.bridge_post_inner(path, body_bytes, true).await
+    }
+
+    /// POST with NIP-98 auth and **no** retry ladder — a single attempt.
+    ///
+    /// For callers whose own timeout is shorter than the first backoff sleep,
+    /// where retrying is not merely useless but actively misleading: the outer
+    /// timeout fires mid-sleep, so the extra attempts never happen and the
+    /// error the caller reports is `Elapsed` rather than what the relay said.
+    async fn bridge_post_once(
+        &self,
+        path: &str,
+        body_bytes: &[u8],
+    ) -> Result<reqwest::Response, RelayError> {
+        self.bridge_post_inner(path, body_bytes, false).await
+    }
+
+    async fn bridge_post_inner(
+        &self,
+        path: &str,
+        body_bytes: &[u8],
+        retry: bool,
+    ) -> Result<reqwest::Response, RelayError> {
         let url = format!("{}{}", self.base_url, path);
         let body_owned = body_bytes.to_vec();
         let auth_tag_header = self.auth_tag_json.clone();
-        self.request_with_retry("POST", path, || {
+        let build = || {
             // NIP-98 is re-signed each attempt (fresh created_at).
             // sign_nip98 is infallible in practice (key is always valid).
             let auth = self
@@ -406,8 +477,20 @@ impl RestClient {
                 req = req.header("x-auth-tag", tag);
             }
             req.body(body_owned.clone()).send()
-        })
-        .await
+        };
+        if retry {
+            self.request_with_retry("POST", path, build).await
+        } else {
+            match build().await {
+                Ok(resp) if resp.status().is_success() => Ok(resp),
+                Ok(resp) => Err(RelayError::Http(format!(
+                    "POST {} returned HTTP {}",
+                    path,
+                    resp.status()
+                ))),
+                Err(e) => Err(RelayError::Http(e.to_string())),
+            }
+        }
     }
 
     /// Query events via the HTTP bridge: `POST /query` with NIP-98 auth.
@@ -421,6 +504,64 @@ impl RestClient {
         resp.json()
             .await
             .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query events via `POST /query` with a raw NIP-01 filter document.
+    ///
+    /// `nostr::Filter` only encodes single-letter generic tags. Project home
+    /// lookup needs `#buzz-channel`, which this path serializes verbatim.
+    pub async fn query_raw(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query every historical event matching one raw filter across bounded pages.
+    ///
+    /// Uses the bridge's composite `(until, before_id)` cursor so a full page
+    /// never becomes evidence that older project metadata is absent.
+    pub async fn query_raw_all(&self, mut filter: Value) -> Result<Vec<Value>, RelayError> {
+        const PAGE_SIZE: usize = 500;
+        const EVENT_BOUND: usize = 10_000;
+        let mut events = Vec::new();
+        loop {
+            let remaining_probe = EVENT_BOUND + 1 - events.len();
+            let page_limit = PAGE_SIZE.min(remaining_probe);
+            filter["limit"] = serde_json::json!(page_limit);
+            let page = self.query_raw(std::slice::from_ref(&filter)).await?;
+            let page = page
+                .as_array()
+                .ok_or_else(|| RelayError::Http("query response is not an array".into()))?;
+            let done = page.len() < page_limit;
+            if events.len() + page.len() > EVENT_BOUND {
+                return Err(RelayError::Http(format!(
+                    "query exceeded the exhaustive {EVENT_BOUND}-event bound"
+                )));
+            }
+            if !done {
+                let last = page
+                    .last()
+                    .ok_or_else(|| RelayError::Http("full query page is empty".into()))?;
+                let created_at = last
+                    .get("created_at")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| RelayError::Http("query page event lacks created_at".into()))?;
+                let id = last
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| id.len() == 64 && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                    .ok_or_else(|| RelayError::Http("query page event has invalid id".into()))?;
+                filter["until"] = serde_json::json!(created_at);
+                filter["before_id"] = serde_json::json!(id);
+            }
+            events.extend(page.iter().cloned());
+            if done {
+                return Ok(events);
+            }
+        }
     }
 
     /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
@@ -443,6 +584,23 @@ impl RestClient {
         let body_bytes = serde_json::to_vec(event)
             .map_err(|e| RelayError::Http(format!("event serialize error: {e}")))?;
         let resp = self.bridge_post("/events", &body_bytes).await?;
+        Self::read_event_response(resp).await
+    }
+
+    /// Submit a signed event with a **single** attempt and no retry ladder.
+    ///
+    /// For cosmetic publishes on a sub-second budget. [`submit_event`] backs
+    /// off 500ms/1s/2s between attempts, so a caller wrapping it in a timeout
+    /// shorter than the first sleep can never reach attempt two — it only
+    /// converts the relay's real answer into an opaque timeout.
+    pub async fn submit_event_once(&self, event: &Event) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(event)
+            .map_err(|e| RelayError::Http(format!("event serialize error: {e}")))?;
+        let resp = self.bridge_post_once("/events", &body_bytes).await?;
+        Self::read_event_response(resp).await
+    }
+
+    async fn read_event_response(resp: reqwest::Response) -> Result<Value, RelayError> {
         let text = resp
             .text()
             .await
@@ -2392,8 +2550,33 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
-                    state.acknowledge_observer_frame(&event_id);
-                    debug!("OK for event {event_id}: accepted={accepted} message={message}");
+                    // Retiring an in-flight frame means "the relay has this
+                    // event now". Only an acceptance establishes that, so a
+                    // rejection must not be retired as though it published.
+                    match classify_ok(accepted, &message) {
+                        OkDisposition::Stored => {
+                            state.acknowledge_observer_frame(&event_id);
+                            debug!(
+                                "OK for event {event_id}: accepted={accepted} message={message}"
+                            );
+                        }
+                        OkDisposition::Retriable => {
+                            // Leave it in flight: the next requeue resends it.
+                            warn!(
+                                "relay refused event {event_id} transiently: {message} — \
+                                 keeping it queued for resend"
+                            );
+                        }
+                        OkDisposition::Permanent => {
+                            // Retire it — resending cannot change this answer —
+                            // but say so, because the event is now lost.
+                            state.acknowledge_observer_frame(&event_id);
+                            warn!(
+                                "relay rejected event {event_id}: {message} — \
+                                 dropping it, a resend would be refused identically"
+                            );
+                        }
+                    }
                 }
             }
             true
@@ -6025,6 +6208,83 @@ mod tests {
             .collect();
         assert_eq!(ids, [rejected.id, later.id]);
         assert!(state.observer_in_flight.is_empty());
+    }
+
+    /// An acceptance, and only an acceptance, means the relay has the event.
+    #[test]
+    fn classify_ok_treats_acceptance_and_duplicate_as_stored() {
+        assert_eq!(classify_ok(true, ""), OkDisposition::Stored);
+        assert_eq!(classify_ok(true, "anything at all"), OkDisposition::Stored);
+        // `duplicate:` is a rejection that means the publish already landed —
+        // the normal outcome of a resend after reconnect, not a failure.
+        assert_eq!(
+            classify_ok(false, "duplicate: already have this event"),
+            OkDisposition::Stored
+        );
+    }
+
+    /// Prefixes describing the event itself cannot be fixed by resending it.
+    #[test]
+    fn classify_ok_treats_event_level_refusals_as_permanent() {
+        for message in [
+            "invalid: bad signature",
+            "blocked: pubkey is banned",
+            "restricted: not a member of this group",
+            "pow: difficulty 28 required",
+        ] {
+            assert_eq!(
+                classify_ok(false, message),
+                OkDisposition::Permanent,
+                "{message} must not be retried — a resend gets the same answer"
+            );
+        }
+    }
+
+    /// Transient refusals, and anything we do not recognize, stay queued.
+    /// Holding an event costs a bounded slot; dropping one loses it for good.
+    #[test]
+    fn classify_ok_keeps_transient_and_unknown_refusals_queued() {
+        for message in [
+            "rate-limited: slow down",
+            "error: could not connect to the database",
+            "sorry, no",
+            "",
+        ] {
+            assert_eq!(
+                classify_ok(false, message),
+                OkDisposition::Retriable,
+                "{message:?} must stay queued rather than be silently dropped"
+            );
+        }
+    }
+
+    /// The bug this replaced: every `OK` retired its in-flight frame, so a
+    /// rejected event was dropped from the resend queue exactly as though it
+    /// had been stored, and the rejection was only visible at `debug!`.
+    #[test]
+    fn transient_rejection_keeps_the_frame_queued_for_resend() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let refused = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(refused.clone()));
+
+        // What the OK handler does for a Retriable disposition: nothing.
+        assert_eq!(
+            classify_ok(false, "rate-limited: slow down"),
+            OkDisposition::Retriable
+        );
+
+        state.requeue_observer_in_flight();
+        let ids: Vec<_> = state
+            .gated_observer_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [refused.id],
+            "a transiently refused event must survive to be resent"
+        );
     }
 
     /// The parked-frame queue is bounded: overflow evicts the oldest frame and

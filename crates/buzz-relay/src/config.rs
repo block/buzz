@@ -47,6 +47,30 @@ pub struct JoinPolicyConfig {
     pub version: String,
 }
 
+/// Optional KLIPY GIF-search integration owned by the relay operator.
+///
+/// The API key deliberately stays private and its [`Debug`] implementation is
+/// redacted so dumping [`Config`] cannot disclose it.
+#[derive(Clone)]
+pub struct KlipyConfig {
+    api_key: String,
+}
+
+impl KlipyConfig {
+    /// Return the key only to the outbound KLIPY client.
+    pub(crate) fn api_key(&self) -> &str {
+        &self.api_key
+    }
+}
+
+impl std::fmt::Debug for KlipyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KlipyConfig")
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
 /// WebSocket close-frame delivery after the final delayed cancellation.
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
@@ -219,6 +243,10 @@ pub struct Config {
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
 
+    /// Relay-owned KLIPY integration. Unset means GIF search is not advertised
+    /// and its proxy routes return 404.
+    pub klipy: Option<KlipyConfig>,
+
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
     /// Maximum concurrent media uploads handled by one relay process.
@@ -301,10 +329,14 @@ pub struct Config {
     /// mock server instead of the real API.
     pub twilio_api_base_url: Option<String>,
 
+    /// Whether NIP-PL push discovery, lease acceptance, matching, and delivery
+    /// are enabled for this deployment. Defaults to false.
+    pub push_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
     /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
-    /// Push lease support is disabled when unset.
+    /// An absent setting selects the canonical Buzz gateway. An explicitly
+    /// empty setting is allowed only while push is disabled.
     pub push_gateway_delivery_url: Option<url::Url>,
     /// Hard timeout for one gateway delivery request.
     pub push_gateway_timeout: Duration,
@@ -350,6 +382,10 @@ fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigErro
         human_messages_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN",
             defaults.human_messages_per_min,
+        )?,
+        gif_searches_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN",
+            defaults.gif_searches_per_min,
         )?,
         human_api_calls_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN",
@@ -660,6 +696,12 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        let klipy = std::env::var("BUZZ_KLIPY_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|api_key| KlipyConfig { api_key });
+
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
         let relay_owner_pubkey = std::env::var("RELAY_OWNER_PUBKEY")
@@ -891,6 +933,7 @@ impl Config {
                 let secret: [u8; 32] = rand::random();
                 hex::encode(secret)
             });
+        let push_enabled = parse_bool("BUZZ_PUSH_ENABLED", false)?;
         let push_executor_key_id =
             std::env::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
         if push_executor_key_id.is_empty() || push_executor_key_id.len() > 64 {
@@ -899,6 +942,12 @@ impl Config {
             ));
         }
         let push_gateway_delivery_url = match std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
+            Ok(raw) if raw.trim().is_empty() && push_enabled => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must not be empty when BUZZ_PUSH_ENABLED=true"
+                        .to_string(),
+                ));
+            }
             Ok(raw) if raw.trim().is_empty() => None,
             Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
             Err(_) => Some(parse_push_gateway_delivery_url(
@@ -1070,6 +1119,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
+            klipy,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -1091,6 +1141,7 @@ impl Config {
             twilio_account_sid,
             twilio_from_number,
             twilio_api_base_url,
+            push_enabled,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
@@ -1105,6 +1156,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn klipy_config_debug_redacts_the_api_key() {
+        let config = KlipyConfig {
+            api_key: "private-klipy-key".to_string(),
+        };
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("private-klipy-key"));
+    }
 
     // Mutex to serialize tests that mutate environment variables.
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
@@ -1539,15 +1601,18 @@ mod tests {
     fn rate_limits_can_be_overridden() {
         let _guard = ENV_MUTEX.lock().unwrap();
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
+        std::env::set_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN", "1004");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
 
         let config = Config::from_env().expect("config");
 
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN");
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN");
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
         assert_eq!(config.auth.rate_limits.human_messages_per_min, 1001);
+        assert_eq!(config.auth.rate_limits.gif_searches_per_min, 1004);
         assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
         assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
     }
@@ -1634,11 +1699,25 @@ mod tests {
     }
 
     #[test]
-    fn push_gateway_defaults_to_buzz_and_can_be_disabled() {
+    fn push_is_opt_in_and_gateway_defaults_to_buzz() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_enabled = std::env::var_os("BUZZ_PUSH_ENABLED");
         let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        std::env::remove_var("BUZZ_PUSH_ENABLED");
         std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         let config = Config::from_env().expect("default config");
+        assert!(!config.push_enabled);
+        assert_eq!(
+            config
+                .push_gateway_delivery_url
+                .as_ref()
+                .map(url::Url::as_str),
+            Some(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
+        );
+
+        std::env::set_var("BUZZ_PUSH_ENABLED", "true");
+        let config = Config::from_env().expect("enabled push config");
+        assert!(config.push_enabled);
         assert_eq!(
             config
                 .push_gateway_delivery_url
@@ -1648,14 +1727,45 @@ mod tests {
         );
 
         std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
+        let result = Config::from_env();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must not be empty")
+        ));
+
+        std::env::set_var("BUZZ_PUSH_ENABLED", "false");
         let config = Config::from_env().expect("disabled push config");
         assert!(config.push_gateway_delivery_url.is_none());
 
+        if let Some(value) = previous_enabled {
+            std::env::set_var("BUZZ_PUSH_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_ENABLED");
+        }
         if let Some(value) = previous {
             std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
         } else {
             std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         }
+    }
+
+    #[test]
+    fn invalid_push_enabled_value_is_rejected() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_PUSH_ENABLED");
+        std::env::set_var("BUZZ_PUSH_ENABLED", "sometimes");
+        let result = Config::from_env();
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PUSH_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_ENABLED");
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PUSH_ENABLED")
+        ));
     }
 
     #[test]

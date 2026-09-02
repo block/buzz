@@ -1697,7 +1697,7 @@ function VideoReviewDialog({
               ref={videoAreaRef}
             >
               <div
-                className="relative isolate flex max-h-full min-w-0 max-w-full items-center justify-center"
+                className="video-review-media-surface relative isolate flex max-h-full min-w-0 max-w-full items-center justify-center"
                 style={fittedVideoStyle}
               >
                 <VideoGlow videoRef={videoRef} />
@@ -1764,7 +1764,7 @@ function VideoReviewDialog({
                     visible={!hasVisibleFrame}
                   />
                 </div>
-                <div className="absolute inset-x-2 bottom-2 z-20 sm:inset-x-4 sm:bottom-3">
+                <div className="video-review-controls absolute inset-x-2 bottom-2 z-20 sm:inset-x-4 sm:bottom-3">
                   <div className="relative isolate flex items-center gap-2 rounded-xl px-2 py-1.5">
                     <GlassSurface />
                     <button

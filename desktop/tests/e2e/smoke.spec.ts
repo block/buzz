@@ -346,6 +346,171 @@ test("opens sidebar search with the shortcut and loads the exact result", async 
   );
 });
 
+test("highlights the query in search results and the opened message", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("SHIPPED");
+
+  const result = page.getByTestId("search-result-mock-engineering-shipped");
+  await expect(result).toBeVisible();
+  await expect(result.locator("mark")).toHaveText("shipped");
+  await expect(result.locator("mark")).toHaveClass(/bg-yellow-300/);
+
+  await result.click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-engineering-shipped"]');
+  await expect(message).toBeVisible();
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "shipped",
+  );
+});
+
+test("highlights the clicked forum post when its route is already open", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11/posts/mock-forum-release-thread",
+  );
+  await expect(
+    page.locator('[data-forum-event-id="mock-forum-release-thread"]'),
+  ).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("checklist");
+
+  const result = page.getByTestId("search-result-mock-forum-release-thread");
+  await expect(result).toBeVisible();
+  await result.click();
+
+  const post = page.locator(
+    '[data-forum-event-id="mock-forum-release-thread"]',
+  );
+  await expect(post.locator('[data-search-match="true"]')).toHaveText(
+    "checklist",
+  );
+});
+
+test("ordinary same-channel activation clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("shipped");
+  await page.getByTestId("search-result-mock-engineering-shipped").click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-engineering-shipped"]');
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "shipped",
+  );
+  await expect(page).toHaveURL(
+    /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9(?:\?thread=mock-engineering-shipped)?$/,
+  );
+
+  await page.getByTestId("channel-engineering").click();
+
+  await expect(message.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
+test("ordinary rendered channel link clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("welcome");
+  await page.getByTestId("search-result-mock-general-welcome").click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-general-welcome"]');
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "Welcome",
+  );
+
+  await message.locator('[data-channel-link=""]').click();
+
+  await expect(message.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
+test("ordinary same-forum activation clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11/posts/mock-forum-release-thread",
+  );
+  await page.getByTestId("open-search").click();
+  await page.getByTestId("search-dialog-input").fill("checklist");
+  await page.getByTestId("search-result-mock-forum-release-thread").click();
+
+  const post = page.locator(
+    '[data-forum-event-id="mock-forum-release-thread"]',
+  );
+  await expect(post.locator('[data-search-match="true"]')).toHaveText(
+    "checklist",
+  );
+
+  await page.getByTestId("channel-watercooler").click();
+  await page.getByText("Release checklist: async feedback thread.").click();
+
+  await expect(post.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
+test("ordinary forum navigation clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11/posts/mock-forum-release-thread",
+  );
+  await page.getByTestId("open-search").click();
+  await page.getByTestId("search-dialog-input").fill("checklist");
+  await page.getByTestId("search-result-mock-forum-release-thread").click();
+
+  const releasePost = page.locator(
+    '[data-forum-event-id="mock-forum-release-thread"]',
+  );
+  await expect(releasePost.locator('[data-search-match="true"]')).toHaveText(
+    "checklist",
+  );
+
+  await page.getByTestId("channel-watercooler").click();
+  await page.getByText("Team offsite planning and travel notes.").click();
+  await expect(
+    page.locator('[data-forum-event-id="mock-forum-offsite-thread"]'),
+  ).toBeVisible();
+  await page.getByTestId("channel-watercooler").click();
+  await page.getByText("Release checklist: async feedback thread.").click();
+
+  await expect(releasePost).toBeVisible();
+  await expect(releasePost.locator('[data-search-match="true"]')).toHaveCount(
+    0,
+  );
+});
+
+test("does not expose stale search results with a newly typed query", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  const input = page.getByTestId("search-dialog-input");
+  await input.fill("shipped");
+  await expect(
+    page.getByTestId("search-result-mock-engineering-shipped"),
+  ).toBeVisible();
+
+  await input.fill("mentions");
+  await expect(
+    page.getByTestId("search-result-mock-engineering-shipped"),
+  ).toHaveCount(0);
+});
+
 test("opens channel matches from search", async ({ page }) => {
   await page.goto("/");
 
@@ -891,4 +1056,56 @@ test("does not shift the timeline when the composer grows", async ({
   expect(after.clientHeight).toBeLessThanOrEqual(before.clientHeight);
   expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThanOrEqual(2);
   expect(after.distanceFromBottom).toBeGreaterThan(160);
+});
+
+test("lifts Jump to latest when the composer grows", async ({ page }) => {
+  const input = page.getByTestId("message-input");
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await ensureTimelineScrollable(page, `Jump pill growth ${Date.now()}`);
+  await page.waitForTimeout(400);
+  const timeline = page.getByTestId("message-timeline");
+  await timeline.evaluate((element) => {
+    element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+
+  const jumpToLatest = page.getByTestId("message-scroll-to-latest");
+  const composer = page.getByTestId("message-composer");
+  await expect(jumpToLatest).toBeVisible();
+  const initialPillBox = await jumpToLatest.boundingBox();
+  const initialComposerBox = await composer.boundingBox();
+
+  await input.fill(
+    [
+      "Composer growth line one",
+      "Composer growth line two",
+      "Composer growth line three",
+      "Composer growth line four",
+    ].join("\n"),
+  );
+
+  await expect
+    .poll(async () => (await composer.boundingBox())?.height ?? 0)
+    .toBeGreaterThan((initialComposerBox?.height ?? 0) + 40);
+  await page.waitForTimeout(250);
+
+  const expandedPillBox = await jumpToLatest.boundingBox();
+  const expandedComposerBox = await composer.boundingBox();
+  expect(initialPillBox).not.toBeNull();
+  expect(initialComposerBox).not.toBeNull();
+  expect(expandedPillBox).not.toBeNull();
+  expect(expandedComposerBox).not.toBeNull();
+
+  const composerGrowth =
+    (expandedComposerBox?.height ?? 0) - (initialComposerBox?.height ?? 0);
+  const pillLift = (initialPillBox?.y ?? 0) - (expandedPillBox?.y ?? 0);
+  expect(pillLift).toBeGreaterThanOrEqual(composerGrowth - 2);
+  expect(
+    (expandedPillBox?.y ?? 0) + (expandedPillBox?.height ?? 0),
+  ).toBeLessThanOrEqual(expandedComposerBox?.y ?? 0);
 });

@@ -49,6 +49,15 @@ const buzzAgentRuntime = {
   mcpCommand: null,
 };
 
+const hermesRuntime = {
+  ...gooseRuntime,
+  id: "hermes",
+  label: "Hermes Agent",
+  command: "hermes-acp",
+  defaultArgs: [],
+  mcpCommand: null,
+};
+
 function persona(overrides = {}) {
   return {
     id: "p-1",
@@ -155,6 +164,22 @@ test("mapping carries the runtime and definition fields", async () => {
   assert.equal(input.spawnAfterCreate, true);
   assert.equal(input.startOnAppLaunch, true);
   assert.deepEqual(input.backend, { type: "local" });
+});
+
+test("Hermes profile binding stays instance-local and becomes exact launcher args", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona({ runtime: "hermes" }),
+    hermesRuntime,
+    undefined,
+    undefined,
+    { type: "hermes_profile", profileName: "jake" },
+  );
+
+  assert.equal(input.agentCommand, "hermes-acp");
+  assert.deepEqual(input.agentArgs, ["--profile", "jake"]);
+  assert.equal(input.personaId, "p-1");
+  assert.equal("hermesProfile" in input, false);
+  assert.equal("profilePath" in input, false);
 });
 
 test("no backend intent is byte-identical to the pre-intent mapping", async () => {

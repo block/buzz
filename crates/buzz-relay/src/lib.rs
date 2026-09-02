@@ -3,6 +3,7 @@
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
 mod admission;
+mod build_info;
 
 /// REST API route handlers.
 pub mod api;

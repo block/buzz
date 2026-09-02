@@ -1,5 +1,4 @@
 import * as React from "react";
-import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import type {
@@ -69,7 +68,9 @@ import {
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
+import { AgentAdvancedFieldsToggle } from "./AgentAdvancedFieldsToggle";
 import { AgentHarnessField } from "./AgentHarnessField";
+import { useHermesProfileDefinitionBinding } from "./useHermesProfileDefinitionBinding";
 import {
   AgentAiConfigurationModeField,
   AgentCreateAiDefaultsSummary,
@@ -111,12 +112,14 @@ type AgentDefinitionDialogProps = {
   /** Publishes saved changes when the edited agent is shared in the catalog. */
   publishCatalogUpdatesOnSave?: boolean;
   createRunSection?: React.ReactNode;
+  createRunOnLocal?: boolean;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
 };
 
 export type AgentDefinitionSubmitOptions = {
   publishCatalogUpdates: boolean;
+  hermesProfile?: string;
 };
 
 export function AgentDefinitionDialog({
@@ -135,6 +138,7 @@ export function AgentDefinitionDialog({
   onSubmit,
   publishCatalogUpdatesOnSave = false,
   createRunSection,
+  createRunOnLocal = true,
   createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
   const runtimesLoading = runtimeCatalogStatus === "loading";
@@ -187,6 +191,13 @@ export function AgentDefinitionDialog({
     [globalConfig.preferred_runtime, runtimes],
   );
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
+  const showHermesProfile =
+    isCreateMode && runtime === "hermes" && createRunOnLocal;
+  const hermesBinding = useHermesProfileDefinitionBinding(
+    showHermesProfile,
+    isPending,
+    open,
+  );
   const shouldReduceMotion = useReducedMotion();
   const initialModelProviderEditableWithoutRuntime = Boolean(
     initialValues &&
@@ -384,7 +395,10 @@ export function AgentDefinitionDialog({
       return;
     }
 
-    await onSubmit(baseInput, { publishCatalogUpdates: false });
+    await onSubmit(baseInput, {
+      publishCatalogUpdates: false,
+      hermesProfile: hermesBinding.profileForSubmit,
+    });
   }
 
   function handleSubmitForm(event: React.FormEvent<HTMLFormElement>) {
@@ -484,12 +498,6 @@ export function AgentDefinitionDialog({
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
-  // Gate the provider requirement on the field's actual visibility, not the raw
-  // runtime capability. Codex/Claude hide the provider picker (they drive their
-  // own provider), so Customize must not require a provider there. But a
-  // runtime-less legacy/builtin definition still exposes the picker via
-  // blankRuntimeModelProviderEditable, so it must keep requiring a provider —
-  // otherwise Save could persist `provider: undefined` despite the visible field.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
@@ -505,8 +513,8 @@ export function AgentDefinitionDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     (!isCreateMode || !createSubmitBlocked) &&
-    // Crash-loop guard, create AND edit: an empty allowlist would crash
-    // every instance minted from this definition at startup.
+    hermesBinding.canSubmit &&
+    // Crash-loop guard: an empty allowlist would crash every new instance.
     personaBehaviorDraftValid(behaviorDraft) &&
     // D1: localModeSatisfied covers both missingNormalizedFields AND
     // missingEnvKeys — credential env keys now block submit, not just display.
@@ -739,7 +747,6 @@ export function AgentDefinitionDialog({
       isPending={isPending}
       onCancel={() => handleOpenChange(false)}
       publishesCatalogUpdates={publishCatalogUpdatesOnSave && hasUserChanges}
-      submitBlockReason={null}
       submitLabel={submitLabel}
     />
   );
@@ -937,6 +944,8 @@ export function AgentDefinitionDialog({
           ) : null}
         </div>
 
+        {hermesBinding.field}
+
         <AgentDefaultsDialog
           onOpenChange={setAiDefaultsOpen}
           open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
@@ -950,32 +959,16 @@ export function AgentDefinitionDialog({
         />
 
         <div className="space-y-3">
-          <button
-            aria-expanded={showAdvancedFields}
-            className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            onClick={() => setShowAdvancedFields((current) => !current)}
-            type="button"
-          >
-            <span>Advanced</span>
-            {(isCreateMode && createSubmitBlocked) ||
-            localModeGate.missingEnvKeys.some((key) =>
-              advancedRequiredEnvKeys.includes(key),
-            ) ? (
-              <span
-                aria-hidden="true"
-                className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive"
-                data-testid="persona-advanced-required-badge"
-              >
-                Required
-              </span>
-            ) : null}
-            <ChevronDown
-              className={cn(
-                "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
-                showAdvancedFields && "rotate-180",
-              )}
-            />
-          </button>
+          <AgentAdvancedFieldsToggle
+            expanded={showAdvancedFields}
+            onToggle={() => setShowAdvancedFields((current) => !current)}
+            required={
+              (isCreateMode && createSubmitBlocked) ||
+              localModeGate.missingEnvKeys.some((key) =>
+                advancedRequiredEnvKeys.includes(key),
+              )
+            }
+          />
           <AnimatePresence initial={false}>
             {showAdvancedFields ? (
               <motion.div

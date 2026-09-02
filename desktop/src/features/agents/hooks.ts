@@ -25,7 +25,6 @@ import {
   createManagedAgent,
   deleteManagedAgent,
   deleteCustomHarness,
-  discoverAcpRuntimes,
   discoverBackendProviders,
   discoverGitBashPrerequisite,
   discoverManagedAgentPrereqs,
@@ -38,11 +37,13 @@ import {
   installAcpRuntime,
   invokeTauri,
   listManagedAgents,
-  listRelayAgents,
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
+import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
+import { getDeviceIdentity } from "@/shared/api/tauriDeviceIdentity";
+import { listRelayAgents } from "@/shared/api/tauriRelayAgents";
 import {
   setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
@@ -50,6 +51,11 @@ import {
   stopManagedAgent,
 } from "@/shared/api/tauriManagedAgents";
 import { bootstrapManagedAgentRuntimePairs } from "@/features/agents/managedAgentRuntimeHooks";
+import {
+  acpRuntimesQueryKey,
+  refreshAcpRuntimes,
+} from "@/features/agents/acpRuntimesQuery";
+export { useAcpRuntimesQueryForced } from "@/features/agents/acpRuntimesQuery";
 import {
   createPersona,
   deletePersona,
@@ -123,7 +129,6 @@ export const managedAgentLogFocusRefetchPolicy = {
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
-export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
@@ -199,12 +204,26 @@ function invalidateManagedAgentQueriesInBackground(
   );
 }
 
+/**
+ * Discover the ACP runtime catalog.
+ *
+ * This always serves the **cheap** backend path: the last cached runtime
+ * availability + auth statuses, no process spawns, low-millisecond. Hot
+ * surfaces (channel switch, composer, member bar) render from cache — a
+ * 30-minute `staleTime` keeps channel switches from re-triggering discovery.
+ *
+ * Fresh auth/version state (Settings, onboarding sign-in, post-mutation) comes
+ * from `refreshAcpRuntimes`, which runs the expensive forced path explicitly
+ * and writes the result into this same cache. Keeping the query's own
+ * `queryFn` cheap guarantees an automatic staleness refetch never re-runs the
+ * probe pipeline.
+ */
 export function useAcpRuntimesQuery(options?: { enabled?: boolean }) {
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: acpRuntimesQueryKey,
-    queryFn: discoverAcpRuntimes,
-    staleTime: 60_000,
+    queryFn: () => discoverAcpRuntimes(),
+    staleTime: 30 * 60_000,
   });
 }
 
@@ -238,7 +257,7 @@ export function useConnectAcpRuntimeMutation() {
     mutationFn: (input: { runtimeId: string; methodId: string }) =>
       connectAcpRuntime(input.runtimeId, input.methodId),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void refreshAcpRuntimes(queryClient);
       void queryClient.invalidateQueries({ queryKey: acpAuthMethodsQueryKey });
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
@@ -250,7 +269,7 @@ export function useInstallAcpRuntimeMutation() {
   return useMutation({
     mutationFn: (runtimeId: string) => installAcpRuntime(runtimeId),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void refreshAcpRuntimes(queryClient);
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
   });
@@ -267,7 +286,7 @@ export function useSaveCustomHarnessMutation() {
       originalId?: string;
     }) => saveCustomHarness(definition, originalId),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void refreshAcpRuntimes(queryClient);
     },
   });
 }
@@ -277,7 +296,7 @@ export function useDeleteCustomHarnessMutation() {
   return useMutation({
     mutationFn: (id: string) => deleteCustomHarness(id),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void refreshAcpRuntimes(queryClient);
     },
   });
 }
@@ -336,19 +355,33 @@ export function useManagedAgentPrereqsQuery(
   });
 }
 
+export const deviceIdentityQueryKey = ["device-identity"] as const;
+
+/**
+ * The device identity of this install.
+ *
+ * Machine-scoped, NOT community-scoped: it must survive a community
+ * switch, so it is deliberately absent from `resetCommunityState()` in
+ * `desktop/src/features/communities/useCommunityInit.ts`. Do not add it
+ * there.
+ */
+export function useDeviceIdentityQuery() {
+  return useQuery({
+    queryKey: deviceIdentityQueryKey,
+    queryFn: getDeviceIdentity,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
 export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
   const refetchInterval = useFocusedRefetchInterval(AGENTS_FOCUS_STALE_TIME_MS);
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
-    // Relay agent profiles (kind:10100) are near-static and the backing
-    // `list_relay_agents` command is an unfiltered relay query for the whole
-    // profile set — mounted on ~13 always-live surfaces (channel screen,
-    // members bar, mentions, sidebar, profile popovers), so a tight interval
-    // re-pulls the full set app-wide. This poll is also the ONLY refresh path:
-    // the `agents-data-changed` event fires only for local persona/team/managed
-    // reconcile (kinds PERSONA/TEAM/MANAGED_AGENT), never for kind:10100. So we
-    // keep polling but at a relaxed cadence and pause it while backgrounded.
+    // Relay agent discovery is scoped to the viewer's relay-signed channel
+    // memberships, then resolves exact agent/profile/policy coordinates in
+    // protocol-sized batches. Polling remains the only refresh path for remote
+    // changes, so keep it relaxed and pause while backgrounded.
     refetchInterval,
     enabled: options?.enabled,
     ...agentsFocusRefetchPolicy,
@@ -440,7 +473,7 @@ export function useUpdateManagedAgentMutation() {
       // the new display name / about / NIP-05 immediately. Also poke any
       // ["users-batch", ...] entries that include this pubkey so sidebar member
       // rows, channel header chips, and message author labels refresh too.
-      const lowerPubkey = variables.pubkey.toLowerCase();
+      const lowerPubkey = normalizePubkey(variables.pubkey);
 
       // The users-batch delta fetch resolves from per-pubkey
       // ["users-batch-entry", pubkey] entries with their own 60s freshness —
@@ -499,7 +532,7 @@ export function useUpdatePersonaMutation() {
       if (agents) {
         const linkedPubkeys = agents
           .filter((a) => a.personaId === variables.id)
-          .map((a) => a.pubkey.toLowerCase());
+          .map((a) => normalizePubkey(a.pubkey));
         evictUsersBatchEntries(queryClient, linkedPubkeys);
       }
 
@@ -553,7 +586,24 @@ export function useStartManagedAgentMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (pubkey: string) => startManagedAgent(pubkey),
+    // Accepts a bare pubkey, or an object carrying the tenant scope a
+    // long-lived callback captured before its first await (the backend
+    // fails closed on a mid-flight community/identity switch).
+    mutationFn: (
+      input:
+        | string
+        | {
+            pubkey: string;
+            expectedRelayUrl?: string;
+            expectedSignerPubkey?: string;
+          },
+    ) =>
+      typeof input === "string"
+        ? startManagedAgent(input)
+        : startManagedAgent(input.pubkey, {
+            expectedRelayUrl: input.expectedRelayUrl,
+            expectedSignerPubkey: input.expectedSignerPubkey,
+          }),
     onSuccess: (updated) => {
       queryClient.setQueryData<ManagedAgent[]>(
         managedAgentsQueryKey,
@@ -773,12 +823,16 @@ export function useProvisionChannelManagedAgentMutation(
         throw new Error("No channel selected.");
       }
 
-      const [managedAgents, members] = await Promise.all([
+      const [managedAgents, members, personas] = await Promise.all([
         listManagedAgents(),
         getChannelMembers(effectiveChannelId),
+        rest.personaId && rest.respondTo === undefined
+          ? listPersonas()
+          : Promise.resolve([]),
       ]);
       return provisionChannelManagedAgent(rest, {
         managedAgents,
+        personas,
         channelMemberPubkeys: new Set(
           members.map((member) => normalizePubkey(member.pubkey)),
         ),

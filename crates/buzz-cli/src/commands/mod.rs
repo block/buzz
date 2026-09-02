@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod channel_templates;
 pub mod channels;
+pub mod cml;
 pub mod dms;
 pub mod emoji;
 pub mod feed;
@@ -12,6 +13,7 @@ pub mod notes;
 pub mod pack;
 pub mod patches;
 pub mod pr;
+pub mod project_channel;
 pub mod projects;
 pub mod reactions;
 pub mod repos;
@@ -24,7 +26,7 @@ pub mod workflows;
 use crate::{client::normalize_write_response, error::CliError};
 use nostr::{EventBuilder, Tag};
 
-const GIT_ORIGIN_CHANNEL_ENV: &str = "BUZZ_GIT_ORIGIN_CHANNEL_ID";
+pub(crate) const GIT_ORIGIN_CHANNEL_ENV: &str = "BUZZ_GIT_ORIGIN_CHANNEL_ID";
 const GIT_ORIGIN_AGENT_ENV: &str = "BUZZ_GIT_ORIGIN_AGENT_NAME";
 
 /// Add trusted, session-scoped provenance supplied by the ACP harness.

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>ai.buzz.relay</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/mfethe/buzz-work/buzz-trunk/scripts/relay-service.sh</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/mfethe/buzz-work/buzz-trunk</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>/tmp/buzz-relay-launchd.log</string>
+    <key>StandardErrorPath</key><string>/tmp/buzz-relay-launchd.log</string>
+</dict>
+</plist>

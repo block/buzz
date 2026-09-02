@@ -237,14 +237,14 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
   await page.getByTestId("open-agents-view").click();
 
   await expect(page.getByTestId("agents-library-personas")).toBeVisible();
-  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
+  for (const personaName of ["Fizz", "Honey", "Pollen"]) {
     await expect(page.getByTestId("agents-library-personas")).toContainText(
       personaName,
     );
   }
 
   await openPersonaCatalog(page);
-  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
+  for (const personaName of ["Fizz", "Honey", "Pollen"]) {
     await expect(page.getByTestId("persona-catalog-dialog")).not.toContainText(
       personaName,
     );
@@ -747,6 +747,8 @@ test("moves agent actions into an overflow menu in a narrow view", async ({
   });
 
   await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
+  // The app-wide default renders text-base at 16px with Tailwind's 1.5
+  // line-height ratio, producing a 24px one-line scroll height.
   await expect(
     page.getByText("Set up and manage your agents.", { exact: true }),
   ).toHaveJSProperty("scrollHeight", 24);
@@ -2287,7 +2289,9 @@ test("people sharing blocks a timeout before encoding or upload", async ({
   });
 
   await page.getByTestId("persona-share-send").click();
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible();
+  await expect(
+    page.getByText("You are currently timed out and cannot send messages."),
+  ).toBeVisible();
 
   const commands = await readAgentShareCommands(page);
   expect(
@@ -2332,7 +2336,11 @@ test("people sharing rechecks destination eligibility after encoding", async ({
     return testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   });
 
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible({
+  await expect(
+    page.getByText(
+      "The selected destination is no longer available. Please pick another.",
+    ),
+  ).toBeVisible({
     timeout: 5_000,
   });
   const commands = await readAgentShareCommands(page);
@@ -2699,4 +2707,77 @@ test("duplicate instances move from the agents gallery into the agent profile", 
   await expect(
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
   ).toHaveCount(0);
+});
+
+test("renamed instances of one persona each get their own gallery card", async ({
+  page,
+}) => {
+  // The regression this pins lived in JSX: the gallery rendered exactly one
+  // card per persona, so an instance the owner renamed had no card at all and
+  // was unreachable from Settings. Model-layer tests cannot catch a revert of
+  // the render layer; this can.
+  const personaId = "builtin:fizz";
+  const claudePubkey = TEST_IDENTITIES.alice.pubkey;
+  const fizzPubkey = TEST_IDENTITIES.charlie.pubkey;
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: personaId,
+        displayName: "Fizz",
+        systemPrompt: "You are Fizz.",
+      },
+    ],
+    managedAgents: [
+      { pubkey: claudePubkey, name: "Claude", personaId, status: "running" },
+      { pubkey: "1".repeat(64), name: "Claude", personaId, status: "stopped" },
+      { pubkey: fizzPubkey, name: "Fizz", personaId, status: "stopped" },
+      { pubkey: "2".repeat(64), name: "Fizz", personaId, status: "stopped" },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  // Four instances, two names, two cards — not one card hiding "Fizz", and not
+  // four cards exploding same-named duplicates apart.
+  const claudeCard = page.getByTestId(`persona-agent-row-${personaId}::claude`);
+  const fizzCard = page.getByTestId(`persona-agent-row-${personaId}::fizz`);
+  await expect(claudeCard).toBeVisible();
+  await expect(fizzCard).toBeVisible();
+  await expect(
+    page.locator(`[data-testid^="persona-agent-row-${personaId}"]`),
+  ).toHaveCount(2);
+  await expect(claudeCard).toContainText("Claude");
+
+  // The persona's own name survives the split as each card's second line, so a
+  // split persona stays findable in the library.
+  await expect(claudeCard.getByText("Fizz", { exact: true })).toBeVisible();
+
+  // Persona actions live on exactly one card — the one still carrying the
+  // persona's name — rather than migrating to whichever instance is running.
+  await expect(
+    page.getByRole("button", { name: "Open actions for Fizz" }),
+  ).toHaveCount(1);
+  await expect(
+    fizzCard.getByRole("button", { name: "Open actions for Fizz" }),
+  ).toBeVisible();
+
+  // Post-#5706 contract: the card's main click opens the PERSONA target, so
+  // the archive-aware selector resolves this split persona to its running
+  // "Claude" instance. Both cards therefore land on the same persona panel;
+  // the exact-instance pick belongs to the panel's Instances list.
+  await fizzCard.click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Stop");
+
+  // The renamed "Fizz" instance is still deliberately reachable: open the
+  // persona panel's Runtime tab, expand Instances, and pick the stopped
+  // "Fizz" instance — which offers Start, where running "Claude" offers Stop.
+  await page.getByRole("tab", { name: "Runtime" }).click();
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${fizzPubkey}`).click();
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Start agent");
 });

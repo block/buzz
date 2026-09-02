@@ -1,3 +1,4 @@
+import { agentIdentityKey } from "@/features/agents/lib/agentIdentity";
 import type { Channel, RelayAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -10,13 +11,24 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
 }
 
 export function relayAgentIsSharedWithUser(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  agent: Pick<
+    RelayAgent,
+    "channelIds" | "ownerPubkey" | "respondTo" | "respondToAllowlist"
+  >,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
 ) {
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
+
+  if (
+    agent.respondTo === "owner-only" &&
+    normalizedCurrentPubkey &&
+    agent.ownerPubkey
+  ) {
+    return normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey;
+  }
 
   if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
     return agent.respondToAllowlist
@@ -31,7 +43,10 @@ export function relayAgentIsSharedWithUser(
 }
 
 export function relayAgentCanRespondInChannel(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  agent: Pick<
+    RelayAgent,
+    "channelIds" | "ownerPubkey" | "respondTo" | "respondToAllowlist"
+  >,
   channelId: string,
   currentPubkey?: string | null,
 ) {
@@ -96,65 +111,40 @@ export type AgentMentionAdmission = "allow" | "deny" | "unknown";
 
 export function getAgentMentionAdmission({
   isAgent,
-  isManagedAgent,
   pubkey,
-  ownerPubkey,
-  currentPubkey,
   mentionableAgentPubkeys,
   directoryReady,
-  ownerOnly,
 }: {
   isAgent: boolean;
-  isManagedAgent: boolean;
   pubkey: string;
-  ownerPubkey?: string | null;
-  currentPubkey?: string | null;
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryReady: boolean;
-  ownerOnly: boolean | undefined;
 }): AgentMentionAdmission {
   if (!isAgent) return "allow";
-  if (!directoryReady || ownerOnly === undefined) return "unknown";
+  if (!directoryReady) return "unknown";
 
-  const normalized = normalizePubkey(pubkey);
-  if (!mentionableAgentPubkeys.has(normalized)) return "deny";
-  if (!ownerOnly || isManagedAgent) return "allow";
-  if (!ownerPubkey || !currentPubkey) return "unknown";
-
-  return normalizePubkey(ownerPubkey) === normalizePubkey(currentPubkey)
+  return mentionableAgentPubkeys.has(normalizePubkey(pubkey))
     ? "allow"
     : "deny";
 }
 
 export function shouldHideAgentFromMentions({
   isAgent,
-  isManagedAgent = false,
   pubkey,
-  ownerPubkey,
-  currentPubkey,
   mentionableAgentPubkeys,
   directoryReady = true,
-  ownerOnly,
 }: {
   isAgent: boolean;
-  isManagedAgent?: boolean;
   pubkey: string;
-  ownerPubkey?: string | null;
-  currentPubkey?: string | null;
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryReady?: boolean;
-  ownerOnly: boolean | undefined;
 }) {
   return (
     getAgentMentionAdmission({
       isAgent,
-      isManagedAgent,
       pubkey,
-      ownerPubkey,
-      currentPubkey,
       mentionableAgentPubkeys,
       directoryReady,
-      ownerOnly,
     }) !== "allow"
   );
 }
@@ -285,16 +275,13 @@ type AgentAutocompleteCandidate = {
   personaId?: string | null;
 };
 
-function agentIdentityKey<T extends AgentAutocompleteCandidate>(candidate: T) {
-  if (candidate.isAgent !== true || !candidate.pubkey) {
-    return null;
-  }
-
-  // Pubkeys—not persona metadata or a display name—are agent identities.
-  // A persona may be installed more than once, and an owner may intentionally
-  // create multiple same-named agents. Collapsing either case makes one agent
-  // impossible to choose from autocomplete.
-  return `pubkey:${normalizePubkey(candidate.pubkey)}`;
+function agentAutocompleteIdentityKey<T extends AgentAutocompleteCandidate>(
+  candidate: T,
+) {
+  // Only agents coalesce; two humans may legitimately share every other field.
+  // The identity itself comes from `agentIdentityKey` so this surface and the
+  // Agents library cannot drift into two different answers for "same agent?".
+  return candidate.isAgent === true ? agentIdentityKey(candidate) : null;
 }
 
 function agentCandidateRank<T extends AgentAutocompleteCandidate>(
@@ -369,7 +356,7 @@ export function coalesceAgentAutocompleteCandidates<
   const indexesByKey = new Map<string, number>();
 
   for (const candidate of candidates) {
-    const key = agentIdentityKey(candidate);
+    const key = agentAutocompleteIdentityKey(candidate);
     if (!key) {
       output.push(candidate);
       continue;

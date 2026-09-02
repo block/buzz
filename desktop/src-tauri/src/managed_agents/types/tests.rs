@@ -223,6 +223,20 @@ fn update_request_provider_tristate_absent_means_no_touch() {
 }
 
 #[test]
+fn update_request_team_id_is_true_tristate() {
+    let absent: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"abc"}"#).unwrap();
+    let clear: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"abc","teamId":null}"#).unwrap();
+    let set: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"abc","teamId":"team-1"}"#).unwrap();
+
+    assert_eq!(absent.team_id, None);
+    assert_eq!(clear.team_id, Some(None));
+    assert_eq!(set.team_id, Some(Some("team-1".to_string())));
+}
+
+#[test]
 fn update_request_provider_tristate_null_means_clear() {
     // A JSON payload with `"provider": null` deserialized with `Some(None)` —
     // the backend must clear the record's provider back to the runtime default.
@@ -442,6 +456,21 @@ fn managed_agent_record_without_key_deserializes_empty() {
     .expect("keyring-backed record without inline key should deserialize");
 
     assert_eq!(record.private_key_nsec, "");
+    assert!(
+        !record.provider_policy_pending,
+        "pre-pending stores must deserialize as acknowledged"
+    );
+}
+
+#[test]
+fn pending_provider_policy_round_trips() {
+    let mut record = sample_agent_record();
+    record.provider_policy_pending = true;
+
+    let json = serde_json::to_string(&record).expect("serialize pending policy");
+    let reloaded: ManagedAgentRecord = serde_json::from_str(&json).expect("reload pending policy");
+
+    assert!(reloaded.provider_policy_pending);
 }
 
 fn sample_agent_record() -> ManagedAgentRecord {

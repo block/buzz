@@ -1,0 +1,128 @@
+{
+  "$id": "https://buzz.dev/schemas/buzz-cml-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Structural CML v1 contract. Cross-field semantics such as role separation, presence derivation, and status/lease coherence are additionally enforced by the authoritative buzz-core parser.",
+  "additionalProperties": false,
+  "properties": {
+    "acceptance": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": { "maxLength": 64, "minLength": 1, "pattern": ".*\\S.*", "type": "string" },
+          "text": { "maxLength": 4096, "minLength": 1, "pattern": ".*\\S.*", "type": "string" },
+          "verified": { "type": "boolean" }
+        },
+        "required": ["id", "text", "verified"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "blockers": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": { "maxLength": 64, "minLength": 1, "pattern": ".*\\S.*", "type": "string" },
+          "reference": { "oneOf": [{ "$ref": "#/$defs/reference" }, { "type": "null" }] },
+          "text": { "maxLength": 4096, "minLength": 1, "pattern": ".*\\S.*", "type": "string" }
+        },
+        "required": ["id", "text", "reference"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "maxLength": 64, "minLength": 1, "pattern": ".*\\S.*", "type": "string" },
+          "reference": { "$ref": "#/$defs/reference" }
+        },
+        "required": ["kind", "reference"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "extensions": { "default": {}, "type": "object" },
+    "git": {
+      "additionalProperties": false,
+      "properties": {
+        "base_sha": { "pattern": "^[0-9a-f]{40}$", "type": "string" },
+        "branch": { "maxLength": 255, "minLength": 1, "pattern": "^(?!/)(?!.*(?:/\\.|\\.\\.|//|@\\{|\\.lock$|\\.$|/$))[A-Za-z0-9_./-]+$", "type": "string" },
+        "head_sha": { "oneOf": [{ "pattern": "^[0-9a-f]{40}$", "type": "string" }, { "type": "null" }] },
+        "repo": { "pattern": "^(?!\\.{1,2}/)(?![^/]+/\\.{1,2}$)[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", "type": "string" },
+        "worktree_alias": { "maxLength": 128, "minLength": 1, "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._-]+$", "type": "string" }
+      },
+      "required": ["base_sha", "branch", "head_sha", "repo", "worktree_alias"],
+      "type": "object"
+    },
+    "id": { "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "type": "string" },
+    "lease": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expires_at": { "minimum": 0, "type": "integer" },
+            "holder": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+            "id": { "maxLength": 128, "minLength": 1, "type": "string" },
+            "issued_at": { "minimum": 0, "type": "integer" }
+          },
+          "required": ["id", "holder", "issued_at", "expires_at"],
+          "type": "object"
+        },
+        { "type": "null" }
+      ]
+    },
+    "objective": { "maxLength": 4096, "minLength": 1, "pattern": ".*\\S.*", "type": "string" },
+    "priority": { "enum": ["P0", "P1", "P2", "P3"] },
+    "protocol": { "const": "buzz-cml" },
+    "review": {
+      "additionalProperties": false,
+      "properties": {
+        "max_rounds": { "const": 3 },
+        "round": { "maximum": 3, "minimum": 0, "type": "integer" }
+      },
+      "required": ["max_rounds", "round"],
+      "type": "object"
+    },
+    "roles": {
+      "additionalProperties": false,
+      "properties": {
+        "fixer": { "$ref": "#/$defs/optionalPubkey" },
+        "planner": { "$ref": "#/$defs/pubkey" },
+        "reviewer": { "$ref": "#/$defs/optionalPubkey" },
+        "worker": { "$ref": "#/$defs/optionalPubkey" }
+      },
+      "required": ["fixer", "planner", "reviewer", "worker"],
+      "type": "object"
+    },
+    "runtime": {
+      "additionalProperties": false,
+      "properties": {
+        "host_id": { "oneOf": [{ "pattern": "^h_[0-9a-f]{16,64}$", "type": "string" }, { "type": "null" }] },
+        "last_heartbeat_at": { "type": ["integer", "null"] },
+        "presence": { "enum": ["online", "stale", "offline"] },
+        "ttl_seconds": { "const": 180 }
+      },
+      "required": ["host_id", "last_heartbeat_at", "presence", "ttl_seconds"],
+      "type": "object"
+    },
+    "status": { "enum": ["proposed", "planned", "claimed", "working", "blocked", "review", "fixing", "verified", "integrated", "shipped", "cancelled", "conflicted"] },
+    "title": { "maxLength": 256, "minLength": 1, "pattern": ".*\\S.*", "type": "string" },
+    "updated_at": { "minimum": 0, "type": "integer" },
+    "version": { "const": 1 }
+  },
+  "required": ["acceptance", "blockers", "evidence", "git", "id", "lease", "objective", "priority", "protocol", "review", "roles", "runtime", "status", "title", "updated_at", "version"],
+  "title": "Buzz CML v1 task snapshot",
+  "type": "object",
+  "$defs": {
+    "optionalPubkey": { "oneOf": [{ "$ref": "#/$defs/pubkey" }, { "type": "null" }] },
+    "pubkey": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+    "reference": {
+      "anyOf": [
+        { "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$", "type": "string" },
+        { "maxLength": 2048, "pattern": "^https://.+$", "type": "string" },
+        { "maxLength": 2048, "pattern": "^buzz://.+$", "type": "string" }
+      ]
+    }
+  }
+}

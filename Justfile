@@ -43,6 +43,7 @@ bootstrap:
         cp .env.example .env
         echo "Created .env from .env.example — review it before running just dev."
     fi
+    ./scripts/ensure-local-relay-key.sh .env
 
 # Start Docker services, run migrations, install desktop deps
 setup: bootstrap
@@ -91,8 +92,50 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
+# Run repo lint, formatting, and repository policy checks
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check
+
+# Validate the trusted security-review workflow support and renderer contract.
+security-review-check:
+    node --check .github/scripts/codex-security-review.js
+    node --test .github/scripts/codex-security-review.test.js
+
+# Run the repository-wide differential file-size ratchet and its policy tests.
+# The ratchet inspects only files changed from the merge base, so this stays
+# cheap enough to run unconditionally without duplicating path filters.
+file-size-check:
+    node --test scripts/check-file-sizes-core.test.mjs
+    node desktop/scripts/check-file-sizes.mjs
+    node web/scripts/check-file-sizes.mjs
+    node mobile/scripts/check-file-sizes.mjs
+
+# Run the ratchet the way CI runs it: against origin/main, not the merge base.
+#
+# `resolveBaseRef` picks merge-base(origin/main, HEAD) locally but `HEAD^1`
+# under GITHUB_ACTIONS — on a PR that is the *main tip*, with the merge commit
+# as the candidate. Those two bases disagree, and the disagreement is not
+# theoretical: a governed file that main shrank, or one that main and a branch
+# each grew a little, can produce a violation that exists only in the merge.
+# PR #5888 hit exactly that — main at 941 lines, branch tip at 994, both under
+# the 1000-line limit, merge result 1008 — so `just file-size-check` passed and
+# CI would have failed.
+#
+# Merge origin/main into your branch first for an exact answer; the note below
+# fires when you have not, because the working tree is then not the merge
+# result CI measures.
+file-size-check-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch --quiet origin main
+    if ! git merge-base --is-ancestor origin/main HEAD; then
+        echo "note: origin/main is not merged into HEAD, so the working tree is not the"
+        echo "      merge result CI measures. Merge main in for an exact check; this run"
+        echo "      still catches everything except a violation the merge itself creates."
+    fi
+    export CHECK_FILE_SIZES_BASE=origin/main
+    node desktop/scripts/check-file-sizes.mjs
+    node web/scripts/check-file-sizes.mjs
+    node mobile/scripts/check-file-sizes.mjs
 
 # Format all Rust code
 fmt:
@@ -120,7 +163,7 @@ desktop-check:
 
 # Fix desktop lint and format issues
 desktop-fix:
-    cd {{desktop_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{desktop_dir}} && pnpm exec biome check --write .
 
 # Run desktop TS helper unit tests
 desktop-test:
@@ -148,19 +191,32 @@ fmt-all: fmt desktop-tauri-fmt mobile-fmt
 # Fix all formatting and lint issues
 fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
 
-# Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
-# Sidecar binary list must stay in sync with desktop-release-build below.
-_ensure-sidecar-stubs:
+# Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time).
+# Takes an optional target triple; defaults to the host. This is the single
+# definition of the sidecar list — desktop-release-build depends on it rather
+# than repeating it, because the two copies had already drifted apart.
+_ensure-sidecar-stubs target="":
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET="{{target}}"
+    if [[ -z "$TARGET" ]]; then
+        TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    fi
     mkdir -p desktop/src-tauri/binaries
     SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+    # tauri.windows.conf.json overrides externalBin to drop this one on Windows.
     if [[ "$TARGET" != *windows* ]]; then
         SIDECARS+=(buzz-backend-kubernetes)
     fi
+    # Tauri resolves an externalBin as `<name>-<target><exe-suffix>`, so on a
+    # Windows host the stub it validates is `.exe`. Without the suffix the
+    # build script panics on the first sidecar and no Tauri recipe can run.
+    EXE_SUFFIX=""
+    if [[ "$TARGET" == *windows* ]]; then
+        EXE_SUFFIX=".exe"
+    fi
     for bin in "${SIDECARS[@]}"; do
-        touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        touch "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE_SUFFIX}"
     done
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
@@ -243,21 +299,10 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     echo "Both compiled states verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
-# Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
-desktop-release-build target="aarch64-apple-darwin":
+desktop-release-build target="aarch64-apple-darwin": (_ensure-sidecar-stubs target)
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET={{target}}
-    mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    if [[ "$TARGET" != *windows* ]]; then
-        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
-    fi
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
@@ -298,14 +343,16 @@ test:
 test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
+    ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
         cargo nextest run -p buzz-voice --lib
         cargo nextest run -p buzz-cli
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
-        # They guard the embedded-migrator invariant (exactly the consolidated
-        # 0001; cutover/backfill stays an operator script, not startup state)
-        # and the tenant-scoping lints. The Postgres-backed buzz-db tests are
+        # They guard the embedded-migrator invariant (the complete checked-in
+        # additive migration set; legacy cutover/backfill remains an operator
+        # script, not startup state) and the tenant-scoping lints. The
+        # Postgres-backed buzz-db tests are
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
@@ -323,6 +370,21 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # buzz-agent model-capabilities corpus: the Rust half of the
+        # cross-language drift guard. `model_capabilities.rs` embeds
+        # scripts/model-capabilities.json + scripts/normative-corpus.json via
+        # include_str! and replays the full locked corpus as pure in-process tests (no
+        # infra). Enumerated explicitly because nothing in CI runs
+        # `cargo test --workspace`; without this step a manifest edit that
+        # diverges Rust from the corpus ships green.
+        cargo nextest run -p buzz-agent --lib
+        # buzz-acp: the ACP harness. Its ~760 --lib tests are pure in-process
+        # unit tests whose fixtures spawn a local POSIX shell as a fake agent —
+        # no relay, no database, no network. Enumerated for the same reason as
+        # the crates above: nothing in CI runs `cargo test --workspace`, so
+        # until this line existed the harness that dispatches every agent turn
+        # had zero executed test coverage in CI on any platform.
+        cargo nextest run -p buzz-acp --lib
     else
         ./scripts/run-tests.sh unit
     fi
@@ -330,6 +392,15 @@ test-unit:
 # Run integration tests only (starts services if needed)
 test-integration:
     ./scripts/run-tests.sh integration
+
+# Regenerate the model-capability normative corpus from the production Rust
+# resolver. The corpus is a golden snapshot, never hand-edited: this runs the
+# `#[ignore]`d writer test in buzz-agent, which serializes `resolve()` over the
+# inputs-only question table to scripts/normative-corpus.json. Run this after
+# any model-capabilities.json edit, then commit the regenerated file. The
+# `corpus_matches_generated_snapshot` gate fails CI if the committed file drifts.
+regen-model-corpus:
+    cargo test -p buzz-agent --lib model_capabilities::tests::regen_corpus_file -- --ignored --exact
 
 # Buzz shared compute e2e: current desktop discovery/admission logic and
 # Playwright UI coverage.
@@ -397,6 +468,9 @@ relay: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay
 
 # Start the relay with the built web UI served from it
@@ -404,6 +478,9 @@ relay-web: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C web build
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
@@ -413,6 +490,9 @@ admin: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
@@ -433,7 +513,12 @@ admin-check: fmt-check
     pnpm -C admin-web exec playwright test
 
 # Start the relay server in release mode
-relay-release: _ensure-migrations
+relay-release: bootstrap _ensure-migrations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay --release
 
 
@@ -442,6 +527,9 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
     relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
     health_port="${BUZZ_HEALTH_PORT:-8080}"
@@ -624,7 +712,7 @@ web-check:
 
 # Fix web lint and format issues
 web-fix:
-    cd {{web_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{web_dir}} && pnpm exec biome check --write .
 
 # Run web TypeScript checks
 web-typecheck:
@@ -656,7 +744,7 @@ mobile-fix:
 
 # Run mobile lint and format checks
 mobile-check:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze && node ./scripts/check-file-sizes.mjs
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze
 
 # Run mobile tests
 mobile-test:
@@ -962,13 +1050,38 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
 
 # ─── Benchmarking ─────────────────────────────────────────────────────────────
 
-# Run the Buzz orchestra benchmark — leaderboard-eligible by default (TB 2.1, k=5, Sonnet+Haiku). Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --include-task, --attempts, --manifest, --dry-run, ...)
+# Run the Buzz orchestra benchmark — TB defaults to leaderboard-eligible k=5; Buzz task layers default to regression k=1 and workflow k=3. Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --layer, --include-task, --attempts, --manifest, --dry-run, ...)
 benchmark *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     uv run --project benchmarks/harbor-buzz-orchestra/testbed \
         benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
+
+# Run the benchmark adapter + testbed gate exactly as CI does (pytest + ruff, pinned ruff from pyproject)
+benchmark-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/benchmarks/harbor-buzz-orchestra"
+    # CI installs the dev extra with pip, so pyproject — not uv.lock — decides
+    # which ruff lints. Read the pin from there so this recipe cannot drift
+    # from the workflow (a floating specifier once meant CI failed on RUF100
+    # while the locked local ruff passed).
+    ruff_pin="$(grep -oE 'ruff==[0-9.]+' pyproject.toml | head -1 | cut -d= -f3)"
+    for project in . testbed; do
+        (
+            cd "$project"
+            echo "── harbor-buzz-orchestra/$project (ruff $ruff_pin)"
+            uv run --frozen pytest -q
+            uvx "ruff@$ruff_pin" check .
+            uvx "ruff@$ruff_pin" format --check .
+        )
+    done
+    # The task verifiers live in the sibling benchmarks/buzz-dataset, so they
+    # need the harness config passed explicitly to stay linted.
+    echo "── buzz-dataset (ruff $ruff_pin)"
+    uvx "ruff@$ruff_pin" check --config pyproject.toml ../buzz-dataset
+    uvx "ruff@$ruff_pin" format --check --config pyproject.toml ../buzz-dataset
 
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:
