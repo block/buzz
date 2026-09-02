@@ -272,3 +272,18 @@ test("reset cancels pending preparations instead of authorizing send", async () 
 
   assert.deepEqual(await preparation.promise, { status: "cancelled" });
 });
+
+test("Skip aborts an abandoned in-flight preview job", async () => {
+  const pending = deferred();
+  seed(first, pending.promise);
+  const job = __linkPreviewPreparationTest.jobs.get(first.href);
+
+  const preparation = prepareBackgroundLinkPreviews([first], 1_000);
+  assert.ok(preparation);
+  preparation.skip();
+
+  assert.deepEqual(await preparation.promise, { status: "ready", tags: [] });
+  assert.equal(job.controller.signal.aborted, true);
+  assert.equal(__linkPreviewPreparationTest.jobs.has(first.href), false);
+  pending.resolve(null);
+});

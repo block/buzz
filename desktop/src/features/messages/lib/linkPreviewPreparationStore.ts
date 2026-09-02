@@ -9,6 +9,7 @@ import {
 } from "@/shared/lib/linkPreviewSnapshot";
 import {
   loadLinkPreviewMetadata,
+  type LinkPreviewMetadata,
   resolveLinkPreview,
 } from "@/shared/lib/useResolvedLinkPreviews";
 
@@ -27,6 +28,7 @@ type PreviewJob = {
 
 type BackgroundPreviewTask = {
   cancel: () => void;
+  hrefs: Set<string>;
   id: number;
   skip: () => void;
 };
@@ -113,7 +115,18 @@ async function buildSnapshot(
   signal: AbortSignal,
   onMetadataReady: (tag: string[]) => void,
 ): Promise<string[] | null> {
-  const metadata = await loadLinkPreviewMetadata(candidate.href);
+  const metadataLoad = loadLinkPreviewMetadata(candidate.href);
+  const cancelMetadata = () => metadataLoad.cancel();
+  signal.addEventListener("abort", cancelMetadata, { once: true });
+  let metadata: LinkPreviewMetadata | null;
+  try {
+    metadata = await metadataLoad.promise;
+  } catch {
+    return null;
+  } finally {
+    signal.removeEventListener("abort", cancelMetadata);
+    metadataLoad.cancel();
+  }
   if (signal.aborted || !metadata) return null;
   const preview = resolveLinkPreview(candidate, metadata);
   if (!preview.snapshotReady) return null;
@@ -288,24 +301,42 @@ export function prepareBackgroundLinkPreviews(
   let finish: ((result: BackgroundLinkPreviewResult) => void) | null = null;
   let terminal = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const complete = (result: BackgroundLinkPreviewResult) => {
+  const complete = (
+    result: BackgroundLinkPreviewResult,
+    abortUnobservedJobs = false,
+  ) => {
     if (terminal) return;
     terminal = true;
     if (timer !== null) clearTimeout(timer);
     tasks.delete(taskId);
+    if (abortUnobservedJobs) {
+      for (const candidate of external) {
+        const observedByAnotherSend = [...tasks.values()].some((task) =>
+          task.hrefs.has(candidate.href),
+        );
+        if (!observedByAnotherSend) {
+          invalidateLinkPreviewPreparation(candidate.href);
+        }
+      }
+    }
     publishSnapshot();
     finish?.(result);
   };
   const promise = new Promise<BackgroundLinkPreviewResult>((resolve) => {
     finish = resolve;
   });
-  const cancel = () => complete({ status: "cancelled" });
-  const skip = () => complete({ status: "ready", tags: [] });
-  tasks.set(taskId, { cancel, id: taskId, skip });
+  const cancel = () => complete({ status: "cancelled" }, true);
+  const skip = () => complete({ status: "ready", tags: [] }, true);
+  tasks.set(taskId, {
+    cancel,
+    hrefs: new Set(external.map((candidate) => candidate.href)),
+    id: taskId,
+    skip,
+  });
   publishSnapshot();
 
   timer = setTimeout(
-    () => complete({ status: "ready", tags: availableTags() }),
+    () => complete({ status: "ready", tags: availableTags() }, true),
     timeoutMs,
   );
   void Promise.all(external.map(prepareLinkPreview)).then((tags) => {

@@ -10,6 +10,8 @@ use reqwest::{
 use serde::Serialize;
 use url::Url;
 
+#[path = "link_preview_cancellation.rs"]
+mod cancellation;
 #[path = "link_preview_image_retry.rs"]
 mod image_retry;
 #[path = "link_preview_rate_limit.rs"]
@@ -59,8 +61,32 @@ pub struct LinkPreviewMetadata {
 #[tauri::command]
 pub async fn fetch_link_preview_metadata(
     href: String,
+    request_id: Option<String>,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
-    fetch_link_preview_metadata_for_url(href).await
+    let cancellation = cancellation::begin(request_id.as_deref());
+    let result = match cancellation {
+        Some(cancellation) => {
+            tokio::select! {
+                result = fetch_link_preview_metadata_for_url(href) => result,
+                () = cancellation.cancelled() => Err("link preview request cancelled".to_string()),
+            }
+        }
+        None => fetch_link_preview_metadata_for_url(href).await,
+    };
+    cancellation::finish(request_id.as_deref());
+    result
+}
+
+/// Cancel renderer-owned metadata work, including an in-flight response body.
+#[tauri::command]
+pub fn cancel_link_preview_metadata(request_id: String) {
+    cancellation::cancel(&request_id);
+}
+
+/// Release a renderer's cancellation record after its invocation settles.
+#[tauri::command]
+pub fn release_link_preview_metadata(request_id: String) {
+    cancellation::finish(Some(&request_id));
 }
 
 async fn fetch_link_preview_metadata_for_url(

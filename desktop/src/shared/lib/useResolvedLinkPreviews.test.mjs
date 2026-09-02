@@ -140,14 +140,14 @@ test("metadata loader retries transient images after the server cooldown", async
   });
 
   assert.equal(
-    (await loader.load(preview.href)).metadata?.imageFetchState,
+    (await loader.load(preview.href).promise).metadata?.imageFetchState,
     "transient_failure",
   );
   assert.equal(calls, 1);
 
   now += 10_000;
   assert.equal(
-    (await loader.load(preview.href)).metadata?.imageFetchState,
+    (await loader.load(preview.href).promise).metadata?.imageFetchState,
     "image",
   );
   assert.equal(calls, 2);
@@ -165,12 +165,15 @@ test("metadata loader retries rejected requests after the negative-cache TTL", a
     now: () => now,
   });
 
-  assert.equal((await loader.load(preview.href)).metadata, null);
-  assert.equal((await loader.load(preview.href)).metadata, null);
+  assert.equal((await loader.load(preview.href).promise).metadata, null);
+  assert.equal((await loader.load(preview.href).promise).metadata, null);
   assert.equal(calls, 1);
 
   now += 5 * 60_000;
-  assert.deepEqual((await loader.load(preview.href)).metadata, metadata());
+  assert.deepEqual(
+    (await loader.load(preview.href).promise).metadata,
+    metadata(),
+  );
   assert.equal(calls, 2);
 });
 
@@ -191,10 +194,10 @@ test("metadata loader coalesces fragment variants and bounds concurrency", async
   });
 
   await Promise.all([
-    loader.load("https://example.com/one#first"),
-    loader.load("https://example.com/one#second"),
-    loader.load("https://example.com/two"),
-    loader.load("https://example.com/three"),
+    loader.load("https://example.com/one#first").promise,
+    loader.load("https://example.com/one#second").promise,
+    loader.load("https://example.com/two").promise,
+    loader.load("https://example.com/three").promise,
   ]);
 
   assert.equal(calls, 3);
@@ -504,12 +507,15 @@ test("invalidateNegative drops a cached null miss so the next load refetches", a
     now: () => now,
   });
 
-  assert.equal((await loader.load(preview.href)).metadata, null);
+  assert.equal((await loader.load(preview.href).promise).metadata, null);
   assert.equal(calls, 1);
 
   loader.invalidateNegative(preview.href);
   nextResult = metadata();
-  assert.deepEqual((await loader.load(preview.href)).metadata, metadata());
+  assert.deepEqual(
+    (await loader.load(preview.href).promise).metadata,
+    metadata(),
+  );
   assert.equal(calls, 2);
 });
 
@@ -538,7 +544,7 @@ test("invalidateNegative drops a cached transient failure so the next load refet
   });
 
   assert.equal(
-    (await loader.load(preview.href)).metadata?.imageFetchState,
+    (await loader.load(preview.href).promise).metadata?.imageFetchState,
     "transient_failure",
   );
   assert.equal(calls, 1);
@@ -547,7 +553,7 @@ test("invalidateNegative drops a cached transient failure so the next load refet
   // the cooldown — is what forces the refetch.
   loader.invalidateNegative(preview.href);
   assert.equal(
-    (await loader.load(preview.href)).metadata?.imageFetchState,
+    (await loader.load(preview.href).promise).metadata?.imageFetchState,
     "image",
   );
   assert.equal(calls, 2);
@@ -566,11 +572,17 @@ test("invalidateNegative leaves a healthy cached hit untouched", async () => {
     now: () => now,
   });
 
-  assert.deepEqual((await loader.load(preview.href)).metadata, metadata());
+  assert.deepEqual(
+    (await loader.load(preview.href).promise).metadata,
+    metadata(),
+  );
   assert.equal(calls, 1);
 
   loader.invalidateNegative(preview.href);
-  assert.deepEqual((await loader.load(preview.href)).metadata, metadata());
+  assert.deepEqual(
+    (await loader.load(preview.href).promise).metadata,
+    metadata(),
+  );
   assert.equal(calls, 1);
 });
 
@@ -599,8 +611,72 @@ test("invalidateNegative leaves an in-flight fetch untouched", async () => {
   assert.equal(calls, 1, "no redundant fetch started by the bust");
 
   releaseFetch();
-  assert.deepEqual((await pending).metadata, metadata());
+  assert.deepEqual((await pending.promise).metadata, metadata());
   assert.equal(calls, 1, "the original in-flight fetch resolved, not a retry");
+});
+
+test("an orphaned metadata load is cancelled after its re-entry grace period", async () => {
+  let cancelled = false;
+  const loader = __linkPreviewMetadataTest.createMetadataLoader({
+    fetcher: (_href, signal) =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            cancelled = true;
+            reject(new Error("cancelled"));
+          },
+          { once: true },
+        );
+      }),
+  });
+
+  const load = loader.load(preview.href);
+  const rejection = assert.rejects(load.promise, /cancelled/);
+  load.cancel();
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  assert.equal(cancelled, true);
+  await rejection;
+});
+
+test("new metadata demand immediately reclaims slots from orphaned loads", async () => {
+  const started = [];
+  const cancelled = [];
+  const releases = new Map();
+  const loader = __linkPreviewMetadataTest.createMetadataLoader({
+    concurrency: 2,
+    fetcher: (href, signal) =>
+      new Promise((resolve, reject) => {
+        started.push(href);
+        releases.set(href, () => resolve(metadata()));
+        signal.addEventListener(
+          "abort",
+          () => {
+            cancelled.push(href);
+            reject(new Error("cancelled"));
+          },
+          { once: true },
+        );
+      }),
+  });
+
+  const firstHref = "https://example.com/stalled-one";
+  const secondHref = "https://example.com/stalled-two";
+  const thirdHref = "https://example.com/ordinary";
+  const first = loader.load(firstHref);
+  const second = loader.load(secondHref);
+  const firstSettled = first.promise.catch(() => undefined);
+  const secondSettled = second.promise.catch(() => undefined);
+  first.cancel();
+  second.cancel();
+
+  const third = loader.load(thirdHref);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [firstHref, secondHref, thirdHref]);
+  assert.deepEqual(new Set(cancelled), new Set([firstHref, secondHref]));
+  releases.get(thirdHref)();
+  assert.deepEqual((await third.promise).metadata, metadata());
+  await Promise.all([firstSettled, secondSettled]);
 });
 
 // ── Hook-level regression: retained resolved-state invalidation on re-entry ───
@@ -895,6 +971,86 @@ test("hook clears a re-entered negative even when the shared cache holds an in-f
   } finally {
     composer.unmount();
     messageList.unmount();
+    cleanup();
+    ipcHandlers.clear();
+  }
+});
+
+test("removing two stalled previews cancels native work and admits a third URL", async () => {
+  const { act, cleanup, renderHook } = await import("@testing-library/react");
+  const { useResolvedLinkPreviews } = await import(
+    "./useResolvedLinkPreviews.ts"
+  );
+
+  resetLinkPreviewMetadataCache();
+  ipcHandlers.clear();
+
+  const firstPreview = {
+    ...hookPreview,
+    href: "https://example.com/stalled-one",
+  };
+  const secondPreview = {
+    ...hookPreview,
+    href: "https://example.com/stalled-two",
+  };
+  const thirdPreview = { ...hookPreview, href: "https://example.com/ordinary" };
+  const pending = new Map();
+  const started = [];
+  const cancelled = [];
+
+  ipcHandlers.set("fetch_link_preview_metadata", ({ href, requestId }) => {
+    started.push(href);
+    return new Promise((resolve, reject) => {
+      pending.set(requestId, { href, reject, resolve });
+    });
+  });
+  ipcHandlers.set("cancel_link_preview_metadata", ({ requestId }) => {
+    const request = pending.get(requestId);
+    if (!request) return Promise.resolve();
+    cancelled.push(request.href);
+    pending.delete(requestId);
+    request.reject(new Error("cancelled by test native seam"));
+    return Promise.resolve();
+  });
+  ipcHandlers.set("release_link_preview_metadata", () => Promise.resolve());
+
+  const flushScheduledLoads = async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+
+  const hook = renderHook(({ previews }) => useResolvedLinkPreviews(previews), {
+    initialProps: { previews: [firstPreview, secondPreview] },
+  });
+
+  try {
+    await flushScheduledLoads();
+    assert.deepEqual(started, [firstPreview.href, secondPreview.href]);
+
+    hook.rerender({ previews: [thirdPreview] });
+    await flushScheduledLoads();
+    assert.deepEqual(
+      new Set(cancelled),
+      new Set([firstPreview.href, secondPreview.href]),
+    );
+    assert.deepEqual(started, [
+      firstPreview.href,
+      secondPreview.href,
+      thirdPreview.href,
+    ]);
+
+    const third = [...pending.values()].find(
+      (request) => request.href === thirdPreview.href,
+    );
+    assert.ok(third, "third URL reached the native fetch seam");
+    await act(async () => {
+      third.resolve(metadata());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(hook.result.current[0].title, "A story");
+  } finally {
+    hook.unmount();
     cleanup();
     ipcHandlers.clear();
   }
