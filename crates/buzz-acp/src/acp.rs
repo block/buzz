@@ -214,6 +214,9 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Assistant text emitted during the current prompt. Lightweight helper
+    /// commands consume this after `session/prompt` completes.
+    agent_message: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,7 +566,13 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            agent_message: String::new(),
         })
+    }
+
+    /// Take the assistant text accumulated from `agent_message_chunk` updates.
+    pub fn take_agent_message(&mut self) -> String {
+        std::mem::take(&mut self.agent_message)
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -781,6 +790,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.agent_message.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1755,6 +1765,7 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.agent_message.push_str(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
