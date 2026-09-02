@@ -12,23 +12,36 @@
  *   - Selects harness from the ACP runtime cache (QueryClientProvider).
  *   - Renders AgentConfigFields with useCustomSelect=true.
  *   - Zero IPC writes on mount and before Save (Save-gated contract).
- *   - Dirty the form via the Advanced env-vars editor (regular input, not Radix):
- *     open Advanced → Add row → type a key name.
+ *   - Operate the effort control: click the real Popover trigger, select "off"
+ *     from the option list. Assert zero writes after selection.
  *   - Exactly one `set_global_agent_config` write fires on "Save defaults" click.
- *   - After save, a fresh mount hydrated from the server's canonical response
- *     (effort "off") shows data-value="off" and text "Off".
+ *   - The save stub captures the submitted payload; asserts raw
+ *     GOOSE_THINKING_EFFORT: "off" is present.
+ *   - After save the stub stores its canonical response (from the actual
+ *     submitted payload). A fresh mount hydrated from that stored response
+ *     shows data-value="off" and text "Off".
  *
  * DefaultConfigStep (onboarding surface):
  *   - Same contract through the onboarding parent tree and the "Next" button.
- *   - Starts with isDirty=true in the draft so commit() fires on Next.
- *   - After save, a fresh mount hydrated from the canonical server response
- *     shows data-value="off" and text "Off".
+ *   - Draft starts with isDirty=false. The form is dirtied by operating the
+ *     real effort control (click trigger → select "off"), which calls
+ *     onConfigChange → updateDraft → sets isDirtyRef=true.
+ *   - Zero writes on mount and after effort selection.
+ *   - Exactly one write fires on "Next" click (commit() is a no-op when
+ *     !isDirty, so real-control dirtying is load-bearing here).
+ *   - Same payload capture + stored canonical + fresh remount contract.
  *
  * Mutation proofs:
- *   - Removing isHarnessNativeEffort branch in AgentConfigFields → effort custom
- *     trigger shows inherit placeholder instead of "Off" → mount assertions RED.
- *   - Removing the Save-gate (firing set_global_agent_config outside of a Save/
- *     Next click) → write-count-before-save assertion fails → RED.
+ *   - Removing isHarnessNativeEffort branch in AgentConfigFields → effort
+ *     custom trigger shows inherit placeholder instead of "Off" on mount and
+ *     after remount → mount and remount assertions RED.
+ *   - Removing the Save-gate (firing set_global_agent_config outside of a
+ *     Save/Next click) → write-count-before-save assertion fails → RED.
+ *   - Dropping GOOSE_THINKING_EFFORT from the submitted payload → payload
+ *     assertion fails → RED.
+ *   - In the onboarding test: removing the effort-select dirtying steps (so
+ *     isDirty stays false) → commit() is a no-op → write-count assertion after
+ *     Next fails (0 instead of 1) → RED.
  */
 
 import assert from "node:assert/strict";
@@ -96,7 +109,13 @@ globalThis.EventTarget = dom.window.EventTarget;
 const clients = [];
 
 // ── IPC write tracking ────────────────────────────────────────────────────────
+// saveCallCount: total set_global_agent_config calls.
+// capturedSavePayload: exact config submitted in the most recent Save/Next.
+// storedCanonicalResponse: canonical response the stub computed from the Save
+//   payload; returned by get_global_agent_config on the fresh remount.
 let saveCallCount = 0;
+let capturedSavePayload = null;
+let storedCanonicalResponse = null;
 
 // ── Tauri IPC stub ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG = {
@@ -113,8 +132,12 @@ function makeIpcHandler(overrides = {}) {
       return Promise.resolve(DEFAULT_CONFIG);
     if (cmd === "set_global_agent_config") {
       saveCallCount += 1;
+      // Capture the submitted config and compute the canonical response by
+      // echoing the payload (the server's canonical form is what was saved).
+      capturedSavePayload = payload?.config ?? null;
+      storedCanonicalResponse = capturedSavePayload ?? DEFAULT_CONFIG;
       return Promise.resolve({
-        config: payload?.config ?? DEFAULT_CONFIG,
+        config: storedCanonicalResponse,
         restarted_count: 0,
         failed_restart_count: 0,
       });
@@ -169,6 +192,8 @@ afterEach(() => {
   }
   // Reset write tracking and restore default IPC stub.
   saveCallCount = 0;
+  capturedSavePayload = null;
+  storedCanonicalResponse = null;
   globalThis.__TAURI_INTERNALS__.invoke = makeIpcHandler();
   dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 });
@@ -233,33 +258,56 @@ async function settle() {
   await act(async () => {});
 }
 
+/**
+ * Select an effort value through the real Popover-based custom select.
+ * Clicks the trigger button to open the popover, then clicks the option button.
+ * The AgentDropdownSelect is a controlled Popover + listbox, not a native
+ * <select>; options are rendered as buttons with data-testid=
+ * `${testId}-option-${value}`.
+ */
+async function selectEffortOption(testId, value) {
+  const trigger = screen.getByTestId(testId);
+  await act(async () => {
+    fireEvent.click(trigger);
+  });
+  await settle();
+  const option = screen.getByTestId(`${testId}-option-${value}`);
+  await act(async () => {
+    fireEvent.click(option);
+  });
+  await settle();
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-test("AgentDefaultsEditor: effort 'off' — zero writes on mount, one write on Save, 'Off' survives reread", async () => {
+test("AgentDefaultsEditor: effort write→save→reread contract through the real Settings parent", async () => {
   // Production Settings journey through the real AgentDefaultsEditor parent:
-  //   1. Mount with Goose effort "off" and a valid credential in env_vars.
-  //   2. Assert zero IPC writes and trigger shows "Off" (Save-gated contract —
-  //      no write fires from mount or effort-field visibility).
-  //   3. Dirty the form via the Advanced env-vars editor (regular HTML input,
+  //   1. Mount with Goose effort "low" and a valid credential in env_vars.
+  //   2. Assert zero IPC writes and trigger shows "Low" (Save-gated contract).
+  //   3. Select "off" via the real Popover trigger + option click. Assert still
+  //      zero IPC writes (effort selection is Save-gated, not direct-write).
+  //   4. Dirty the form via the Advanced env-vars editor (regular HTML input,
   //      not Radix): open Advanced, click Add, type a key name.
-  //   4. Assert still zero IPC writes (all changes are Save-gated).
   //   5. Click the real "Save defaults" button — fires exactly one IPC write.
-  //   6. Unmount and remount a FRESH AgentDefaultsEditor whose
-  //      get_global_agent_config stub returns the canonical server response
-  //      (effort "off"). Assert zero writes on second mount and trigger shows
-  //      "Off".
+  //   6. Assert the submitted payload contains raw GOOSE_THINKING_EFFORT: "off".
+  //   7. Unmount and remount a FRESH AgentDefaultsEditor whose
+  //      get_global_agent_config stub returns the stored canonical response
+  //      (the actual server response from step 5, not a hand-written fixture).
+  //      Assert zero writes on second mount and trigger shows "Off".
   //
   // Mutation proofs:
   //   - Remove the isHarnessNativeEffort branch in AgentConfigFields → the
-  //     trigger shows "Select" instead of "Off" at steps 2 and 6 → RED.
+  //     trigger shows "Select" instead of "Low"/"Off" at steps 2 and 7 → RED.
   //   - Fire set_global_agent_config outside a Save click → write-count-before-
   //     save assertion fails → RED.
+  //   - Drop GOOSE_THINKING_EFFORT from the submitted payload → step 6
+  //     payload assertion fails → RED.
 
   // ANTHROPIC_API_KEY satisfies credentialsValid so configIsValid=true and
   // the Save button is enabled once the form is dirtied.
-  const savedConfig = {
+  const initialConfig = {
     env_vars: {
-      GOOSE_THINKING_EFFORT: "off",
+      GOOSE_THINKING_EFFORT: "low",
       ANTHROPIC_API_KEY: "sk-test",
     },
     provider: "anthropic",
@@ -268,7 +316,7 @@ test("AgentDefaultsEditor: effort 'off' — zero writes on mount, one write on S
   };
 
   globalThis.__TAURI_INTERNALS__.invoke = makeIpcHandler({
-    get_global_agent_config: () => Promise.resolve(savedConfig),
+    get_global_agent_config: () => Promise.resolve(initialConfig),
   });
   dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 
@@ -284,32 +332,53 @@ test("AgentDefaultsEditor: effort 'off' — zero writes on mount, one write on S
 
   await settle();
 
-  // Step 2: zero writes on mount, trigger shows "Off".
+  // Step 2: zero writes on mount, trigger shows "Low".
   assert.equal(
     saveCallCount,
     0,
     "zero IPC writes must fire on mount (effort is Save-gated)",
   );
-  const triggerBefore = screen.queryByTestId(
+  const triggerMount = screen.queryByTestId(
     "global-agent-thinking-effort-select",
   );
   assert.ok(
-    triggerBefore,
+    triggerMount,
     "effort trigger must be present after AgentDefaultsEditor loads",
   );
   assert.equal(
-    triggerBefore.getAttribute("data-value"),
-    "off",
-    'trigger data-value must be "off" on mount',
+    triggerMount.getAttribute("data-value"),
+    "low",
+    'trigger data-value must be "low" on mount',
   );
   assert.ok(
-    triggerBefore.textContent?.includes("Off"),
-    `trigger must show "Off" on mount; got: "${triggerBefore.textContent}"`,
+    triggerMount.textContent?.includes("Low"),
+    `trigger must show "Low" on mount; got: "${triggerMount.textContent}"`,
   );
 
-  // Step 3: open the Advanced section via the toggle button (regular HTML
-  // button, not Radix) and add a new env-var row, then type a key name.
-  // This dirts the form via a real control without touching the effort field.
+  // Step 3: select "off" via the real effort Popover control.
+  // AgentDropdownSelect renders options as <button data-testid="${testId}-option-${value}">.
+  await selectEffortOption("global-agent-thinking-effort-select", "off");
+
+  assert.equal(
+    saveCallCount,
+    0,
+    "zero IPC writes must fire after effort selection (Save-gated, not direct-write)",
+  );
+  const triggerAfterEffort = screen.queryByTestId(
+    "global-agent-thinking-effort-select",
+  );
+  assert.equal(
+    triggerAfterEffort?.getAttribute("data-value"),
+    "off",
+    'trigger data-value must be "off" after effort selection',
+  );
+  assert.ok(
+    triggerAfterEffort?.textContent?.includes("Off"),
+    `trigger must show "Off" after effort selection; got: "${triggerAfterEffort?.textContent}"`,
+  );
+
+  // Step 4: open the Advanced section and add a new env-var row to ensure
+  // the form is dirty for Save (credentials are present so configIsValid=true).
   const advancedToggle = screen.getByTestId("global-agent-advanced-toggle");
   await act(async () => {
     fireEvent.click(advancedToggle);
@@ -322,7 +391,6 @@ test("AgentDefaultsEditor: effort 'off' — zero writes on mount, one write on S
   });
   await settle();
 
-  // The new row's key input is the last [data-testid="env-vars-key"] in DOM.
   const keyInputs = screen.queryAllByTestId("env-vars-key");
   assert.ok(
     keyInputs.length > 0,
@@ -334,7 +402,6 @@ test("AgentDefaultsEditor: effort 'off' — zero writes on mount, one write on S
   });
   await settle();
 
-  // Step 4: still zero IPC writes — all field changes are Save-gated.
   assert.equal(
     saveCallCount,
     0,
@@ -358,19 +425,30 @@ test("AgentDefaultsEditor: effort 'off' — zero writes on mount, one write on S
     "exactly one set_global_agent_config write must fire on Save",
   );
 
-  // Step 6: unmount and remount a FRESH parent hydrated from the canonical
-  // server response (effort "off"). Zero additional writes; trigger shows "Off".
+  // Step 6: assert the submitted payload contains raw GOOSE_THINKING_EFFORT: "off".
+  assert.ok(
+    capturedSavePayload !== null,
+    "set_global_agent_config must have captured a payload",
+  );
+  assert.equal(
+    capturedSavePayload?.env_vars?.GOOSE_THINKING_EFFORT,
+    "off",
+    'submitted payload must contain raw GOOSE_THINKING_EFFORT: "off"',
+  );
+
+  // Step 7: unmount and remount a FRESH parent hydrated from the stored
+  // canonical response — the actual server response from step 5, not a
+  // hand-written fixture. Zero additional writes; trigger shows "Off".
   unmount();
   cleanup();
 
-  const canonicalConfig = {
-    env_vars: { GOOSE_THINKING_EFFORT: "off" },
-    provider: "anthropic",
-    model: "claude-3-5-sonnet",
-    preferred_runtime: "goose",
-  };
+  assert.ok(
+    storedCanonicalResponse !== null,
+    "stub must have stored a canonical response from the Save payload",
+  );
+  const canonicalForRemount = storedCanonicalResponse;
   globalThis.__TAURI_INTERNALS__.invoke = makeIpcHandler({
-    get_global_agent_config: () => Promise.resolve(canonicalConfig),
+    get_global_agent_config: () => Promise.resolve(canonicalForRemount),
   });
   dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 
@@ -392,45 +470,51 @@ test("AgentDefaultsEditor: effort 'off' — zero writes on mount, one write on S
     "second mount must not fire any additional IPC writes",
   );
 
-  const triggerAfter = screen.queryByTestId(
+  const triggerRemount = screen.queryByTestId(
     "global-agent-thinking-effort-select",
   );
-  assert.ok(triggerAfter, "effort trigger must be present after fresh remount");
+  assert.ok(
+    triggerRemount,
+    "effort trigger must be present after fresh remount",
+  );
   assert.equal(
-    triggerAfter.getAttribute("data-value"),
+    triggerRemount.getAttribute("data-value"),
     "off",
-    'trigger data-value must be "off" after fresh remount with canonical server response',
+    'trigger data-value must be "off" after fresh remount from stored canonical response',
   );
   assert.ok(
-    triggerAfter.textContent?.includes("Off"),
-    `trigger must show "Off" after fresh remount; got: "${triggerAfter.textContent}"`,
+    triggerRemount.textContent?.includes("Off"),
+    `trigger must show "Off" after fresh remount; got: "${triggerRemount.textContent}"`,
   );
 });
 
-test("DefaultConfigStep: effort 'off' — zero writes on mount, one write on Next, 'Off' survives reread", async () => {
+test("DefaultConfigStep: effort write→save→reread contract through the real onboarding parent", async () => {
   // Production onboarding journey through the real DefaultConfigStep parent:
-  //   1. Mount with Goose effort "off", valid credentials (ANTHROPIC_API_KEY),
-  //      and isDirty=true in the draft (simulates the user having edited a field
-  //      earlier in onboarding). The credential makes configIsValid=true so the
-  //      Next button is enabled.
-  //   2. Assert zero IPC writes and trigger shows "Off".
-  //   3. Click the real "Next" button — fires exactly one IPC write via
+  //   1. Mount with Goose effort "low", valid credentials (ANTHROPIC_API_KEY),
+  //      and isDirty=false in the draft. The credential makes configIsValid=true.
+  //   2. Assert zero IPC writes and trigger shows "Low".
+  //   3. Select "off" via the real effort Popover control. This calls
+  //      onConfigChange → updateDraft → sets isDirtyRef=true. Assert still zero
+  //      writes (effort selection is Save-gated).
+  //   4. Click the real "Next" button — fires exactly one IPC write via
   //      persistenceState.commit() (which is a no-op when !isDirty, so the
-  //      isDirty=true draft is load-bearing here).
-  //   4. Unmount and remount a FRESH DefaultConfigStep whose
-  //      get_global_agent_config stub returns the canonical server response
-  //      (effort "off"). Assert zero writes on second mount and trigger shows
-  //      "Off".
+  //      real-control dirtying in step 3 is load-bearing here).
+  //   5. Assert the submitted payload contains raw GOOSE_THINKING_EFFORT: "off".
+  //   6. Unmount and remount a FRESH DefaultConfigStep with draft=null, whose
+  //      get_global_agent_config stub returns the stored canonical response.
+  //      Assert zero writes on second mount and trigger shows "Off".
   //
   // Mutation proofs:
   //   - Remove the isHarnessNativeEffort branch in AgentConfigFields → trigger
-  //     shows "Select" instead of "Off" → mount assertion RED.
-  //   - Remove isDirty=true from the draft → commit() is a no-op → write-count
-  //     assertion after Next fails (0 instead of 1) → RED.
+  //     shows "Select" instead of "Low"/"Off" → mount and remount assertions RED.
+  //   - Remove the effort-select steps (so isDirty stays false) → commit() is a
+  //     no-op → write-count assertion after Next fails (0 instead of 1) → RED.
+  //   - Drop GOOSE_THINKING_EFFORT from the submitted payload → step 5
+  //     payload assertion fails → RED.
 
-  const gooseConfig = {
+  const initialConfig = {
     env_vars: {
-      GOOSE_THINKING_EFFORT: "off",
+      GOOSE_THINKING_EFFORT: "low",
       ANTHROPIC_API_KEY: "sk-test",
     },
     provider: "anthropic",
@@ -438,9 +522,8 @@ test("DefaultConfigStep: effort 'off' — zero writes on mount, one write on Nex
     preferred_runtime: "goose",
   };
 
-  // Save stub echoes submitted config as the canonical response.
   globalThis.__TAURI_INTERNALS__.invoke = makeIpcHandler({
-    get_global_agent_config: () => Promise.resolve(gooseConfig),
+    get_global_agent_config: () => Promise.resolve(initialConfig),
   });
   dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 
@@ -457,12 +540,14 @@ test("DefaultConfigStep: effort 'off' — zero writes on mount, one write on Nex
     updateDraft: () => {},
   };
 
-  // isDirty=true: commit() will call setGlobalAgentConfig (instead of no-op).
+  // isDirty=false: commit() would be a no-op without real-control dirtying.
+  // The effort selection in step 3 sets isDirtyRef=true via onConfigChange →
+  // updateDraft, making the write load-bearing.
   const initialDraft = {
-    config: gooseConfig,
+    config: initialConfig,
     isCustomModelEditing: false,
     isCustomProvider: false,
-    isDirty: true,
+    isDirty: false,
   };
 
   const { unmount } = render(
@@ -479,30 +564,53 @@ test("DefaultConfigStep: effort 'off' — zero writes on mount, one write on Nex
 
   await settle();
 
-  // Step 2: zero writes on mount, trigger shows "Off".
+  // Step 2: zero writes on mount, trigger shows "Low".
   assert.equal(
     saveCallCount,
     0,
     "zero IPC writes must fire on DefaultConfigStep mount",
   );
-  const triggerBefore = screen.queryByTestId(
+  const triggerMount = screen.queryByTestId(
     "global-agent-thinking-effort-select",
   );
   assert.ok(
-    triggerBefore,
+    triggerMount,
     "effort trigger must be present in DefaultConfigStep after Goose loads",
   );
   assert.equal(
-    triggerBefore.getAttribute("data-value"),
-    "off",
-    'DefaultConfigStep effort trigger data-value must be "off" on mount',
+    triggerMount.getAttribute("data-value"),
+    "low",
+    'DefaultConfigStep effort trigger data-value must be "low" on mount',
   );
   assert.ok(
-    triggerBefore.textContent?.includes("Off"),
-    `DefaultConfigStep trigger must show "Off" on mount; got: "${triggerBefore.textContent}"`,
+    triggerMount.textContent?.includes("Low"),
+    `DefaultConfigStep trigger must show "Low" on mount; got: "${triggerMount.textContent}"`,
   );
 
-  // Step 3: click the real "Next" button.
+  // Step 3: select "off" via the real effort Popover control.
+  // This calls onConfigChange → updateDraft → isDirtyRef=true, making the
+  // subsequent Next click a real write rather than a no-op.
+  await selectEffortOption("global-agent-thinking-effort-select", "off");
+
+  assert.equal(
+    saveCallCount,
+    0,
+    "zero IPC writes must fire after effort selection (Save-gated, not direct-write)",
+  );
+  const triggerAfterEffort = screen.queryByTestId(
+    "global-agent-thinking-effort-select",
+  );
+  assert.equal(
+    triggerAfterEffort?.getAttribute("data-value"),
+    "off",
+    'trigger data-value must be "off" after effort selection',
+  );
+  assert.ok(
+    triggerAfterEffort?.textContent?.includes("Off"),
+    `trigger must show "Off" after effort selection; got: "${triggerAfterEffort?.textContent}"`,
+  );
+
+  // Step 4: click the real "Next" button.
   const nextButton = screen.getByTestId("onboarding-finish");
   assert.ok(
     !nextButton.disabled,
@@ -516,26 +624,36 @@ test("DefaultConfigStep: effort 'off' — zero writes on mount, one write on Nex
   assert.equal(
     saveCallCount,
     1,
-    "exactly one set_global_agent_config write must fire on Next (isDirty=true in draft)",
+    "exactly one set_global_agent_config write must fire on Next (isDirty=true after effort selection)",
   );
   assert.ok(
     completeCalled.value,
     "actions.complete() must have been called after Next",
   );
 
-  // Step 4: unmount and remount a FRESH DefaultConfigStep hydrated from the
-  // canonical server response (effort "off"). Zero additional writes; "Off".
+  // Step 5: assert the submitted payload contains raw GOOSE_THINKING_EFFORT: "off".
+  assert.ok(
+    capturedSavePayload !== null,
+    "set_global_agent_config must have captured a payload",
+  );
+  assert.equal(
+    capturedSavePayload?.env_vars?.GOOSE_THINKING_EFFORT,
+    "off",
+    'submitted payload must contain raw GOOSE_THINKING_EFFORT: "off"',
+  );
+
+  // Step 6: unmount and remount a FRESH DefaultConfigStep with draft=null,
+  // hydrated from the stored canonical response. Zero additional writes; "Off".
   unmount();
   cleanup();
 
-  const canonicalConfig = {
-    env_vars: { GOOSE_THINKING_EFFORT: "off" },
-    provider: "anthropic",
-    model: "claude-3-5-sonnet",
-    preferred_runtime: "goose",
-  };
+  assert.ok(
+    storedCanonicalResponse !== null,
+    "stub must have stored a canonical response from the Save payload",
+  );
+  const canonicalForRemount = storedCanonicalResponse;
   globalThis.__TAURI_INTERNALS__.invoke = makeIpcHandler({
-    get_global_agent_config: () => Promise.resolve(canonicalConfig),
+    get_global_agent_config: () => Promise.resolve(canonicalForRemount),
   });
   dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 
@@ -568,20 +686,20 @@ test("DefaultConfigStep: effort 'off' — zero writes on mount, one write on Nex
     "second DefaultConfigStep mount must not fire any additional IPC writes",
   );
 
-  const triggerAfter = screen.queryByTestId(
+  const triggerRemount = screen.queryByTestId(
     "global-agent-thinking-effort-select",
   );
   assert.ok(
-    triggerAfter,
+    triggerRemount,
     "effort trigger must be present after fresh DefaultConfigStep remount",
   );
   assert.equal(
-    triggerAfter.getAttribute("data-value"),
+    triggerRemount.getAttribute("data-value"),
     "off",
-    'trigger data-value must be "off" after fresh remount with canonical server response',
+    'trigger data-value must be "off" after fresh remount from stored canonical response',
   );
   assert.ok(
-    triggerAfter.textContent?.includes("Off"),
-    `DefaultConfigStep trigger must show "Off" after fresh remount; got: "${triggerAfter.textContent}"`,
+    triggerRemount.textContent?.includes("Off"),
+    `DefaultConfigStep trigger must show "Off" after fresh remount; got: "${triggerRemount.textContent}"`,
   );
 });
