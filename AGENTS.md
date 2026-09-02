@@ -64,12 +64,17 @@ crates/
   buzz-search         # Postgres FTS full-text search
   buzz-audit          # Hash-chain audit log
   buzz-media          # Blossom/S3 media storage
+  buzz-deletion       # Durable whole-community deletion engine
+  buzz-relay-mesh     # Inter-relay QUIC mesh (iroh): transport, membership, fenced wire contract
+  buzz-push-gateway   # Blind, capability-gated NIP-PL APNs last hop for mobile push
+  buzz-voice          # Reusable local voice primitives
   # Agent surface
   buzz-acp            # ACP harness bridging Buzz events to AI agents
   buzz-agent          # Minimal ACP-compliant agent (non-streaming, tool-calls-as-output)
   buzz-dev-mcp        # Developer MCP server — shell + file-edit tools
   buzz-persona        # Agent persona packs
   buzz-workflow       # YAML-as-code workflow engine (evalexpr conditions)
+  buzz-backend-kubernetes # Kubernetes backend provider for remote agents (docs/remote-agents.md)
   # Clients + interop
   buzz-pair-relay     # Ephemeral sidecar relay for NIP-AB device pairing
   buzz-pairing-cli    # CLI for NIP-AB device pairing interop testing
@@ -81,13 +86,20 @@ crates/
   buzz-admin          # Operator CLI for relay administration
   buzz-ws-client      # Shared NIP-42 WebSocket client (connect, auth, publish)
   buzz-test-client    # Integration test client and E2E test suite
+  buzz-conformance    # Replay checker + golden fixtures for docs/spec/MultiTenantRelay.tla
+  buzz-datastore-tracing # Privacy-preserving datastore tracing policy macros
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
 desktop/              # Tauri 2 + React 19 desktop app
 web/                  # Browser web client (repo browser, served by the relay)
+admin-web/            # Read-only moderation dashboard, served by the relay (`just admin`)
 mobile/               # Flutter mobile app
 migrations/           # SQL migrations (auto-applied on relay startup)
 scripts/              # Dev tooling
+benchmarks/           # Harbor tasks scoring agent behavior *through* Buzz
+examples/             # Reference integrations (countdown-bot, meadow-core)
+deploy/               # Helm charts, compose files, local deployment
+docs/                 # Specs and operator docs — see docs/nips/, docs/spec/
 .env.example          # Config template — copy to .env before running
 ```
 
@@ -256,7 +268,11 @@ If you find yourself reaching for a new HTTP endpoint, first check whether
 an event kind would do the job — it usually will, and you get realtime
 fan-out, NIP-29 scoping, and the existing auth pipeline for free.
 
-Reference https://github.com/nostr-protocol/nips
+Reference https://github.com/nostr-protocol/nips for upstream NIPs. Buzz's own
+NIP specs live in [`docs/nips/`](docs/nips) (NIP-AA agent auth, NIP-PL push,
+NIP-MP multi-repo projects, the NIP-FI family, …); the formal relay model is
+`docs/spec/MultiTenantRelay.tla`, replay-checked by `buzz-conformance`.
+[NOSTR.md](NOSTR.md) maps Buzz concepts onto the protocol.
 
 **Event kinds**: All event kind integers are defined in
 `buzz-core/src/kind.rs`. New features get new kind integers — add them here
@@ -342,6 +358,28 @@ coverage, or `pnpm test:e2e:integration` for relay-backed coverage. These
 scripts build the required E2E bridge before running Playwright.
 
 See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
+
+### Running a single test
+
+```bash
+cargo nextest run -p buzz-core event::tests::tampered_signature_fails_verify  # Rust
+cargo test -p buzz-cli --lib -- --exact <path::to::test>    # Rust, no nextest
+cargo test --manifest-path desktop/src-tauri/Cargo.toml <filter>   # Tauri Rust
+cd desktop && node --import ./test-loader.mjs --experimental-strip-types \
+  --test src/features/agents/agentReuse.test.mjs            # Desktop unit
+cd desktop && pnpm exec playwright test --project=smoke -g "<title>"  # after pnpm build:e2e
+cd mobile && flutter test test/features/activity/activity_page_test.dart
+```
+
+Desktop unit tests are `node:test` over `src/**/*.test.mjs` (custom
+type-stripping loader), **not** vitest. `admin-web` uses vitest; `web/` has
+Playwright only.
+
+**Adding a new crate?** Nothing runs `cargo test --workspace`. The `test-unit`
+recipe in the `Justfile` enumerates packages explicitly — add yours there or
+its tests never execute in CI. Postgres-backed `buzz-db` tests are `#[ignore]`d,
+which is why `--lib` is safe in the infra-free lane; `just test-integration`
+runs those.
 
 ### PR Screenshots
 
@@ -609,6 +647,12 @@ new arbitrary text-size literal — px **or** rem/em. Genuinely decorative glyph
 (e.g. the `text-[6rem]` avatar emoji) are allowlisted by `path:line` in that
 script.
 
+A sibling guard, `pnpm check:pubkey-truncation` (in both `desktop/` and
+`web/`), blocks ad-hoc `pubkey.slice(0, N)` — truncated prefixes are forgeable
+by vanity grinding, so all display truncation goes through `truncatePubkey` /
+`<PubKey>`. Non-display uses (array windows, color/initials derivation) are
+allowlisted by `path:line`, same as `check:px-text`.
+
 ### Community Switching
 
 The desktop app supports multiple communities (each backed by a different relay).
@@ -733,3 +777,5 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+- [NOSTR.md](NOSTR.md) — how Buzz maps onto the Nostr protocol
+- [`docs/nips/`](docs/nips) — Buzz-specific NIP specifications
