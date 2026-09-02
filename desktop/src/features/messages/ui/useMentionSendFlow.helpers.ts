@@ -130,6 +130,49 @@ export function mergeOutgoingTagsWithReferenceMentions(
   ];
 }
 
+/**
+ * How long the pre-side-effect mention-authorization pass may stand in as the
+ * publish-boundary answer before the publish re-runs it.
+ *
+ * The named triggers in {@link shouldRevalidateMentionsAtPublish} enumerate
+ * the awaited steps known to reach the relay, and an enumeration rots: a step
+ * added later that suspends the send for a round-trip would silently publish
+ * a stale admission, and nothing would fail. Measuring the gap fails the
+ * other way — an unenumerated suspension, a cold cache, a contended backend
+ * lock, or an event-loop stall costs one extra pass instead of a stale
+ * publish. The measured fast path is single-digit milliseconds of local IPC
+ * with no relay traffic possible, so this bound never fires there.
+ */
+export const MENTION_ADMISSION_MAX_AGE_MS = 200;
+
+/**
+ * Whether the publish must re-run mention authorization rather than reuse the
+ * pre-side-effect pass (#5681): either an awaited step known to reach the
+ * relay ran in between, or the two are far enough apart that the earlier
+ * answer can no longer be assumed current.
+ *
+ * `msSinceAdmission` must come from a monotonic clock (`performance.now()`),
+ * not `Date.now()` — a wall-clock step backwards would suppress the check.
+ */
+export function shouldRevalidateMentionsAtPublish({
+  hasDeferredUpload,
+  hasDeferredLinkPreviews,
+  relaySideEffectsRan,
+  msSinceAdmission,
+}: {
+  hasDeferredUpload: boolean;
+  hasDeferredLinkPreviews: boolean;
+  relaySideEffectsRan: boolean;
+  msSinceAdmission: number;
+}) {
+  return (
+    hasDeferredUpload ||
+    hasDeferredLinkPreviews ||
+    relaySideEffectsRan ||
+    msSinceAdmission >= MENTION_ADMISSION_MAX_AGE_MS
+  );
+}
+
 export function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error.trim()) return error;

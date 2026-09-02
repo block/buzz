@@ -41,6 +41,7 @@ import {
   type QueuedAgentWake,
   type SendMessageWithMentionFlowInput,
   resolvePreviewTags,
+  shouldRevalidateMentionsAtPublish,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
 import { buildAgentAddressMentionTags } from "@/features/messages/lib/agentAddressMention.mjs";
@@ -380,6 +381,8 @@ export function useMentionSendFlow({
         const admittedMentionPubkeys = uniqueNormalizedPubkeys(
           await mentions.revalidateMentionPubkeys(mentionPubkeys),
         );
+        // Monotonic stamp for the publish-boundary staleness bound below.
+        const admittedAtMs = performance.now();
         if (isSendCancelled()) return restoreComposerAfterFailure();
         if (!isMountedRef.current) return persistPreflightDraft();
         const admittedMentionPubkeySet = new Set(admittedMentionPubkeys);
@@ -520,15 +523,20 @@ export function useMentionSendFlow({
           // Mention authorization was already established by the pre-side-effect
           // pass above. Re-validate at the publish boundary only when something
           // separated that pass from this publish — a deferred wait (background
-          // media upload, link-preview settlement) or an awaited relay side
+          // media upload, link-preview settlement), an awaited relay side
           // effect (DM expansion, membership/access-policy writes, huddle
-          // enrollment) — since authorization could have been revoked during
-          // the gap. On the remaining immediate path a second pass would repeat
-          // the same relay round-trips with the same inputs.
-          const revalidatedMentionPubkeys =
-            preparedUpload || draft.preparedLinkPreviews || relaySideEffectsRan
-              ? await mentions.revalidateMentionPubkeys(mentionPubkeys)
-              : admittedMentionPubkeys;
+          // enrollment), or simply enough elapsed time that the earlier answer
+          // is no longer current — since authorization could have been revoked
+          // during the gap. On the remaining immediate path a second pass would
+          // repeat the same relay round-trips with the same inputs.
+          const revalidatedMentionPubkeys = shouldRevalidateMentionsAtPublish({
+            hasDeferredUpload: preparedUpload != null,
+            hasDeferredLinkPreviews: draft.preparedLinkPreviews != null,
+            relaySideEffectsRan,
+            msSinceAdmission: performance.now() - admittedAtMs,
+          })
+            ? await mentions.revalidateMentionPubkeys(mentionPubkeys)
+            : admittedMentionPubkeys;
           if (signal?.aborted || isSendCancelled()) return;
           const finalTagsWithAgentAddress = [
             ...finalOutgoingTags,

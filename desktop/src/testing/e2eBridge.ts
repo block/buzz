@@ -316,6 +316,11 @@ type E2eConfig = {
     addAgentToHuddleError?: string;
     /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
     huddleStateReadDelayMs?: number;
+    /** Delay (ms) for `sync_agents_to_active_huddle` so e2e tests can hold the
+     *  send path open across a leg that writes nothing to the relay (no active
+     *  huddle) and revoke a mention mid-hold.
+     *  Releasable early via `__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__()`. */
+    syncAgentsToActiveHuddleDelayMs?: number;
     /** Delay companion creation to expose the newly-started huddle handoff state. */
     openHuddleWindowDelayMs?: number;
     /** Delay the native start result after membership arrives in the channel list. */
@@ -1519,6 +1524,10 @@ declare global {
      *  armed `startManagedAgentErrors` rejection) without waiting out the
      *  delay. Returns the number of holds flushed. */
     __BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__?: () => number;
+    /** Release every `sync_agents_to_active_huddle` currently held behind
+     *  `syncAgentsToActiveHuddleDelayMs`, letting it resolve without waiting
+     *  out the delay. Returns the number of holds flushed. */
+    __BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__?: () => number;
     /** Hold the next channel read until released. */
     __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
     /** Disarm the latch and release the held channel read, if any. */
@@ -1656,6 +1665,11 @@ let deferredThreadRepliesQueue: Array<() => void> = [];
 // start across a community round-trip needs the hold long enough to be
 // deterministic AND a way to settle it on demand afterwards.
 let heldManagedAgentStartReleases: Array<() => void> = [];
+// Huddle agent syncs currently held behind `syncAgentsToActiveHuddleDelayMs`,
+// releasable early via `__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__()`. The hold
+// must outlast the mid-send mutation a spec injects, then settle on demand
+// rather than on a timer, so the publish never races the injection.
+let heldHuddleAgentSyncReleases: Array<() => void> = [];
 let cancelledMediaUploadIds = new Set<string>();
 let cancelledMediaFetchIds = new Set<string>();
 let mockMediaFetchControllers = new Map<string, AbortController>();
@@ -11557,6 +11571,12 @@ export function maybeInstallE2eTauriMocks() {
     for (const release of held) release();
     return held.length;
   };
+  heldHuddleAgentSyncReleases = [];
+  window.__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__ = () => {
+    const held = heldHuddleAgentSyncReleases.splice(0);
+    for (const release of held) release();
+    return held.length;
+  };
   deferNextChannelsRead = false;
   deferredChannelsReadResolve = null;
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
@@ -11991,6 +12011,24 @@ export function maybeInstallE2eTauriMocks() {
           channelId?: string;
           agentPubkeys?: string[];
         };
+        const syncDelayMs =
+          activeConfig?.mock?.syncAgentsToActiveHuddleDelayMs ?? 0;
+        if (syncDelayMs > 0) {
+          await new Promise<void>((resolve) => {
+            let settled = false;
+            const release = () => {
+              if (settled) return;
+              settled = true;
+              window.clearTimeout(timer);
+              heldHuddleAgentSyncReleases = heldHuddleAgentSyncReleases.filter(
+                (held) => held !== release,
+              );
+              resolve();
+            };
+            const timer = window.setTimeout(release, syncDelayMs);
+            heldHuddleAgentSyncReleases.push(release);
+          });
+        }
         if (
           !mockHuddle ||
           !request.channelId ||

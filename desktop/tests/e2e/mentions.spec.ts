@@ -2321,6 +2321,115 @@ test("sends that enroll agents into an active huddle revalidate at the publish b
   );
 });
 
+test("a send held open by a no-write step still revalidates at the publish boundary", async ({
+  page,
+}) => {
+  // The three named triggers enumerate the awaited steps known to reach the
+  // relay; the staleness bound covers the ones they cannot name. Here the only
+  // thing separating the authorization pass from the publish is the huddle
+  // sync — which with no active huddle writes nothing and returns
+  // `matched_active_huddle: false`, so no named trigger fires — held open long
+  // enough for a revocation to land. The p tag must still be stripped.
+  await installMockBridge(page, {
+    // Released on demand below; long enough that it is never waited out.
+    syncAgentsToActiveHuddleDelayMs: 45_000,
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  // Already a member, so readiness short-circuits: no access-policy read, no
+  // membership write, no wake.
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+  await expect(input).toHaveText("@quinn hello");
+
+  const baselineCommands = await readCommandLog(page);
+  await page.getByTestId("send-message").click();
+
+  // The pre-side-effect pass has admitted quinn; the huddle sync now holds the
+  // publish open. Revoke before releasing, so the ordering is deterministic by
+  // construction rather than by timing.
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "revalidate_relay_agents"),
+    )
+    .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 1);
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [pubkey];
+  }, ALLOWLIST_RELAY_AGENT_PUBKEY);
+
+  // The send is parked on the held sync, so this only widens a gap that is
+  // already open — it pins the admission-to-publish distance past the
+  // staleness bound on any machine.
+  await page.waitForTimeout(400);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__?.() ?? 0,
+      ),
+    )
+    .toBeGreaterThan(0);
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .not.toBeNull();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
+  expect(commandCount(commands, "sync_agents_to_active_huddle")).toBe(
+    commandCount(baselineCommands, "sync_agents_to_active_huddle") + 1,
+  );
+  // The second pass was owed to elapsed time alone: nothing on this leg wrote
+  // relay state, which is what makes it invisible to the named triggers.
+  for (const command of [
+    "add_channel_members",
+    "attach_managed_agent",
+    "update_managed_agent",
+    "start_managed_agent",
+  ]) {
+    expect(commandCount(commands, command)).toBe(
+      commandCount(baselineCommands, command),
+    );
+  }
+});
+
 test("selected relay agents are invited as bots before sending", async ({
   page,
 }) => {
