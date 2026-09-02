@@ -221,7 +221,9 @@ On WebSocket upgrade:
 3. Complete NIP-42 handshake; validate AUTH event, extract `k`.
 4. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
    [FI-TRACE-ASSERTION-KEY-MISMATCH]
-5. Admit the connection.  The session's authority deadline is the minimum of all
+5. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
+   `authorization_denied`.  [FI-TRACE-DENY-SET]
+6. Admit the connection.  The session's authority deadline is the minimum of all
    `authority_deadlines`; see Session policy.
 
 ## Session policy
@@ -268,51 +270,70 @@ does not imply key revocation or identity loss; that is the issuer's domain.
 The assertion issuer can terminate live relay sessions for a specific public key via an
 authenticated `disconnect` call.
 
-### Semantics (session-only)
+### Semantics (deny-until-TTL)
 
-A disconnect call causes the relay to close all live WebSocket connections
-whose proven `k` equals the target pubkey.  This is a **session-only**
-operation: it closes existing connections but does not prevent the key from
-reconnecting.  After disconnection, a client holding a still-valid JWT can
-reconnect immediately.
+A disconnect call causes the relay to:
 
-> **Non-normative note — open product question (session-only vs deny-until-TTL):**
+1. Close all live WebSocket connections whose proven `k` equals the target
+   pubkey, synchronously.
+2. Insert a **deny entry** keyed by `(iss, target_pubkey)` into the relay's
+   in-memory deny set, with an absolute expiry of `until` (a Unix timestamp
+   supplied in the command body; see Request below).  Any subsequent connection
+   or admission attempt for that pubkey under the same issuer is denied
+   `authorization_denied` until `now >= until`.
+
+The deny set is held **in relay memory only** — no durable storage, no schema
+changes.  A relay restart MAY forget active deny entries.  The residual exposure
+after a restart is bounded by the remaining assertion TTL
+(`max(0, min(exp, iat + maximum_assertion_age) - now)`), which is finite by
+the assertion contract.  [FI-TRACE-DENY-SET]
+
+The relay MUST bound the deny set size.  When the deny set is at capacity, the
+relay MUST NOT silently drop the incoming deny entry; it MUST reject the command
+with `503` so the adapter knows the entry was not recorded.  Implementations
+SHOULD use an LRU or TTL-expiry policy to age out entries before reaching the
+hard cap.
+
+The `until` timestamp MUST NOT exceed the maximum possible remaining assertion
+validity for any assertion the issuer could currently mint: the relay MUST
+enforce `until <= now + maximum_assertion_age` for this issuer policy.  An
+`until` that exceeds this ceiling is rejected `400`.  Supplying an
+`until` in the past is a no-op disconnect (sessions are still closed, deny entry
+is immediately expired); this is not an error.
+
+> **Note — adopted position (session-only vs deny-until-TTL):**
 >
-> The session-only model means a revoked user retains access until their
-> assertion's effective authority expires.  After a successful disconnect call
-> (all matching sessions closed synchronously), there is no surviving
-> old-session window.  If the issuer also stops issuing new assertions at
-> that point, cumulative residual access is bounded by:
+> The session-only model closes existing connections but places no
+> protocol-level bound on reconnection.  For session-only, if the issuer also
+> stops issuing new assertions after a disconnect call, cumulative residual
+> access is bounded by:
 >
 > ```
 > max(0, min(exp, iat + maximum_assertion_age) - now)
 > ```
 >
 > `max_connection_lifetime_seconds` only partitions that interval into
-> individual sessions; it does not shorten the total window.  A snapshot
-> refresh failure, hard-deadline expiry without key replacement, or signing-key
-> removal can terminate access earlier, but these are not reliable protocol-level
-> bounds: the JWKS snapshot deadline renews on each refresh even when content is
-> unchanged, so it does not cap cumulative access.  If the issuer
-> continues issuing new assertions after the disconnect call, cumulative
-> access extends indefinitely — the session-only protocol places no
-> protocol-level bound on that case.
+> individual sessions; it does not shorten the total window.  If the issuer
+> continues issuing new assertions, cumulative access extends indefinitely.
 >
-> If the disconnect call is asynchronous or best-effort, the spec would need
-> to define a completion-bound contract; the current normative text assumes
-> synchronous close.
+> The **deny-until-TTL** model closes this reconnect window.  The relay holds a
+> memory-resident deny set keyed by `(iss, pubkey)`, with absolute expiry
+> carried by the issuer as `until` in the disconnect command.  Any admission
+> attempt for that key is denied until the entry expires.  The issuer must boot
+> the deny TTL to outlast the longest live assertion it may have already
+> issued; otherwise an unexpired assertion lets the client back in the moment
+> the entry expires.
 >
-> The alternative is a **deny-until-TTL** model: the relay holds a
-> memory-resident deny-list entry for the pubkey keyed to the issuer's stated
-> TTL, and any reconnect attempt for that key is denied `authorization_denied`
-> until the entry expires.  This eliminates the reconnect window at the cost of
-> relay in-memory state and a TTL-propagation contract between issuer and relay.
+> The deny set is RAM-cache, not a database — the same operational posture as
+> the JWKS snapshot.  A relay restart clears the set; the adapter, as the
+> durable system of record for revocations, SHOULD re-push still-active denies
+> when it observes a relay restart (same publish/cache pattern as JWKS).  A
+> fresh relay MAY consult the issuer before first admissions to close the
+> seconds-wide startup race; this is non-normative.
 >
-> This document intentionally leaves that decision unresolved.  The current
-> normative text describes session-only.  If deny-until-TTL is chosen, Section 6
-> must be revised to add: the TTL parameter on the disconnect call, the
-> deny-list data structure (keyed by pubkey, value = absolute expiry), the
-> deny-list check at admission (step 4), and the expiry/eviction rule.
+> This design was chosen because session-only disconnection must outlast
+> the live socket to mean anything as a revocation primitive; a self-expiring
+> RAM entry preserves the zero-persistence guarantee while closing the window.
 
 ### Transport
 
@@ -345,6 +366,7 @@ The command JWT MUST carry the following claims:
 | `path` | Exactly `"/api/nip-fi/disconnect"` (literal string).  Binds the command to the endpoint. |
 | `cmd` | Exactly `"disconnect"` (literal string).  Operation selector. |
 | `target_pubkey` | Lowercase hexadecimal encoding of the target 32-byte Nostr public key — the same encoding required for the assertion `nostr_pubkey` claim. |
+| `until` | Unix timestamp (NumericDate) at which the deny entry expires.  MUST NOT exceed `now + maximum_assertion_age` for this issuer policy.  The relay validates this ceiling; a value that exceeds it rejects `400`. |
 
 The `maximum_command_age` policy knob is a required positive finite
 configuration per authorized issuer, with a normative upper bound of
@@ -376,23 +398,28 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   assert claims.path   == request_path   or DENY(evidence_rejected)
   assert claims.cmd    == "disconnect"   or DENY(evidence_rejected)
   target_k := ParseHexKey(claims.target_pubkey) or DENY(evidence_rejected)
+  until := claims.until or DENY(evidence_rejected)
 
-  // 4. Principal authorization (pure check — no side effects)
+  // 4. Validate until ceiling
+  deny_ceiling := now + policy.maximum_assertion_age
+  assert until <= deny_ceiling or REJECT(400)  // out-of-range until, not an auth failure
+
+  // 5. Principal authorization (pure check — no side effects)
   AssertAuthorizedIssuerPrincipal(claims.iss, claims.sub) or DENY(authorization_denied)
 
-  // 5. Signed-target / request-body agreement (pure check — no side effects)
+  // 6. Signed-target / request-body agreement (pure check — no side effects)
   assert target_k == request_body_pubkey or DENY(authorization_denied)
 
-  // 6. Atomically reserve jti — final admission step, immediately before side effects.
+  // 7. Atomically reserve jti — final admission step, immediately before side effects.
   // The reservation is keyed by (iss, jti) and held until the command's
   // effective expiry: min(exp, iat + maximum_command_age).  This step MUST
   // be the last mutation before disconnect side effects; performing it before
-  // steps 4 or 5 would burn the signed command identity on failed-authorization
+  // steps 5 or 6 would burn the signed command identity on failed-authorization
   // or mismatched-body requests, violating the fail-closed contract.
   effective_expiry := min(claims.exp, claims.iat + policy.maximum_command_age)
   AtomicReserveJti(claims.iss, claims.jti, effective_expiry) or DENY(authorization_denied)
 
-  return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub))
+  return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub), until=until)
 ```
 
 Any failure at any step is fail-closed: no side effects occur and the relay
@@ -408,14 +435,17 @@ POST /api/nip-fi/disconnect HTTP/1.1
 Nostr-Federated-Identity: Bearer <compact-command-JWS>
 Content-Type: application/json
 
-{"pubkey": "<lowercase-hex-32-byte-pubkey>"}
+{"pubkey": "<lowercase-hex-32-byte-pubkey>", "until": <unix-timestamp>}
 ```
 
 The relay calls `VerifyCommandJwt` passing the request method, path, and
 body `pubkey` field; any failure denies per the rejection table.  On success,
 the relay closes all live connections whose proven `k` equals
-`CommandResult.target_pubkey`.  An unknown or unprovable pubkey is not an
-error; the relay responds `200` with `{"disconnected": 0}`.
+`CommandResult.target_pubkey` and inserts a deny entry for `(iss, target_pubkey)`
+with expiry `CommandResult.until`.  An unknown or unprovable pubkey is not an
+error; the relay responds `200` with `{"disconnected": 0}`.  An `until` value in
+the past is not an error; sessions are closed and the deny entry expires
+immediately.
 
 ### Response
 
@@ -423,7 +453,8 @@ error; the relay responds `200` with `{"disconnected": 0}`.
 |---|---|---|
 | Authorized; action taken or no-op | `200` | `{"disconnected": <n>}` where `n` is the count of sessions closed |
 | Missing or invalid command JWT | `401` / `403` | Per the rejection table |
-| Malformed request body | `400` | `bad request\n` |
+| Malformed request body or `until` exceeds ceiling | `400` | `bad request\n` |
+| Deny set at capacity | `503` | `deny set full\n` |
 
 ## Rejection and privacy
 
@@ -435,7 +466,7 @@ exception and reveals only that a required dependency is unreadable.
 |---|---|---|---|
 | assertion or proof absent | `missing_evidence` | `auth-required: authentication required` | `401`; `WWW-Authenticate: Nostr`; `Content-Type: text/plain; charset=utf-8`; body `authentication required\n` |
 | malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; body `evidence rejected\n` |
-| assertion–key mismatch; local policy denial; issuer-initiated disconnect (session-only model) | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
+| assertion–key mismatch; local policy denial; active deny-set entry for pubkey | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
 | required JWKS snapshot unreadable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
 
 A denial decided on a WebSocket upgrade is the HTTP response in place of `101`.
@@ -473,11 +504,18 @@ A relay SHOULD advertise core support in NIP-11 as:
     "core": "client-attached",
     "assertion_freshness": {
       "class": "offline-jwt",
-      "maximum_residual_upstream_revocation_seconds": null
+      "maximum_residual_upstream_revocation_seconds": <seconds>
     }
   }
 }
 ```
+
+where `maximum_residual_upstream_revocation_seconds` SHOULD be set to the relay's
+configured `maximum_assertion_age` ceiling — the maximum duration between a
+successful disconnect call and full denial of any still-live assertion.  This
+value is non-null because the deny-until-TTL model provides a protocol-level
+bound: the issuer supplies an `until` timestamp and the relay enforces the
+ceiling at command time.
 
 Discovery MUST NOT state issuer URLs, audiences, claim names, tenant IDs, or
 deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
@@ -494,6 +532,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-JWKS-REMOVE` | Connections verified under a removed key deny on next revalidation or reconnect. |
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
+| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions and does not deny future admissions; a deny-set-full command is rejected `503` without closing sessions. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal `sub` values under different `iss` values remain distinct identities. |
@@ -521,25 +560,23 @@ key replacement, or signing-key removal).  Stopping issuance prevents minting
 assertions that extend this window; it does not invalidate already-issued
 assertions.  If the issuer continues issuing assertions, access continues.
 
-For the session-only disconnect model (issuer issues a successful disconnect
-call that closes all matching sessions synchronously), there is no surviving
-old-session window.  If the issuer also stops issuing new assertions at that
-point, cumulative residual access is bounded by:
+For the deny-until-TTL disconnect model (issuer issues a successful disconnect
+call with an `until` timestamp), the relay inserts a deny entry for the target
+pubkey with expiry `until` and closes all matching sessions synchronously.  Any
+subsequent admission attempt for that pubkey is denied `authorization_denied`
+until `now >= until`.  The `until` ceiling enforced by the relay is
+`now + maximum_assertion_age`, bounding the maximum residual exposure to the
+maximum remaining validity of any assertion the issuer could have already
+minted.  The issuer SHOULD set `until` to outlast
+the longest still-live assertion it has issued to ensure no unexpired assertion
+slides through the expiry boundary.
 
-```
-max(0, min(exp, iat + maximum_assertion_age) - now)
-```
-
-`max_connection_lifetime_seconds` only partitions that interval into individual
-sessions; it does not shorten the total window.  A snapshot refresh failure,
-hard-deadline expiry without key replacement, or signing-key removal can
-terminate access earlier, but these are not reliable protocol-level bounds: the
-JWKS snapshot deadline renews on each refresh even when content is unchanged.
-If the issuer continues issuing new assertions after the disconnect call,
-cumulative access extends indefinitely — the session-only protocol places no
-protocol-level bound on that case.  See the non-normative note in the Admin
-disconnect section for the open product question on the deny-until-TTL
-alternative.
+A relay restart clears the in-memory deny set.  The adapter, as the durable
+system of record for revocations, SHOULD re-push still-active entries on
+observed restart.  The residual exposure window during the seconds-wide restart
+race is bounded by `max(0, min(exp, iat + maximum_assertion_age) - now)` — the
+same bound as issuer-stops-issuance without a deny call, and finite by the
+assertion contract.
 
 **SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
