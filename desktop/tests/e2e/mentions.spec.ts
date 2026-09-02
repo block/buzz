@@ -1190,6 +1190,84 @@ test("typing an unregistered @token before existing text is left alone", async (
   await expect(input).toHaveText("hello @zzq world");
 });
 
+test("wrapped channel references keep the icon on the first composer line", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await page.getByTestId("message-input-scroll").evaluate((element) => {
+    element.style.width = "74px";
+  });
+  await input.fill("#all-replies");
+
+  const channelChip = input.locator(".inline-chip-icon-channel", {
+    hasText: "all-replies",
+  });
+  await expect(channelChip).toBeVisible();
+  // CSSOM exposes pseudo-element styles but not their rendered box.
+  const cdp = await page.context().newCDPSession(page);
+  const { root } = await cdp.send("DOM.getDocument", {
+    depth: -1,
+    pierce: true,
+  });
+  const { nodeId } = await cdp.send("DOM.querySelector", {
+    nodeId: root.nodeId,
+    selector: ".rich-text-composer .inline-chip-icon-channel",
+  });
+  const { node } = await cdp.send("DOM.describeNode", { nodeId, depth: 1 });
+  const before = node.pseudoElements?.find(
+    (pseudo) => pseudo.pseudoType === "before",
+  );
+  if (!before) {
+    throw new Error("Channel chip is missing its generated icon");
+  }
+  const iconBox = await cdp.send("DOM.getBoxModel", { nodeId: before.nodeId });
+  const iconTop = iconBox.model.border[1];
+  await cdp.detach();
+  const geometry = await channelChip.evaluate((element) => {
+    const textNode = element.firstChild;
+    if (!(textNode instanceof Text)) {
+      throw new Error("Channel chip is missing its decorated text node");
+    }
+    const textRange = document.createRange();
+    textRange.selectNodeContents(textNode);
+    const rects = (source: DOMRectList) =>
+      Array.from(source, (rect) => ({
+        left: rect.left,
+        top: rect.top,
+      }));
+    const iconStyle = getComputedStyle(element, "::before");
+    const tokenProbe = document.createElement("span");
+    tokenProbe.style.cssText =
+      "position:fixed;width:var(--inline-chip-padding-inline)";
+    element.append(tokenProbe);
+    const tokenPadding = tokenProbe.getBoundingClientRect().width;
+    tokenProbe.remove();
+    return {
+      chipRects: rects(element.getClientRects()),
+      iconPosition: iconStyle.position,
+      iconTransform: iconStyle.transform,
+      tokenPadding,
+      textRects: rects(textRange.getClientRects()),
+    };
+  });
+  expect(geometry.chipRects).toHaveLength(2);
+  expect(geometry.textRects).toHaveLength(2);
+  expect(geometry.iconPosition).toBe("static");
+  expect(geometry.iconTransform).toBe("none");
+  expect(
+    geometry.textRects[0].left - geometry.chipRects[0].left,
+  ).toBeGreaterThan(geometry.tokenPadding);
+  expect(geometry.textRects[1].left - geometry.chipRects[1].left).toBeCloseTo(
+    geometry.tokenPadding,
+    0,
+  );
+  expect(iconTop - geometry.textRects[0].top).toBeCloseTo(2.5, 0);
+});
+
 test("channel references keep caret movement through the channel name", async ({
   page,
 }) => {
