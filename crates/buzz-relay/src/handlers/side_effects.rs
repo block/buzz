@@ -2424,7 +2424,12 @@ fn extract_p_tag(event: &Event) -> Option<Vec<u8>> {
             }
         }
     }
-    None
+    // The `nostr` crate's EventBuilder strips `p` tags that point at the
+    // event's own signer (self-mention dedup), so a client signing a
+    // self-targeted admin event (e.g. a bot joining a channel itself) can
+    // never emit the `p` tag. Treat a missing `p` tag as targeting the
+    // signer: self-join / self-leave semantics.
+    Some(event.pubkey.to_bytes().to_vec())
 }
 
 /// Extract the effective message author from a stored event.
@@ -3679,6 +3684,39 @@ mod tests {
                 && fields[1] == late_pubkey
                 && fields[3] == "owner"
         }));
+    }
+
+    #[test]
+    fn extract_p_tag_defaults_to_signer_when_absent() {
+        // nostr EventBuilder strips p tags that point at the signer
+        // (self-mention dedup), so a self-join kind:9000 arrives without
+        // one. The relay must treat the missing target as the signer.
+        let keys = nostr::key::Keys::generate();
+        let signer_hex = keys.public_key().to_hex();
+
+        let no_p = EventBuilder::new(nostr::Kind::Custom(9000), "")
+            .tags([
+                Tag::parse(["h", "49da54b4-999d-424f-aea1-1905f94b3f0a"]).unwrap(),
+                Tag::parse(["p", &signer_hex]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(
+            extract_p_tag(&no_p).map(|b| hex::encode(b)),
+            Some(signer_hex.clone()),
+            "absent p tag must default to the event signer (self-join semantics)"
+        );
+
+        let third_party = "de2cdbe6fccd93ecd5d2301437213d3d96ba078d2b776b88bd409de4f37ad346";
+        let with_p = EventBuilder::new(nostr::Kind::Custom(9000), "")
+            .tags([Tag::parse(["p", third_party]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(
+            extract_p_tag(&with_p).map(|b| hex::encode(b)),
+            Some(third_party.to_string()),
+            "explicit p tag must win over the signer default"
+        );
     }
 
     #[test]
