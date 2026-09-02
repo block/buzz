@@ -496,3 +496,27 @@ test("ordinary send may clean its untouched source even if navigation preceded o
   assert.equal(s.events("mark-sent").length, 1);
   assert.equal(s.options.contentRef.current, "B edit");
 });
+
+for (const upload of [false, true]) {
+  test(`publication failure remains visible and recoverable after invitation${upload ? " with media" : ""}`, async () => {
+    const s = await setup();
+    s.options.onSendRef.current = async () => {
+      throw new Error("relay rejected publication");
+    };
+    if (upload) {
+      s.control.attachments = [{ id: "queued-file", file: {} }];
+      await s.prompt();
+    }
+    await s.invite();
+    if (upload) {
+      await s.act(async () =>
+        s.control.uploadCallbacks.onComplete([], new AbortController().signal),
+      );
+    }
+    assert.equal(s.options.contentRef.current, TEXT);
+    assert.deepEqual(s.events("error"), [
+      ["error", "Message failed to send: relay rejected publication"],
+    ]);
+    assert.equal(s.result.current.isPreparingMentionSend, false);
+  });
+}
