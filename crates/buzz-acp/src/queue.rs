@@ -1374,6 +1374,25 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append the delivery contract, unconditionally, to every turn's prompt.
+///
+/// Plain session/assistant text is never auto-published to a Buzz channel —
+/// only an explicit `buzz messages send` call delivers a reply. Stronger
+/// models tend to infer this convention from the surrounding CLI-oriented
+/// context; others don't, and a turn can complete cleanly (tokens billed, no
+/// error logged) while the reply is silently dropped because the model never
+/// called `buzz messages send`. Stating the contract explicitly, every turn,
+/// removes the need for the model to infer it. See block/buzz#2698.
+fn append_delivery_contract(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: Your plain text output in this session is NOT delivered \
+         to the user — it is never read by them. The only way a reply reaches \
+         them is an explicit `buzz messages send` (or equivalent CLI) call. If \
+         this turn is meant to produce a reply, you MUST call it before ending \
+         the turn.",
+    );
+}
+
 /// Append a new-thread reply instruction for a human-facing top-level mention.
 ///
 /// The triggering mention has no thread tags, so the agent's reply becomes the
@@ -2131,6 +2150,12 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         sections.push(framing.closing_note.to_string());
     }
 
+    // 5. Delivery contract — always present, regardless of scope or whether a
+    // reply anchor was resolved. See block/buzz#2698.
+    let mut delivery_contract = String::new();
+    append_delivery_contract(&mut delivery_contract);
+    sections.push(delivery_contract);
+
     sections
 }
 
@@ -2606,6 +2631,33 @@ mod tests {
         assert!(prompt.contains("Event ID:"));
         // Should NOT contain "--- Event 1 ---" (that's the multi-event format).
         assert!(!prompt.contains("--- Event 1 ---"));
+    }
+
+    /// The delivery contract (block/buzz#2698) must be stated on every turn,
+    /// regardless of scope — a model that never infers the "plain text isn't
+    /// delivered" convention should still be told explicitly every time.
+    #[test]
+    fn test_format_prompt_always_states_delivery_contract() {
+        let ch = Uuid::new_v4();
+        let event = make_event("Hello @agent");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        assert!(
+            prompt.contains("Your plain text output in this session is NOT delivered"),
+            "expected the delivery contract to be present in every prompt, got:\n{prompt}"
+        );
+        assert!(prompt.contains("buzz messages send"));
     }
 
     /// Helper: build a merged (cancel + re-prompt) batch with one cancelled
