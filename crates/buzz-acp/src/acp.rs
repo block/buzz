@@ -508,6 +508,12 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
+            // Buzz delivery credentials must reach Hermes even when the harness
+            // parent already carries its own copy in the inherited environment.
+            if key == "BUZZ_PRIVATE_KEY" || key == "BUZZ_RELAY_URL" {
+                cmd.env(key, value);
+                continue;
+            }
             if std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
@@ -3123,6 +3129,36 @@ mod tests {
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
         );
+    }
+
+    /// Hermes must receive BUZZ delivery env from persona `extra_env` even when
+    /// the harness parent already exports the same keys.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_forces_buzz_delivery_env_onto_agent_process() {
+        const PRIVATE_KEY: &str = "BUZZ_PRIVATE_KEY";
+        const RELAY_URL: &str = "BUZZ_RELAY_URL";
+        std::env::set_var(PRIVATE_KEY, "parent-value");
+        std::env::set_var(RELAY_URL, "ws://parent.example");
+
+        let observed_key = spawn_named_and_read_child_env(
+            "hermes-acp",
+            PRIVATE_KEY,
+            &[(PRIVATE_KEY.into(), "agent-nsec".into())],
+        )
+        .await;
+        let observed_relay = spawn_named_and_read_child_env(
+            "hermes-acp",
+            RELAY_URL,
+            &[(RELAY_URL.into(), "ws://relay.example".into())],
+        )
+        .await;
+
+        std::env::remove_var(PRIVATE_KEY);
+        std::env::remove_var(RELAY_URL);
+
+        assert_eq!(observed_key, "agent-nsec");
+        assert_eq!(observed_relay, "ws://relay.example");
     }
 
     #[tokio::test]
