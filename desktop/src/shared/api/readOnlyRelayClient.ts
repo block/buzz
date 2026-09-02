@@ -8,6 +8,7 @@ import {
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
+import { RelayAuthChallengeBuffer } from "@/shared/api/relayAuthChallengeBuffer";
 import {
   AUTH_TIMEOUT_MS,
   HISTORY_TIMEOUT_MS,
@@ -43,6 +44,7 @@ export class ReadOnlyRelayClient {
     reject: (error: Error) => void;
     timeout: number;
   } | null = null;
+  private authChallenges = new RelayAuthChallengeBuffer();
   private histories = new Map<string, PendingHistory>();
   private publishes = new Map<string, PendingPublish>();
   private generation = 0;
@@ -71,6 +73,7 @@ export class ReadOnlyRelayClient {
   disconnect(): void {
     const error = new Error("Read-only relay observer disconnected.");
     this.generation++;
+    this.authChallenges.clear();
 
     if (this.wsId !== null) {
       void closeWebSocket(this.wsId, "observer disconnected");
@@ -142,7 +145,7 @@ export class ReadOnlyRelayClient {
       config: {},
     });
 
-    await new Promise<void>((resolve, reject) => {
+    const authPromise = new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.authRequest = null;
         this.disconnect();
@@ -156,6 +159,11 @@ export class ReadOnlyRelayClient {
         timeout,
       };
     });
+    const eagerChallenge = this.authChallenges.take(generation);
+    if (eagerChallenge) {
+      this.dispatchAuthChallenge(eagerChallenge, generation);
+    }
+    await authPromise;
   }
 
   private requestHistory(
@@ -232,7 +240,7 @@ export class ReadOnlyRelayClient {
 
     const [type, ...rest] = data;
     if (type === "AUTH" && typeof rest[0] === "string") {
-      await this.handleAuthChallenge(rest[0], generation);
+      this.dispatchAuthChallenge(rest[0], generation);
       return;
     }
     if (type === "EVENT" && typeof rest[0] === "string" && rest[1]) {
@@ -254,6 +262,18 @@ export class ReadOnlyRelayClient {
     if (type === "EOSE" && typeof rest[0] === "string") {
       this.handleEose(rest[0]);
     }
+  }
+
+  private dispatchAuthChallenge(challenge: string, generation: number): void {
+    if (generation !== this.generation) return;
+    if (this.wsId === null || !this.authRequest) {
+      this.authChallenges.store(challenge, generation);
+      return;
+    }
+
+    void this.handleAuthChallenge(challenge, generation).catch(() => {
+      if (generation === this.generation) this.disconnect();
+    });
   }
 
   private async handleAuthChallenge(
