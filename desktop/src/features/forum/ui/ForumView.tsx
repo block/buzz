@@ -137,6 +137,8 @@ export function ForumView({
 
     return (
       <ForumThreadPanel
+        key={`${channel.id}:${selectedPostId}`}
+        postId={selectedPostId}
         canDeletePost={canDeleteExpandedPost}
         currentPubkey={effectiveCurrentPubkey}
         isDeletingPost={deletePostMutation.isPending}
@@ -176,6 +178,7 @@ export function ForumView({
             autocompleteBelow
             channelId={channel.id}
             channelType="forum"
+            draftKey={`forum:${channel.id}`}
             isSending={createPostMutation.isPending}
             onCancel={() => setIsComposerOpen(false)}
             onSubmit={async (content, mentionPubkeys, mediaTags) => {

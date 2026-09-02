@@ -991,7 +991,19 @@ function MessageComposerImpl({
           </form>
         </div>
       </footer>
-      <NonMemberMentionDialog {...mentionSendFlow.nonMemberPromptProps} />
+      <NonMemberMentionDialog
+        {...mentionSendFlow.nonMemberPromptProps}
+        onRestoreFocus={() => {
+          if (
+            effectiveDraftKeyRef.current === effectiveDraftKey &&
+            richText.editor &&
+            !richText.editor.isDestroyed &&
+            richText.editor.view.dom.isConnected
+          ) {
+            richText.focus();
+          }
+        }}
+      />
       {linkEditor.card}
       {linkEditor.dialog}
     </>

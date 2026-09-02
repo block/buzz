@@ -28,6 +28,7 @@ type ForumThreadPanelProps = {
   isLoading: boolean;
   isSendingReply: boolean;
   channelId: string;
+  postId: string;
   currentPubkey?: string;
   profiles?: UserProfileLookup;
   onBack: () => void;
@@ -146,6 +147,7 @@ export function ForumThreadPanel({
   isLoading,
   isSendingReply,
   channelId,
+  postId,
   currentPubkey,
   profiles,
   onBack,
@@ -334,6 +336,7 @@ export function ForumThreadPanel({
         <ForumComposer
           channelId={channelId}
           channelType="forum"
+          draftKey={`thread:${postId}`}
           isSending={isSendingReply}
           onSubmit={onReply}
           placeholder="Reply to this post..."

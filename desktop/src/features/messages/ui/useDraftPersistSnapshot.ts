@@ -70,7 +70,7 @@ type UseDraftPersistLifecycleResult = {
   /** Shared key intent; later visits can revoke a captured continuation. */
   getComposerRevision: () => number;
   /** Optimistic send/recovery is not an authored edit or authoritative deletion. */
-  runComposerUpdate: (update: () => void) => void;
+  runComposerUpdate: (update: () => void, pendingImeta?: ImetaMedia[]) => void;
   /**
    * Record the latest authored editor content. Empty content is persisted
    * immediately and remains authoritative across composer remounts until a
@@ -155,15 +155,21 @@ export function useDraftPersistLifecycle({
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
   const emptyContentIsAuthoritativeRef = React.useRef(false);
   const isRestoringContentRef = React.useRef(false);
-  const runComposerUpdate = React.useCallback((update: () => void) => {
-    const wasRestoring = isRestoringContentRef.current;
-    isRestoringContentRef.current = true;
-    try {
-      update();
-    } finally {
-      isRestoringContentRef.current = wasRestoring;
-    }
-  }, []);
+  const runComposerUpdate = React.useCallback(
+    (update: () => void, pendingImeta?: ImetaMedia[]) => {
+      // Recovery may notify a mounted source immediately before it unmounts.
+      // Snapshot media synchronously, just as the initial restore below does.
+      if (pendingImeta) pendingImetaForPersistRef.current = pendingImeta;
+      const wasRestoring = isRestoringContentRef.current;
+      isRestoringContentRef.current = true;
+      try {
+        update();
+      } finally {
+        isRestoringContentRef.current = wasRestoring;
+      }
+    },
+    [],
+  );
   const restoredQueuedAttachmentsRef = React.useRef<QueuedMediaAttachment[]>(
     [],
   );

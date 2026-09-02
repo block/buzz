@@ -26,23 +26,28 @@ export function useForumMentionPreparation(
   const [error, setError] = React.useState<string | null>(null);
   const [isInviting, setIsInviting] = React.useState(false);
   const pendingRef = React.useRef<PendingInvite | null>(null);
-  const invitingRef = React.useRef(false);
+  const invitingRef = React.useRef<PendingInvite | null>(null);
+  const attemptRef = React.useRef(0);
   const activeChannelRef = React.useRef(channelId);
   activeChannelRef.current = channelId;
   const mountedRef = React.useRef(false);
 
   const dismiss = React.useCallback(() => {
     const draft = pendingRef.current;
+    attemptRef.current += 1;
+    invitingRef.current = null;
+    setIsInviting(false);
     pendingRef.current = null;
     setPending(null);
     setError(null);
     draft?.resolve(false);
   }, []);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      attemptRef.current += 1;
       pendingRef.current?.resolve(false);
       pendingRef.current = null;
     };
@@ -53,7 +58,12 @@ export function useForumMentionPreparation(
 
   const prepareMentionPubkeys = React.useCallback(
     async (pubkeys: string[], content: string) => {
+      const attempt = ++attemptRef.current;
       const capturedChannelId = channelId;
+      const isCurrent = () =>
+        mountedRef.current &&
+        activeChannelRef.current === capturedChannelId &&
+        attemptRef.current === attempt;
       const intendedAgentPubkeys = [
         ...pubkeys.filter(mentions.isAgentPubkey),
         ...mentions
@@ -90,19 +100,20 @@ export function useForumMentionPreparation(
         });
         if (!invited) return null;
       }
-      if (!mountedRef.current || activeChannelRef.current !== capturedChannelId)
-        return null;
+      if (!isCurrent()) return null;
       // The add mutation awaits membership invalidation. Publication still
       // requires a fresh authoritative directory/membership/policy read.
-      const validated = await mentions.revalidateMentionPubkeys(
-        pubkeys,
-        capturedChannelId,
-        { phase: "publish", intendedAgentPubkeys },
-      );
-      return mountedRef.current &&
-        activeChannelRef.current === capturedChannelId
-        ? validated
-        : null;
+      try {
+        const validated = await mentions.revalidateMentionPubkeys(
+          pubkeys,
+          capturedChannelId,
+          { phase: "publish", intendedAgentPubkeys },
+        );
+        return isCurrent() ? validated : null;
+      } catch (failure) {
+        if (!isCurrent()) return null;
+        throw failure;
+      }
     },
     [channelId, channelType, mentions],
   );
@@ -118,7 +129,7 @@ export function useForumMentionPreparation(
       mountedRef.current &&
       activeChannelRef.current === draft.channelId &&
       pendingRef.current === draft;
-    invitingRef.current = true;
+    invitingRef.current = draft;
     setIsInviting(true);
     setError(null);
     try {
@@ -150,8 +161,10 @@ export function useForumMentionPreparation(
             : "Could not invite members.",
         );
     } finally {
-      invitingRef.current = false;
-      if (mountedRef.current) setIsInviting(false);
+      if (invitingRef.current === draft) {
+        invitingRef.current = null;
+        if (mountedRef.current) setIsInviting(false);
+      }
     }
   }, [addMembers.mutateAsync, canInvite, mentions.revalidateMentionPubkeys]);
 
