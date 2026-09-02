@@ -68,8 +68,8 @@ export function resolveStartRuntimeForDefinition(
 
 /**
  * Where the started instance should run when the user picked something other
- * than plain local in the definition-create flow (B5). Absent intent =
- * today's local mapping, byte-identical.
+ * than plain local in the definition-create flow (B5). Absent intent uses the
+ * local mapping below: start now, with future launch-time fan-out opt-in.
  *
  * - `provider`: remote backend. Mirrors the legacy provider-mode create:
  *   no local ACP/agent/MCP commands are spawned, so none are set;
@@ -155,7 +155,9 @@ export async function buildInstanceInputForDefinition(
     model: persona.model ?? undefined,
     provider: persona.provider ?? undefined,
     spawnAfterCreate: true,
-    startOnAppLaunch: true,
+    // Start this deployment now, but require an explicit opt-in before every
+    // future Desktop launch retains a relay-listener process for it.
+    startOnAppLaunch: false,
     backend: { type: "local" },
   };
 }
