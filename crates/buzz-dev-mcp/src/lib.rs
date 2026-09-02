@@ -150,6 +150,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         "tree" => std::process::exit(tree::run(std::env::args().skip(1).collect())),
         "git-credential-nostr" => std::process::exit(git_credential_nostr::run()),
         "git-sign-nostr" => std::process::exit(git_sign_nostr::run()),
+        "git" => std::process::exit(buzz_git_identity::git_wrapper::run()),
         _ => {}
     }
 

@@ -536,6 +536,64 @@ fn resolve_global_fallback_when_no_persona_linked() {
     assert_eq!(provider.as_deref(), Some("global-provider"));
 }
 
+/// P1 (Carl): a user-supplied `GIT_CONFIG_*` entry — at any layer — must never
+/// reach `descriptor.env`, which `spawn_agent_child` writes onto the child
+/// *after* the relay credential-helper `GIT_CONFIG_*`. A surviving
+/// `GIT_CONFIG_COUNT=0` would orphan the helper (and in `user` mode no identity
+/// install re-stages it), erasing relay git auth. This drives the real
+/// six-layer resolver — the same path spawn and remote-deploy both consume —
+/// not a fresh `Command`, so it witnesses the actual Desktop→harness layering.
+#[test]
+fn git_config_stripped_from_every_env_layer_before_descriptor() {
+    // Seed the attacker value at all three user-settable layers: global,
+    // live persona, and per-agent overrides.
+    let mut persona = persona("p", Some("model"), Some("anthropic"));
+    persona.env_vars = [
+        ("GIT_CONFIG_COUNT".to_string(), "0".to_string()),
+        (
+            "GIT_CONFIG_KEY_0".to_string(),
+            "credential.helper".to_string(),
+        ),
+        ("BENIGN".to_string(), "persona".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let personas = vec![persona];
+
+    let mut record = bare_record();
+    record.persona_id = Some("p".to_string());
+    record.env_vars = [("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string())]
+        .into_iter()
+        .collect();
+
+    let global = GlobalAgentConfig {
+        env_vars: [("GIT_CONFIG_SYSTEM".to_string(), "/dev/null".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let runtime = super::super::known_acp_runtime("buzz-agent").expect("buzz-agent runtime");
+
+    let effective = super::super::readiness::resolve_effective_agent_env(
+        &record,
+        &personas,
+        Some(runtime),
+        &global,
+    );
+
+    for key in effective.env.keys() {
+        assert!(
+            !key.to_ascii_uppercase().starts_with("GIT_CONFIG"),
+            "descriptor env must not carry a user GIT_CONFIG* key, found `{key}`"
+        );
+    }
+    // Non-reserved overrides still flow through — the strip is surgical.
+    assert_eq!(
+        effective.env.get("BENIGN").map(String::as_str),
+        Some("persona")
+    );
+}
+
 /// All-None: no source provides model/provider → both must be None.
 /// Guards against a resolver that synthesizes phantom defaults.
 #[test]

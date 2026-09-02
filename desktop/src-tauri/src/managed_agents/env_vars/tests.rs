@@ -205,6 +205,50 @@ fn reserved_keys_include_relay_url() {
     assert!(merged.is_empty());
 }
 
+#[test]
+fn reserved_keys_include_git_config_family() {
+    // Buzz stages the relay credential helper and the agent identity/signing
+    // config into the child through the GIT_CONFIG_* indexed env family. A
+    // user override lands after the helper on the spawn command, so a single
+    // GIT_CONFIG_COUNT=0 (or any index collision) silently orphans it. The
+    // whole family — the bare name and every GIT_CONFIG_* var — must be
+    // stripped from persona/agent/global overrides.
+    for key in [
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_PARAMETERS",
+        // Case-insensitive: the shape the child getenv resolves is uppercase,
+        // but the validator/filter must not be fooled by a lowercased key.
+        "git_config_count",
+    ] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "0")]);
+        assert!(
+            merged_user_env(&BTreeMap::new(), &agent).is_empty(),
+            "{key} should be stripped from overrides"
+        );
+        assert!(
+            validate_user_env_keys(&map(&[(key, "0")])).is_err(),
+            "{key} should be rejected at save time"
+        );
+    }
+}
+
+#[test]
+fn git_config_reservation_does_not_catch_unrelated_names() {
+    // The prefix rule matches `GIT_CONFIG` and `GIT_CONFIG_*` only — a name
+    // that merely starts with those letters but is a distinct identifier
+    // (no underscore boundary) stays user-overridable.
+    for key in ["GIT_CONFIGURATION", "GIT_CONFIGX", "MY_GIT_CONFIG"] {
+        assert!(!is_reserved_env_key(key), "{key} must not be reserved");
+    }
+}
+
 // ── validate_user_env_keys ─────────────────────────────────────────
 
 #[test]

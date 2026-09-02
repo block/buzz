@@ -431,10 +431,22 @@ test-unit:
         # disabled_mode_still_requires_the_correct_host / _a_matching_origin.
         cargo nextest run -p buzz-relay --lib \
             -E 'test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)'
+        # git-sign-nostr is required by the buzz-acp process-level enforcement
+        # suite and the buzz-git-identity lib suite; build it once ahead of both.
+        cargo build -p git-sign-nostr
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
         cargo nextest run -p buzz-acp --lib
+        # Process-level installed-wrapper gate: exercises the real git-wrapper
+        # multicall entry path and verifies that push is refused end-to-end
+        # for unsigned commits, builtin-shadowing aliases, and deprecated-builtin
+        # aliases. These tests require unix and run on the CI unit-tests runner.
+        cargo nextest run -p buzz-acp --test git_identity_enforcement
+        # buzz-git-identity git wrapper unit tests: the push/commit author and
+        # signature guards that prevent identity bypass via git-replace,
+        # newline injection, config URL injection, and SSH-command hijack.
+        cargo nextest run -p buzz-git-identity --lib
     else
         ./scripts/run-tests.sh unit
     fi
