@@ -100,20 +100,15 @@ fn default_locale() -> String {
 // NIP-11 descriptor resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve the relay's `gif` descriptor from its NIP-11 document.
+/// Parse the `gif` descriptor from a decoded NIP-11 JSON document.
 ///
-/// Returns `(search_path, share_path)` as validated relay-relative strings.
-/// Fails with a clear `CliError` if:
-/// - the relay does not advertise `buzz-gif`
-/// - the provider is not `klipy`
-/// - either path is absent or fails the `safe_relay_path` check
-pub(crate) async fn resolve_gif_descriptor(
-    client: &BuzzClient,
+/// Shared between `resolve_gif_descriptor` (which fetches the document) and
+/// tests (which inject a synthetic document directly).  Separating the pure
+/// parse logic from the I/O call makes the descriptor gates directly testable
+/// without a fake HTTP server.
+pub(crate) fn parse_gif_descriptor_info(
+    info: &serde_json::Value,
 ) -> Result<(String, String), CliError> {
-    let raw = client.get_public("/info").await?;
-    let info: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("invalid NIP-11 response: {e}")))?;
-
     // Gate 1: `supported_extensions` must contain `"buzz-gif"`.
     let extensions = info
         .get("supported_extensions")
@@ -161,6 +156,22 @@ pub(crate) async fn resolve_gif_descriptor(
     }
 
     Ok((search, share))
+}
+
+/// Resolve the relay's `gif` descriptor from its NIP-11 document.
+///
+/// Returns `(search_path, share_path)` as validated relay-relative strings.
+/// Fails with a clear `CliError` if:
+/// - the relay does not advertise `buzz-gif`
+/// - the provider is not `klipy`
+/// - either path is absent or fails the `safe_relay_path` check
+pub(crate) async fn resolve_gif_descriptor(
+    client: &BuzzClient,
+) -> Result<(String, String), CliError> {
+    let raw = client.get_public("/info").await?;
+    let info: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("invalid NIP-11 response: {e}")))?;
+    parse_gif_descriptor_info(&info)
 }
 
 // ---------------------------------------------------------------------------
@@ -468,46 +479,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // resolve_gif_descriptor — pure parsing against a typed descriptor
+    // parse_gif_descriptor_info — production gate logic, no I/O
     // -----------------------------------------------------------------------
-
-    /// Parse a JSON NIP-11 fragment the same way `resolve_gif_descriptor` does,
-    /// returning `Ok((search, share))` or `Err(msg)`.  Extracted as a pure fn
-    /// so tests can drive the full gate logic without I/O.
-    fn parse_descriptor(info: &serde_json::Value) -> Result<(String, String), String> {
-        let extensions = info
-            .get("supported_extensions")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        if !extensions.iter().any(|&e| e == REQUIRED_EXTENSION) {
-            return Err(format!("missing {REQUIRED_EXTENSION}"));
-        }
-        let gif = info
-            .get("gif")
-            .ok_or_else(|| "no gif descriptor".to_string())?;
-        let provider = gif.get("provider").and_then(|v| v.as_str()).unwrap_or("");
-        if provider != REQUIRED_PROVIDER {
-            return Err(format!("wrong provider: {provider}"));
-        }
-        let search = gif
-            .get("search")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let share = gif
-            .get("share")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if !safe_relay_path(&search) {
-            return Err(format!("unsafe search path: {search:?}"));
-        }
-        if !safe_relay_path(&share) {
-            return Err(format!("unsafe share path: {share:?}"));
-        }
-        Ok((search, share))
-    }
 
     #[test]
     fn descriptor_missing_extension_is_rejected() {
@@ -515,10 +488,11 @@ mod tests {
             "supported_extensions": ["buzz-emoji"],
             "gif": { "provider": "klipy", "search": "/gifs/search", "share": "/gifs/share" }
         });
-        assert!(parse_descriptor(&info).is_err());
-        assert!(parse_descriptor(&info)
-            .unwrap_err()
-            .contains("missing buzz-gif"));
+        let err = parse_gif_descriptor_info(&info).unwrap_err();
+        assert!(
+            err.to_string().contains("buzz-gif"),
+            "error must mention buzz-gif, got: {err}"
+        );
     }
 
     #[test]
@@ -527,9 +501,11 @@ mod tests {
             "supported_extensions": ["buzz-gif"],
             "gif": { "provider": "tenor", "search": "/gifs/search", "share": "/gifs/share" }
         });
-        assert!(parse_descriptor(&info)
-            .unwrap_err()
-            .contains("wrong provider"));
+        let err = parse_gif_descriptor_info(&info).unwrap_err();
+        assert!(
+            err.to_string().contains("tenor"),
+            "error must mention the bad provider, got: {err}"
+        );
     }
 
     #[test]
@@ -538,9 +514,11 @@ mod tests {
             "supported_extensions": ["buzz-gif"],
             "gif": { "provider": "klipy", "search": "//attacker.example/x", "share": "/gifs/share" }
         });
-        assert!(parse_descriptor(&info)
-            .unwrap_err()
-            .contains("unsafe search path"));
+        let err = parse_gif_descriptor_info(&info).unwrap_err();
+        assert!(
+            err.to_string().contains("search path"),
+            "error must mention search path, got: {err}"
+        );
     }
 
     #[test]
@@ -549,9 +527,11 @@ mod tests {
             "supported_extensions": ["buzz-gif"],
             "gif": { "provider": "klipy", "search": "/gifs/search", "share": "/gifs/../admin" }
         });
-        assert!(parse_descriptor(&info)
-            .unwrap_err()
-            .contains("unsafe share path"));
+        let err = parse_gif_descriptor_info(&info).unwrap_err();
+        assert!(
+            err.to_string().contains("share path"),
+            "error must mention share path, got: {err}"
+        );
     }
 
     #[test]
@@ -560,7 +540,7 @@ mod tests {
             "supported_extensions": ["buzz-gif"],
             "gif": { "provider": "klipy", "search": "/gifs/search", "share": "/gifs/share" }
         });
-        let (search, share) = parse_descriptor(&info).unwrap();
+        let (search, share) = parse_gif_descriptor_info(&info).unwrap();
         assert_eq!(search, "/gifs/search");
         assert_eq!(share, "/gifs/share");
     }
