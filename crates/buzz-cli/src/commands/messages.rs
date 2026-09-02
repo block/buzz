@@ -373,10 +373,15 @@ pub async fn cmd_get_messages(
 
     // If specific kinds requested, override
     if let Some(k) = kinds {
-        let kind_list: Vec<u64> = k.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        if !kind_list.is_empty() {
-            filter["kinds"] = serde_json::json!(kind_list);
-        }
+        let kind_list: Vec<u64> = k
+            .split(',')
+            .map(|s| {
+                s.trim().parse::<u64>().map_err(|_| {
+                    CliError::Usage(format!("invalid kind value in --kinds: {:?}", s.trim()))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        filter["kinds"] = serde_json::json!(kind_list);
     }
 
     if let Some(b) = before {
@@ -1056,11 +1061,11 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        channel_id_from_event, cmd_get_messages, cmd_get_thread, event_mention_pubkeys,
+        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
+        missing_members, normalize_explicit_mentions, parse_event_id, parse_member_pubkeys,
+        parse_uuid, resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1568,6 +1573,46 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
-        assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+        assert_eq!(match_profiles_by_name(&events, "aArOn").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_messages_rejects_invalid_kinds() {
+        let client =
+            BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
+        let error = cmd_get_messages(
+            &client,
+            "123e4567-e89b-12d3-a456-426614174000",
+            None,
+            None,
+            None,
+            Some("abc"),
+            &crate::OutputFormat::Json,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::Usage(_)));
+        assert!(error.to_string().contains("invalid kind value in --kinds"));
+    }
+
+    #[tokio::test]
+    async fn get_messages_rejects_partially_invalid_kinds() {
+        let client =
+            BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
+        let error = cmd_get_messages(
+            &client,
+            "123e4567-e89b-12d3-a456-426614174000",
+            None,
+            None,
+            None,
+            Some("9,abc"),
+            &crate::OutputFormat::Json,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::Usage(_)));
+        assert!(error.to_string().contains("abc"));
     }
 }
