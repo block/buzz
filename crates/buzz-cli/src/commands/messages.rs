@@ -647,7 +647,9 @@ pub async fn cmd_send_message(
         ));
     }
 
-    // Upload files and build imeta tags
+    // Upload files and build imeta tags. Markdown form follows Desktop:
+    // images/video as inline media; generic files (zip/pdf/…) as plain links
+    // so FileCard can render download cards instead of broken images.
     let mut media_tags: Vec<Vec<String>> = Vec::new();
     let mut media_content = String::new();
     for file_path in &p.files {
@@ -655,14 +657,13 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        // Pass the full path so sanitize_filename can strip both separator styles
+        // and controls (same label contract as format_attachment_markdown / Desktop).
+        media_tags.push(crate::client::build_imeta_tag_with_filename(
+            &desc,
+            Some(file_path.as_str()),
+        ));
+        media_content.push_str(&crate::client::format_attachment_markdown(file_path, &desc));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
