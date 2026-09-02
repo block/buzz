@@ -45,10 +45,14 @@ impl TurnReplyCapture {
 
     fn push_chunk(&mut self, update: &serde_json::Value) {
         if let Some(message_id) = update.get("messageId").and_then(|value| value.as_str()) {
-            if self.message_id.as_deref() != Some(message_id) {
+            if self
+                .message_id
+                .as_deref()
+                .is_some_and(|current| current != message_id)
+            {
                 self.reset();
-                self.message_id = Some(message_id.to_owned());
             }
+            self.message_id = Some(message_id.to_owned());
         }
 
         let Some(text) = update

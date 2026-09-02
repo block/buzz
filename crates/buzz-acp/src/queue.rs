@@ -2066,7 +2066,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there. Top-level DMs remain unthreaded; DM replies preserve their thread.
     let reply_anchor = reply_destination_for_batch(batch, args.channel_info, args.profile_lookup)
         .and_then(|destination| destination.reply_to);
     sections.push(format_context_hints(

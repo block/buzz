@@ -2946,12 +2946,10 @@ pub async fn run_prompt_task(
                             );
                         }
                         log_stop_reason(&source, &StopReason::EndTurn);
-                        finish_turn_reply_fallback(
-                            &mut agent,
-                            &ctx.rest_client,
-                            reply_fallback.as_ref(),
-                        )
-                        .await;
+                        // The prompt future was dropped, so its actual stop reason
+                        // (end_turn, max_tokens, refusal, etc.) is unavailable.
+                        // Fail closed rather than risk publishing partial output.
+                        let _ = agent.acp.take_turn_reply();
                         if let PromptSource::Channel(scope) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
                             record_scope_delivery_success(
@@ -5174,7 +5172,7 @@ async fn post_agent_reply_fallback(
     let event = builder
         .sign_with_keys(&rest.keys)
         .map_err(|error| format!("sign failed: {error}"))?;
-    let event_id = event.id.clone();
+    let event_id = event.id;
     let event_id_hex = event_id.to_hex();
 
     let uncertain_reason = match tokio::time::timeout(
