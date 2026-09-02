@@ -1246,6 +1246,7 @@ dependencies = [
  "ort",
  "ort-sys",
  "rand 0.10.2",
+ "regex",
  "sentencepiece-model",
  "serde",
  "serde_json",
@@ -1253,6 +1254,7 @@ dependencies = [
  "sherpa-onnx",
  "symphonia",
  "tokenizers",
+ "zip 8.6.0",
 ]
 
 [[package]]
