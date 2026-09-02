@@ -20,6 +20,8 @@ type VoiceInputMode = "push_to_talk" | "voice_activity";
 type MicControlsProps = {
   /** Compact split-button treatment for the sidebar huddle card. */
   compact?: boolean;
+  showPttHint?: boolean;
+  onPttHintDismiss?: () => void;
   isMuted: boolean;
   onToggleMute: () => void;
   isPttMode: boolean;
@@ -93,6 +95,8 @@ function usePrefersReducedMotion(): boolean {
 
 export function MicControls({
   compact = false,
+  showPttHint = false,
+  onPttHintDismiss,
   isMuted,
   onToggleMute,
   isPttMode,
@@ -146,7 +150,7 @@ export function MicControls({
             "overflow-hidden border border-sidebar-border/80 bg-transparent text-sidebar-foreground/70 shadow-none",
         )}
       >
-        <Tooltip>
+        <Tooltip open={showPttHint ? true : undefined}>
           <TooltipTrigger asChild>
             <Button
               aria-disabled={micUnavailable}
@@ -161,6 +165,7 @@ export function MicControls({
               )}
               onClick={() => {
                 if (!micConnected) return;
+                if (showPttHint) onPttHintDismiss?.();
                 onToggleMute();
               }}
               size="icon"
@@ -178,7 +183,15 @@ export function MicControls({
             </Button>
           </TooltipTrigger>
           <TooltipContent className="buzz-huddle-tooltip" side="top">
-            {isPttMode && !micUnavailable && isEffectivelyMuted ? (
+            {showPttHint ? (
+              <span className="flex max-w-64 items-center gap-1.5">
+                <span>Hold</span>
+                <kbd className="rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">
+                  {pushToTalkShortcut}
+                </kbd>
+                <span>to talk — click to switch to open mic</span>
+              </span>
+            ) : isPttMode && !micUnavailable && isEffectivelyMuted ? (
               <span className="flex items-center gap-1.5">
                 <span>Click to unmute or hold</span>
                 <kbd className="rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">

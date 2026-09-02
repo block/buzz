@@ -22,6 +22,7 @@ import type { RelayEvent } from "@/shared/api/types";
 import { KIND_HUDDLE_REACTION } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
@@ -29,13 +30,14 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle, useHuddleLevels } from "../HuddleContext";
 import { useHuddleParticipantRoster } from "../hooks/useHuddleParticipantRoster";
+import { audioLinkNotice, type HuddleAudioLink } from "../lib/audioLink";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
-// Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
+// Mirrors HuddleState in src-tauri/src/huddle/state.rs.
 type HuddleState = {
   phase:
     | "idle"
@@ -44,6 +46,7 @@ type HuddleState = {
     | "connected"
     | "active"
     | "leaving";
+  audio_link: HuddleAudioLink;
   parent_channel_id: string | null;
   ephemeral_channel_id: string | null;
   huddle_thread_event_id: string | null;
@@ -71,9 +74,14 @@ const HUDDLE_STATE_FALLBACK_INTERVAL_MS = 30_000;
 const HUDDLE_MODEL_STATUS_INTERVAL_MS = 10_000;
 const HUDDLE_REACTION_NAME_MAX = 48;
 const HEADPHONES_HINT_SEEN_STORAGE_KEY = "buzz.huddle.headphones-hint-seen";
+const PTT_HINT_SEEN_STORAGE_KEY = "buzz.huddle.ptt-hint-seen";
 
 function hasSeenHeadphonesHint() {
-  return window.localStorage.getItem(HEADPHONES_HINT_SEEN_STORAGE_KEY) === "1";
+  return getStorageItem(HEADPHONES_HINT_SEEN_STORAGE_KEY) === "1";
+}
+
+function hasSeenPttHint() {
+  return getStorageItem(PTT_HINT_SEEN_STORAGE_KEY) === "1";
 }
 
 function isVisibleHuddleState(state: HuddleState | null) {
@@ -188,6 +196,8 @@ export function HuddleBar({
   const [headphonesHintDismissed, setHeadphonesHintDismissed] = React.useState(
     hasSeenHeadphonesHint,
   );
+  const [pttHintDismissed, setPttHintDismissed] =
+    React.useState(hasSeenPttHint);
   const [isLeaving, setIsLeaving] = React.useState(false);
   const [showAddAgent, setShowAddAgent] = React.useState(false);
   const [agentAddError, setAgentAddError] = React.useState<string | null>(null);
@@ -330,8 +340,12 @@ export function HuddleBar({
   const mainHadActiveHuddleRef = React.useRef(false);
 
   const dismissHeadphonesHint = React.useCallback(() => {
-    window.localStorage.setItem(HEADPHONES_HINT_SEEN_STORAGE_KEY, "1");
+    setStorageItem(HEADPHONES_HINT_SEEN_STORAGE_KEY, "1");
     setHeadphonesHintDismissed(true);
+  }, []);
+  const dismissPttHint = React.useCallback(() => {
+    setStorageItem(PTT_HINT_SEEN_STORAGE_KEY, "1");
+    setPttHintDismissed(true);
   }, []);
 
   React.useEffect(() => {
@@ -502,6 +516,7 @@ export function HuddleBar({
   const hasAvailableMic = micConnected;
   const ttsEnabled = barState.tts_enabled;
   const transcriptionEnabled = barState.transcription_enabled;
+  const audioLinkBanner = audioLinkNotice(barState.audio_link);
   // Self-removing detection: remote-peer audio plays through native rodio
   // today (outside the WebView render graph), so the browser's AEC has no
   // far-end reference. The AEC follow-up PR flips this constant in the
@@ -582,6 +597,28 @@ export function HuddleBar({
       )}
     >
       <div className="flex min-w-0 items-center gap-3 overflow-hidden">
+        {/* Audio link banner — Rust is redialing, or gave up. */}
+        {audioLinkBanner && (
+          <output
+            role={audioLinkBanner.tone === "error" ? "alert" : "status"}
+            className={cn(
+              "flex min-w-0 items-center gap-1.5 rounded px-2 py-1 text-xs",
+              audioLinkBanner.tone === "error"
+                ? "bg-destructive/10 text-destructive"
+                : "text-muted-foreground",
+            )}
+          >
+            <span
+              className={cn(
+                "max-w-[220px] truncate",
+                audioLinkBanner.tone === "info" && "animate-pulse",
+              )}
+            >
+              {audioLinkBanner.message}
+            </span>
+          </output>
+        )}
+
         {/* Error banner */}
         {huddleError && (
           <div
@@ -660,6 +697,14 @@ export function HuddleBar({
 
         <div className="flex shrink-0 items-center gap-2">
           <MicControls
+            showPttHint={
+              mode === "main" &&
+              isPttMode &&
+              isMuted &&
+              !pttHintDismissed &&
+              !isDrawerClosing
+            }
+            onPttHintDismiss={dismissPttHint}
             isMuted={isMuted}
             onToggleMute={toggleMute}
             isPttMode={isPttMode}

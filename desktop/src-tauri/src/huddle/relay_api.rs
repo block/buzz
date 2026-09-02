@@ -69,13 +69,76 @@ fn build_audio_auth_event(
         .map_err(|e| format!("sign: {e}"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudioRelayConnectError {
+    code: Option<String>,
+    message: String,
+}
+
+impl AudioRelayConnectError {
+    pub(crate) fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    pub(crate) fn from_relay_payload(value: &serde_json::Value) -> Self {
+        Self {
+            code: value["code"].as_str().map(str::to_string),
+            message: value["message"]
+                .as_str()
+                .unwrap_or("unknown relay error")
+                .to_string(),
+        }
+    }
+}
+
+impl From<String> for AudioRelayConnectError {
+    fn from(message: String) -> Self {
+        Self {
+            code: None,
+            message,
+        }
+    }
+}
+
+impl From<&str> for AudioRelayConnectError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+impl std::fmt::Display for AudioRelayConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code.as_deref() {
+            Some(code) => write!(
+                formatter,
+                "audio relay auth error [{code}]: {}",
+                self.message
+            ),
+            None => formatter.write_str(&self.message),
+        }
+    }
+}
+
+fn format_audio_relay_error(value: &serde_json::Value) -> AudioRelayConnectError {
+    AudioRelayConnectError::from_relay_payload(value)
+}
+
+fn parse_audio_roster_peer(peer: &serde_json::Value) -> Option<(u8, String, u8)> {
+    Some((
+        u8::try_from(peer["peer_index"].as_u64()?).ok()?,
+        peer["pubkey"].as_str()?.to_string(),
+        // Legacy relays omit the occupancy epoch.
+        u8::try_from(peer["epoch"].as_u64().unwrap_or(0)).ok()?,
+    ))
+}
+
 async fn connect_authenticated_audio_socket(
     channel_id: &str,
     parent_channel_id: Option<&str>,
     relay_url: &str,
     keys: &nostr::Keys,
     auth_tag_json: Option<&str>,
-) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String, u8)>), String> {
+) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String, u8)>), AudioRelayConnectError> {
     use nostr::JsonUtil;
 
     let ws_url = format!("{relay_url}/huddle/{channel_id}/audio");
@@ -134,19 +197,7 @@ async fn connect_authenticated_audio_socket(
                             let peers = value["peers"]
                                 .as_array()
                                 .map(|peers| {
-                                    peers
-                                        .iter()
-                                        .filter_map(|peer| {
-                                            Some((
-                                                peer["peer_index"].as_u64()? as u8,
-                                                peer["pubkey"].as_str()?.to_string(),
-                                                // Absent `epoch` (legacy relay) degrades
-                                                // to 0 so the fence becomes a no-op rather
-                                                // than rejecting every frame.
-                                                peer["epoch"].as_u64().unwrap_or(0) as u8,
-                                            ))
-                                        })
-                                        .collect()
+                                    peers.iter().filter_map(parse_audio_roster_peer).collect()
                                 })
                                 .unwrap_or_default();
                             let peer_index = value["peer_index"]
@@ -156,7 +207,7 @@ async fn connect_authenticated_audio_socket(
                             break Ok((peer_index, peers));
                         }
                         Some("error") => {
-                            break Err(format!("audio relay auth error: {}", value["message"]));
+                            break Err(format_audio_relay_error(&value));
                         }
                         _ => continue,
                     }
@@ -182,7 +233,7 @@ pub(crate) async fn connect_audio_relay(
     channel_id: &str,
     parent_channel_id: Option<&str>,
     state: &AppState,
-) -> Result<(CancellationToken, tokio::sync::mpsc::Sender<Vec<u8>>), String> {
+) -> Result<(CancellationToken, tokio::sync::mpsc::Sender<Vec<u8>>), AudioRelayConnectError> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
     let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
 
@@ -194,6 +245,7 @@ pub(crate) async fn connect_audio_relay(
         remote_stt_pipeline,
         agent_pubkeys,
         human_floor,
+        reconnect_target,
     ) = {
         let hs = state.huddle()?;
         (
@@ -202,7 +254,8 @@ pub(crate) async fn connect_audio_relay(
             Arc::clone(&hs.local_tts_publishers),
             Arc::clone(&hs.remote_stt_pipeline),
             Arc::clone(&hs.agent_pubkeys),
-            hs.human_floor.clone(),
+            hs.human_floor.for_audio_connection(),
+            super::reconnect::ReconnectTarget::capture(&hs, channel_id, parent_channel_id),
         )
     };
 
@@ -215,12 +268,8 @@ pub(crate) async fn connect_audio_relay(
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(50);
-    let output_device_name = state
-        .huddle_audio
-        .output_device
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let output_device_changes = state.huddle_audio.output_device_changes.subscribe();
+    let output_device_name = output_device_changes.borrow().clone();
 
     tokio::spawn(async move {
         if let Err(e) = audio_relay_pipeline(AudioRelayPipelineArgs {
@@ -237,19 +286,22 @@ pub(crate) async fn connect_audio_relay(
             agent_pubkeys,
             human_floor,
             output_device_name,
+            output_device_changes,
         })
         .await
         {
             eprintln!("buzz-desktop: audio relay pipeline exited: {e}");
         }
 
-        // Only emit the disconnect event for UNEXPECTED exits.
-        // Skip if already cancelled (teardown_huddle in progress).
+        // Only UNEXPECTED exits reconnect. An already-cancelled token means
+        // teardown_huddle is in progress and the huddle is going away.
+        // Cancelling before the reconnect call is load-bearing: if this
+        // pipeline dies before a running reconnect loop has installed its
+        // handles, the loop reads the cancelled token as a failed dial.
         if !cancel_clone.is_cancelled() {
             cancel_clone.cancel();
-            if let Some(ref app) = app_handle {
-                use tauri::Emitter;
-                let _ = app.emit("huddle-audio-disconnected", ());
+            if let Some(app) = app_handle {
+                super::reconnect::after_unexpected_disconnect(app, reconnect_target).await;
             }
         }
     });
@@ -265,6 +317,75 @@ type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 
 const TTS_BROADCAST_QUEUE_DEPTH: usize = 8;
 const TTS_BROADCAST_MAX_FRAMES: usize = 1_500; // 30 seconds at 20 ms/frame.
+const AUDIO_SEND_QUEUE_DEPTH: usize = 4;
+
+#[derive(Default)]
+struct AudioSendQueueState {
+    frames: std::collections::VecDeque<Vec<u8>>,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct AudioSendQueue {
+    state: std::sync::Mutex<AudioSendQueueState>,
+    ready: tokio::sync::Notify,
+}
+
+impl AudioSendQueue {
+    fn push_latest(&self, frame: Vec<u8>) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return;
+        }
+        if state.frames.len() == AUDIO_SEND_QUEUE_DEPTH {
+            state.frames.pop_front();
+        }
+        state.frames.push_back(frame);
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    fn close(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .closed = true;
+        self.ready.notify_waiters();
+    }
+
+    async fn pop(&self) -> Option<Vec<u8>> {
+        loop {
+            let notified = self.ready.notified();
+            {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(frame) = state.frames.pop_front() {
+                    return Some(frame);
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+async fn wire_send_loop<S>(
+    queue: std::sync::Arc<AudioSendQueue>,
+    sink: std::sync::Arc<tokio::sync::Mutex<S>>,
+) -> Result<(), String>
+where
+    S: futures_util::Sink<WsMsg> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    while let Some(frame) = queue.pop().await {
+        let mut sink = sink.lock().await;
+        sink.send(WsMsg::Binary(frame.into()))
+            .await
+            .map_err(|error| format!("audio send: {error}"))?;
+    }
+    Ok(())
+}
 
 struct QueuedTtsFrame {
     epoch: u64,
@@ -329,7 +450,8 @@ pub(crate) async fn connect_tts_audio_publisher(
         keys,
         auth_tag_json,
     )
-    .await?;
+    .await
+    .map_err(|error| error.to_string())?;
 
     let cancel = CancellationToken::new();
     let publisher_cancel = cancel.clone();
@@ -462,6 +584,7 @@ struct AudioRelayPipelineArgs {
     agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
     human_floor: super::human_floor::HumanFloor,
     output_device_name: Option<String>,
+    output_device_changes: tokio::sync::watch::Receiver<Option<String>>,
 }
 
 async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String> {
@@ -479,12 +602,13 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         agent_pubkeys,
         human_floor,
         output_device_name,
+        output_device_changes,
     } = args;
 
     let mut encoder = opus::Encoder::new(48000, opus::Channels::Mono, opus::Application::Voip)
         .map_err(|e| format!("opus encoder: {e}"))?;
     encoder
-        .set_bitrate(opus::Bitrate::Bits(32000))
+        .set_bitrate(opus::Bitrate::Bits(32_000))
         .map_err(|e| format!("opus bitrate: {e}"))?;
     encoder
         .set_dtx(true)
@@ -496,8 +620,13 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
     let ws_tx = StdArc::new(tokio::sync::Mutex::new(ws_tx));
     let ws_tx_send = StdArc::clone(&ws_tx);
     let cancel_send = cancel.clone();
+    let send_queue = StdArc::new(AudioSendQueue::default());
+    let wire_queue = StdArc::clone(&send_queue);
 
-    let send_task = tokio::spawn(async move {
+    let wire_send_task = tokio::spawn(wire_send_loop(wire_queue, ws_tx_send));
+
+    let encode_queue = StdArc::clone(&send_queue);
+    let encode_task = tokio::spawn(async move {
         use super::wire::{audio_level_dbov, FrameHeader, V2_HEADER_LEN};
         let mut encoder = encoder; // Move encoder into task.
         const FRAME_SAMPLES: usize = 960;
@@ -528,7 +657,6 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect();
 
-            let mut tx = ws_tx_send.lock().await;
             for chunk in samples.chunks(FRAME_SAMPLES) {
                 // dBov is computed from the pre-encode PCM. Opus DTX may
                 // produce a 1-2 byte comfort packet; computing level from
@@ -565,24 +693,21 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
                     let mut frame = Vec::with_capacity(V2_HEADER_LEN + n);
                     frame.extend_from_slice(&header);
                     frame.extend_from_slice(&out_buf[..n]);
-                    if tx.send(WsMsg::Binary(frame.into())).await.is_err() {
-                        return; // WS closed.
-                    }
+                    encode_queue.push_latest(frame);
 
                     seq = seq.wrapping_add(1);
                     ts_48k = ts_48k.wrapping_add(super::jitter::FRAME_TIMESTAMP_DELTA);
                 }
             }
         }
-        let mut tx = ws_tx_send.lock().await;
-        let _ = tx.send(WsMsg::Close(None)).await;
+        encode_queue.close();
     });
 
     let recv_task = tokio::spawn(super::playout::run_playout_recv_loop(
         ws_rx,
         ws_tx,
         sink_handle,
-        cancel,
+        cancel.clone(),
         app_handle,
         initial_peers,
         tts_active,
@@ -590,17 +715,61 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         local_tts_publishers,
         remote_stt_pipeline,
         agent_pubkeys,
-        human_floor,
+        human_floor.clone(),
+        output_device_changes,
     ));
 
-    // Wait for either task to finish, then abort the survivor.
-    use futures_util::future::Either;
-    match futures_util::future::select(std::pin::pin!(send_task), std::pin::pin!(recv_task)).await {
-        Either::Left((_, recv_handle)) => recv_handle.abort(),
-        Either::Right((_, send_handle)) => send_handle.abort(),
-    }
+    supervise_audio_tasks(
+        encode_task,
+        wire_send_task,
+        recv_task,
+        &send_queue,
+        &cancel,
+        &human_floor,
+    )
+    .await
+}
 
-    Ok(())
+/// Every exit, including a child panic, joins the remaining children before
+/// clearing this connection's remote floor or handing recovery to a successor.
+async fn supervise_audio_tasks(
+    mut encode: tokio::task::JoinHandle<()>,
+    mut send: tokio::task::JoinHandle<Result<(), String>>,
+    mut recv: tokio::task::JoinHandle<()>,
+    queue: &AudioSendQueue,
+    cancel: &CancellationToken,
+    floor: &super::human_floor::HumanFloor,
+) -> Result<(), String> {
+    let (completed, result) = tokio::select! {
+        result = &mut encode => (0, result.map_err(|error| format!("audio encode task: {error}"))),
+        result = &mut send => (1, result.map_err(|error| format!("audio send task: {error}")).and_then(|result| result)),
+        result = &mut recv => (2, result.map_err(|error| format!("audio receive task: {error}"))),
+        _ = cancel.cancelled() => (3, Ok(())),
+    };
+    queue.close();
+    encode.abort();
+    send.abort();
+    recv.abort();
+    // A completed JoinHandle must not be polled a second time.
+    if completed != 0 {
+        log_audio_child_join("encode", encode.await);
+    }
+    if completed != 1 {
+        log_audio_child_join("send", send.await);
+    }
+    if completed != 2 {
+        log_audio_child_join("receive", recv.await);
+    }
+    floor.clear_remote();
+    result
+}
+
+fn log_audio_child_join<T>(name: &str, result: Result<T, tokio::task::JoinError>) {
+    if let Err(error) = result {
+        if !error.is_cancelled() {
+            eprintln!("buzz-desktop: audio {name} task failed during teardown: {error}");
+        }
+    }
 }
 
 /// Fetch channel members with roles from the relay. Returns (pubkey, role) tuples.
@@ -671,43 +840,5 @@ pub(crate) async fn count_human_members(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tts_upsampling_doubles_rate_with_linear_midpoints() {
-        assert_eq!(
-            upsample_tts_24k_to_48k(&[0.0, 1.0, -1.0]),
-            vec![0.0, 0.5, 1.0, 0.0, -1.0, -1.0]
-        );
-    }
-
-    #[test]
-    fn tts_queue_rejects_cancelled_versions_and_pads_twenty_ms_frames() {
-        let mut queue = std::collections::VecDeque::new();
-        queue_tts_broadcast_packet(
-            &mut queue,
-            super::super::tts::TtsBroadcastPacket {
-                epoch: 1,
-                speaker_generation: 7,
-                samples_24k: vec![0.25; 480],
-            },
-            1,
-            7,
-        );
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].samples_48k.len(), 960);
-
-        queue_tts_broadcast_packet(
-            &mut queue,
-            super::super::tts::TtsBroadcastPacket {
-                epoch: 1,
-                speaker_generation: 7,
-                samples_24k: vec![0.5; 480],
-            },
-            2,
-            7,
-        );
-        assert_eq!(queue.len(), 1, "cancelled epoch must not enqueue");
-    }
-}
+#[path = "relay_api_tests.rs"]
+mod tests;

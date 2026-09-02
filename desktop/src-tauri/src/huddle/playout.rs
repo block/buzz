@@ -273,7 +273,7 @@ impl PeerSlot {
 pub(crate) async fn run_playout_recv_loop(
     mut ws_rx: futures_util::stream::SplitStream<WsStream>,
     ws_tx_for_pongs: Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WsStream, WsMsg>>>,
-    sink_handle: rodio::MixerDeviceSink,
+    mut sink_handle: rodio::MixerDeviceSink,
     cancel: CancellationToken,
     app_handle: Option<tauri::AppHandle>,
     initial_peers: Vec<(u8, String, u8)>,
@@ -283,6 +283,7 @@ pub(crate) async fn run_playout_recv_loop(
     remote_stt_pipeline: Arc<std::sync::Mutex<Option<std::sync::Weak<super::stt::SttPipeline>>>>,
     agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
     human_floor: HumanFloor,
+    mut output_device_changes: tokio::sync::watch::Receiver<Option<String>>,
 ) {
     use rodio::buffer::SamplesBuffer;
     use std::num::NonZero;
@@ -328,6 +329,25 @@ pub(crate) async fn run_playout_recv_loop(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
+            changed = output_device_changes.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let selected = output_device_changes.borrow_and_update().clone();
+                match super::audio_output::open_output_sink_by_name(selected.as_deref()) {
+                    Ok(next_sink) => {
+                        sink_handle = next_sink;
+                        let mixer = sink_handle.mixer().clone();
+                        for slot in peers.values_mut() {
+                            slot.player = rodio::Player::connect_new(&mixer);
+                            slot.recovering_playout = false;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("buzz-desktop: live output device switch failed: {error}");
+                    }
+                }
+            }
             _ = playout_tick.tick() => {
                 // Drain one 10 ms frame from each *active* peer's NetEq into
                 // its Player. NetEq always emits a frame (Expand/silence when
@@ -655,7 +675,7 @@ pub(crate) async fn run_playout_recv_loop(
         }
     }
 
-    human_floor.clear_remote();
+    // The supervisor clears this connection's floor after joining all children.
     if let Some(ref app) = app_handle {
         use tauri::Emitter;
         let _ = app.emit(

@@ -200,7 +200,7 @@ impl TtsPipeline {
         cancel: Arc<AtomicBool>,
         human_floor: HumanFloor,
         voice: &str,
-        output_device: Option<String>,
+        output_device_changes: tokio::sync::watch::Receiver<Option<String>>,
         activity_app: Option<tauri::AppHandle>,
     ) -> Result<Self, String> {
         let (text_tx, text_rx) = mpsc::sync_channel::<QueuedText>(TEXT_QUEUE_DEPTH);
@@ -255,7 +255,7 @@ impl TtsPipeline {
                         worker_playback_probe,
                         worker_broadcasters,
                     ),
-                    output_device,
+                    output_device_changes,
                     activity_app,
                     startup_tx,
                 )
@@ -318,6 +318,19 @@ fn authorize_or_defer_queued_text(
     }
 }
 
+pub(super) fn apply_pending_output_device_change(
+    output_device_changes: &mut tokio::sync::watch::Receiver<Option<String>>,
+    mut apply: impl FnMut(Option<&str>) -> Result<(), String>,
+) {
+    if !output_device_changes.has_changed().unwrap_or(false) {
+        return;
+    }
+    let selected = output_device_changes.borrow_and_update().clone();
+    if let Err(error) = apply(selected.as_deref()) {
+        eprintln!("buzz-desktop: live TTS output device switch failed: {error}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tts_worker(
     model_dir: PathBuf,
@@ -325,7 +338,7 @@ fn tts_worker(
     text_rx: mpsc::Receiver<QueuedText>,
     human_floor: HumanFloor,
     control_state: WorkerControlState,
-    output_device: Option<String>,
+    mut output_device_changes: tokio::sync::watch::Receiver<Option<String>>,
     activity_app: Option<tauri::AppHandle>,
     startup_tx: mpsc::SyncSender<Result<(), String>>,
 ) {
@@ -397,16 +410,17 @@ fn tts_worker(
     // ── 3. Initialise rodio output device ─────────────────────────────────────
     use rodio::buffer::SamplesBuffer;
 
-    let sink_handle = match super::audio_output::open_output_sink_by_name(output_device.as_deref())
-    {
-        Ok(h) => h,
-        Err(e) => {
-            let error = format!("TTS audio output initialization failed: {e}");
-            eprintln!("buzz-desktop: tts stage=startup status=failed reason=output_open");
-            let _ = startup_tx.send(Err(error));
-            return;
-        }
-    };
+    let initial_output_device = output_device_changes.borrow().clone();
+    let mut sink_handle =
+        match super::audio_output::open_output_sink_by_name(initial_output_device.as_deref()) {
+            Ok(h) => h,
+            Err(e) => {
+                let error = format!("TTS audio output initialization failed: {e}");
+                eprintln!("buzz-desktop: tts stage=startup status=failed reason=output_open");
+                let _ = startup_tx.send(Err(error));
+                return;
+            }
+        };
 
     let channels = match NonZero::new(1u16) {
         Some(c) => c,
@@ -505,11 +519,17 @@ fn tts_worker(
         channels,
         rate,
     };
-    let append_audio = |prepared: PreparedModelAudio,
-                        route_id: u64,
-                        speaker_pubkey: Option<&str>,
-                        speaker_generation: u64,
-                        floor_epoch: u64| {
+    let mut append_audio = |prepared: PreparedModelAudio,
+                            route_id: u64,
+                            speaker_pubkey: Option<&str>,
+                            speaker_generation: u64,
+                            floor_epoch: u64| {
+        apply_pending_output_device_change(&mut output_device_changes, |selected| {
+            let next_sink = super::audio_output::open_output_sink_by_name(selected)?;
+            playback.replace_output_mixer(next_sink.mixer());
+            sink_handle = next_sink;
+            Ok(())
+        });
         let broadcast_samples = speaker_pubkey.map(|_| prepared.buffer.clone());
         append_worker_audio(
             &append_context,

@@ -4,7 +4,6 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-
 import {
   threadRepliesKey,
   sortMessages,
@@ -106,17 +105,24 @@ export function combineThreadRepliesResults(
  * replies into the chat timeline so companion and in-app presentations show the
  * same conversation without opening a transient thread surface.
  */
+export type ThreadRepliesForRootsOptions = {
+  placeholderDataByRoot?: ReadonlyMap<string, RelayEvent[]>;
+};
+
 export function useThreadRepliesForRoots(
   activeChannel: Channel | null,
   rootIds: readonly string[],
+  options: ThreadRepliesForRootsOptions = {},
 ) {
   const queryClient = useQueryClient();
   const channelId = activeChannel?.id ?? "none";
+  const placeholderDataByRoot = options.placeholderDataByRoot;
   return useQueries({
     queries: rootIds.map((rootId) => ({
       queryKey: threadRepliesKey(channelId, rootId),
       enabled: activeChannel !== null && activeChannel.channelType !== "forum",
       queryFn: () => loadThreadReplies(queryClient, channelId, rootId),
+      placeholderData: () => placeholderDataByRoot?.get(rootId),
       staleTime: 0,
       gcTime: 60 * 60 * 1_000,
     })),

@@ -499,8 +499,8 @@ fn teardown_huddle(state: &AppState) -> Result<(), String> {
         let cancel = hs.audio_ws_cancel.take();
         // Cancel the relay token BEFORE dropping the sender. If we drop
         // pcm_tx first, the send task sees None from recv() and can exit
-        // the pipeline before is_cancelled() is true — causing a spurious
-        // huddle-audio-disconnected event on intentional teardown.
+        // the pipeline before is_cancelled() is true — and would start a
+        // spurious audio reconnect on intentional teardown.
         if let Some(ref c) = cancel {
             c.cancel();
         }
@@ -601,6 +601,7 @@ pub async fn leave_huddle(app: tauri::AppHandle, state: State<'_, AppState>) -> 
             return Ok(()); // Nothing to leave.
         }
         hs.phase = HuddlePhase::Leaving;
+        hs.huddle_cancel.cancel();
         (
             hs.parent_channel_id.clone().unwrap_or_default(),
             hs.ephemeral_channel_id.clone().unwrap_or_default(),
@@ -674,6 +675,7 @@ pub async fn end_huddle(
             return Err("only the huddle creator can end it — use leave_huddle instead".into());
         }
         hs.phase = HuddlePhase::Leaving;
+        hs.huddle_cancel.cancel();
         (
             hs.parent_channel_id.clone().unwrap_or_default(),
             hs.ephemeral_channel_id.clone().unwrap_or_default(),

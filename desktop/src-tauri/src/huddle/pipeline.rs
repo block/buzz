@@ -250,7 +250,7 @@ pub(crate) async fn post_connect_setup(
             }
             return Ok(PostConnectOutcome::Stale);
         }
-        let (cancel, pcm_tx) = audio_result?;
+        let (cancel, pcm_tx) = audio_result.map_err(|error| error.to_string())?;
         hs.audio_ws_cancel = Some(cancel);
         hs.audio_relay_pcm_tx = Some(pcm_tx);
     }
@@ -349,12 +349,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
             ptt,
             manual_mic_unmuted,
             hs.human_floor.clone(),
-            state
-                .huddle_audio
-                .output_device
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            state.huddle_audio.output_device_changes.subscribe(),
             old,
         )
     };
@@ -447,12 +442,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
 
     // Resolve all fallible construction inputs before claiming the sentinel so
     // an unreadable optional voice registry cannot wedge future start attempts.
-    let output_device = state
-        .huddle_audio
-        .output_device
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let output_device_changes = state.huddle_audio.output_device_changes.subscribe();
     let app = state
         .app_handle
         .lock()
@@ -502,7 +492,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
             tts_cancel,
             human_floor,
             &initial_voice,
-            output_device,
+            output_device_changes,
             app,
         )
     })

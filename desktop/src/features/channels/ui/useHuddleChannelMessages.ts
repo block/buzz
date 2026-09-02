@@ -4,8 +4,10 @@ import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { mergeMessages } from "@/features/messages/hooks";
 import {
   channelWindowThreadSummaries,
+  flattenChannelWindowEvents,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { useThreadRepliesForRoots } from "@/features/messages/useThreadReplies";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
@@ -24,6 +26,19 @@ type HuddleChannelMessagesOptions = {
   targetMessageEvents: RelayEvent[];
   windowStore?: ChannelWindowStore;
 };
+
+export function seedHuddleThreadReplies(
+  windowStore: ChannelWindowStore | undefined,
+): ReadonlyMap<string, RelayEvent[]> {
+  const repliesByRoot = new Map<string, RelayEvent[]>();
+  if (!windowStore) return repliesByRoot;
+  for (const event of flattenChannelWindowEvents(windowStore)) {
+    const { parentId, rootId } = getThreadReference(event.tags);
+    if (!parentId || !rootId) continue;
+    repliesByRoot.set(rootId, [...(repliesByRoot.get(rootId) ?? []), event]);
+  }
+  return repliesByRoot;
+}
 
 export function useHuddleChannelMessages({
   activeChannel,
@@ -51,9 +66,16 @@ export function useHuddleChannelMessages({
         : [],
     [isHuddleTranscript, threadSummaries],
   );
+  const placeholderThreadRepliesByRoot = React.useMemo(
+    () => seedHuddleThreadReplies(windowStore),
+    [windowStore],
+  );
   const huddleThreadReplies = useThreadRepliesForRoots(
     activeChannel,
     huddleThreadRootIds,
+    {
+      placeholderDataByRoot: placeholderThreadRepliesByRoot,
+    },
   );
   const resolvedMessages = React.useMemo(
     () =>

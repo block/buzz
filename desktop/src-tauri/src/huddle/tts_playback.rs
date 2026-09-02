@@ -75,7 +75,7 @@ pub(super) enum HumanFloorAuthorization {
 struct HumanFloorState {
     epoch: u64,
     local: bool,
-    remote: HashSet<u8>,
+    remote: HashSet<(uuid::Uuid, u8)>,
 }
 
 pub(super) struct SynthesisFlightGuard {
@@ -120,6 +120,17 @@ impl PlaybackCoordinator {
         if state.player.is_none() {
             state.player = Some(Player::connect_new(mixer));
         }
+    }
+
+    pub(super) fn replace_output_mixer(&self, mixer: &Mixer) {
+        *self.mixer.lock().unwrap_or_else(PoisonError::into_inner) = Some(mixer.clone());
+        let old_player = {
+            let mut state = self.lock();
+            state.first_append = true;
+            state.output_lease.begin_hangover(Instant::now());
+            state.player.replace(Player::connect_new(mixer))
+        };
+        drop(old_player);
     }
 
     fn lock(&self) -> MutexGuard<'_, PlaybackState> {
@@ -337,16 +348,19 @@ impl PlaybackCoordinator {
         self.lock().human_floor.local = false;
     }
 
-    pub(super) fn enter_remote_human_floor(&self, peer: u8) {
-        self.enter_human_floor(|floor| floor.remote.insert(peer));
+    pub(super) fn enter_remote_human_floor(&self, scope: uuid::Uuid, peer: u8) {
+        self.enter_human_floor(|floor| floor.remote.insert((scope, peer)));
     }
 
-    pub(super) fn leave_remote_human_floor(&self, peer: u8) {
-        self.lock().human_floor.remote.remove(&peer);
+    pub(super) fn leave_remote_human_floor(&self, scope: uuid::Uuid, peer: u8) {
+        self.lock().human_floor.remote.remove(&(scope, peer));
     }
 
-    pub(super) fn clear_remote_human_floor(&self) {
-        self.lock().human_floor.remote.clear();
+    pub(super) fn clear_remote_human_floor(&self, scope: uuid::Uuid) {
+        self.lock()
+            .human_floor
+            .remote
+            .retain(|(owner, _)| *owner != scope);
     }
 
     fn enter_human_floor(&self, enter: impl FnOnce(&mut HumanFloorState) -> bool) {
@@ -420,6 +434,44 @@ mod tests {
             NonZero::new(24_000).expect("nonzero rate"),
             vec![0.25; 24_000],
         )
+    }
+
+    #[test]
+    fn pending_output_watch_change_replaces_live_playback_before_next_append() {
+        let (playback, _old_source) = coordinator();
+        append_second(&playback);
+        assert!(!playback.empty());
+
+        let (output_tx, mut output_rx) = tokio::sync::watch::channel(None);
+        output_tx.send_replace(Some("new route".to_string()));
+        let channels = NonZero::new(1).expect("nonzero channels");
+        let rate = NonZero::new(24_000).expect("nonzero rate");
+        let (next_mixer, _next_source) = rodio::mixer::mixer(channels, rate);
+        crate::huddle::tts::apply_pending_output_device_change(&mut output_rx, |selected| {
+            assert_eq!(selected, Some("new route"));
+            playback.replace_output_mixer(&next_mixer);
+            Ok(())
+        });
+
+        assert!(playback.empty(), "the old-route queue must be dropped");
+        append_second(&playback);
+        assert!(!playback.empty(), "subsequent audio must use the new mixer");
+    }
+
+    #[test]
+    fn replacing_output_mixer_drops_old_route_and_accepts_new_audio() {
+        let (playback, _old_source) = coordinator();
+        append_second(&playback);
+        assert!(!playback.empty());
+
+        let channels = NonZero::new(1).expect("nonzero channels");
+        let rate = NonZero::new(24_000).expect("nonzero rate");
+        let (next_mixer, _next_source) = rodio::mixer::mixer(channels, rate);
+        playback.replace_output_mixer(&next_mixer);
+
+        assert!(playback.empty());
+        append_second(&playback);
+        assert!(!playback.empty());
     }
 
     #[test]
@@ -573,7 +625,7 @@ mod tests {
         let (playback, _unpulled_source) = coordinator();
         let delayed_tts_epoch = playback.human_floor_epoch();
 
-        playback.enter_remote_human_floor(7);
+        playback.enter_remote_human_floor(uuid::Uuid::nil(), 7);
 
         assert!(playback.human_floor_blocked());
         assert!(!playback.human_floor_permits(delayed_tts_epoch));
@@ -584,12 +636,12 @@ mod tests {
         let (playback, _unpulled_source) = coordinator();
         assert!(playback.enter_local_human_floor(true, false));
         let local_epoch = playback.human_floor_epoch();
-        playback.enter_remote_human_floor(7);
+        playback.enter_remote_human_floor(uuid::Uuid::nil(), 7);
         assert_ne!(playback.human_floor_epoch(), local_epoch);
 
         playback.leave_local_human_floor();
         assert!(playback.human_floor_blocked());
-        playback.leave_remote_human_floor(7);
+        playback.leave_remote_human_floor(uuid::Uuid::nil(), 7);
         assert!(!playback.human_floor_blocked());
     }
 

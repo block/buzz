@@ -2151,6 +2151,123 @@ mod tests {
         }
     }
 
+    // These bytes pin the production encoder/schema from main 1c8321cd.
+    // Postcard is positional: roundtripping the current types alone cannot
+    // detect a field insertion silently transposing a remote peer's identity.
+    #[test]
+    fn control_schema_matches_main_wire_fixtures() {
+        let peers = vec![
+            RosterEntry {
+                pubkey: "a".into(),
+                peer_index: 7,
+                epoch: 3,
+            },
+            RosterEntry {
+                pubkey: "bc".into(),
+                peer_index: 254,
+                epoch: 255,
+            },
+        ];
+        let mut fixtures: Vec<(HuddleControlMsg, &[u8])> = vec![
+            (
+                HuddleControlMsg::RegisterPeer {
+                    community_id: Uuid::from_bytes([0x11; 16]),
+                    pubkey: "a".into(),
+                    protocol_version: 2,
+                },
+                &[
+                    0, 16, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 1, 97, 2,
+                ],
+            ),
+            (
+                HuddleControlMsg::PeerRegistered {
+                    pubkey: "a".into(),
+                    peer_index: 7,
+                    epoch: 3,
+                    roster: RosterSnapshot {
+                        revision: 300,
+                        peers: peers.clone(),
+                    },
+                },
+                &[1, 1, 97, 7, 3, 172, 2, 2, 1, 97, 7, 3, 2, 98, 99, 254, 255],
+            ),
+            (
+                HuddleControlMsg::RosterSnapshot {
+                    revision: 300,
+                    peers: peers.clone(),
+                },
+                &[2, 172, 2, 2, 1, 97, 7, 3, 2, 98, 99, 254, 255],
+            ),
+            (
+                HuddleControlMsg::RosterSnapshot {
+                    revision: 0,
+                    peers: vec![],
+                },
+                &[2, 0, 0],
+            ),
+            (
+                HuddleControlMsg::RosterDelta {
+                    revision: 301,
+                    joined: Some(peers[0].clone()),
+                    left: Some(peers[1].clone()),
+                },
+                &[3, 173, 2, 1, 1, 97, 7, 3, 1, 2, 98, 99, 254, 255],
+            ),
+            (
+                HuddleControlMsg::RosterDelta {
+                    revision: 302,
+                    joined: None,
+                    left: None,
+                },
+                &[3, 174, 2, 0, 0],
+            ),
+            (HuddleControlMsg::RosterResync, &[4]),
+            (
+                HuddleControlMsg::UnregisterPeer { pubkey: "a".into() },
+                &[6, 1, 97],
+            ),
+        ];
+        for (reason, bytes) in [
+            (RegisterRejection::RoomFull, &[5, 1, 97, 0][..]),
+            (RegisterRejection::RoomEnded, &[5, 1, 97, 1][..]),
+            (
+                RegisterRejection::VersionMismatch {
+                    pinned: 3,
+                    requested: 2,
+                },
+                &[5, 1, 97, 2, 3, 2][..],
+            ),
+            (
+                RegisterRejection::Fenced(FenceRejection::StaleGeneration),
+                &[5, 1, 97, 3, 0][..],
+            ),
+            (
+                RegisterRejection::Fenced(FenceRejection::NoActiveLease),
+                &[5, 1, 97, 3, 1][..],
+            ),
+            (
+                RegisterRejection::Fenced(FenceRejection::OwnerMismatch),
+                &[5, 1, 97, 3, 2][..],
+            ),
+            (
+                RegisterRejection::Fenced(FenceRejection::FutureGeneration),
+                &[5, 1, 97, 3, 3][..],
+            ),
+        ] {
+            fixtures.push((
+                HuddleControlMsg::RegisterRejected {
+                    pubkey: "a".into(),
+                    reason,
+                },
+                bytes,
+            ));
+        }
+        for (message, bytes) in fixtures {
+            assert_eq!(encode_control(&message).unwrap(), bytes, "{message:?}");
+            assert_eq!(decode_control(bytes).unwrap(), message);
+        }
+    }
+
     // ── In-memory MeshStream pair for handshake round-trip tests ─────────────
     //
     // A channel-backed `StreamSendHalf`/`StreamRecvHalf` pair drives

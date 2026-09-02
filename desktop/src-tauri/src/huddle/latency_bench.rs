@@ -143,8 +143,8 @@ fn baseline_stt_fake_llm_tts_first_audio() {
         Arc::clone(&tts_cancel),
         super::human_floor::HumanFloor::new(),
         "eve",
-        None, // default output device
-        None, // no Tauri app handle
+        tokio::sync::watch::channel(None).1, // default output device
+        None,                                // no Tauri app handle
     )
     .expect("tts pipeline");
     eprintln!(
@@ -158,7 +158,7 @@ fn baseline_stt_fake_llm_tts_first_audio() {
         None,
         None,
         super::human_floor::HumanFloor::new(),
-        None,
+        tokio::sync::watch::channel(None).1,
     )
     .expect("stt pipeline");
     // Recognizer loads inside the worker thread; give it time, then verify

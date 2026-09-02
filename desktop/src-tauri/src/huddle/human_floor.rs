@@ -7,6 +7,7 @@ use super::tts_playback::{HumanFloorAuthorization, PlaybackCoordinator};
 #[derive(Clone)]
 pub(crate) struct HumanFloor {
     playback: Arc<PlaybackCoordinator>,
+    remote_scope: uuid::Uuid,
 }
 
 impl std::fmt::Debug for HumanFloor {
@@ -25,6 +26,15 @@ impl HumanFloor {
     pub(crate) fn new() -> Self {
         Self {
             playback: Arc::new(PlaybackCoordinator::unbound()),
+            remote_scope: uuid::Uuid::new_v4(),
+        }
+    }
+
+    /// Share local/TTS coordination, but isolate one audio connection's peers.
+    pub(crate) fn for_audio_connection(&self) -> Self {
+        Self {
+            playback: Arc::clone(&self.playback),
+            remote_scope: uuid::Uuid::new_v4(),
         }
     }
 
@@ -60,14 +70,16 @@ impl HumanFloor {
     }
 
     pub(crate) fn enter_remote(&self, peer: u8) {
-        self.playback.enter_remote_human_floor(peer);
+        self.playback
+            .enter_remote_human_floor(self.remote_scope, peer);
     }
 
     pub(crate) fn leave_remote(&self, peer: u8) {
-        self.playback.leave_remote_human_floor(peer);
+        self.playback
+            .leave_remote_human_floor(self.remote_scope, peer);
     }
 
     pub(crate) fn clear_remote(&self) {
-        self.playback.clear_remote_human_floor();
+        self.playback.clear_remote_human_floor(self.remote_scope);
     }
 }

@@ -117,6 +117,14 @@ pub type IndexedPeerAdmission = (
     u64,
 );
 
+/// Snapshot of a room's admission history taken the moment it was observed
+/// empty. Passed back to [`Room::end_if_idle`] after the grace window: if any
+/// peer admitted in between, the snapshot is stale and the end is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdleGeneration {
+    admissions: u64,
+}
+
 /// Reason a peer was refused entry to a room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionError {
@@ -179,6 +187,18 @@ struct AdmissionGuard {
     /// this behavior.
     pinned_version: Option<u8>,
     roster_revision: u64,
+    /// Count of successful admissions. A room-empty observation captures this
+    /// value; [`Room::end_if_idle`] only ends the room if no admission has
+    /// happened since, so a rejoin during the empty-room grace window fences
+    /// out the stale auto-end without any explicit timer cancellation.
+    admissions: u64,
+    /// The last peer left and an [`IdleGeneration`] was handed out: a grace
+    /// window may be pending against *this* `Room`. While set, the manager
+    /// must not drop the room — a rejoiner has to land on the same `Room` so
+    /// its admission fences the pending [`Room::end_if_idle`]. Stays set
+    /// through `end_if_idle` while the archive is in flight; cleared by
+    /// admission or by [`Room::release_idle_hold`].
+    idle_hold: bool,
 }
 
 impl AdmissionGuard {
@@ -190,6 +210,8 @@ impl AdmissionGuard {
             ended: false,
             pinned_version: None,
             roster_revision: 0,
+            admissions: 0,
+            idle_hold: false,
         }
     }
 
@@ -325,6 +347,8 @@ impl Room {
                 protocol_version: requested_version,
             },
         );
+        g.admissions += 1;
+        g.idle_hold = false;
         g.roster_revision = g.roster_revision.wrapping_add(1);
         let revision = g.roster_revision;
         let delta = RosterDelta {
@@ -386,6 +410,8 @@ impl Room {
                 protocol_version: requested_version,
             },
         );
+        g.admissions += 1;
+        g.idle_hold = false;
         g.roster_revision = g.roster_revision.wrapping_add(1);
         let revision = g.roster_revision;
         let delta = RosterDelta {
@@ -425,12 +451,16 @@ impl Room {
         Some(delta)
     }
 
-    /// Remove a peer AND atomically check if the room should end.
-    /// If the room is now empty, sets `ended = true` under the same lock
-    /// acquisition that removes the peer — no window for a concurrent
-    /// `add_peer` to sneak in between removal and the ended flag.
-    /// Returns `(roster_delta, should_auto_end)`.
-    pub fn remove_peer_and_check_ended(&self, peer_id: Uuid) -> Option<(RosterDelta, bool)> {
+    /// Remove a peer AND atomically observe whether it left the room empty.
+    /// Returns `(roster_delta, idle)` where `idle` is `Some` only for the
+    /// departure that emptied a not-yet-ended room. The [`IdleGeneration`]
+    /// captures the admission count under the same lock acquisition that
+    /// removed the peer, so the caller can wait out a grace window and then
+    /// call [`Self::end_if_idle`] without racing a concurrent `add_peer`.
+    pub fn remove_peer_and_check_idle(
+        &self,
+        peer_id: Uuid,
+    ) -> Option<(RosterDelta, Option<IdleGeneration>)> {
         let mut g = self.guard.lock().ok()?;
         let (_, peer) = self.peers.remove(&peer_id)?;
         let peer_index = peer.peer_index;
@@ -445,18 +475,60 @@ impl Room {
                 epoch: peer.epoch,
             }),
         };
-        // Only the first task to see empty + !ended wins the auto-end.
-        // This prevents duplicate archive/48103 when two peers disconnect
-        // simultaneously and both see is_empty() == true.
-        let should_end = if !g.ended && self.peers.is_empty() {
-            g.ended = true;
-            true
-        } else {
-            false
-        };
+        let idle = (!g.ended && self.peers.is_empty()).then_some(IdleGeneration {
+            admissions: g.admissions,
+        });
+        g.idle_hold |= idle.is_some();
         let _ = self.roster_tx.send(delta.clone());
         drop(g);
-        Some((delta, should_end))
+        Some((delta, idle))
+    }
+
+    /// End the room if it is still idle: empty, not already ended, and no
+    /// admission has happened since `idle` was observed. Sets `ended = true`
+    /// under the admission lock so no `add_peer` can sneak in after the check.
+    /// Returns `true` exactly once per idle generation — two leavers who both
+    /// observed the same empty room cannot both end it, and a rejoin (even one
+    /// that has since left again) fences out the stale observation.
+    ///
+    /// The idle hold is retained: the caller still has to archive the channel,
+    /// and until that resolves the room must stay registered so a concurrent
+    /// joiner meets `ended` on this `Room` instead of a fresh one whose
+    /// pre-join DB check can race the archive. Call
+    /// [`Self::release_idle_hold`] once the archive has succeeded, or
+    /// [`Self::clear_ended`] + `release_idle_hold` if it failed.
+    pub fn end_if_idle(&self, idle: IdleGeneration) -> bool {
+        let Ok(mut g) = self.guard.lock() else {
+            return false;
+        };
+        if g.ended || g.admissions != idle.admissions || !self.peers.is_empty() {
+            return false;
+        }
+        g.ended = true;
+        true
+    }
+
+    /// Release the hold taken by the idle observation `idle`, so the manager
+    /// may evict the room — either because the grace window was abandoned
+    /// (drain, owner loss) or because the end it guarded has fully resolved.
+    /// Fenced like [`Self::end_if_idle`]: a later admission owns its own hold,
+    /// which a stale release must not lift.
+    pub fn release_idle_hold(&self, idle: IdleGeneration) {
+        if let Ok(mut g) = self.guard.lock() {
+            if g.admissions == idle.admissions {
+                g.idle_hold = false;
+            }
+        }
+    }
+
+    /// True when the room may be dropped from the manager: no peers, and no
+    /// grace window or in-flight end pending that a rejoiner would need to
+    /// land on. Both are read under the admission lock so a concurrent
+    /// `add_peer` cannot slip a peer in between the two checks.
+    fn is_evictable(&self) -> bool {
+        self.guard
+            .lock()
+            .is_ok_and(|g| !g.idle_hold && self.peers.is_empty())
     }
 
     /// Fan-out a binary frame to all peers except the sender. Protocol v3
@@ -621,10 +693,16 @@ impl AudioRoomManager {
         Some(room)
     }
 
-    /// Remove the room if it has no peers. Returns `true` if the room was removed.
+    /// Remove the room if it has no peers and no pending grace window.
+    /// Returns `true` if the room was removed.
+    ///
+    /// A room whose last peer just left stays registered until its grace
+    /// window resolves ([`Room::end_if_idle`] / [`Room::release_idle_hold`]):
+    /// evicting it early would hand a rejoiner a fresh `Room` that the pending
+    /// end cannot see, and the stale end would then archive the live huddle.
     pub fn cleanup_if_empty(&self, community_id: CommunityId, channel_id: Uuid) -> bool {
         self.rooms
-            .remove_if(&(community_id, channel_id), |_, room| room.is_empty())
+            .remove_if(&(community_id, channel_id), |_, room| room.is_evictable())
             .is_some()
     }
 }
@@ -787,11 +865,13 @@ mod tests {
         let (peer_id, _, _, _, _, _) = room1
             .add_peer("alice".to_string(), 2)
             .expect("first peer admits");
-        // Last peer leaves and ends the room atomically.
-        let (_, ended) = room1
-            .remove_peer_and_check_ended(peer_id)
+        // Last peer leaves; the idle observation ends the room after grace.
+        let (_, idle) = room1
+            .remove_peer_and_check_idle(peer_id)
             .expect("peer existed");
-        assert!(ended, "single-peer room should end on its last departure");
+        let idle = idle.expect("single-peer room should be idle on its last departure");
+        assert!(room1.end_if_idle(idle), "idle room ends");
+        room1.release_idle_hold(idle);
         assert!(manager.cleanup_if_empty(community_id, channel_id));
 
         // Next joiner with a different version on the same channel id gets a
@@ -992,5 +1072,196 @@ mod tests {
         );
         // And the room state must be unchanged.
         assert_eq!(room.peers.len(), MAX_PEERS_PER_ROOM);
+    }
+
+    /// Only the departure that empties the room observes idleness; the
+    /// observation then ends the room exactly once.
+    #[test]
+    fn idle_observed_only_by_last_leaver_and_ends_once() {
+        let room = fresh_room();
+        let (alice, ..) = room.add_peer("alice".into(), 2).unwrap();
+        let (bob, ..) = room.add_peer("bob".into(), 2).unwrap();
+
+        let (_, idle) = room.remove_peer_and_check_idle(alice).unwrap();
+        assert!(idle.is_none(), "room still has bob");
+        let (_, idle) = room.remove_peer_and_check_idle(bob).unwrap();
+        let idle = idle.expect("bob emptied the room");
+
+        assert!(room.end_if_idle(idle));
+        assert!(
+            !room.end_if_idle(idle),
+            "second end on the same generation is a no-op"
+        );
+        assert!(matches!(
+            room.add_peer("carol".into(), 2),
+            Err(AdmissionError::Ended)
+        ));
+    }
+
+    /// A rejoin during the grace window fences out the stale idle observation,
+    /// even if the rejoiner has already left again — its own departure owns the
+    /// next lifecycle decision.
+    #[test]
+    fn rejoin_during_grace_fences_stale_idle() {
+        let room = fresh_room();
+        let (alice, ..) = room.add_peer("alice".into(), 2).unwrap();
+        let (_, idle) = room.remove_peer_and_check_idle(alice).unwrap();
+        let stale = idle.unwrap();
+
+        let (alice_again, ..) = room
+            .add_peer("alice".into(), 2)
+            .expect("room is not ended during grace");
+        assert!(!room.end_if_idle(stale), "occupied room never ends");
+
+        let (_, idle) = room.remove_peer_and_check_idle(alice_again).unwrap();
+        let fresh = idle.expect("alice emptied the room again");
+        assert!(
+            !room.end_if_idle(stale),
+            "stale generation cannot end a room a later admission touched"
+        );
+        assert!(room.end_if_idle(fresh), "the fresh observation ends it");
+    }
+
+    /// Mari's concurrent-leaver ordering: Alice removes first (sees Bob, gets
+    /// no idle), Bob removes last (gets the idle generation), then Alice's
+    /// delayed `cleanup_if_empty` runs. The registry must keep the room pinned
+    /// so a rejoiner lands on the same `Room` and fences Bob's pending end;
+    /// otherwise the stale end would archive underneath a live replacement.
+    #[test]
+    fn pending_grace_pins_room_in_manager_across_concurrent_leavers() {
+        let manager = AudioRoomManager::new();
+        let community_id = CommunityId::from_uuid(Uuid::new_v4());
+        let channel_id = Uuid::new_v4();
+        let room = manager.get_or_create(community_id, channel_id);
+        let (alice, ..) = room.add_peer("alice".into(), 3).unwrap();
+        let (bob, ..) = room.add_peer("bob".into(), 3).unwrap();
+
+        let (_, alice_idle) = room.remove_peer_and_check_idle(alice).unwrap();
+        assert!(alice_idle.is_none(), "Bob is still present");
+        let (_, bob_idle) = room.remove_peer_and_check_idle(bob).unwrap();
+        let bob_idle = bob_idle.expect("Bob emptied the room");
+
+        // Alice's cleanup arrives late, after Bob's idle observation.
+        assert!(
+            !manager.cleanup_if_empty(community_id, channel_id),
+            "an empty room with a pending grace window must not be evicted"
+        );
+        let rejoin_room = manager.get_or_create(community_id, channel_id);
+        assert!(
+            Arc::ptr_eq(&room, &rejoin_room),
+            "rejoin must land on the room the grace task holds"
+        );
+        let (carol, ..) = rejoin_room.add_peer("carol".into(), 3).unwrap();
+        assert!(
+            !room.end_if_idle(bob_idle),
+            "Carol's admission fences Bob's stale end"
+        );
+
+        // Carol leaves; her observation owns the lifecycle and ends the room.
+        let (_, carol_idle) = room.remove_peer_and_check_idle(carol).unwrap();
+        let carol_idle = carol_idle.unwrap();
+        assert!(room.end_if_idle(carol_idle));
+        room.release_idle_hold(carol_idle);
+        assert!(manager.cleanup_if_empty(community_id, channel_id));
+        assert!(manager.get(community_id, channel_id).is_none());
+    }
+
+    /// Mari's archive-in-flight ordering: the grace window expires and
+    /// `end_if_idle` succeeds, but the archive write has not resolved yet. A
+    /// delayed `cleanup_if_empty` must not detach the ended room, and a joiner
+    /// arriving in that gap must meet `ended` on the same `Room` rather than
+    /// admit into a fresh one whose pre-join DB check raced the archive.
+    #[test]
+    fn ended_room_stays_pinned_until_archive_resolves() {
+        let manager = AudioRoomManager::new();
+        let community_id = CommunityId::from_uuid(Uuid::new_v4());
+        let channel_id = Uuid::new_v4();
+        let room = manager.get_or_create(community_id, channel_id);
+        let (alice, ..) = room.add_peer("alice".into(), 3).unwrap();
+        let idle = room.remove_peer_and_check_idle(alice).unwrap().1.unwrap();
+        assert!(room.end_if_idle(idle));
+
+        // Archive is in flight: cleanup cannot detach, and a joiner lands on
+        // the ended room and is refused.
+        assert!(
+            !manager.cleanup_if_empty(community_id, channel_id),
+            "an ended room with its archive in flight must stay registered"
+        );
+        let joiner_room = manager.get_or_create(community_id, channel_id);
+        assert!(Arc::ptr_eq(&room, &joiner_room));
+        assert!(matches!(
+            joiner_room.add_peer("bob".into(), 3),
+            Err(AdmissionError::Ended)
+        ));
+
+        // Archive succeeded: release, then the manager may evict.
+        room.release_idle_hold(idle);
+        assert!(manager.cleanup_if_empty(community_id, channel_id));
+        assert!(manager.get(community_id, channel_id).is_none());
+    }
+
+    /// Archive failure rolls the end back: the room reopens, the hold is
+    /// released, and the next joiner gets a live room again.
+    #[test]
+    fn failed_archive_reopens_room_and_releases_hold() {
+        let manager = AudioRoomManager::new();
+        let community_id = CommunityId::from_uuid(Uuid::new_v4());
+        let channel_id = Uuid::new_v4();
+        let room = manager.get_or_create(community_id, channel_id);
+        let (alice, ..) = room.add_peer("alice".into(), 3).unwrap();
+        let idle = room.remove_peer_and_check_idle(alice).unwrap().1.unwrap();
+        assert!(room.end_if_idle(idle));
+
+        room.clear_ended();
+        room.release_idle_hold(idle);
+        assert!(
+            manager.cleanup_if_empty(community_id, channel_id),
+            "a reopened, empty, unheld room is evictable"
+        );
+        let next = manager.get_or_create(community_id, channel_id);
+        assert!(next.add_peer("bob".into(), 3).is_ok(), "fresh room admits");
+    }
+
+    /// Drain variant: the last leaver's idle observation is abandoned (the
+    /// huddle must outlive the pod), so it releases its hold and the room is
+    /// evicted. A pre-last teardown's cleanup racing ahead of that release
+    /// still cannot detach the room, and a stale release after a rejoin cannot
+    /// lift the rejoiner's hold.
+    #[test]
+    fn released_hold_allows_eviction_but_stale_release_does_not() {
+        let manager = AudioRoomManager::new();
+        let community_id = CommunityId::from_uuid(Uuid::new_v4());
+        let channel_id = Uuid::new_v4();
+        let room = manager.get_or_create(community_id, channel_id);
+        let (alice, ..) = room.add_peer("alice".into(), 3).unwrap();
+        let (bob, ..) = room.add_peer("bob".into(), 3).unwrap();
+
+        assert!(room.remove_peer_and_check_idle(alice).unwrap().1.is_none());
+        let drained = room.remove_peer_and_check_idle(bob).unwrap().1.unwrap();
+        assert!(
+            !manager.cleanup_if_empty(community_id, channel_id),
+            "pre-last cleanup must wait for the drain-owned release"
+        );
+
+        // Rejoin before the release lands: the rejoiner owns a fresh hold.
+        let (carol, ..) = room.add_peer("carol".into(), 3).unwrap();
+        let fresh = room.remove_peer_and_check_idle(carol).unwrap().1.unwrap();
+        room.release_idle_hold(drained);
+        assert!(
+            !manager.cleanup_if_empty(community_id, channel_id),
+            "a stale release must not lift a later observation's hold"
+        );
+
+        room.release_idle_hold(fresh);
+        assert!(
+            manager.cleanup_if_empty(community_id, channel_id),
+            "released hold on an empty room permits eviction"
+        );
+        let next = manager.get_or_create(community_id, channel_id);
+        assert!(!Arc::ptr_eq(&room, &next), "evicted room is replaced");
+        assert!(
+            next.add_peer("dave".into(), 2).is_ok(),
+            "fresh room, no pin"
+        );
     }
 }

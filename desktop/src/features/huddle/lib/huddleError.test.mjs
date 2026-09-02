@@ -44,3 +44,26 @@ test("uses action-specific fallback copy for unknown errors", () => {
     "Couldn’t start the huddle.",
   );
 });
+
+test("maps relay room, drain, owner, and protocol errors to useful copy", () => {
+  const cases = [
+    ["room_full", "This huddle is full."],
+    ["room_ended", "This huddle has ended."],
+    ["huddle_relay_draining", "The huddle relay is restarting. Reconnecting…"],
+    [
+      "huddle_owner_unreachable",
+      "The huddle relay can’t be reached. Try again in a moment.",
+    ],
+    ["unsupported_version", "Update Buzz to join this huddle."],
+    [
+      "upgrade_required",
+      "This huddle uses a newer audio version. Update Buzz, then try again.",
+    ],
+  ];
+  for (const [code, expected] of cases) {
+    assert.equal(
+      formatHuddleActionError(`audio relay error: ${code}`, "join"),
+      expected,
+    );
+  }
+});

@@ -60,6 +60,11 @@ const MAX_MISSED_PONGS: u8 = 3;
 /// Auth timeout.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long an emptied huddle room stays open for a rejoin before it
+/// auto-ends. Covers a laptop sleep/wake or a client-side reconnect without
+/// ending the huddle for everyone who was about to come back.
+const ROOM_EMPTY_GRACE: Duration = Duration::from_secs(20);
+
 /// WebSocket upgrade handler for `/huddle/:channel_id/audio`.
 pub async fn ws_audio_handler(
     State(state): State<Arc<AppState>>,
@@ -792,6 +797,10 @@ async fn handle_active_audio_connection(
     // the local generation floor so the fresh generation is accepted. The cause
     // distinction is carried on the remote control streams; locally the action
     // is the same WS teardown. Silent on ordinary client leave.
+    // Clones survive the teardown watcher's move so the leave path below can
+    // tell a drain-driven teardown from an ordinary leave.
+    let owner_lost_after_leave = owner_lost.clone();
+    let owner_draining_after_leave = owner_draining.clone();
     let owner_teardown_task = if owner_lost.is_some() || owner_draining.is_some() {
         let fence = Arc::clone(
             &state
@@ -864,14 +873,15 @@ async fn handle_active_audio_connection(
         let _ = owner_teardown_task.await;
     }
 
-    // Atomic owner remove + end check: remove_peer_and_check_ended holds the
-    // AdmissionGuard lock across index recycling AND the is_empty + ended=true
-    // check. Ingress mirrors never archive authoritative huddle state; they
+    // Atomic owner remove + idle observation: remove_peer_and_check_idle holds
+    // the AdmissionGuard lock across index recycling AND the is_empty check,
+    // capturing the admission generation so a later end_if_idle cannot race a
+    // rejoin. Ingress mirrors never archive authoritative huddle state; they
     // remove locally and let the owner decide room lifetime.
     let removal = if remote_session.is_some() {
-        room.remove_peer(peer_id).map(|delta| (delta, false))
+        room.remove_peer(peer_id).map(|delta| (delta, None))
     } else {
-        room.remove_peer_and_check_ended(peer_id)
+        room.remove_peer_and_check_idle(peer_id)
     };
     let removal_revision = if remote_session.is_none() {
         removal.as_ref().map(|(delta, _)| delta.revision)
@@ -880,7 +890,7 @@ async fn handle_active_audio_connection(
         // ordering. Omit it rather than publishing a plausible-but-wrong value.
         None
     };
-    let should_auto_end = removal.as_ref().map(|(_, ended)| *ended).unwrap_or(false);
+    let idle = removal.as_ref().and_then(|(_, idle)| *idle);
 
     if remote_session.is_none() {
         if let Some((delta, _)) = removal {
@@ -918,45 +928,51 @@ async fn handle_active_audio_connection(
     )
     .await;
 
-    let room_emptied;
-    if should_auto_end {
-        info!(channel_id = %channel_id, "audio room empty — auto-ending huddle");
-
-        match state
-            .db
-            .archive_channel(tenant.community(), channel_id)
-            .await
-        {
-            Err(e) => {
-                warn!(channel_id = %channel_id, "auto-archive failed, huddle stays alive: {e}");
-                room.clear_ended();
-                room_emptied = false;
-            }
-            Ok(()) => {
-                room_emptied = state
-                    .audio_rooms
-                    .cleanup_if_empty(tenant.community(), channel_id);
-
-                emit_participant_event(
-                    &state,
-                    &tenant,
-                    channel_id,
-                    parent_id_for_event,
-                    ParticipantLifecycle {
-                        kind: Kind::Custom(48103),
-                        participant_pubkey: &pubkey_hex,
-                        roster_revision: None,
-                        admission_id: None,
-                    },
-                )
-                .await;
-            }
+    // A relay drain (SIGTERM / owner-drain) tore every local client down at
+    // once. That empties the room without anyone choosing to leave, so it must
+    // never end the huddle: release the lease so rejoiners re-acquire through
+    // Redis, and leave the channel alive. Ordinary last-leaver departures get a
+    // grace window before the room ends so a reconnecting client keeps its
+    // huddle.
+    let draining = owner_draining_after_leave.is_some_and(|token| token.is_cancelled())
+        || relay_is_draining(&state);
+    let room_emptied = match idle {
+        Some(idle) if !draining => {
+            info!(
+                channel_id = %channel_id,
+                grace_secs = ROOM_EMPTY_GRACE.as_secs(),
+                "audio room empty — holding huddle open for rejoin"
+            );
+            tokio::spawn(end_room_after_grace(
+                Arc::clone(&state),
+                tenant.clone(),
+                channel_id,
+                parent_id_for_event,
+                pubkey_hex.clone(),
+                Arc::clone(&room),
+                idle,
+                owner_lost_after_leave,
+                owner_generation,
+            ));
+            // The grace task now owns room cleanup and lease release.
+            false
         }
-    } else {
-        room_emptied = state
+        Some(idle) => {
+            info!(channel_id = %channel_id, "audio room emptied by relay drain — huddle stays alive");
+            room.release_idle_hold(idle);
+            state
+                .audio_rooms
+                .cleanup_if_empty(tenant.community(), channel_id)
+        }
+        // Another peer was present under the same lock that removed this one
+        // (or this is an ingress mirror, which never observes idle). Cleanup is
+        // safe from any departure: a pending grace window pins the room in the
+        // manager, so a slow pre-last leaver cannot detach a room whose end is
+        // still in flight.
+        None => state
             .audio_rooms
-            .cleanup_if_empty(tenant.community(), channel_id);
-    }
+            .cleanup_if_empty(tenant.community(), channel_id),
+    };
 
     // Owner path: release this room's lease when the room empties, so a new
     // owner can acquire and the renewer stops cleanly (silent, not owner-loss).
@@ -965,9 +981,7 @@ async fn handle_active_audio_connection(
     // is a no-op for the stale generation and leaves the live renewer running.
     // Only the last leaver empties the room, so exactly one release fires.
     if room_emptied {
-        if let (Some(mesh), Some(generation)) = (state.mesh(), owner_generation) {
-            mesh.owners.release(channel_id, generation);
-        }
+        release_owner_lease(&state, channel_id, owner_generation);
     }
 
     info!(
@@ -975,6 +989,134 @@ async fn handle_active_audio_connection(
         pubkey = %pubkey_hex,
         "audio peer left"
     );
+}
+
+/// Whether this runtime is shutting down or draining its huddle ownership.
+/// `shutting_down` flips on SIGTERM before the mesh watcher propagates it to
+/// `owners.drain_all()`, and is the only signal in single-pod mode.
+fn relay_is_draining(state: &AppState) -> bool {
+    state.shutting_down.load(Ordering::Relaxed)
+        || state.mesh().is_some_and(|mesh| mesh.owners.is_draining())
+}
+
+fn release_owner_lease(state: &AppState, channel_id: Uuid, owner_generation: Option<u64>) {
+    if let (Some(mesh), Some(generation)) = (state.mesh(), owner_generation) {
+        mesh.owners.release(channel_id, generation);
+    }
+}
+
+/// Outcome of waiting out the empty-room grace window.
+#[derive(Debug, PartialEq, Eq)]
+enum IdleOutcome {
+    /// The grace window elapsed with no rejoin; the room is now `ended` and the
+    /// caller must archive + emit 48103.
+    Ended,
+    /// A peer was admitted during the window (whether or not it has since
+    /// left). That peer's own departure owns the next lifecycle decision.
+    Rejoined,
+    /// The lease was lost or the relay began draining before the window
+    /// elapsed. The room must not end; another owner may hold it now.
+    Aborted,
+}
+
+/// Wait `grace`, then end the room if it is still idle. `owner_lost` aborts the
+/// wait; `draining` is re-polled when the timer fires so a drain that began
+/// mid-window (single-pod mode has no token) cannot end the huddle.
+async fn await_room_idle(
+    room: &crate::audio::room::Room,
+    idle: crate::audio::room::IdleGeneration,
+    grace: Duration,
+    owner_lost: Option<CancellationToken>,
+    draining: impl Fn() -> bool,
+) -> IdleOutcome {
+    let lost = async {
+        match owner_lost {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        // Owner loss wins a tie with the timer: another pod may own the room.
+        biased;
+        _ = lost => IdleOutcome::Aborted,
+        _ = tokio::time::sleep(grace) => {
+            if draining() {
+                IdleOutcome::Aborted
+            } else if room.end_if_idle(idle) {
+                IdleOutcome::Ended
+            } else {
+                IdleOutcome::Rejoined
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn end_room_after_grace(
+    state: Arc<AppState>,
+    tenant: TenantContext,
+    channel_id: Uuid,
+    parent_id_for_event: Uuid,
+    last_leaver_pubkey: String,
+    room: Arc<crate::audio::room::Room>,
+    idle: crate::audio::room::IdleGeneration,
+    owner_lost: Option<CancellationToken>,
+    owner_generation: Option<u64>,
+) {
+    let outcome = await_room_idle(&room, idle, ROOM_EMPTY_GRACE, owner_lost, || {
+        relay_is_draining(&state)
+    })
+    .await;
+    let room_emptied = match outcome {
+        IdleOutcome::Rejoined => return,
+        IdleOutcome::Aborted => {
+            info!(channel_id = %channel_id, "audio room grace aborted — huddle stays alive");
+            room.release_idle_hold(idle);
+            state
+                .audio_rooms
+                .cleanup_if_empty(tenant.community(), channel_id)
+        }
+        IdleOutcome::Ended => {
+            info!(channel_id = %channel_id, "audio room stayed empty — auto-ending huddle");
+            match state
+                .db
+                .archive_channel(tenant.community(), channel_id)
+                .await
+            {
+                Err(e) => {
+                    warn!(channel_id = %channel_id, "auto-archive failed, huddle stays alive: {e}");
+                    room.clear_ended();
+                    room.release_idle_hold(idle);
+                    return;
+                }
+                Ok(()) => {
+                    // The hold outlived `end_if_idle` so no joiner could land
+                    // on a replacement room while the archive was in flight.
+                    room.release_idle_hold(idle);
+                    let emptied = state
+                        .audio_rooms
+                        .cleanup_if_empty(tenant.community(), channel_id);
+                    emit_participant_event(
+                        &state,
+                        &tenant,
+                        channel_id,
+                        parent_id_for_event,
+                        ParticipantLifecycle {
+                            kind: Kind::Custom(48103),
+                            participant_pubkey: &last_leaver_pubkey,
+                            roster_revision: None,
+                            admission_id: None,
+                        },
+                    )
+                    .await;
+                    emptied
+                }
+            }
+        }
+    };
+    if room_emptied {
+        release_owner_lease(&state, channel_id, owner_generation);
+    }
 }
 
 /// React to a non-owner huddle teardown signal read off the owner's control
@@ -1692,5 +1834,86 @@ mod tests {
             !handler_receives_message_of_size(MAX_WEBSOCKET_MESSAGE_BYTES + 1).await,
             "oversized messages must be rejected by the WebSocket parser before the handler sees them"
         );
+    }
+
+    fn idle_room() -> (crate::audio::room::Room, crate::audio::room::IdleGeneration) {
+        let room = crate::audio::room::Room::new(
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4()),
+            Uuid::new_v4(),
+        );
+        let (peer, ..) = room.add_peer("alice".into(), 3).expect("admit");
+        let (_, idle) = room.remove_peer_and_check_idle(peer).expect("peer existed");
+        (room, idle.expect("last leaver observes idle"))
+    }
+
+    /// The grace window holds the room open; once it elapses with no rejoin the
+    /// room ends and refuses further admission.
+    #[tokio::test(start_paused = true)]
+    async fn empty_room_ends_only_after_grace_elapses() {
+        let (room, idle) = idle_room();
+        let wait = await_room_idle(&room, idle, ROOM_EMPTY_GRACE, None, || false);
+        tokio::pin!(wait);
+
+        tokio::time::advance(ROOM_EMPTY_GRACE - Duration::from_millis(1)).await;
+        assert!(
+            futures_util::poll!(&mut wait).is_pending(),
+            "room must stay open for the whole grace window"
+        );
+        let (bob, ..) = room
+            .add_peer("bob".into(), 3)
+            .expect("rejoin is admitted during grace");
+        room.remove_peer(bob);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            wait.await,
+            IdleOutcome::Rejoined,
+            "a rejoin during grace fences out the stale observation"
+        );
+        assert!(room.add_peer("carol".into(), 3).is_ok(), "room never ended");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_room_with_no_rejoin_ends_after_grace() {
+        let (room, idle) = idle_room();
+        let outcome = await_room_idle(&room, idle, ROOM_EMPTY_GRACE, None, || false).await;
+        assert_eq!(outcome, IdleOutcome::Ended);
+        assert!(matches!(
+            room.add_peer("bob".into(), 3),
+            Err(crate::audio::room::AdmissionError::Ended)
+        ));
+    }
+
+    /// Owner-loss during the window aborts without ending: the room now belongs
+    /// to whichever pod re-acquires the lease.
+    #[tokio::test(start_paused = true)]
+    async fn owner_loss_during_grace_aborts_without_ending() {
+        let (room, idle) = idle_room();
+        let lost = CancellationToken::new();
+        let wait = await_room_idle(&room, idle, ROOM_EMPTY_GRACE, Some(lost.clone()), || false);
+        tokio::pin!(wait);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        lost.cancel();
+        assert_eq!(wait.await, IdleOutcome::Aborted);
+        assert!(room.add_peer("bob".into(), 3).is_ok(), "room was not ended");
+    }
+
+    /// A drain that begins mid-window (single-pod mode has no drain token, only
+    /// `shutting_down`) must not end the huddle when the timer fires.
+    #[tokio::test(start_paused = true)]
+    async fn drain_during_grace_aborts_without_ending() {
+        let (room, idle) = idle_room();
+        let draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&draining);
+        let wait = await_room_idle(&room, idle, ROOM_EMPTY_GRACE, None, move || {
+            flag.load(Ordering::Relaxed)
+        });
+        tokio::pin!(wait);
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        draining.store(true, Ordering::Relaxed);
+        assert_eq!(wait.await, IdleOutcome::Aborted);
+        assert!(room.add_peer("bob".into(), 3).is_ok(), "room was not ended");
     }
 }

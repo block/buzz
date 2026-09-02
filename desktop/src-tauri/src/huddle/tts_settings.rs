@@ -45,6 +45,8 @@ pub struct HuddleAudioSettingsState {
     pub tts_transition: tokio::sync::Mutex<()>,
     /// Selected huddle output device. `None` uses the system default.
     pub output_device: Mutex<Option<String>>,
+    /// Live output-route changes for an active huddle playout loop.
+    pub output_device_changes: tokio::sync::watch::Sender<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -624,7 +626,7 @@ pub async fn preview_pocket_voice(
             cancel,
             super::human_floor::HumanFloor::new(),
             &voice_name,
-            output_device,
+            tokio::sync::watch::channel(output_device).1,
             None,
         )?;
         pipeline.speak("Hello! This is how I’ll read agent responses.".to_string())?;

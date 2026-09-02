@@ -100,7 +100,7 @@ impl SttPipeline {
         ptt_active: Option<Arc<AtomicBool>>,
         manual_mic_unmuted: Option<Arc<AtomicBool>>,
         human_floor: HumanFloor,
-        output_device: Option<String>,
+        output_device_changes: tokio::sync::watch::Receiver<Option<String>>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<SttAudioInput>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
@@ -120,7 +120,7 @@ impl SttPipeline {
                     ptt_active_worker,
                     manual_mic_unmuted_worker,
                     human_floor,
-                    output_device,
+                    output_device_changes,
                 )
             })
             .map_err(|e| format!("failed to spawn stt-worker thread: {e}"))?;
@@ -449,7 +449,7 @@ fn stt_worker(
     ptt_active: Option<Arc<AtomicBool>>,
     manual_mic_unmuted: Option<Arc<AtomicBool>>,
     human_floor: HumanFloor,
-    output_device: Option<String>,
+    output_device_changes: tokio::sync::watch::Receiver<Option<String>>,
 ) {
     // ── 1. Initialise sherpa-onnx recognizer ─────────────────────────────────
     //
@@ -566,7 +566,7 @@ fn stt_worker(
                         manual_gate,
                         &human_floor,
                         local_barge_in_state,
-                        output_device.as_deref(),
+                        output_device_changes.borrow().as_deref(),
                         track_local_floor,
                     );
                 }
