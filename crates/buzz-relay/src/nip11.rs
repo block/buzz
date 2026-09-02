@@ -583,6 +583,7 @@ mod tests {
     /// `self` would give clients no way to verify membership events. The
     /// debug_assert in `build` catches this in tests/debug builds.
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "advertise_nip43=true requires relay_self=Some")]
     fn build_nip43_without_self_panics_in_debug() {
         let _ = RelayInfo::build(None, None, true, DEFAULT_MAX_FRAME_BYTES, None, None);
