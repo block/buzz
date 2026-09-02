@@ -12,15 +12,22 @@ import type { ManagedAgent } from "@/shared/api/types";
  * file order can't hijack the persona target. Returns `undefined` when every
  * instance is archived — the card then renders in persona-only mode. The
  * `isArchived` predicate is fail-open (returns `false` while the relay archive
- * snapshot loads), so a cold start never briefly picks nothing.
+ * snapshot loads), so a cold start never briefly picks nothing. When the same
+ * persona has identities from several communities, the active community's
+ * identity wins before runtime status.
  */
 export function pickProfileAgent(
   agents: readonly ManagedAgent[],
   isArchived: (pubkey: string) => boolean,
+  preferredRelayUrl?: string,
 ) {
   return [...agents]
     .filter((agent) => !isArchived(agent.pubkey))
     .sort((left, right) => {
+      const relayDiff =
+        Number(right.relayUrl === preferredRelayUrl) -
+        Number(left.relayUrl === preferredRelayUrl);
+      if (relayDiff !== 0) return relayDiff;
       const activeDiff =
         Number(isManagedAgentActive(right)) -
         Number(isManagedAgentActive(left));
