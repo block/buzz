@@ -3,8 +3,15 @@
 
 use super::{
     build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-    extract_retry_in_hint, parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
+    extract_retry_in_hint, parse_command_response, relay_http_base_url,
+    submit::{
+        send_event_http_request_for_test, send_event_http_request_with_keys_for_test,
+        submit_event_json_with_keys_for_test, submit_event_text_with_keys_for_test,
+        EventSubmitHttpError, SubmitEventResponse,
+    },
+    MALFORMED_RESPONSE_MESSAGE,
 };
+use nostr::JsonUtil as _;
 use serde::Deserialize;
 
 // ── extract_retry_in_hint ────────────────────────────────────────────────
@@ -599,6 +606,349 @@ fn profile_event_without_auth_tag() {
     assert_eq!(auth_tags.len(), 0, "expected no auth tags");
 
     assert_eq!(event.kind, nostr::Kind::Metadata);
+}
+
+#[tokio::test]
+async fn stalled_event_submit_times_out_with_classified_error() {
+    use std::io::Read as _;
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        send_event_http_request_for_test(
+            &reqwest::Client::new(),
+            &format!("http://{addr}/events"),
+            b"{}".to_vec(),
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect("the event submit helper must honor its per-request timeout and resolve within 5s");
+
+    assert_eq!(
+        result.expect_err("a stalled event submit must fail"),
+        "relay unreachable: request timed out"
+    );
+    let _ = handle.join();
+}
+
+#[tokio::test]
+async fn pre_header_timeout_retries_same_event_once() {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = Arc::clone(&attempts);
+    let handle = std::thread::spawn(move || {
+        let (first, _) = listener.accept().expect("first submit");
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(300));
+        drop(first);
+
+        let (mut second, _) = listener.accept().expect("retry submit");
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        second
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        second.flush().unwrap();
+    });
+
+    let keys = nostr::Keys::generate();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        send_event_http_request_with_keys_for_test(
+            &reqwest::Client::new(),
+            &format!("http://{addr}/events"),
+            &keys,
+            b"{}",
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect("headers-only submit must resolve within 5s")
+    .expect("the retry receives a success response");
+
+    assert!(result.status().is_success());
+    handle.join().unwrap();
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn event_submit_timeout_covers_response_body() {
+    use std::io::{Read as _, Write as _};
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n",
+            );
+            let _ = stream.flush();
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    let response = send_event_http_request_for_test(
+        &reqwest::Client::new(),
+        &format!("http://{addr}/events"),
+        b"{}".to_vec(),
+        Duration::from_millis(200),
+    )
+    .await
+    .expect("response headers should arrive before the request deadline");
+    let err = super::parse_json_response::<serde_json::Value>(response)
+        .await
+        .expect_err("the stalled response body must time out");
+
+    assert_eq!(err, "relay unreachable: request timed out");
+    let _ = handle.join();
+}
+
+#[tokio::test]
+async fn accepted_event_body_timeout_retries_same_event_with_fresh_auth() {
+    use base64::Engine as _;
+    use std::io::{Read as _, Write as _};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn read_request(stream: &mut std::net::TcpStream) -> (Vec<u8>, String) {
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        let header_end = loop {
+            let read = stream.read(&mut buf).expect("read request");
+            assert!(read > 0, "request closed before headers completed");
+            request.extend_from_slice(&buf[..read]);
+            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&request[..header_end])
+            .expect("request headers are UTF-8")
+            .to_string();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("valid content length"))
+            })
+            .expect("content length header");
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut buf).expect("read request body");
+            assert!(read > 0, "request closed before body completed");
+            request.extend_from_slice(&buf[..read]);
+        }
+        let auth = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("authorization")
+                    .then(|| value.trim().to_string())
+            })
+            .expect("authorization header");
+        (
+            request[header_end..header_end + content_length].to_vec(),
+            auth,
+        )
+    }
+
+    fn auth_nonce(auth: &str) -> String {
+        let encoded = auth.strip_prefix("Nostr ").expect("Nostr auth scheme");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("base64 NIP-98 event");
+        let event: nostr::Event = serde_json::from_slice(&bytes).expect("NIP-98 event JSON");
+        event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                let values = tag.as_slice();
+                (values.first().map(String::as_str) == Some("nonce"))
+                    .then(|| values.get(1).cloned())
+                    .flatten()
+            })
+            .expect("NIP-98 nonce tag")
+    }
+
+    let keys = nostr::Keys::generate();
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "one user action")
+        .sign_with_keys(&keys)
+        .unwrap();
+    let event_id = event.id.to_hex();
+    let body = event.as_json().into_bytes();
+    let attempts = Arc::new(Mutex::new(Vec::<(Vec<u8>, String)>::new()));
+    let durable_event_ids = Arc::new(Mutex::new(std::collections::HashSet::<String>::new()));
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_attempts = Arc::clone(&attempts);
+    let server_durable_event_ids = Arc::clone(&durable_event_ids);
+    let server_event_id = event_id.clone();
+    let handle = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().expect("first submit");
+        let first_request = read_request(&mut first);
+        let first_event: nostr::Event =
+            serde_json::from_slice(&first_request.0).expect("first signed event");
+        assert!(
+            server_durable_event_ids
+                .lock()
+                .unwrap()
+                .insert(first_event.id.to_hex()),
+            "the first attempt models the relay commit"
+        );
+        server_attempts.lock().unwrap().push(first_request);
+        first
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n",
+            )
+            .unwrap();
+        first.flush().unwrap();
+
+        let (mut second, _) = listener.accept().expect("retry submit");
+        let second_request = read_request(&mut second);
+        let second_event: nostr::Event =
+            serde_json::from_slice(&second_request.0).expect("retried signed event");
+        assert!(
+            !server_durable_event_ids
+                .lock()
+                .unwrap()
+                .insert(second_event.id.to_hex()),
+            "the retry models the relay's duplicate-ID no-op"
+        );
+        server_attempts.lock().unwrap().push(second_request);
+        let response_body = serde_json::json!({
+            "event_id": server_event_id,
+            "accepted": true,
+            "message": "duplicate:"
+        })
+        .to_string();
+        write!(
+            second,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        )
+        .unwrap();
+        second.flush().unwrap();
+    });
+
+    let result: SubmitEventResponse = tokio::time::timeout(
+        Duration::from_secs(5),
+        submit_event_json_with_keys_for_test(
+            &reqwest::Client::new(),
+            &format!("http://{addr}/events"),
+            &keys,
+            &body,
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect("the retrying submit helper must resolve within 5s")
+    .expect("the second identical submission reconciles the ambiguous timeout");
+
+    handle.join().unwrap();
+    let attempts = attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 2, "one timeout gets exactly one retry");
+    assert_eq!(attempts[0].0, body, "first attempt uses the signed event");
+    assert_eq!(attempts[1].0, body, "retry preserves the exact event bytes");
+    assert_eq!(result.event_id, event_id, "one durable event ID");
+    assert_eq!(
+        durable_event_ids.lock().unwrap().len(),
+        1,
+        "accepted attempt plus retry remains one durable event"
+    );
+    assert!(result.accepted);
+    assert_eq!(result.message, "duplicate:");
+    assert_ne!(attempts[0].1, attempts[1].1, "NIP-98 auth must be fresh");
+    assert_ne!(
+        auth_nonce(&attempts[0].1),
+        auth_nonce(&attempts[1].1),
+        "the relay replay guard must see distinct auth nonces"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_event_submit_preserves_error_prefix_contracts() {
+    use std::io::{Read as _, Write as _};
+    use std::time::Duration;
+
+    let keys = nostr::Keys::generate();
+    let body = nostr::EventBuilder::new(nostr::Kind::Custom(9), "engram")
+        .sign_with_keys(&keys)
+        .unwrap()
+        .as_json()
+        .into_bytes();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        for fixture in [
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"message\":\"nope\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: close\r\n\r\nshort",
+        ] {
+            let (mut stream, _) = listener.accept().expect("snapshot submit");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream.write_all(fixture.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    let url = format!("http://{addr}/events");
+
+    let rejected = submit_event_text_with_keys_for_test(
+        &reqwest::Client::new(),
+        &url,
+        &keys,
+        &body,
+        Duration::from_secs(1),
+    )
+    .await
+    .expect_err("400 is a relay rejection");
+    assert!(
+        matches!(
+            rejected,
+            EventSubmitHttpError::Rejected(ref error)
+                if error == "relay returned 400 Bad Request: nope"
+        ),
+        "{rejected:?}"
+    );
+
+    let body_error = submit_event_text_with_keys_for_test(
+        &reqwest::Client::new(),
+        &url,
+        &keys,
+        &body,
+        Duration::from_secs(1),
+    )
+    .await
+    .expect_err("an incomplete 2xx body is a response read failure");
+    assert!(
+        matches!(
+            body_error,
+            EventSubmitHttpError::Response(ref error)
+                if error.starts_with("failed to read relay response: ")
+        ),
+        "{body_error:?}"
+    );
+
+    handle.join().unwrap();
 }
 
 #[test]

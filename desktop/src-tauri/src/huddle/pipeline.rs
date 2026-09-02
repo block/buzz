@@ -696,28 +696,14 @@ pub(crate) fn spawn_transcription_task(
                 }
             };
             let url = format!("{relay_base_url}/events");
-            let auth_header = match crate::relay::build_nip98_auth_header_for_keys(
-                &keys,
-                &reqwest::Method::POST,
+            let response = crate::relay::send_event_http_request_with_keys(
+                &http_client,
                 &url,
+                &keys,
+                None,
                 &body_bytes,
-            ) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("buzz-desktop: STT NIP-98 auth: {e}");
-                    continue;
-                }
-            };
-
-            let response = {
-                http_client
-                    .post(&url)
-                    .header("Authorization", auth_header)
-                    .header("Content-Type", "application/json")
-                    .body(body_bytes)
-                    .send()
-                    .await
-            };
+            )
+            .await;
 
             match response {
                 Ok(resp) if resp.status().is_success() => {}
@@ -727,8 +713,12 @@ pub(crate) fn spawn_transcription_task(
                     let msg = crate::relay::relay_error_message(resp).await;
                     eprintln!("buzz-desktop: STT kind:9 post failed: {msg}");
                 }
+                Err(crate::relay::EventSubmitHttpError::Auth(e)) => {
+                    eprintln!("buzz-desktop: STT NIP-98 auth: {e}");
+                    continue;
+                }
                 Err(e) => {
-                    eprintln!("buzz-desktop: STT kind:9 post failed: {e}");
+                    eprintln!("buzz-desktop: STT kind:9 post failed: {}", e.into_message());
                 }
             }
         }
