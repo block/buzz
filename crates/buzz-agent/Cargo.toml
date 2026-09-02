@@ -44,25 +44,15 @@ path = "tests/bin/auth_worker.rs"
 
 [dependencies]
 # For the `buzz-agent auth <provider>` subcommand only. Provider auth for the
-# agent loop itself is goose's; this is the interactive PKCE login that seeds
-# the token cache that goose (and the desktop model picker) then read.
+# agent loop itself is GDK-based; this is the interactive PKCE login that seeds
+# the token cache used by inference and the desktop model picker.
 buzz-model-catalog = { path = "../buzz-model-catalog" }
-goose = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565", default-features = false, features = ["rustls-tls"] }
-# Consume the GDK loop primitives from their owning crate. Keep this on the
-# exact same Goose revision as `goose` so shared conversation types stay unified.
-goose-agent = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
-goose-provider-types = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
-goose-context-management = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
-goose-sdk-types = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
-# ModelConfig: goose re-exports it from goose-providers; goose::model_config
-# keeps its own copy private.
-goose-providers = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
-# Resolution guard: goose pins icu_locale "=2.1.1" (needs icu_collections
-# ~2.1.1) while url 2.5.x -> idna -> idna_adapter 1.2.2 pulls icu_normalizer
-# 2.2.0 (needs icu_collections ~2.2.0). Only one 2.x icu_collections can be
-# selected. 1.2.0 is the last idna_adapter on ICU4X 1.x, which keeps IDNA off
-# the icu_collections 2.x line entirely and lets both resolve.
-idna_adapter = "=1.2.0"
+# Keep all GDK crates on the exact same Goose revision so shared types stay unified.
+goose-agent = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-provider-types = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-context-management = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-sdk-types = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-providers = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 anyhow = "1"

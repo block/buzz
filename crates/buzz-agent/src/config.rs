@@ -122,8 +122,8 @@ fn parse_approval(raw: Option<&str>) -> GooseMode {
 
 /// Translate a Buzz provider id into the name goose's registry knows.
 ///
-/// Unknown names pass through untouched — goose owns the registry, so
-/// gatekeeping here would break every provider it gains that we don't list.
+/// Unknown names pass through so provider construction can return the
+/// authoritative supported-provider error.
 fn goose_provider_name(provider: &str) -> &str {
     match provider {
         // Buzz's OpenAI-wire-compatible providers; goose calls them `openai`.
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn unknown_providers_pass_through_untouched() {
-        // Goose owns the registry; we must not gatekeep names we don't know.
+        // Keep translation separate from the finite provider factory.
         assert_eq!(goose_provider_name("anthropic"), "anthropic");
         assert_eq!(
             goose_provider_name("some_future_provider"),

@@ -518,7 +518,11 @@ async fn infer(
 ) -> Result<Option<Inference>, AgentError> {
     let (provider, model_config, _model_id) = ctx.model.snapshot().await;
 
-    let system_prompt = ctx.prompt.build(&session.working_dir).await;
+    let system_prompt = ctx
+        .prompt
+        .build(&session.working_dir)
+        .await
+        .map_err(|error| AgentError::Llm(format!("system prompt: {error}")))?;
     let tools = ctx.mcp.rmcp_tools();
 
     let mut stream = provider

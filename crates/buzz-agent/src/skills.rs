@@ -1,7 +1,7 @@
 //! The skill index for the system prompt.
 //!
 //! Discovery, `load_skill`, argument templating, supporting-file loading and
-//! the path-escape guard are all [`goose::skills`]. The only thing left here
+//! the path-escape guard come from [`goose_agent::skills`]. The only thing left here
 //! is rendering the index, and only because the piece of goose that renders it
 //! (`ops_skills::skill_instructions`) is reachable through `SkillOperation`,
 //! which is `pub(super)` — its concrete operations stay internal to goose
@@ -42,7 +42,7 @@ pub fn load_skill(
         .unwrap_or("");
     let args = arguments.get("args").and_then(serde_json::Value::as_str);
     if let Some(skill) = skills.iter().find(|skill| skill.name == name) {
-        return match goose::skills::loaded_skill_context_with_args(skill, args) {
+        return match goose_agent::skills::loaded_skill_context_with_args(skill, args) {
             Ok(rendered) => {
                 rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
                     rendered,
@@ -158,46 +158,5 @@ mod tests {
         let alpha = index.find("alpha").expect("alpha listed");
         let zebra = index.find("zebra").expect("zebra listed");
         assert!(alpha < zebra, "index must not reorder between rounds");
-    }
-}
-
-/// Nothing in this crate may *load* hint files.
-///
-/// buzz-agent used to walk `AGENTS.md` itself while goose's
-/// `PromptManager::build_system_prompt` was already loading the same files, so
-/// every hint landed in the system prompt twice. This guard outlived the
-/// module it was written in (`hints.rs`, deleted along with the duplicate
-/// skills code it shared a file with), so it moves here rather than being
-/// dropped.
-///
-/// It looks for the *filename literals* a loader would need, not for the
-/// names in prose -- the previous version banned the bare word and could only
-/// live in a file that never explained itself. The literals are assembled at
-/// runtime so the guard does not trip over its own source text.
-#[cfg(test)]
-mod hint_files_are_gooses_job {
-    const SOURCES: &[(&str, &str)] = &[
-        ("lib.rs", include_str!("lib.rs")),
-        ("prompt.rs", include_str!("prompt.rs")),
-        ("loop_drive.rs", include_str!("loop_drive.rs")),
-        ("skills.rs", include_str!("skills.rs")),
-    ];
-
-    #[test]
-    fn no_module_loads_hint_files() {
-        let quote = '"';
-        // Assembled rather than written out, so this test's own source does
-        // not count as a violation of the rule it enforces.
-        for name in [format!("AGENTS{}md", '.'), format!(".goose{}", "hints")] {
-            let literal = format!("{quote}{name}{quote}");
-            for (file, source) in SOURCES {
-                assert!(
-                    !source.contains(&literal),
-                    "{file} has a {literal} string literal: hint-file loading \
-                     belongs to goose's PromptManager, or hints render twice \
-                     in the prompt"
-                );
-            }
-        }
     }
 }

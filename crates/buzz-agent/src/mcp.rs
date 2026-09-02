@@ -35,6 +35,64 @@ pub struct ResultBudget {
     pub text: usize,
 }
 
+fn discover_skills(
+    working_dir: &std::path::Path,
+) -> Vec<goose_sdk_types::custom_requests::SourceEntry> {
+    use goose_agent::skills::{SkillDiscoveryOptions, SkillRoot, SkillScope};
+
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for (precedence, path) in [
+            home.join(".agents/skills"),
+            home.join(".config/goose/skills"),
+            home.join(".claude/skills"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            roots.push(SkillRoot {
+                path,
+                scope: SkillScope::Global,
+                precedence: precedence as u32,
+                writable: false,
+                preserve_path: false,
+            });
+        }
+    }
+    for (offset, path) in [
+        working_dir.join(".agents/skills"),
+        working_dir.join(".goose/skills"),
+        working_dir.join(".claude/skills"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        roots.push(SkillRoot {
+            path,
+            scope: SkillScope::Project,
+            precedence: 100 + offset as u32,
+            writable: false,
+            preserve_path: false,
+        });
+    }
+
+    match goose_agent::skills::discover_skills(&SkillDiscoveryOptions {
+        roots,
+        working_dir: Some(working_dir.to_path_buf()),
+    }) {
+        Ok(discovery) => {
+            for diagnostic in discovery.diagnostics {
+                tracing::warn!(path = %diagnostic.path.display(), error = diagnostic.message, "skill ignored");
+            }
+            discovery.skills
+        }
+        Err(error) => {
+            tracing::warn!(%error, "skill discovery failed");
+            Vec::new()
+        }
+    }
+}
+
 const PASSTHROUGH_ENV: &[&str] = &[
     // Core
     "PATH",
@@ -216,12 +274,7 @@ impl McpRegistry {
             hook_timeout: Duration::from_millis(
                 env_u64("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2_500).max(1),
             ),
-            skills: goose::skills::discover_skills(Some(std::path::Path::new(cwd)))
-                .into_iter()
-                .filter(|skill| {
-                    skill.source_type != goose_sdk_types::custom_requests::SourceType::BuiltinSkill
-                })
-                .collect(),
+            skills: discover_skills(std::path::Path::new(cwd)),
         };
 
         let mut seen_names = HashSet::new();

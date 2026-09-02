@@ -1,81 +1,96 @@
-//! buzz-agent's system prompt, assembled with goose's `PromptManager`.
-//!
-//! `Agent::prompt_manager` is `pub(super)` in goose, and `Agent::reply` is the
-//! only thing that reads it. Since buzz-agent owns the loop it also owns the
-//! prompt: we keep our own `PromptManager` and call it at the top of each
-//! round, which is exactly what goose's inference step does internally.
-//!
-//! Owning it is not just a workaround for the visibility — it is the seam that
-//! makes the persona work at all. goose's ACP server never reads
-//! `systemPrompt`, so an agent driven over plain ACP silently loses Fizz and
-//! the `[Base]` operating manual. Building the prompt here puts them in front
-//! of the model.
+//! Per-session system prompt composition using the Goose GDK.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use goose::agents::PromptManager;
+use goose_agent::prompt::{
+    InstructionDiscovery, InstructionDiscoveryOptions, PromptComposer, PromptContext, PromptSource,
+};
 use goose_provider_types::goose_mode::GooseMode;
 use tokio::sync::Mutex;
 
+struct PromptState {
+    composer: PromptComposer,
+    instructions: InstructionDiscovery,
+    root_instructions_loaded: bool,
+}
+
 /// The system prompt for one session.
-///
-/// Cloneable so a turn can hold it without borrowing the session map.
 #[derive(Clone)]
 pub struct SessionPrompt {
-    manager: Arc<Mutex<PromptManager>>,
+    state: Arc<Mutex<PromptState>>,
     mode: GooseMode,
 }
 
 impl SessionPrompt {
     pub fn new(mode: GooseMode) -> Self {
         Self {
-            manager: Arc::new(Mutex::new(PromptManager::new())),
+            state: Arc::new(Mutex::new(PromptState {
+                composer: PromptComposer::new(PromptSource::Literal(String::new())),
+                instructions: InstructionDiscovery::new(InstructionDiscoveryOptions::default()),
+                root_instructions_loaded: false,
+            })),
             mode,
         }
     }
 
-    /// Replace goose's base template with the harness-supplied persona.
+    /// Replace the base prompt with the harness-supplied persona template.
     pub async fn set_override(&self, template: String) {
-        self.manager
+        self.state
             .lock()
             .await
-            .set_system_prompt_override(template);
+            .composer
+            .set_base(PromptSource::Template(template));
     }
 
-    /// Append a keyed section (AGENTS.md hints, the skill index, hook
-    /// guidance). Extras survive an override — goose appends them to whichever
-    /// base template is in force.
+    /// Append or replace a keyed prompt section.
     pub async fn add_extra(&self, key: &str, instruction: String) {
-        self.manager
+        self.state
             .lock()
             .await
-            .add_system_prompt_extra(key.to_string(), instruction);
+            .composer
+            .add_extra(key.to_string(), instruction);
     }
 
     /// Render the prompt for one inference.
-    ///
-    /// Called per round rather than once per session because
-    /// `build_system_prompt` also folds in subdirectory hints discovered from
-    /// the tool arguments seen so far — a prompt built once at session start
-    /// would never pick them up.
-    pub async fn build(&self, working_dir: &Path) -> String {
-        self.manager
-            .lock()
-            .await
-            .build_system_prompt(working_dir, Vec::new(), self.mode)
+    pub async fn build(&self, working_dir: &Path) -> anyhow::Result<String> {
+        let mut state = self.state.lock().await;
+        if !state.root_instructions_loaded {
+            for instruction in state.instructions.discover_root(working_dir)? {
+                state
+                    .composer
+                    .add_extra(instruction.key, instruction.content);
+            }
+            state.root_instructions_loaded = true;
+        }
+        for instruction in state
+            .instructions
+            .discover_new_subdirectory_instructions(working_dir)?
+        {
+            state
+                .composer
+                .add_extra(instruction.key, instruction.content);
+        }
+        state.composer.render(
+            &PromptContext {
+                current_date_time: String::new(),
+                goose_mode: self.mode,
+                variables: Default::default(),
+            },
+            [],
+        )
     }
 
-    /// Feed tool arguments to the subdirectory-hint tracker, so entering a new
-    /// part of the tree pulls in that directory's AGENTS.md on the next round.
+    /// Feed tool arguments to the subdirectory-instruction tracker.
     pub async fn record_tool_arguments(
         &self,
         arguments: &Option<serde_json::Map<String, serde_json::Value>>,
         working_dir: &Path,
     ) {
-        self.manager
+        self.state
             .lock()
             .await
+            .instructions
             .record_tool_arguments(arguments, working_dir);
     }
 }
@@ -88,21 +103,31 @@ mod tests {
     async fn override_replaces_the_base_template() {
         let prompt = SessionPrompt::new(GooseMode::Auto);
         prompt.set_override("You are Fizz.".to_string()).await;
-        let built = prompt.build(Path::new(".")).await;
+        let built = prompt.build(Path::new(".")).await.unwrap();
         assert!(built.contains("You are Fizz."));
     }
 
     #[tokio::test]
     async fn extras_survive_an_override() {
-        // The persona arrives as an override and the hints as an extra; losing
-        // either one is a silent failure the harness cannot detect.
         let prompt = SessionPrompt::new(GooseMode::Auto);
         prompt.set_override("You are Fizz.".to_string()).await;
         prompt
             .add_extra("buzz_hints", "Always ship the sprocket first.".to_string())
             .await;
-        let built = prompt.build(Path::new(".")).await;
+        let built = prompt.build(Path::new(".")).await.unwrap();
         assert!(built.contains("You are Fizz."));
         assert!(built.contains("Always ship the sprocket first."));
+    }
+
+    #[tokio::test]
+    async fn instructions_are_loaded_once() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "Project instruction").unwrap();
+        let prompt = SessionPrompt::new(GooseMode::Auto);
+        prompt.set_override("Persona".to_string()).await;
+        let first = prompt.build(root.path()).await.unwrap();
+        let second = prompt.build(root.path()).await.unwrap();
+        assert_eq!(first.matches("Project instruction").count(), 1);
+        assert_eq!(second.matches("Project instruction").count(), 1);
     }
 }

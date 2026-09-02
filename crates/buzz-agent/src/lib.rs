@@ -26,6 +26,7 @@ pub mod hooks;
 pub mod loop_drive;
 pub mod mcp;
 pub mod model;
+mod model_config;
 pub mod ops;
 pub mod permission;
 pub mod prompt;
@@ -153,9 +154,8 @@ async fn build_agent(
         .or_else(|| std::env::var("GOOSE_MODEL").ok())
         .ok_or_else(|| AgentError::Llm("no model configured".into()))?;
     let provider = build_provider(&provider_name).await?;
-    let model_config =
-        goose::model_config::model_config_from_user_config(&provider_name, &model_name)
-            .map_err(|error| AgentError::LlmModelNotFound(error.to_string()))?;
+    let model_config = crate::model_config::from_env(&provider_name, &model_name)
+        .map_err(|error| AgentError::LlmModelNotFound(error.to_string()))?;
     let model = crate::model::SessionModel::new(provider, model_config, model_name);
 
     let prompt = crate::prompt::SessionPrompt::new(cfg.goose_mode);
@@ -895,8 +895,8 @@ async fn cancel_session(app: &Arc<App>, params: Value) {
 
 /// Swap the model for an existing session.
 ///
-/// Rebuilds the provider (base-url/credential resolution lives in goose's
-/// registry) and installs it with the new `ModelConfig`. `SharedProvider` is an
+/// Rebuilds the configured Buzz provider and installs it with the new
+/// `ModelConfig`. `SharedProvider` is an
 /// `Arc<Mutex<Option<..>>>` precisely so this is hot-swappable
 /// (goose `agents/types.rs:11-12`).
 /// Construct the goose provider. See [`crate::provider`].
@@ -909,7 +909,7 @@ async fn build_provider(
 async fn apply_model(model: &crate::model::SessionModel, model_id: &str) -> Result<(), AgentError> {
     let provider_name = std::env::var("GOOSE_PROVIDER").unwrap_or_else(|_| "openai".to_string());
     let provider = build_provider(&provider_name).await?;
-    let model_config = goose::model_config::model_config_from_user_config(&provider_name, model_id)
+    let model_config = crate::model_config::from_env(&provider_name, model_id)
         .map_err(|e| AgentError::LlmModelNotFound(e.to_string()))?;
     // Swapped on buzz's own handle. `Agent::update_provider` would do the same
     // thing plus a write to goose's session row; see [`crate::model`].
