@@ -275,13 +275,15 @@ authenticated `disconnect` call.
 
 A disconnect call causes the relay to:
 
-1. Close all live WebSocket connections whose proven `k` equals the target
-   pubkey, synchronously.
-2. Insert a **deny entry** keyed by `(iss, target_pubkey)` into the relay's
+1. Insert a **deny entry** keyed by `(iss, target_pubkey)` into the relay's
    in-memory deny set, with an absolute expiry of `until` (a Unix timestamp
    carried in the signed command JWT; see Command JWT).  Any subsequent connection
    or admission attempt for that pubkey under the same issuer is denied
-   `authorization_denied` until `now >= until`.
+   `authorization_denied` until `now >= until`.  If the deny set is at capacity
+   and the entry cannot be inserted, the relay MUST reject the command `503`; no
+   sessions are closed and no replay state is consumed.
+2. Close all live WebSocket connections whose proven `k` equals the target
+   pubkey, synchronously.
 
 The deny set is held **in relay memory only** — no durable storage, no schema
 changes.  A relay restart MAY forget active deny entries.  The residual exposure
@@ -289,18 +291,34 @@ after a restart is bounded by the remaining assertion TTL
 (`max(0, min(exp, iat + maximum_assertion_age) - now)`), which is finite by
 the assertion contract.  [FI-TRACE-DENY-SET]
 
-The relay MUST bound the deny set size.  When the deny set is at capacity, the
-relay MUST NOT silently drop the incoming deny entry; it MUST reject the command
-with `503` so the issuer knows the entry was not recorded.  Implementations
-SHOULD use an LRU or TTL-expiry policy to age out entries before reaching the
-hard cap.
+The relay MUST bound the deny set size.  Implementations MUST evict only
+expired entries; when the set is at capacity and all entries are still active,
+the relay MUST reject the new command `503` without removing any existing entry.
 
 The `until` timestamp MUST NOT exceed the maximum possible remaining assertion
-validity for any assertion the issuer could currently mint: the relay MUST
-enforce `until <= now + maximum_assertion_age` for this issuer policy.  An
+validity for any assertion the issuer could currently mint.  Because an
+assertion accepted at the future-skew boundary (`iat <= now + skew`) remains
+valid until `iat + maximum_assertion_age`, the latest possible authority deadline
+is `now + skew + maximum_assertion_age`; the relay MUST enforce
+`until <= now + skew + maximum_assertion_age` for this issuer policy.  An
 `until` that exceeds this ceiling is rejected `400`.  Supplying an
 `until` in the past is a no-op disconnect (sessions are still closed, deny entry
 is immediately expired); this is not an error.
+
+The deny entry is keyed `(iss, target_pubkey)` and applies to admission
+across **all communities** served by the relay under that issuer.
+Identity-level revocation is intentionally not community-partial: a key revoked
+by its issuer loses access in every community that issuer governs.
+
+In a deployment with multiple relay processes, the deployment MUST propagate
+both the session-close and the deny entry to every process serving admissions
+for the issuer's communities.  The propagation mechanism is deployment-defined
+(for example, the existing inter-process message bus — the same posture as JWKS
+snapshot convergence); each process holds its own RAM copy.  Propagation is
+asynchronous with no protocol-level completion bound.  The issuer re-push duty
+specified below is the recovery path for lost propagation, exactly as for relay
+restart.  A success response from the receiving process does not imply
+cluster-wide application.
 
 > **Note — adopted position (session-only vs deny-until-TTL):**
 >
@@ -367,7 +385,7 @@ The command JWT MUST carry the following claims:
 | `path` | Exactly `"/api/nip-fi/disconnect"` (literal string).  Binds the command to the endpoint. |
 | `cmd` | Exactly `"disconnect"` (literal string).  Operation selector. |
 | `target_pubkey` | Lowercase hexadecimal encoding of the target 32-byte Nostr public key — the same encoding required for the assertion `nostr_pubkey` claim. |
-| `until` | Unix timestamp (NumericDate) at which the deny entry expires.  MUST NOT exceed `now + maximum_assertion_age` for this issuer policy.  The relay validates this ceiling; a value that exceeds it rejects `400`. |
+| `until` | Unix timestamp (NumericDate) at which the deny entry expires.  MUST NOT exceed `now + skew + maximum_assertion_age` for this issuer policy.  The relay validates this ceiling; a value that exceeds it rejects `400`. |
 
 The `maximum_command_age` policy knob is a required positive finite
 configuration per authorized issuer, with a normative upper bound of
@@ -402,7 +420,7 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   until := claims.until or DENY(evidence_rejected)
 
   // 4. Validate until ceiling
-  deny_ceiling := now + policy.maximum_assertion_age
+  deny_ceiling := now + policy.skew + policy.maximum_assertion_age
   assert until <= deny_ceiling or REJECT(400)  // out-of-range until, not an auth failure
 
   // 5. Principal authorization (pure check — no side effects)
@@ -445,20 +463,20 @@ Content-Type: application/json
 
 The relay calls `VerifyCommandJwt` passing the request method, path, and
 body `pubkey` field; any failure denies per the rejection table.  On success,
-the relay closes all live connections whose proven `k` equals
-`CommandResult.target_pubkey` and inserts a deny entry for `(iss, target_pubkey)`
-with expiry `CommandResult.until`.  The `until` expiry is taken exclusively
+the relay inserts a deny entry for `(iss, target_pubkey)` with expiry
+`CommandResult.until`, then closes all live connections whose proven `k` equals
+`CommandResult.target_pubkey`.  The `until` expiry is taken exclusively
 from the signed command JWT claim; the request body carries no `until` field.
 An unknown or unprovable pubkey is not an
-error; the relay responds `200` with `{"disconnected": 0}`.  An `until` value in
-the past is not an error; sessions are closed and the deny entry expires
+error; the relay responds `200` with `{"disconnected": true}`.  An `until` value
+in the past is not an error; sessions are closed and the deny entry expires
 immediately.
 
 ### Response
 
 | Condition | Status | Body |
 |---|---|---|
-| Authorized; action taken or no-op | `200` | `{"disconnected": <n>}` where `n` is the count of sessions closed |
+| Authorized; action taken or no-op | `200` | `{"disconnected": true}` |
 | Missing or invalid command JWT | `401` / `403` | Per the rejection table |
 | Malformed request body or `until` exceeds ceiling | `400` | `bad request\n` |
 | Deny set at capacity | `503` | `deny set full\n` |
@@ -649,7 +667,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-JWKS-REMOVE` | Connections verified under a removed key deny on next revalidation or reconnect. |
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
-| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions and does not deny future admissions; a deny-set-full command is rejected `503` without closing sessions. |
+| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions and does not deny future admissions; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
 | `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
@@ -680,10 +698,10 @@ assertions.  If the issuer continues issuing assertions, access continues.
 
 For the deny-until-TTL disconnect model (issuer issues a successful disconnect
 call with an `until` timestamp), the relay inserts a deny entry for the target
-pubkey with expiry `until` and closes all matching sessions synchronously.  Any
+pubkey with expiry `until` and then closes all matching sessions synchronously.  Any
 subsequent admission attempt for that pubkey is denied `authorization_denied`
 until `now >= until`.  The `until` ceiling enforced by the relay is
-`now + maximum_assertion_age`; this limits how long a deny entry may last —
+`now + skew + maximum_assertion_age`; this limits how long a deny entry may last —
 it does not ensure denial outlasts all live assertions.  A short or past
 `until` is valid, and if the issuer continues issuing after the entry
 expires, access resumes.  The issuer SHOULD set `until` to outlast the
