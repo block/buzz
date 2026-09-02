@@ -284,6 +284,16 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+18. **Observer telemetry is channel-shared; observer control remains
+    owner-only.** The controlling owner keeps existing telemetry visibility.
+    Additional viewers must be direct relay members, current members of the
+    event's channel, and explicit encrypted `p`-tag recipients. The relay
+    revalidates membership before publication and delivery. Relay-only agents,
+    former channel members, unauthenticated clients, and non-recipient
+    subscribers must never receive or decrypt the frame. Discover relay agents
+    for ingestion through the current identity's visible channels, but do not
+    infer management or control authority from visibility.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness

@@ -174,10 +174,9 @@ pub fn build_observer_control_event(
     let encrypted =
         buzz_core_pkg::observer::encrypt_observer_payload(&keys, &agent_pubkey, &payload)
             .map_err(|error| format!("encrypt observer control failed: {error}"))?;
-    let builder = buzz_sdk_pkg::build_agent_observer_frame(
+    let builder = buzz_sdk_pkg::build_agent_observer_control_frame(
+        &keys.public_key().to_hex(),
         &agent_pubkey_hex,
-        &agent_pubkey_hex,
-        buzz_core_pkg::observer::OBSERVER_FRAME_CONTROL,
         &encrypted,
     )
     .map_err(|error| format!("build observer control failed: {error}"))?;

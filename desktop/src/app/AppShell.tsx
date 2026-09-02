@@ -195,8 +195,8 @@ export function AppShell() {
   useAgentsDataRefresh();
   // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
   useAutoRestartPolicy();
-  // Owner-global observer ingestion: receives + decrypts agent observer
-  // frames and keeps derived active-turn liveness in sync app-wide, so no
+  // App-global observer ingestion: receives + decrypts owner and channel-shared
+  // agent frames and keeps derived active-turn liveness in sync, so no
   // individual screen/panel has to mount its own bridge for ingestion.
   // Intentionally mounted without a `startupReady`/identity guard: before
   // `currentPubkey` resolves the hook ingests managed agents only, and

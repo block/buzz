@@ -118,10 +118,11 @@ use std::time::Instant;
 
 use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_TYPING_INDICATOR,
+    KIND_NIP29_GROUP_MEMBERS, KIND_NIP43_MEMBERSHIP_LIST, KIND_TYPING_INDICATOR,
 };
+use buzz_core::observer::OBSERVER_MAX_RECIPIENTS;
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
+use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -492,6 +493,36 @@ impl RestClient {
             .map_err(|e| RelayError::Http(e.to_string()))
     }
 
+    /// Resolve the direct relay members who may observe one channel's agent work.
+    ///
+    /// The channel's kind-39002 roster supplies the access scope. Intersecting
+    /// it with the kind-13534 relay roster excludes owner-delegated agent keys.
+    /// The controlling owner remains first and always receives the frame.
+    pub async fn shared_observer_recipients(
+        &self,
+        channel_id: Uuid,
+        owner: PublicKey,
+        agent: PublicKey,
+    ) -> Result<Vec<PublicKey>, RelayError> {
+        use nostr::{Alphabet, SingleLetterTag};
+
+        let channel_id = channel_id.to_string();
+        let filters = [
+            nostr::Filter::new()
+                .kind(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16))
+                .custom_tags(
+                    SingleLetterTag::lowercase(Alphabet::D),
+                    [channel_id.as_str()],
+                )
+                .limit(1),
+            nostr::Filter::new()
+                .kind(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16))
+                .limit(1),
+        ];
+        let events = self.query(&filters).await?;
+        resolve_shared_observer_recipients(&events, &channel_id, owner, agent)
+    }
+
     /// Query events via `POST /query` with a raw NIP-01 filter document.
     ///
     /// `nostr::Filter` only encodes single-letter generic tags. Project home
@@ -626,6 +657,95 @@ impl From<nostr::event::builder::Error> for RelayError {
     fn from(e: nostr::event::builder::Error) -> Self {
         RelayError::AuthFailed(e.to_string())
     }
+}
+
+fn json_tag_values<'a>(event: &'a Value, tag_name: &str) -> Result<Vec<&'a str>, RelayError> {
+    let tags = event
+        .get("tags")
+        .and_then(Value::as_array)
+        .ok_or_else(|| RelayError::Http("observer roster event has no tags array".into()))?;
+    let mut values = Vec::new();
+    for tag in tags {
+        let Some(parts) = tag.as_array() else {
+            return Err(RelayError::Http(
+                "observer roster event contains a non-array tag".into(),
+            ));
+        };
+        if parts.first().and_then(Value::as_str) != Some(tag_name) {
+            continue;
+        }
+        let value = parts.get(1).and_then(Value::as_str).ok_or_else(|| {
+            RelayError::Http(format!(
+                "observer roster {tag_name} tag has no string value"
+            ))
+        })?;
+        values.push(value);
+    }
+    Ok(values)
+}
+
+fn resolve_shared_observer_recipients(
+    events: &Value,
+    channel_id: &str,
+    owner: PublicKey,
+    agent: PublicKey,
+) -> Result<Vec<PublicKey>, RelayError> {
+    let events = events
+        .as_array()
+        .ok_or_else(|| RelayError::Http("observer roster query response is not an array".into()))?;
+    let newest = |kind: u32, required_tag: Option<(&str, &str)>| {
+        events
+            .iter()
+            .filter(|event| event.get("kind").and_then(Value::as_u64) == Some(kind as u64))
+            .filter(|event| {
+                let Some((name, value)) = required_tag else {
+                    return true;
+                };
+                json_tag_values(event, name)
+                    .map(|values| values.contains(&value))
+                    .unwrap_or(false)
+            })
+            .max_by_key(|event| event.get("created_at").and_then(Value::as_u64).unwrap_or(0))
+    };
+
+    let channel_roster = newest(KIND_NIP29_GROUP_MEMBERS, Some(("d", channel_id)))
+        .ok_or_else(|| RelayError::Http("channel member roster is unavailable".into()))?;
+    let relay_roster = newest(KIND_NIP43_MEMBERSHIP_LIST, None)
+        .ok_or_else(|| RelayError::Http("relay member roster is unavailable".into()))?;
+
+    let mut direct_members = HashSet::new();
+    for value in json_tag_values(relay_roster, "member")? {
+        let pubkey = PublicKey::from_hex(value)
+            .map_err(|_| RelayError::Http("relay member roster has an invalid pubkey".into()))?;
+        direct_members.insert(pubkey.to_bytes());
+    }
+
+    let owner_bytes = owner.to_bytes();
+    let agent_bytes = agent.to_bytes();
+    let mut employee_pubkeys = Vec::new();
+    let mut seen = HashSet::new();
+    for value in json_tag_values(channel_roster, "p")? {
+        let pubkey = PublicKey::from_hex(value)
+            .map_err(|_| RelayError::Http("channel member roster has an invalid pubkey".into()))?;
+        let bytes = pubkey.to_bytes();
+        if bytes == owner_bytes || bytes == agent_bytes || !direct_members.contains(&bytes) {
+            continue;
+        }
+        if seen.insert(bytes) {
+            employee_pubkeys.push(pubkey);
+        }
+    }
+    employee_pubkeys.sort_by_key(PublicKey::to_hex);
+    if employee_pubkeys.len() + 1 > OBSERVER_MAX_RECIPIENTS {
+        return Err(RelayError::Http(format!(
+            "shared observer audience exceeds {OBSERVER_MAX_RECIPIENTS} recipients"
+        )));
+    }
+
+    let mut recipients = Vec::with_capacity(employee_pubkeys.len() + 1);
+    recipients.push(owner);
+    recipients.extend(employee_pubkeys);
+    Ok(recipients)
 }
 
 /// A parsed NIP-01 relay message.
@@ -4281,6 +4401,63 @@ mod tests {
         (client, requests, server)
     }
 
+    #[test]
+    fn shared_observer_audience_is_channel_members_intersected_with_direct_members() {
+        let owner = Keys::generate().public_key();
+        let employee = Keys::generate().public_key();
+        let delegated_agent = Keys::generate().public_key();
+        let external_guest = Keys::generate().public_key();
+        let employee_outside_channel = Keys::generate().public_key();
+        let channel_id = Uuid::new_v4().to_string();
+        let events = serde_json::json!([
+            {
+                "kind": KIND_NIP29_GROUP_MEMBERS,
+                "created_at": 10,
+                "tags": [
+                    ["d", channel_id],
+                    ["p", owner.to_hex()],
+                    ["p", employee.to_hex()],
+                    ["p", delegated_agent.to_hex()],
+                    ["p", external_guest.to_hex()]
+                ]
+            },
+            {
+                "kind": KIND_NIP43_MEMBERSHIP_LIST,
+                "created_at": 11,
+                "tags": [
+                    ["member", owner.to_hex(), "member"],
+                    ["member", employee.to_hex(), "member"],
+                    ["member", delegated_agent.to_hex(), "agent"],
+                    ["member", employee_outside_channel.to_hex(), "member"]
+                ]
+            }
+        ]);
+
+        let recipients =
+            resolve_shared_observer_recipients(&events, &channel_id, owner, delegated_agent)
+                .expect("resolve shared observer recipients");
+
+        assert_eq!(recipients, vec![owner, employee]);
+    }
+
+    #[test]
+    fn shared_observer_audience_fails_closed_without_direct_member_roster() {
+        let owner = Keys::generate().public_key();
+        let agent = Keys::generate().public_key();
+        let channel_id = Uuid::new_v4().to_string();
+        let events = serde_json::json!([{
+            "kind": KIND_NIP29_GROUP_MEMBERS,
+            "created_at": 10,
+            "tags": [["d", channel_id], ["p", owner.to_hex()]]
+        }]);
+
+        let error = resolve_shared_observer_recipients(&events, &channel_id, owner, agent)
+            .expect_err("missing relay roster must fail closed");
+        assert!(error
+            .to_string()
+            .contains("relay member roster is unavailable"));
+    }
+
     #[tokio::test]
     async fn relay_self_reads_and_normalizes_standard_root_document() {
         let uppercase = "AB".repeat(32);
@@ -6346,10 +6523,12 @@ mod tests {
             &json!({"type": "test"}),
         )
         .expect("encrypt test observer payload");
-        buzz_sdk::build_agent_observer_frame(
-            &recipient.public_key().to_hex(),
+        let recipient_hex = recipient.public_key().to_hex();
+        buzz_sdk::build_agent_observer_telemetry_frame(
+            &recipient_hex,
+            std::slice::from_ref(&recipient_hex),
             &keys.public_key().to_hex(),
-            "telemetry",
+            None,
             &encrypted,
         )
         .expect("build test observer frame")

@@ -1,6 +1,9 @@
 //! EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::body::Bytes;
 use tracing::{debug, error, info, warn};
@@ -11,8 +14,9 @@ use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
-    content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
-    OBSERVER_FRAME_TELEMETRY,
+    content_looks_like_nip44, observer_payload_recipient_count, OBSERVER_AGENT_TAG,
+    OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY, OBSERVER_MAX_RECIPIENTS,
+    OBSERVER_OWNER_TAG,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -173,6 +177,43 @@ pub async fn filter_fanout_by_access(
     } else {
         matches
     };
+
+    // Observer telemetry stays globally indexed by p-tag so the desktop can
+    // keep one identity subscription. Shared frames still re-check channel
+    // membership at this final send chokepoint, including Redis cross-node
+    // delivery, so a stale subscription cannot outlive channel removal.
+    if event_kind_u32(&stored_event.event) == KIND_AGENT_OBSERVER_FRAME {
+        let route = match agent_observer_route(&stored_event.event) {
+            Ok(Some(route)) => route,
+            _ => return Vec::new(),
+        };
+        if route.direction == AgentObserverDirection::Telemetry && route.recipients.len() > 1 {
+            let Some(channel_id) = route.channel_id else {
+                return Vec::new();
+            };
+            let mut allowed = Vec::with_capacity(matches.len());
+            for (conn_id, sub_id) in matches {
+                let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
+                    continue;
+                };
+                if pubkey == route.owner.to_bytes() {
+                    allowed.push((conn_id, sub_id));
+                    continue;
+                }
+                match state
+                    .is_member_cached(community_id, channel_id, &pubkey)
+                    .await
+                {
+                    Ok(true) => allowed.push((conn_id, sub_id)),
+                    Ok(false) => {}
+                    Err(error) => {
+                        warn!(%channel_id, "observer fan-out membership check failed: {error}");
+                    }
+                }
+            }
+            return allowed;
+        }
+    }
 
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
@@ -911,10 +952,12 @@ enum AgentObserverDirection {
     Control,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct AgentObserverRoute {
     agent: PublicKey,
     owner: PublicKey,
+    recipients: Vec<PublicKey>,
+    channel_id: Option<uuid::Uuid>,
     direction: AgentObserverDirection,
 }
 
@@ -1060,6 +1103,83 @@ async fn handle_agent_observer_event(
         return;
     }
 
+    if route.direction == AgentObserverDirection::Telemetry && route.recipients.len() > 1 {
+        let channel_id = route
+            .channel_id
+            .expect("shared observer route must include a channel");
+        for recipient in route
+            .recipients
+            .iter()
+            .filter(|recipient| **recipient != route.owner)
+        {
+            match state
+                .is_member_cached(conn.tenant.community(), channel_id, &recipient.to_bytes())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    reject("auth");
+                    conn.send(RelayMessage::ok(
+                        event_id_hex,
+                        false,
+                        "restricted: observer recipient is not a channel member",
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    warn!(
+                        conn_id = %conn_id,
+                        event_id = %event_id_hex,
+                        %channel_id,
+                        "observer recipient membership check failed: {error}"
+                    );
+                    conn.send(RelayMessage::ok(
+                        event_id_hex,
+                        false,
+                        "error: internal server error",
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+
+    if route.direction == AgentObserverDirection::Telemetry && route.recipients.len() > 1 {
+        let relay_members = match state.db.list_relay_members(conn.tenant.community()).await {
+            Ok(members) => members
+                .into_iter()
+                .map(|member| member.pubkey)
+                .collect::<HashSet<_>>(),
+            Err(error) => {
+                warn!(
+                    conn_id = %conn_id,
+                    event_id = %event_id_hex,
+                    "observer relay membership check failed: {error}"
+                );
+                conn.send(RelayMessage::ok(
+                    event_id_hex,
+                    false,
+                    "error: internal server error",
+                ));
+                return;
+            }
+        };
+        if route
+            .recipients
+            .iter()
+            .filter(|recipient| **recipient != route.owner)
+            .any(|recipient| !relay_members.contains(&recipient.to_hex()))
+        {
+            reject("auth");
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "restricted: observer recipient is not a direct relay member",
+            ));
+            return;
+        }
+    }
+
     // Rate limit telemetry frames only (100/sec per agent).
     // Control frames (owner → agent) bypass the limiter — they are rare and must not
     // be starved by bursty telemetry from the agent.
@@ -1101,21 +1221,57 @@ async fn handle_agent_observer_event(
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {
-    if !content_looks_like_nip44(&event.content) {
-        return Err("invalid: observer content must be NIP-44 encrypted".into());
-    }
-
-    let recipient = parse_single_pubkey_tag(event, "p")?;
+    let recipients = parse_pubkey_tags(event, "p")?;
     let agent = parse_single_pubkey_tag(event, OBSERVER_AGENT_TAG)?;
     let frame = single_tag_content(event, OBSERVER_FRAME_TAG)?;
+    let owner_tag = optional_single_tag_content(event, OBSERVER_OWNER_TAG)?
+        .map(|value| {
+            PublicKey::from_hex(value)
+                .map_err(|_| "invalid: observer owner tag must be a hex pubkey".to_string())
+        })
+        .transpose()?;
+    let channel_id = optional_single_tag_content(event, "h")?
+        .map(|value| {
+            uuid::Uuid::parse_str(value)
+                .map_err(|_| "invalid: observer h tag must be a channel UUID".to_string())
+        })
+        .transpose()?;
 
-    let (owner, direction, expected_frame) = if event.pubkey == agent && recipient != agent {
+    let payload_recipients = observer_payload_recipient_count(&event.content)
+        .map_err(|error| format!("invalid: observer content must be NIP-44 encrypted: {error}"))?;
+    if payload_recipients != recipients.len() {
+        return Err("invalid: observer recipient tags do not match encrypted payload".into());
+    }
+
+    let (owner, direction, expected_frame) = if event.pubkey == agent {
+        if recipients.contains(&agent) {
+            return Err("invalid: observer telemetry cannot target the agent".into());
+        }
+        let owner = match owner_tag {
+            Some(owner) => owner,
+            None if recipients.len() == 1 => recipients[0],
+            None => {
+                return Err("invalid: shared observer telemetry requires an owner tag".into());
+            }
+        };
+        if !recipients.contains(&owner) {
+            return Err("invalid: observer owner must be a recipient".into());
+        }
+        if recipients.len() > 1 && channel_id.is_none() {
+            return Err("invalid: shared observer telemetry requires an h tag".into());
+        }
         (
-            recipient,
+            owner,
             AgentObserverDirection::Telemetry,
             OBSERVER_FRAME_TELEMETRY,
         )
-    } else if recipient == agent && event.pubkey != agent {
+    } else if recipients.len() == 1 && recipients[0] == agent {
+        if !content_looks_like_nip44(&event.content) {
+            return Err("invalid: observer control content must be direct NIP-44".into());
+        }
+        if owner_tag.is_some_and(|owner| owner != event.pubkey) {
+            return Err("invalid: observer control owner tag must match its author".into());
+        }
         (
             event.pubkey,
             AgentObserverDirection::Control,
@@ -1123,7 +1279,7 @@ fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, Str
         )
     } else {
         return Err(
-            "invalid: observer frame must be agent-to-owner telemetry or owner-to-agent control"
+            "invalid: observer frame must be agent-to-viewer telemetry or owner-to-agent control"
                 .into(),
         );
     };
@@ -1136,8 +1292,42 @@ fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, Str
     Ok(Some(AgentObserverRoute {
         agent,
         owner,
+        recipients,
+        channel_id,
         direction,
     }))
+}
+
+fn parse_pubkey_tags(event: &Event, tag_name: &str) -> Result<Vec<PublicKey>, String> {
+    let values: Vec<&str> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == tag_name)
+        .filter_map(|tag| tag.content())
+        .collect();
+    if values.is_empty() {
+        return Err(format!("invalid: observer frame missing {tag_name} tag"));
+    }
+    if values.len() > OBSERVER_MAX_RECIPIENTS {
+        return Err(format!(
+            "invalid: observer frame exceeds {OBSERVER_MAX_RECIPIENTS} recipients"
+        ));
+    }
+
+    let mut seen = HashSet::with_capacity(values.len());
+    values
+        .into_iter()
+        .map(|value| {
+            let pubkey = PublicKey::from_hex(value)
+                .map_err(|_| format!("invalid: observer {tag_name} tag must be a hex pubkey"))?;
+            if !seen.insert(pubkey.to_bytes()) {
+                return Err(format!(
+                    "invalid: observer frame has duplicate {tag_name} tags"
+                ));
+            }
+            Ok(pubkey)
+        })
+        .collect()
 }
 
 fn parse_single_pubkey_tag(event: &Event, tag_name: &str) -> Result<PublicKey, String> {
@@ -1146,21 +1336,27 @@ fn parse_single_pubkey_tag(event: &Event, tag_name: &str) -> Result<PublicKey, S
         .map_err(|_| format!("invalid: observer {tag_name} tag must be a hex pubkey"))
 }
 
-fn single_tag_content<'a>(event: &'a Event, tag_name: &str) -> Result<&'a str, String> {
+fn optional_single_tag_content<'a>(
+    event: &'a Event,
+    tag_name: &str,
+) -> Result<Option<&'a str>, String> {
     let mut values = event
         .tags
         .iter()
         .filter(|tag| tag.kind().to_string() == tag_name)
         .filter_map(|tag| tag.content());
-    let Some(value) = values.next() else {
-        return Err(format!("invalid: observer frame missing {tag_name} tag"));
-    };
+    let value = values.next();
     if values.next().is_some() {
         return Err(format!(
             "invalid: observer frame has multiple {tag_name} tags"
         ));
     }
     Ok(value)
+}
+
+fn single_tag_content<'a>(event: &'a Event, tag_name: &str) -> Result<&'a str, String> {
+    optional_single_tag_content(event, tag_name)?
+        .ok_or_else(|| format!("invalid: observer frame missing {tag_name} tag"))
 }
 
 #[cfg(test)]
@@ -1174,8 +1370,8 @@ mod tests {
         KIND_FORUM_VOTE, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
     };
     use buzz_core::observer::{
-        encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
-        OBSERVER_FRAME_TELEMETRY,
+        encrypt_observer_payload, encrypt_observer_payload_for_recipients, OBSERVER_AGENT_TAG,
+        OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY, OBSERVER_OWNER_TAG,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use tokio::sync::{mpsc, Mutex, RwLock};
@@ -1272,6 +1468,95 @@ mod tests {
         assert_eq!(route.agent, agent.public_key());
         assert_eq!(route.owner, owner.public_key());
         assert_eq!(route.direction, super::AgentObserverDirection::Telemetry);
+    }
+
+    #[test]
+    fn agent_observer_route_accepts_channel_scoped_shared_telemetry() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let employee = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let recipients = [owner.public_key(), employee.public_key()];
+        let encrypted = encrypt_observer_payload_for_recipients(
+            &agent,
+            &recipients,
+            &serde_json::json!({"type": "acp_read"}),
+        )
+        .expect("encrypt shared observer payload");
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", &owner.public_key().to_hex()]).expect("owner p tag"),
+                Tag::parse(["p", &employee.public_key().to_hex()]).expect("employee p tag"),
+                Tag::parse([OBSERVER_OWNER_TAG, &owner.public_key().to_hex()]).expect("owner tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+                Tag::parse(["h", &channel_id.to_string()]).expect("channel tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign event");
+
+        let route = super::agent_observer_route(&event)
+            .expect("observer route")
+            .expect("route should be Some");
+        assert_eq!(route.agent, agent.public_key());
+        assert_eq!(route.owner, owner.public_key());
+        assert_eq!(route.recipients, recipients);
+        assert_eq!(route.channel_id, Some(channel_id));
+        assert_eq!(route.direction, super::AgentObserverDirection::Telemetry);
+    }
+
+    #[test]
+    fn agent_observer_route_rejects_shared_telemetry_without_channel() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let employee = Keys::generate();
+        let recipients = [owner.public_key(), employee.public_key()];
+        let encrypted = encrypt_observer_payload_for_recipients(
+            &agent,
+            &recipients,
+            &serde_json::json!({"type": "acp_read"}),
+        )
+        .expect("encrypt shared observer payload");
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", &owner.public_key().to_hex()]).expect("owner p tag"),
+                Tag::parse(["p", &employee.public_key().to_hex()]).expect("employee p tag"),
+                Tag::parse([OBSERVER_OWNER_TAG, &owner.public_key().to_hex()]).expect("owner tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign event");
+
+        let error = super::agent_observer_route(&event).expect_err("missing h must fail");
+        assert!(error.contains("requires an h tag"));
+    }
+
+    #[test]
+    fn agent_observer_route_rejects_recipient_envelope_mismatch() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let employee = Keys::generate();
+        let recipients = [owner.public_key(), employee.public_key()];
+        let encrypted = encrypt_observer_payload_for_recipients(
+            &agent,
+            &recipients,
+            &serde_json::json!({"type": "acp_read"}),
+        )
+        .expect("encrypt shared observer payload");
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", &owner.public_key().to_hex()]).expect("owner p tag"),
+                Tag::parse([OBSERVER_OWNER_TAG, &owner.public_key().to_hex()]).expect("owner tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+                Tag::parse(["h", &Uuid::new_v4().to_string()]).expect("channel tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign event");
+
+        let error = super::agent_observer_route(&event).expect_err("mismatch must fail");
+        assert!(error.contains("do not match encrypted payload"));
     }
 
     #[test]
@@ -1432,6 +1717,95 @@ mod tests {
         assert_eq!(
             frame[3],
             "restricted: observer frame is not authorized for this agent owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_observer_publish_rejects_non_member_recipient() {
+        let state = fanout_access::test_state().await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let non_member = Keys::generate();
+        let community_id = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let channel_id = Uuid::new_v4();
+        let recipients = [owner.public_key(), non_member.public_key()];
+        state.observer_owner_cache.insert(
+            (
+                community_id,
+                agent.public_key().to_bytes().to_vec(),
+                owner.public_key().to_bytes().to_vec(),
+            ),
+            true,
+        );
+        state.membership_cache.insert(
+            (
+                community_id,
+                channel_id,
+                non_member.public_key().to_bytes().to_vec(),
+            ),
+            false,
+        );
+        let encrypted = encrypt_observer_payload_for_recipients(
+            &agent,
+            &recipients,
+            &serde_json::json!({"channelId": channel_id}),
+        )
+        .expect("encrypt shared observer payload");
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", &owner.public_key().to_hex()]).expect("owner p tag"),
+                Tag::parse(["p", &non_member.public_key().to_hex()]).expect("non-member p tag"),
+                Tag::parse([OBSERVER_OWNER_TAG, &owner.public_key().to_hex()]).expect("owner tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+                Tag::parse(["h", &channel_id.to_string()]).expect("channel tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign observer event");
+
+        let (send_tx, mut send_rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::TenantContext::resolved(community_id, "relay.example"),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey: agent.public_key(),
+                    scopes: vec![],
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    agent_owner_pubkey: None,
+                },
+            )),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+
+        super::handle_agent_observer_event(
+            event.clone(),
+            conn.conn_id,
+            &event.id.to_hex(),
+            conn,
+            state,
+        )
+        .await;
+
+        let axum::extract::ws::Message::Text(text) =
+            send_rx.try_recv().expect("observer rejection sent")
+        else {
+            panic!("expected text relay message");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("relay frame JSON");
+        assert_eq!(frame[0], "OK");
+        assert_eq!(frame[2], false);
+        assert_eq!(
+            frame[3],
+            "restricted: observer recipient is not a channel member"
         );
     }
 
@@ -1996,7 +2370,7 @@ mod tests {
         use std::sync::Arc;
 
         use buzz_core::StoredEvent;
-        use nostr::{EventBuilder, Keys, Kind};
+        use nostr::{EventBuilder, Keys, Kind, Tag};
         use tokio::sync::{mpsc, Mutex};
         use tokio_util::sync::CancellationToken;
         use uuid::Uuid;
@@ -2126,6 +2500,89 @@ mod tests {
                 .sign_with_keys(&Keys::generate())
                 .expect("sign event");
             StoredEvent::new(event, channel_id)
+        }
+
+        fn shared_observer_event(
+            channel_id: Uuid,
+            agent: &Keys,
+            owner: &Keys,
+            employee: &Keys,
+        ) -> StoredEvent {
+            let recipients = [owner.public_key(), employee.public_key()];
+            let encrypted = buzz_core::observer::encrypt_observer_payload_for_recipients(
+                agent,
+                &recipients,
+                &serde_json::json!({"channelId": channel_id}),
+            )
+            .expect("encrypt shared observer payload");
+            let event = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16),
+                encrypted,
+            )
+            .tags([
+                Tag::parse(["p", &owner.public_key().to_hex()]).expect("owner p tag"),
+                Tag::parse(["p", &employee.public_key().to_hex()]).expect("employee p tag"),
+                Tag::parse([
+                    buzz_core::observer::OBSERVER_OWNER_TAG,
+                    &owner.public_key().to_hex(),
+                ])
+                .expect("owner tag"),
+                Tag::parse([
+                    buzz_core::observer::OBSERVER_AGENT_TAG,
+                    &agent.public_key().to_hex(),
+                ])
+                .expect("agent tag"),
+                Tag::parse([
+                    buzz_core::observer::OBSERVER_FRAME_TAG,
+                    buzz_core::observer::OBSERVER_FRAME_TELEMETRY,
+                ])
+                .expect("frame tag"),
+                Tag::parse(["h", &channel_id.to_string()]).expect("channel tag"),
+            ])
+            .sign_with_keys(agent)
+            .expect("sign observer frame");
+            StoredEvent::new(event, None)
+        }
+
+        #[tokio::test]
+        async fn shared_observer_fanout_keeps_owner_and_current_channel_member_only() {
+            let state = test_state().await;
+            let channel_id = Uuid::new_v4();
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            let agent = Keys::generate();
+            let owner = Keys::generate();
+            let employee = Keys::generate();
+            let former_member = Keys::generate();
+            let employee_bytes = employee.public_key().to_bytes().to_vec();
+            let former_member_bytes = former_member.public_key().to_bytes().to_vec();
+            state
+                .membership_cache
+                .insert((community_id, channel_id, employee_bytes.clone()), true);
+            state.membership_cache.insert(
+                (community_id, channel_id, former_member_bytes.clone()),
+                false,
+            );
+
+            let owner_conn = register_conn(&state, Some(owner.public_key().to_bytes().to_vec()));
+            let employee_conn = register_conn(&state, Some(employee_bytes));
+            let former_member_conn = register_conn(&state, Some(former_member_bytes));
+            let matches = vec![
+                (owner_conn, "owner".to_string()),
+                (employee_conn, "employee".to_string()),
+                (former_member_conn, "former".to_string()),
+            ];
+            let event = shared_observer_event(channel_id, &agent, &owner, &employee);
+
+            let allowed =
+                filter_fanout_by_access(&state, community_id, &event, matches, None).await;
+
+            assert_eq!(
+                allowed,
+                vec![
+                    (owner_conn, "owner".to_string()),
+                    (employee_conn, "employee".to_string()),
+                ]
+            );
         }
 
         #[tokio::test]

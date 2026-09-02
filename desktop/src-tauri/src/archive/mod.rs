@@ -13,9 +13,10 @@
 //!
 //! **Ephemeral scope** (`owner_p`, kind 24200 observer frames): the relay
 //! never stores these, so `/query` cannot verify them. The relay's REQ-time
-//! `#p == authed reader` gate is the access control; local per-frame
-//! validation (sig/id + kind + p-tag + agent tag + frame=telemetry + author
-//! == agent) is applied fail-closed.
+//! `#p == authenticated reader` gate is the access control; local per-frame
+//! validation (sig/id + kind + matching p-tag + agent tag + frame=telemetry
+//! + author == agent) is applied fail-closed. Shared frames remain encrypted
+//!   and are only addressed to direct relay members who share the turn's channel.
 
 mod agent_usage;
 mod archive_db;

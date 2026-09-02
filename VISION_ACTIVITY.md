@@ -8,13 +8,19 @@ We wanted a feed you supervise the way you supervise a capable teammate: skim fo
 
 ## Who It Serves
 
-A developer supervising a delegate. They are not watching for entertainment; they are deciding whether to intervene. Every item in the feed earns its pixels by answering one of three questions:
+A channel member supervising a delegate. They are not watching for entertainment; they are deciding whether to intervene. Every item in the feed earns its pixels by answering one of three questions:
 
 - **Comprehension** — *what is it doing, and why?*
 - **Confidence** — *is it going well, or is it stuck or wrong?*
 - **Control** — *do I need to step in, and where?*
 
 A feed that answers these instantly converts a stream of events into a sense of trajectory. A feed that does not is just noise with a scrollbar.
+
+Visibility follows the team boundary. The controlling owner retains existing
+oversight; other observers must be authenticated direct relay members who
+currently share the event's channel. Telemetry is encrypted for the named
+viewers. Channel membership never grants observer controls, agent memory, or
+secret access.
 
 ## The Governing Frame: Verb, Object, Outcome
 

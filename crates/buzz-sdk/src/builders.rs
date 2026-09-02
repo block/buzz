@@ -15,8 +15,9 @@ use buzz_core::{
         KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
-        content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
-        OBSERVER_FRAME_TELEMETRY,
+        content_looks_like_nip44, content_looks_like_observer_payload,
+        observer_payload_recipient_count, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL,
+        OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY, OBSERVER_MAX_RECIPIENTS, OBSERVER_OWNER_TAG,
     },
 };
 use nostr::{EventBuilder, Kind, Tag};
@@ -244,34 +245,111 @@ pub fn build_message(
         .allow_self_tagging())
 }
 
-/// Build an encrypted agent observer frame (kind 24200).
+/// Build encrypted agent-to-viewer observer telemetry (kind 24200).
 ///
-/// `recipient_pubkey` is the cleartext `p` tag used by the relay for owner-only
-/// routing. `agent_pubkey` identifies the managed agent whose observer stream
-/// this frame belongs to. `encrypted_content` must be NIP-44 v2 ciphertext.
-pub fn build_agent_observer_frame(
-    recipient_pubkey: &str,
+/// `recipient_pubkeys` and the payload's wrapped keys have the same order.
+/// The controlling owner must be one recipient. More than one recipient
+/// requires a channel so the relay can enforce shared-channel visibility.
+pub fn build_agent_observer_telemetry_frame(
+    owner_pubkey: &str,
+    recipient_pubkeys: &[String],
     agent_pubkey: &str,
-    frame: &str,
+    channel_id: Option<Uuid>,
     encrypted_content: &str,
 ) -> Result<EventBuilder, SdkError> {
-    if frame != OBSERVER_FRAME_TELEMETRY && frame != OBSERVER_FRAME_CONTROL {
+    if recipient_pubkeys.is_empty() || recipient_pubkeys.len() > OBSERVER_MAX_RECIPIENTS {
         return Err(SdkError::InvalidInput(format!(
-            "observer frame must be {OBSERVER_FRAME_TELEMETRY:?} or {OBSERVER_FRAME_CONTROL:?}"
+            "observer frame must have 1..={OBSERVER_MAX_RECIPIENTS} recipients"
         )));
     }
-    if !content_looks_like_nip44(encrypted_content) {
+    if !content_looks_like_observer_payload(encrypted_content) {
         return Err(SdkError::InvalidInput(
-            "observer frame content must be NIP-44 v2 ciphertext".into(),
+            "observer telemetry content must be encrypted".into(),
+        ));
+    }
+    let wrapped_key_count = observer_payload_recipient_count(encrypted_content)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    if wrapped_key_count != recipient_pubkeys.len() {
+        return Err(SdkError::InvalidInput(
+            "observer recipient count must match encrypted payload".into(),
+        ));
+    }
+    if recipient_pubkeys.len() > 1 && channel_id.is_none() {
+        return Err(SdkError::InvalidInput(
+            "shared observer telemetry requires a channel".into(),
         ));
     }
 
-    let recipient_pubkey = check_pubkey_hex(recipient_pubkey, "recipient_pubkey")?;
+    let owner_pubkey = check_pubkey_hex(owner_pubkey, "owner_pubkey")?;
     let agent_pubkey = check_pubkey_hex(agent_pubkey, "agent_pubkey")?;
+    if owner_pubkey == agent_pubkey {
+        return Err(SdkError::InvalidInput(
+            "observer owner and agent must differ".into(),
+        ));
+    }
+
+    let mut recipients = Vec::with_capacity(recipient_pubkeys.len());
+    for recipient in recipient_pubkeys {
+        let recipient = check_pubkey_hex(recipient, "recipient_pubkey")?;
+        if recipient == agent_pubkey {
+            return Err(SdkError::InvalidInput(
+                "observer telemetry cannot target its author".into(),
+            ));
+        }
+        if recipients.contains(&recipient) {
+            return Err(SdkError::InvalidInput(
+                "observer recipients must be unique".into(),
+            ));
+        }
+        recipients.push(recipient);
+    }
+    if !recipients.contains(&owner_pubkey) {
+        return Err(SdkError::InvalidInput(
+            "observer telemetry recipients must include the owner".into(),
+        ));
+    }
+
+    let mut tags = Vec::with_capacity(recipients.len() + 4);
+    for recipient in &recipients {
+        tags.push(tag(&["p", recipient])?);
+    }
+    tags.push(tag(&[OBSERVER_OWNER_TAG, &owner_pubkey])?);
+    tags.push(tag(&[OBSERVER_AGENT_TAG, &agent_pubkey])?);
+    tags.push(tag(&[OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY])?);
+    if let Some(channel_id) = channel_id {
+        tags.push(tag(&["h", &channel_id.to_string()])?);
+    }
+
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16),
+        encrypted_content,
+    )
+    .tags(tags))
+}
+
+/// Build an encrypted owner-to-agent observer control frame (kind 24200).
+pub fn build_agent_observer_control_frame(
+    owner_pubkey: &str,
+    agent_pubkey: &str,
+    encrypted_content: &str,
+) -> Result<EventBuilder, SdkError> {
+    if !content_looks_like_nip44(encrypted_content) {
+        return Err(SdkError::InvalidInput(
+            "observer control content must be NIP-44 v2 ciphertext".into(),
+        ));
+    }
+    let owner_pubkey = check_pubkey_hex(owner_pubkey, "owner_pubkey")?;
+    let agent_pubkey = check_pubkey_hex(agent_pubkey, "agent_pubkey")?;
+    if owner_pubkey == agent_pubkey {
+        return Err(SdkError::InvalidInput(
+            "observer owner and agent must differ".into(),
+        ));
+    }
     let tags = vec![
-        tag(&["p", &recipient_pubkey])?,
+        tag(&["p", &agent_pubkey])?,
+        tag(&[OBSERVER_OWNER_TAG, &owner_pubkey])?,
         tag(&[OBSERVER_AGENT_TAG, &agent_pubkey])?,
-        tag(&[OBSERVER_FRAME_TAG, frame])?,
+        tag(&[OBSERVER_FRAME_TAG, OBSERVER_FRAME_CONTROL])?,
     ];
 
     Ok(EventBuilder::new(
@@ -2434,43 +2512,82 @@ mod tests {
     }
 
     #[test]
-    fn agent_observer_frame_happy_path() {
-        let sender = keys();
-        let recipient = keys();
+    fn agent_observer_telemetry_frame_binds_shared_recipients_and_channel() {
+        let owner = keys();
+        let viewer = keys();
         let agent = keys();
-        let encrypted = buzz_core::observer::encrypt_observer_payload(
-            &sender,
-            &recipient.public_key(),
+        let channel = uuid();
+        let recipients = vec![owner.public_key().to_hex(), viewer.public_key().to_hex()];
+        let encrypted = buzz_core::observer::encrypt_observer_payload_for_recipients(
+            &agent,
+            &[owner.public_key(), viewer.public_key()],
             &serde_json::json!({"type": "acp_read"}),
         )
         .unwrap();
-        let ev = sign(
-            build_agent_observer_frame(
-                &recipient.public_key().to_hex(),
-                &agent.public_key().to_hex(),
-                OBSERVER_FRAME_TELEMETRY,
-                &encrypted,
-            )
-            .unwrap(),
-        );
+        let ev = build_agent_observer_telemetry_frame(
+            &owner.public_key().to_hex(),
+            &recipients,
+            &agent.public_key().to_hex(),
+            Some(channel),
+            &encrypted,
+        )
+        .unwrap()
+        .sign_with_keys(&agent)
+        .unwrap();
 
         assert_eq!(ev.kind.as_u16(), KIND_AGENT_OBSERVER_FRAME as u16);
         assert_eq!(ev.content, encrypted);
-        assert!(has_tag(&ev, "p", &recipient.public_key().to_hex()));
+        assert!(has_tag(&ev, "p", &owner.public_key().to_hex()));
+        assert!(has_tag(&ev, "p", &viewer.public_key().to_hex()));
+        assert!(has_tag(
+            &ev,
+            OBSERVER_OWNER_TAG,
+            &owner.public_key().to_hex()
+        ));
         assert!(has_tag(
             &ev,
             OBSERVER_AGENT_TAG,
             &agent.public_key().to_hex()
         ));
         assert!(has_tag(&ev, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY));
+        assert!(has_tag(&ev, "h", &channel.to_string()));
     }
 
     #[test]
-    fn agent_observer_frame_rejects_plaintext_content() {
-        let err = build_agent_observer_frame(
+    fn agent_observer_control_frame_targets_agent_only() {
+        let owner = keys();
+        let agent = keys();
+        let encrypted = buzz_core::observer::encrypt_observer_payload(
+            &owner,
+            &agent.public_key(),
+            &serde_json::json!({"type": "cancel_turn"}),
+        )
+        .unwrap();
+        let ev = build_agent_observer_control_frame(
+            &owner.public_key().to_hex(),
+            &agent.public_key().to_hex(),
+            &encrypted,
+        )
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+
+        assert!(has_tag(&ev, "p", &agent.public_key().to_hex()));
+        assert!(has_tag(
+            &ev,
+            OBSERVER_OWNER_TAG,
+            &owner.public_key().to_hex()
+        ));
+        assert!(has_tag(&ev, OBSERVER_FRAME_TAG, OBSERVER_FRAME_CONTROL));
+    }
+
+    #[test]
+    fn shared_agent_observer_frame_rejects_plaintext_content() {
+        let err = build_agent_observer_telemetry_frame(
             &"a".repeat(64),
+            &["a".repeat(64), "c".repeat(64)],
             &"b".repeat(64),
-            OBSERVER_FRAME_TELEMETRY,
+            Some(uuid()),
             "not encrypted",
         )
         .unwrap_err();

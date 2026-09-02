@@ -22,6 +22,8 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use buzz_core::observer::{decrypt_observer_payload, encrypt_observer_payload_for_recipients};
+use buzz_sdk::{build_agent_observer_telemetry_frame, nip_oa};
 use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
 use sha2::{Digest, Sha256};
@@ -3202,5 +3204,169 @@ async fn test_nip29_relay_rejects_last_owner_self_demotion() {
             .as_deref(),
         Some("owner"),
         "the last owner must keep their role"
+    );
+}
+
+/// Channel members named by a shared observer frame receive and decrypt it;
+/// authenticated outsiders do not.
+#[tokio::test]
+#[ignore]
+async fn test_shared_agent_observer_frame_reaches_channel_employee_only() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let employee = Keys::generate();
+    let agent = Keys::generate();
+    let outsider = Keys::generate();
+    let delegated_agent = Keys::generate();
+    let relay_url = url::Url::parse(&url).expect("parse relay URL");
+    let relay_host = format!(
+        "{}:{}",
+        relay_url.host_str().expect("relay URL host"),
+        relay_url.port_or_known_default().expect("relay URL port")
+    );
+    seed_relay_member(&relay_host, &employee, "member").await;
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner).await;
+    for member in [&employee, &agent, &delegated_agent] {
+        let (accepted, message) = add_member_ws(
+            &mut owner_client,
+            &channel_id,
+            &member.public_key().to_hex(),
+            &owner,
+        )
+        .await;
+        assert!(accepted, "add channel member failed: {message}");
+    }
+
+    let auth_tag_json = nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=24200")
+        .expect("compute observer NIP-OA tag");
+    let auth_tag = nip_oa::parse_auth_tag(&auth_tag_json).expect("parse observer NIP-OA tag");
+    let mut agent_client = BuzzTestClient::connect_unauthenticated(&url)
+        .await
+        .expect("connect agent");
+    agent_client
+        .authenticate_with_nip_oa(&agent, &auth_tag)
+        .await
+        .expect("authenticate managed agent");
+
+    let mut employee_client = BuzzTestClient::connect(&url, &employee)
+        .await
+        .expect("connect employee");
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider)
+        .await
+        .expect("connect outsider");
+
+    for (client, name, viewer) in [
+        (&mut owner_client, "observer-owner", &owner),
+        (&mut employee_client, "observer-employee", &employee),
+        (&mut outsider_client, "observer-outsider", &outsider),
+    ] {
+        let sid = sub_id(name);
+        let viewer_hex = viewer.public_key().to_hex();
+        let filter = Filter::new()
+            .kind(Kind::Custom(24_200))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::P), viewer_hex.as_str());
+        client
+            .subscribe(&sid, vec![filter])
+            .await
+            .expect("subscribe to observer frames");
+        client
+            .collect_until_eose(&sid, Duration::from_secs(5))
+            .await
+            .expect("observer subscription EOSE");
+    }
+
+    let recipients = [owner.public_key(), employee.public_key()];
+    let payload = serde_json::json!({
+        "type": "acp_read",
+        "channelId": channel_id,
+        "path": "VISION.md",
+    });
+    let encrypted = encrypt_observer_payload_for_recipients(&agent, &recipients, &payload)
+        .expect("encrypt shared observer payload");
+    let recipient_hexes = recipients
+        .iter()
+        .map(|recipient| recipient.to_hex())
+        .collect::<Vec<_>>();
+    let event = build_agent_observer_telemetry_frame(
+        &owner.public_key().to_hex(),
+        &recipient_hexes,
+        &agent.public_key().to_hex(),
+        Some(channel_id.parse().expect("channel UUID")),
+        &encrypted,
+    )
+    .expect("build shared observer frame")
+    .sign_with_keys(&agent)
+    .expect("sign shared observer frame");
+    let ok = agent_client
+        .send_event(event)
+        .await
+        .expect("publish shared observer frame");
+    assert!(
+        ok.accepted,
+        "shared observer frame rejected: {}",
+        ok.message
+    );
+
+    for (client, viewer, name) in [
+        (&mut owner_client, &owner, "owner"),
+        (&mut employee_client, &employee, "employee"),
+    ] {
+        let message = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|error| panic!("{name} did not receive observer frame: {error}"));
+        let RelayMessage::Event { event, .. } = message else {
+            panic!("{name} received unexpected relay message: {message:?}");
+        };
+        let decrypted: serde_json::Value =
+            decrypt_observer_payload(viewer, &event).expect("decrypt shared observer frame");
+        assert_eq!(
+            decrypted, payload,
+            "{name} decrypted wrong observer payload"
+        );
+    }
+
+    match outsider_client.recv_event(Duration::from_millis(500)).await {
+        Err(TestClientError::Timeout) => {}
+        Ok(RelayMessage::Event { event, .. }) => {
+            panic!("outsider received observer frame {}", event.id)
+        }
+        Ok(other) => panic!("outsider received unexpected relay message: {other:?}"),
+        Err(error) => panic!("outsider observer wait failed unexpectedly: {error}"),
+    }
+
+    let delegated_recipients = [owner.public_key(), delegated_agent.public_key()];
+    let delegated_content =
+        encrypt_observer_payload_for_recipients(&agent, &delegated_recipients, &payload)
+            .expect("encrypt delegated-agent observer payload");
+    let delegated_recipient_hexes = delegated_recipients
+        .iter()
+        .map(|recipient| recipient.to_hex())
+        .collect::<Vec<_>>();
+    let delegated_event = build_agent_observer_telemetry_frame(
+        &owner.public_key().to_hex(),
+        &delegated_recipient_hexes,
+        &agent.public_key().to_hex(),
+        Some(channel_id.parse().expect("channel UUID")),
+        &delegated_content,
+    )
+    .expect("build delegated-agent observer frame")
+    .sign_with_keys(&agent)
+    .expect("sign delegated-agent observer frame");
+    let rejected = agent_client
+        .send_event(delegated_event)
+        .await
+        .expect("publish delegated-agent observer frame");
+    assert!(
+        !rejected.accepted
+            && rejected
+                .message
+                .contains("observer recipient is not a direct relay member"),
+        "channel-only delegated agent must not become an observer: {}",
+        rejected.message
     );
 }

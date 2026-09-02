@@ -1,6 +1,6 @@
 //! Owner-reviewed agent draft requests published through Buzz observer frames.
 
-use buzz_core::observer::{encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY};
+use buzz_core::observer::encrypt_observer_payload;
 use nostr::{Event, Keys, PublicKey};
 use serde::Serialize;
 
@@ -107,6 +107,8 @@ fn build<T: Serialize>(
     action: &'static str,
     request: T,
 ) -> Result<BuiltDraftRequest, CliError> {
+    let channel_uuid = uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let payload = ObserverEvent {
         seq: 0,
@@ -125,10 +127,12 @@ fn build<T: Serialize>(
     };
     let encrypted = encrypt_observer_payload(keys, owner, &payload)
         .map_err(|error| CliError::Other(format!("could not encrypt draft request: {error}")))?;
-    let event = buzz_sdk::build_agent_observer_frame(
-        &owner.to_hex(),
+    let owner_hex = owner.to_hex();
+    let event = buzz_sdk::build_agent_observer_telemetry_frame(
+        &owner_hex,
+        std::slice::from_ref(&owner_hex),
         &keys.public_key().to_hex(),
-        OBSERVER_FRAME_TELEMETRY,
+        Some(channel_uuid),
         &encrypted,
     )
     .map_err(|error| CliError::Other(format!("could not build draft request: {error}")))?
@@ -254,7 +258,9 @@ pub fn build_project_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buzz_core::observer::{decrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG};
+    use buzz_core::observer::{
+        decrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY,
+    };
 
     const CHANNEL: &str = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
 
@@ -289,9 +295,7 @@ mod tests {
         assert!(tags
             .iter()
             .any(|tag| tag == &[OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]));
-        assert!(!tags
-            .iter()
-            .any(|tag| tag.first().map(String::as_str) == Some("h")));
+        assert!(tags.iter().any(|tag| tag == &["h", CHANNEL]));
 
         let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
         assert_eq!(payload["kind"], AGENT_REQUEST_KIND);

@@ -483,6 +483,69 @@ fn test_ephemeral_path_persists_valid_frame() {
 }
 
 #[test]
+fn test_ephemeral_path_persists_and_indexes_shared_frame_for_employee() {
+    let conn = in_memory();
+    let owner_keys = Keys::generate();
+    let employee_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let employee_pk = employee_keys.public_key().to_hex();
+    let relay_url = "wss://relay.example";
+    let channel_id = Uuid::new_v4().to_string();
+    add_sub(
+        &conn,
+        &employee_pk,
+        relay_url,
+        "owner_p",
+        &employee_pk,
+        "[24200]",
+    );
+
+    let recipients = [owner_keys.public_key(), employee_keys.public_key()];
+    let encrypted = buzz_core_pkg::observer::encrypt_observer_payload_for_recipients(
+        &agent_keys,
+        &recipients,
+        &serde_json::json!({
+            "kind": "acp_read",
+            "channelId": channel_id,
+            "payload": {"marker": "employee-visible"}
+        }),
+    )
+    .expect("encrypt shared observer payload");
+    let event = EventBuilder::new(Kind::Custom(24200), encrypted)
+        .tags([
+            Tag::parse(["p", &owner_keys.public_key().to_hex()]).unwrap(),
+            Tag::parse(["p", &employee_pk]).unwrap(),
+            Tag::parse(["owner", &owner_keys.public_key().to_hex()]).unwrap(),
+            Tag::parse(["agent", &agent_keys.public_key().to_hex()]).unwrap(),
+            Tag::parse(["frame", OBSERVER_FRAME_TELEMETRY]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+        ])
+        .sign_with_keys(&agent_keys)
+        .unwrap();
+    let candidates = vec![candidate(&event, ScopeType::OwnerP, &employee_pk)];
+
+    let result = run_batch_sync_with_keys(
+        candidates,
+        &employee_pk,
+        relay_url,
+        &conn,
+        vec![],
+        &employee_keys,
+    );
+
+    assert_eq!(result.persisted, 1);
+    assert_eq!(result.dropped, 0);
+    let indexed_channel: Option<String> = conn
+        .query_row(
+            "SELECT channel_id FROM observer_channel_index WHERE id = ?1",
+            [&event.id.to_hex()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed_channel.as_deref(), Some(channel_id.as_str()));
+}
+
+#[test]
 fn test_ephemeral_path_drops_kind_not_in_subscription() {
     let conn = in_memory();
     let owner_keys = Keys::generate();

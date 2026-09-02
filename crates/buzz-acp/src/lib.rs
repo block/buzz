@@ -28,7 +28,7 @@ use buzz_core::kind::{
     KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
-    decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
+    decrypt_observer_payload, encrypt_observer_payload, encrypt_observer_payload_for_recipients,
     OBSERVER_MAX_PLAINTEXT_LEN,
 };
 use clap::Parser;
@@ -45,7 +45,7 @@ use pool::{
 };
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
-use relay::{HarnessRelay, RelayEventPublisher};
+use relay::{HarnessRelay, RelayEventPublisher, RestClient};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -1097,12 +1097,83 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
     }
 }
 
+const OBSERVER_RECIPIENT_CACHE_TTL: Duration = Duration::from_secs(30);
+const OBSERVER_RECIPIENT_CACHE_MAX_CHANNELS: usize = 1_024;
+const OBSERVER_RECIPIENT_FETCH_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+struct ObserverRecipientCache {
+    by_channel: HashMap<uuid::Uuid, (tokio::time::Instant, Vec<PublicKey>)>,
+}
+
+impl ObserverRecipientCache {
+    fn insert(
+        &mut self,
+        channel_id: uuid::Uuid,
+        fetched_at: tokio::time::Instant,
+        recipients: Vec<PublicKey>,
+    ) {
+        if !self.by_channel.contains_key(&channel_id)
+            && self.by_channel.len() >= OBSERVER_RECIPIENT_CACHE_MAX_CHANNELS
+        {
+            if let Some(oldest_channel) = self
+                .by_channel
+                .iter()
+                .min_by_key(|(_, (cached_at, _))| *cached_at)
+                .map(|(channel_id, _)| *channel_id)
+            {
+                self.by_channel.remove(&oldest_channel);
+            }
+        }
+        self.by_channel.insert(channel_id, (fetched_at, recipients));
+    }
+
+    async fn resolve(
+        &mut self,
+        rest: &RestClient,
+        channel_id: uuid::Uuid,
+        owner: PublicKey,
+        agent: PublicKey,
+    ) -> Vec<PublicKey> {
+        if let Some((fetched_at, recipients)) = self.by_channel.get(&channel_id) {
+            if fetched_at.elapsed() < OBSERVER_RECIPIENT_CACHE_TTL {
+                return recipients.clone();
+            }
+        }
+
+        match tokio::time::timeout(
+            OBSERVER_RECIPIENT_FETCH_TIMEOUT,
+            rest.shared_observer_recipients(channel_id, owner, agent),
+        )
+        .await
+        {
+            Ok(Ok(recipients)) => {
+                self.insert(channel_id, tokio::time::Instant::now(), recipients.clone());
+                recipients
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    %channel_id,
+                    "shared observer audience unavailable; publishing owner-only: {error}"
+                );
+                vec![owner]
+            }
+            Err(_) => {
+                tracing::warn!(
+                    %channel_id,
+                    "shared observer audience query timed out; publishing owner-only"
+                );
+                vec![owner]
+            }
+        }
+    }
+}
+
 fn spawn_relay_observer_publisher(
     observer: observer::ObserverHandle,
     publisher: RelayEventPublisher,
+    rest: RestClient,
     keys: nostr::Keys,
-    agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -1112,16 +1183,7 @@ fn spawn_relay_observer_publisher(
         // high-water `seq` (monotonic, assigned at emit).
         let rx = observer.subscribe();
         let snapshot = observer.snapshot();
-        run_relay_observer_publisher(
-            snapshot,
-            rx,
-            publisher,
-            keys,
-            agent_pubkey_hex,
-            owner_pubkey_hex,
-            owner_pubkey,
-        )
-        .await;
+        run_relay_observer_publisher(snapshot, rx, publisher, Some(rest), keys, owner_pubkey).await;
     })
 }
 
@@ -1129,12 +1191,12 @@ async fn run_relay_observer_publisher(
     snapshot: Vec<observer::ObserverEvent>,
     mut rx: tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
     publisher: RelayEventPublisher,
+    rest: Option<RestClient>,
     keys: nostr::Keys,
-    agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
 ) {
     let mut queue = ObserverPublishQueue::default();
+    let mut recipient_cache = ObserverRecipientCache::default();
     let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
     for event in snapshot {
         queue.ingest(event);
@@ -1150,6 +1212,9 @@ async fn run_relay_observer_publisher(
         OBSERVER_PUBLISH_TICK,
     );
     publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let agent_pubkey = keys.public_key();
+    let agent_pubkey_hex = agent_pubkey.to_hex();
+    let owner_pubkey_hex = owner_pubkey.to_hex();
     let mut closed = false;
     loop {
         tokio::select! {
@@ -1177,10 +1242,28 @@ async fn run_relay_observer_publisher(
             }
             _ = publish_tick.tick() => {
                 if let Some(frame) = queue.next_frame() {
+                    let channel_id = frame
+                        .channel_id
+                        .as_deref()
+                        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+                    let recipients = match (channel_id, rest.as_ref()) {
+                        (Some(channel_id), Some(rest)) => {
+                            recipient_cache
+                                .resolve(rest, channel_id, owner_pubkey, agent_pubkey)
+                                .await
+                        }
+                        _ => vec![owner_pubkey],
+                    };
                     publish_relay_observer_event(
-                        &publisher, &keys, &agent_pubkey_hex,
-                        &owner_pubkey_hex, &owner_pubkey, frame,
-                    ).await;
+                        &publisher,
+                        &keys,
+                        &agent_pubkey_hex,
+                        &owner_pubkey_hex,
+                        recipients,
+                        channel_id,
+                        frame,
+                    )
+                    .await;
                 }
                 if closed && queue.is_empty() {
                     break;
@@ -1522,23 +1605,31 @@ async fn publish_relay_observer_event(
     keys: &nostr::Keys,
     agent_pubkey_hex: &str,
     owner_pubkey_hex: &str,
-    owner_pubkey: &PublicKey,
+    recipients: Vec<PublicKey>,
+    channel_id: Option<uuid::Uuid>,
     mut event: observer::ObserverEvent,
 ) {
-    // Trim oversized frames to fit the plaintext cap rather than letting
-    // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
+    // Trim oversized frames before encryption so one oversized leaf cannot
+    // drop the whole telemetry frame.
     fit_observer_event_to_budget(&mut event);
-    let encrypted = match encrypt_observer_payload(keys, owner_pubkey, &event) {
+    let encrypted = if recipients.len() == 1 {
+        encrypt_observer_payload(keys, &recipients[0], &event)
+    } else {
+        encrypt_observer_payload_for_recipients(keys, &recipients, &event)
+    };
+    let encrypted = match encrypted {
         Ok(encrypted) => encrypted,
         Err(error) => {
             tracing::warn!("failed to encrypt relay observer event: {error}");
             return;
         }
     };
-    let builder = match buzz_sdk::build_agent_observer_frame(
+    let recipient_pubkeys: Vec<String> = recipients.iter().map(PublicKey::to_hex).collect();
+    let builder = match buzz_sdk::build_agent_observer_telemetry_frame(
         owner_pubkey_hex,
+        &recipient_pubkeys,
         agent_pubkey_hex,
-        OBSERVER_FRAME_TELEMETRY,
+        channel_id,
         &encrypted,
     ) {
         Ok(builder) => builder,
@@ -2565,9 +2656,8 @@ async fn tokio_main() -> Result<()> {
                     relay_observer_publisher = Some((
                         observer,
                         relay.event_publisher(),
+                        relay.rest_client(),
                         config.keys.clone(),
-                        pubkey_hex.clone(),
-                        owner_pubkey_hex,
                         owner_pubkey,
                     ));
                     relay
@@ -2648,16 +2738,9 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
-        relay_observer_publisher.take()
-    {
+    if let Some((observer, publisher, rest, keys, owner)) = relay_observer_publisher.take() {
         relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
-            observer,
-            publisher,
-            keys,
-            agent_pubkey,
-            owner_pubkey,
-            owner,
+            observer, publisher, rest, keys, owner,
         ));
     }
 
@@ -7812,9 +7895,8 @@ mod observer_snapshot_race_tests {
             snapshot,
             rx,
             publisher,
+            None,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
         )
         .await;
@@ -7848,6 +7930,33 @@ mod observer_snapshot_race_tests {
 #[cfg(test)]
 mod observer_publish_queue_tests {
     use super::*;
+    #[test]
+    fn observer_recipient_cache_evicts_oldest_channel_at_capacity() {
+        let mut cache = ObserverRecipientCache::default();
+        let started_at = tokio::time::Instant::now();
+        let oldest_channel = uuid::Uuid::from_u128(1);
+        for index in 0..OBSERVER_RECIPIENT_CACHE_MAX_CHANNELS {
+            cache.insert(
+                uuid::Uuid::from_u128(index as u128 + 1),
+                started_at + Duration::from_millis(index as u64),
+                Vec::new(),
+            );
+        }
+
+        let newest_channel = uuid::Uuid::from_u128(u128::MAX);
+        cache.insert(
+            newest_channel,
+            started_at + Duration::from_secs(60),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            cache.by_channel.len(),
+            OBSERVER_RECIPIENT_CACHE_MAX_CHANNELS
+        );
+        assert!(!cache.by_channel.contains_key(&oldest_channel));
+        assert!(cache.by_channel.contains_key(&newest_channel));
+    }
 
     fn event(seq: u64, kind: &str, channel: Option<&str>) -> observer::ObserverEvent {
         observer::ObserverEvent {
@@ -8468,6 +8577,74 @@ mod observer_publish_queue_tests {
 }
 
 #[cfg(test)]
+mod shared_observer_publish_tests {
+    use super::*;
+    use buzz_core::observer::{OBSERVER_FRAME_TELEMETRY, OBSERVER_OWNER_TAG};
+    use nostr::Keys;
+
+    #[tokio::test]
+    async fn one_shared_frame_is_decryptable_by_owner_and_channel_employee() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let employee = Keys::generate();
+        let outsider = Keys::generate();
+        let channel_id = uuid::Uuid::new_v4();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+        let frame = observer::ObserverEvent {
+            seq: 1,
+            timestamp: "2026-04-29T04:00:00Z".into(),
+            kind: "acp_read".into(),
+            agent_index: Some(0),
+            channel_id: Some(channel_id.to_string()),
+            session_id: Some("session-1".into()),
+            turn_id: Some("turn-1".into()),
+            started_at: None,
+            payload: serde_json::json!({"marker": "shared"}),
+        };
+
+        publish_relay_observer_event(
+            &publisher,
+            &agent,
+            &agent.public_key().to_hex(),
+            &owner.public_key().to_hex(),
+            vec![owner.public_key(), employee.public_key()],
+            Some(channel_id),
+            frame,
+        )
+        .await;
+        let event = published_rx.recv().await.expect("published observer frame");
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags
+            .iter()
+            .any(|tag| tag == &["p", &owner.public_key().to_hex()]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag == &["p", &employee.public_key().to_hex()]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag == &[OBSERVER_OWNER_TAG, &owner.public_key().to_hex()]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag == &["h", &channel_id.to_string()]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag == &["frame", OBSERVER_FRAME_TELEMETRY]));
+
+        let owner_payload: serde_json::Value =
+            decrypt_observer_payload(&owner, &event).expect("owner decrypts");
+        let employee_payload: serde_json::Value =
+            decrypt_observer_payload(&employee, &event).expect("employee decrypts");
+        assert_eq!(owner_payload["payload"]["marker"], "shared");
+        assert_eq!(employee_payload, owner_payload);
+        assert!(decrypt_observer_payload::<serde_json::Value>(&outsider, &event).is_err());
+    }
+}
+
+#[cfg(test)]
 mod observer_publish_cadence_tests {
     use super::*;
     use nostr::Keys;
@@ -8536,9 +8713,8 @@ mod observer_publish_cadence_tests {
             snapshot,
             rx,
             publisher,
+            None,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
         ));
 
@@ -8615,9 +8791,8 @@ mod observer_publish_cadence_tests {
             snapshot,
             rx,
             publisher,
+            None,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
         ));
 
@@ -8681,9 +8856,8 @@ mod observer_publish_cadence_tests {
             snapshot,
             rx,
             publisher,
+            None,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
         ));
         settle().await;
