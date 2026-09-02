@@ -112,6 +112,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   welcomeKickoffStage = null,
   welcomeKickoffSettingUp = false,
   messages,
+  inlineThreadController,
   threadSummaries,
   huddleThreadRepliesError = false,
   onRetryHuddleThreadReplies,
@@ -669,6 +670,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               mainEntries={mainTimelineEntries}
               threadSummaries={threadSummaries}
               messages={visibleMessages}
+              inlineThreadController={inlineThreadController}
               firstUnreadMessageId={firstUnreadMessageId}
               unreadCount={unreadCount}
               onDelete={onDelete}

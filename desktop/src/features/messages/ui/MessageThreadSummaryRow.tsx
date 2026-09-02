@@ -61,7 +61,9 @@ export function MessageThreadSummaryRow({
   message,
   onCollapseDepthGuide,
   onCollapseDepthGuideHoverChange,
+  inlineExpanded = false,
   onOpenThread,
+  onToggleInline,
   showDepthGuides = true,
   summary,
   summaryIndentOffsetRem = 0,
@@ -71,12 +73,14 @@ export function MessageThreadSummaryRow({
   depth?: number;
   depthGuideDepths?: ReadonlyArray<number>;
   highlightThreadLineDepths?: ReadonlyArray<number>;
+  inlineExpanded?: boolean;
   message: TimelineMessage;
   onCollapseDepthGuide?: (message: TimelineMessage) => void;
   onCollapseDepthGuideHoverChange?: (
     message: TimelineMessage,
     hovered: boolean,
   ) => void;
+  onToggleInline?: (message: TimelineMessage) => void;
   onOpenThread: (message: TimelineMessage) => void;
   showDepthGuides?: boolean;
   summary: TimelineThreadSummary;
@@ -207,73 +211,94 @@ export function MessageThreadSummaryRow({
         </div>
       ) : null}
 
-      <button
-        aria-label={summaryAriaLabel}
-        className="group relative isolate inline-flex h-[1.875rem] w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full py-0 pr-3 text-left text-xs font-medium text-muted-foreground transition-[color,opacity] hover:text-foreground hover:opacity-90 focus-visible:outline-hidden"
-        data-thread-head-id={message.id}
-        data-testid="message-thread-summary"
-        onClick={() => onOpenThread(message)}
+      <div
+        className="flex min-w-0 items-center gap-1"
         style={{
           marginLeft: hoverLeft,
           maxWidth: `calc(100% - ${hoverLeft})`,
-          paddingLeft: contentPaddingStart,
         }}
-        type="button"
       >
-        <span
-          aria-hidden="true"
-          className="pointer-events-none absolute bottom-[-0.125rem] top-[-0.125rem] rounded-full opacity-0 ring-border/70 transition-[background-color,box-shadow,opacity] group-hover:bg-background/95 group-hover:opacity-100 group-hover:ring-1 group-focus-visible:bg-background/95 group-focus-visible:opacity-100 group-focus-visible:ring-1 group-focus-visible:ring-ring"
-          data-testid="message-thread-summary-surface"
-          style={{
-            left: surfaceInsetStart,
-            right: 0,
-          }}
-        />
-        <div className="relative z-10 flex shrink-0 items-center">
-          {summary.participants.map((participant, index) => (
-            <ParticipantAvatar
-              index={index}
-              key={participant.id}
-              participant={participant}
-              participantCount={summary.participants.length}
-            />
-          ))}
-        </div>
-        <div className="relative z-10 min-w-0">
-          <div>
-            <span className="font-medium transition-colors group-hover:text-foreground">
-              {summary.replyCount} {replyLabel}
-            </span>
-            {unreadCount != null && unreadCount > 0 ? (
-              <span className="ml-1" data-testid="thread-unread-badge">
-                ({unreadCount} new)
-              </span>
-            ) : null}
-            {summary.lastReplyAt ? (
-              <>
-                <span className="mx-1 font-normal text-muted-foreground/50">
-                  ·
-                </span>
-                <span className="inline-grid font-normal text-muted-foreground/70">
-                  <span
-                    className="col-start-1 row-start-1 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
-                    data-testid="message-thread-summary-last-reply"
-                  >
-                    last reply{" "}
-                    {formatThreadSummaryLastReplyTime(summary.lastReplyAt)}
-                  </span>
-                  <span
-                    className="col-start-1 row-start-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
-                    data-testid="message-thread-summary-hover-action"
-                  >
-                    View thread
-                  </span>
-                </span>
-              </>
-            ) : null}
+        <button
+          aria-label={summaryAriaLabel}
+          className="group relative isolate inline-flex h-[1.875rem] min-w-0 cursor-pointer items-center gap-1.5 rounded-full py-0 pr-3 text-left text-xs font-medium text-muted-foreground transition-[color,opacity] hover:text-foreground hover:opacity-90 focus-visible:outline-hidden"
+          data-thread-head-id={message.id}
+          data-testid="message-thread-summary"
+          onClick={() => onOpenThread(message)}
+          style={{ paddingLeft: contentPaddingStart }}
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-[-0.125rem] top-[-0.125rem] rounded-full opacity-0 ring-border/70 transition-[background-color,box-shadow,opacity] group-hover:bg-background/95 group-hover:opacity-100 group-hover:ring-1 group-focus-visible:bg-background/95 group-focus-visible:opacity-100 group-focus-visible:ring-1 group-focus-visible:ring-ring"
+            data-testid="message-thread-summary-surface"
+            style={{
+              left: surfaceInsetStart,
+              right: 0,
+            }}
+          />
+          <div className="relative z-10 flex shrink-0 items-center">
+            {summary.participants.map((participant, index) => (
+              <ParticipantAvatar
+                index={index}
+                key={participant.id}
+                participant={participant}
+                participantCount={summary.participants.length}
+              />
+            ))}
           </div>
-        </div>
-      </button>
+          <div className="relative z-10 min-w-0">
+            <div>
+              <span className="font-medium transition-colors group-hover:text-foreground">
+                {summary.replyCount} {replyLabel}
+              </span>
+              {unreadCount != null && unreadCount > 0 ? (
+                <span className="ml-1" data-testid="thread-unread-badge">
+                  ({unreadCount} new)
+                </span>
+              ) : null}
+              {summary.lastReplyAt ? (
+                <>
+                  <span className="mx-1 font-normal text-muted-foreground/50">
+                    ·
+                  </span>
+                  <span className="inline-grid font-normal text-muted-foreground/70">
+                    <span
+                      className="col-start-1 row-start-1 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                      data-testid="message-thread-summary-last-reply"
+                    >
+                      last reply{" "}
+                      {formatThreadSummaryLastReplyTime(summary.lastReplyAt)}
+                    </span>
+                    <span
+                      className="col-start-1 row-start-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+                      data-testid="message-thread-summary-hover-action"
+                    >
+                      View thread
+                    </span>
+                  </span>
+                </>
+              ) : null}
+            </div>
+          </div>
+        </button>
+        {onToggleInline ? (
+          <button
+            aria-label={
+              inlineExpanded
+                ? `Hide ${summary.replyCount} ${replyLabel} from channel`
+                : `Show ${summary.replyCount} ${replyLabel} in channel`
+            }
+            aria-pressed={inlineExpanded}
+            className="h-7 shrink-0 rounded-full px-2 text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+            data-thread-head-id={message.id}
+            data-testid="message-thread-inline-toggle"
+            onClick={() => onToggleInline(message)}
+            type="button"
+          >
+            {inlineExpanded ? "Hide replies" : "Show in channel"}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }

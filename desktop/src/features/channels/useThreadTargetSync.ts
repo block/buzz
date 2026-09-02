@@ -23,6 +23,7 @@ export function useThreadTargetSync({
   setThreadScrollTargetId,
   threadReplyTargetId,
   threadReplyTargetMessage,
+  threadMessagesPending,
 }: {
   clearOptimisticThreadOverride: () => void;
   editTargetId: string | null;
@@ -37,6 +38,7 @@ export function useThreadTargetSync({
   setThreadScrollTargetId: (id: string | null) => void;
   threadReplyTargetId: string | null;
   threadReplyTargetMessage: TimelineMessage | null;
+  threadMessagesPending: boolean;
 }) {
   React.useEffect(() => {
     if (openThreadHeadId && !openThreadHeadMessage) {
@@ -52,6 +54,10 @@ export function useThreadTargetSync({
 
     if (openThreadHeadMessage && !threadReplyTargetId) {
       setThreadReplyTargetId(openThreadHeadMessage.id);
+      return;
+    }
+
+    if (threadMessagesPending) {
       return;
     }
 
@@ -74,6 +80,7 @@ export function useThreadTargetSync({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
     threadReplyTargetId,
+    threadMessagesPending,
     threadReplyTargetMessage,
   ]);
 }

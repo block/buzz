@@ -6,6 +6,7 @@ import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
+import type { InlineThreadController } from "@/features/messages/useThreadReplies";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
   ProfilePanelTab,
@@ -71,6 +72,7 @@ export type ChannelPaneProps = {
   /** The kickoff is still setting up the team — the banner copy reads as setup status. */
   welcomeKickoffSettingUp?: boolean;
   messages: TimelineMessage[];
+  inlineThreadController?: InlineThreadController;
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   /**
    * A Huddle transcript flattens summarized reply subtrees into the chat

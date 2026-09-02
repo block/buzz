@@ -91,6 +91,7 @@ export default defineConfig({
         "**/home-collapsed-top-chrome.spec.ts",
         "**/top-chrome-zoom-clearance.spec.ts",
         "**/thread-unread.spec.ts",
+        "**/inline-thread-replies.spec.ts",
         "**/thread-load-failure.spec.ts",
         "**/project-conversation-load-failure.spec.ts",
         "**/huddle-thread-load-failure.spec.ts",

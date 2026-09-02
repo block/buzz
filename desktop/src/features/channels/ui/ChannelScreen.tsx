@@ -34,6 +34,7 @@ import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcome
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
+  mergeMessages,
   useChannelMessagesQuery,
   useChannelSubscription,
   useChannelWindowQuery,
@@ -53,7 +54,7 @@ import { hasPersistedHydratedChannel } from "@/features/messages/lib/channelHead
 import { resolveTimelineQueryLoadingState } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
-import { useThreadReplies } from "@/features/messages/useThreadReplies";
+import { useInlineThreadReplies, useMarkInlineRepliesRead, useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -152,12 +153,8 @@ export function ChannelScreen({
   } = useThreadPanelWidth(channelContentWidthPx || undefined);
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
   const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
-  const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
-    () => new Set<string>(),
-  );
-  const [threadScrollTargetId, setThreadScrollTargetId] = React.useState<
-    string | null
-  >(null);
+  const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(() => new Set<string>());
+  const [threadScrollTargetId, setThreadScrollTargetId] = React.useState<string | null>(null);
   const [threadReplyTargetId, setThreadReplyTargetId] = React.useState<
     string | null
   >(null);
@@ -202,10 +199,8 @@ export function ChannelScreen({
   }, [activeChannelId, openThreadHeadId]);
   const messagesQuery = useChannelMessagesQuery(activeChannel);
   const windowQuery = useChannelWindowQuery(activeChannel);
-  const threadRepliesQuery = useThreadReplies(
-    activeChannel,
-    effectiveOpenThreadHeadId,
-  );
+  const threadRepliesQuery = useThreadReplies(activeChannel, effectiveOpenThreadHeadId);
+  const inlineThreadReplies = useInlineThreadReplies(activeChannel);
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
@@ -265,6 +260,11 @@ export function ChannelScreen({
     targetMessageEvents,
     windowStore: windowQuery.data,
   });
+  const resolvedTimelineEvents = React.useMemo(
+    () =>
+      inlineThreadReplies.events.reduce(mergeMessages, resolvedMessages),
+    [inlineThreadReplies.events, resolvedMessages],
+  );
   useHuddleReadMarker({
     activeChannelId,
     activeChannelIsMember: activeChannel?.isMember,
@@ -283,7 +283,7 @@ export function ChannelScreen({
     threadReplyEvents,
   );
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
-    resolvedMessages,
+    resolvedTimelineEvents,
     threadReplyEvents,
     relaySelfPubkey,
   );
@@ -403,7 +403,7 @@ export function ChannelScreen({
   const timelineMessages = React.useMemo(
     () =>
       formatTimelineMessages(
-        resolvedMessages,
+        resolvedTimelineEvents,
         activeChannel,
         currentPubkey,
         currentProfile?.avatarUrl ?? null,
@@ -424,7 +424,7 @@ export function ChannelScreen({
       personaLookup,
       relaySelfPubkey,
       respondToLookup,
-      resolvedMessages,
+      resolvedTimelineEvents,
     ],
   );
   const threadPanelData = useIndependentThreadPanel({
@@ -453,7 +453,6 @@ export function ChannelScreen({
     markRevealedRepliesRead,
     openThreadHeadMessage,
     threadFirstUnreadReplyId,
-    threadReplyTargetMessage,
     threadReplyUnreadCounts,
     threadUnreadCounts,
     unreadCount,
@@ -473,6 +472,7 @@ export function ChannelScreen({
     isThreadMuted,
     readStateVersion,
   });
+  useMarkInlineRepliesRead(inlineThreadReplies, markRevealedRepliesRead);
   const editTargetMessage = React.useMemo(
     () =>
       timelineMessages.find((message) => message.id === editTargetId) ??
@@ -671,7 +671,8 @@ export function ChannelScreen({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
     threadReplyTargetId,
-    threadReplyTargetMessage,
+    threadReplyTargetMessage: threadPanelData.replyTargetMessage,
+    threadMessagesPending: threadRepliesQuery.isPending,
   });
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
@@ -883,6 +884,7 @@ export function ChannelScreen({
                   isSinglePanelView={isSinglePanelView}
                   isTimelineError={messagesQuery.isError} isTimelineLoading={isTimelineLoading}
                   onRetryTimeline={() => void messagesQuery.refetch()} messages={timelineMessages}
+                  inlineThreadController={inlineThreadReplies.controller}
                   threadSummaries={threadSummaries}
                   huddleThreadRepliesError={huddleThreadRepliesError}
                   onRetryHuddleThreadReplies={onRetryHuddleThreadReplies}

@@ -10,6 +10,7 @@ import { preloadTimelineImages } from "@/features/messages/lib/timelineImagePrel
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
+import type { InlineThreadController } from "@/features/messages/useThreadReplies";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -46,6 +47,7 @@ type MessageTimelineProps = {
   huddleMemberPubkeysPending?: boolean;
   messages: TimelineMessage[];
   mainEntries?: MainTimelineEntry[];
+  inlineThreadController?: InlineThreadController;
   /** Relay thread summaries (root id → summary) for the deferred-pass entry
    *  fallback, so badge rows survive while a scrollback page commits. */
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
@@ -97,6 +99,7 @@ type MessageTimelineProps = {
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onOpenThread?: (message: TimelineMessage) => void;
+
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -165,6 +168,7 @@ const MessageTimelineBase = React.forwardRef<
     directMessageIntro = null,
     messages,
     mainEntries,
+    inlineThreadController,
     threadSummaries,
     isError = false,
     isLoading = false,
@@ -198,6 +202,7 @@ const MessageTimelineBase = React.forwardRef<
     onMarkRead,
     onReply,
     onOpenThread,
+
     channelName,
     channelType,
     isSendingVideoReviewComment = false,
@@ -667,6 +672,8 @@ const MessageTimelineBase = React.forwardRef<
       onEntranceMessageComplete={onEntranceMessageComplete}
       messageFooters={messageFooters}
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
+      inlineThreadController={inlineThreadController}
+      inlineThreadMessages={messages}
       leadingContent={virtualizedLeadingContent}
       historyExhausted={renderedHistoryExhausted}
       hideDayDividers={hideDayDividers}

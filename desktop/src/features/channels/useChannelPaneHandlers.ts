@@ -161,13 +161,45 @@ export function useChannelPaneHandlers({
   }, []);
 
   const handleEdit = React.useCallback(
-    (message: { id: string }) => {
+    (message: { id: string; rootId?: string | null }) => {
+      const threadHeadId = message.rootId ?? null;
+      if (
+        threadHeadId &&
+        openThreadHeadIdRef.current !== threadHeadId &&
+        !requireThreadEditResolution()
+      )
+        return;
+      if (threadHeadId && openThreadHeadIdRef.current !== threadHeadId) {
+        deferPanelState(() => {
+          setExpandedThreadReplyIds(new Set());
+          onOptimisticOpenThreadHeadIdChange(threadHeadId);
+          setOpenThreadHeadId(threadHeadId);
+          // Navigation can commit before local target state. Set the child
+          // target after the containing thread panel has mounted.
+          deferPanelState(() => {
+            setEditTargetId(message.id);
+            setThreadReplyTargetId(threadHeadId);
+            setThreadScrollTargetId(message.id);
+          });
+        });
+        return;
+      }
       setEditTargetId((current) =>
         current === message.id ? null : message.id,
       );
-      setThreadReplyTargetId(openThreadHeadIdRef.current);
+      setThreadReplyTargetId(threadHeadId ?? openThreadHeadIdRef.current);
+      if (threadHeadId) setThreadScrollTargetId(message.id);
     },
-    [setEditTargetId, setThreadReplyTargetId],
+    [
+      deferPanelState,
+      onOptimisticOpenThreadHeadIdChange,
+      requireThreadEditResolution,
+      setEditTargetId,
+      setExpandedThreadReplyIds,
+      setOpenThreadHeadId,
+      setThreadReplyTargetId,
+      setThreadScrollTargetId,
+    ],
   );
 
   const handleEditSave = React.useCallback(
@@ -214,9 +246,17 @@ export function useChannelPaneHandlers({
   );
 
   const handleOpenThread = React.useCallback(
-    (message: { id: string }) => {
+    (message: { id: string; rootId?: string | null }) => {
       if (!requireThreadEditResolution()) return;
-      if (openThreadHeadIdRef.current === message.id) {
+      const threadHeadId = message.rootId ?? message.id;
+      const replyTargetId = message.rootId ? message.id : threadHeadId;
+      if (openThreadHeadIdRef.current === threadHeadId) {
+        if (message.rootId) {
+          setThreadReplyTargetId(replyTargetId);
+          setThreadScrollTargetId(replyTargetId);
+          setEditTargetId(null);
+          return;
+        }
         deferPanelState(() => {
           onOptimisticOpenThreadHeadIdChange(null);
           setOpenThreadHeadId(null);
@@ -229,11 +269,17 @@ export function useChannelPaneHandlers({
       }
 
       deferPanelState(() => {
-        onOptimisticOpenThreadHeadIdChange(message.id);
-        setOpenThreadHeadId(message.id);
-        setThreadReplyTargetId(message.id);
-        setThreadScrollTargetId(null);
         setExpandedThreadReplyIds(new Set());
+        onOptimisticOpenThreadHeadIdChange(threadHeadId);
+        setOpenThreadHeadId(threadHeadId);
+        if (message.rootId) {
+          // Navigation can commit before local target state. Set the child
+          // target after the containing thread panel has mounted.
+          deferPanelState(() => {
+            setThreadReplyTargetId(replyTargetId);
+            setThreadScrollTargetId(replyTargetId);
+          });
+        }
       });
       setEditTargetId(null);
     },
