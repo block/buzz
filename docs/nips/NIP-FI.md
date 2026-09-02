@@ -330,7 +330,7 @@ is immediately expired); this is not an error.
 > durable system of record for revocations, SHOULD re-push still-active denies
 > when it observes a relay restart (same publish/cache pattern as JWKS).  A
 > fresh relay MAY consult the issuer before first admissions to close the
-> seconds-wide startup race; this is non-normative.
+> startup race; this is non-normative.
 >
 > This design was chosen because session-only disconnection must outlast
 > the live socket to mean anything as a revocation primitive; a self-expiring
