@@ -2078,6 +2078,46 @@ void main() {
       }
     });
 
+    testWidgets('long file attachment names use a wide overflow-safe card', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+        pickAttachmentFile: () async => XFile.fromData(
+          Uint8List.fromList([1, 2, 3]),
+          name: 'BUZZ_ANDROID_ATTACHMENT_PROBE_WITH_A_LONG_NAME.md',
+        ),
+      );
+      addTearDown(uploadService.dispose);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Files'));
+      await tester.pumpAndSettle();
+
+      final card = find.byWidgetPredicate((widget) {
+        final key = widget.key;
+        return key is ValueKey<String> &&
+            key.value.startsWith('compose-attachment:');
+      });
+      expect(card, findsOneWidget);
+      expect(tester.getSize(card), const Size(208, 72));
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets(
       'attachment menu grows rows and scrolls for accessibility text',
       (tester) async {

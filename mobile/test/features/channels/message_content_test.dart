@@ -178,8 +178,7 @@ void main() {
       tester,
     ) async {
       const url = 'https://relay.example/media/report.pdf';
-      String? openedUrl;
-      Map<String, String>? openedHeaders;
+      List<MediaRequestTarget>? openedTargets;
       String? openedFilename;
       final auth = MediaGetAuthService(
         baseUrl: 'https://relay.example',
@@ -192,12 +191,10 @@ void main() {
           overrides: [
             mediaGetAuthServiceProvider.overrideWithValue(auth),
             openDownloadedFileProvider.overrideWithValue((
-              url,
-              headers,
+              targets,
               filename,
             ) async {
-              openedUrl = url;
-              openedHeaders = headers;
+              openedTargets = targets;
               openedFilename = filename;
             }),
           ],
@@ -207,9 +204,12 @@ void main() {
       await tester.tap(find.text('report.pdf'));
       await tester.pump();
 
-      expect(openedUrl, url);
+      expect(openedTargets?.single.uri.toString(), url);
       expect(openedFilename, 'report.pdf');
-      expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+      expect(
+        openedTargets?.single.headers['Authorization'],
+        startsWith('Nostr '),
+      );
     });
 
     test('buildImageViewerRoute uses modal-style page route builder', () {

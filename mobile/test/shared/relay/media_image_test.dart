@@ -18,8 +18,16 @@ final _pngBytes = base64Decode(
 const _relayBase = 'https://relay.example.com';
 const _mediaUrl = '$_relayBase/media/abc123.png';
 
-MediaGetAuthService _auth({String? nsec, DateTime Function()? now}) =>
-    MediaGetAuthService(baseUrl: _relayBase, nsec: nsec, now: now);
+MediaGetAuthService _auth({
+  String? nsec,
+  String? lanRelayUrl,
+  DateTime Function()? now,
+}) => MediaGetAuthService(
+  baseUrl: _relayBase,
+  lanRelayUrl: lanRelayUrl,
+  nsec: nsec,
+  now: now,
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -62,6 +70,41 @@ void main() {
       final auth = _auth(nsec: nsec);
       expect(auth.headersFor('https://elsewhere.com/media/abc.png'), isEmpty);
       expect(auth.headersFor('$_relayBase/not-media/abc.png'), isEmpty);
+    });
+
+    test('maps relay media to LAN while preserving canonical auth scope', () {
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        lanRelayUrl: 'wss://10.24.11.82:3000',
+      );
+
+      final targets = auth.requestTargetsFor(_mediaUrl);
+
+      expect(targets.map((target) => target.uri.toString()), [
+        'http://10.24.11.82:3000/media/abc123.png',
+        _mediaUrl,
+      ]);
+      expect(targets.first.headers['host'], 'relay.example.com');
+      expect(targets.first.headers['Authorization'], startsWith('Nostr '));
+      expect(targets.last.headers.containsKey('host'), isFalse);
+    });
+
+    test('normalizes LAN-host descriptors to LAN and canonical targets', () {
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        lanRelayUrl: 'wss://10.24.11.82:3000',
+      );
+
+      const lanDescriptor = 'https://10.24.11.82:3000/media/abc123.png';
+      final targets = auth.requestTargetsFor(lanDescriptor);
+
+      expect(auth.isRelayMediaUrl(lanDescriptor), isTrue);
+      expect(targets.map((target) => target.uri.toString()), [
+        'http://10.24.11.82:3000/media/abc123.png',
+        _mediaUrl,
+      ]);
+      expect(targets.first.headers['host'], 'relay.example.com');
+      expect(targets.first.headers['Authorization'], startsWith('Nostr '));
     });
   });
 
@@ -140,6 +183,56 @@ void main() {
       );
       await _wait(provider.resolve(ImageConfiguration.empty));
       expect(seen?['Authorization'], startsWith('Nostr '));
+    });
+
+    test('fetches canonical media through the LAN target', () async {
+      Uri? seenUrl;
+      Map<String, String>? seenHeaders;
+      final client = http_testing.MockClient((request) async {
+        seenUrl = request.url;
+        seenHeaders = request.headers;
+        return http.Response.bytes(_pngBytes, 200);
+      });
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        lanRelayUrl: 'ws://10.24.11.82:3000',
+      );
+
+      await _wait(
+        MediaImageProvider(
+          url: _mediaUrl,
+          auth: auth,
+          client: client,
+        ).resolve(ImageConfiguration.empty),
+      );
+
+      expect(seenUrl.toString(), 'http://10.24.11.82:3000/media/abc123.png');
+      expect(seenHeaders?['host'], 'relay.example.com');
+    });
+
+    test('falls back to canonical media after a LAN server failure', () async {
+      final seenUrls = <String>[];
+      final client = http_testing.MockClient((request) async {
+        seenUrls.add(request.url.toString());
+        if (request.url.host == '10.24.11.82') {
+          return http.Response('unavailable', 503);
+        }
+        return http.Response.bytes(_pngBytes, 200);
+      });
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        lanRelayUrl: 'ws://10.24.11.82:3000',
+      );
+
+      await _wait(
+        MediaImageProvider(
+          url: _mediaUrl,
+          auth: auth,
+          client: client,
+        ).resolve(ImageConfiguration.empty),
+      );
+
+      expect(seenUrls, ['http://10.24.11.82:3000/media/abc123.png', _mediaUrl]);
     });
 
     test('failed URL is not refetched until cooldown elapses', () async {

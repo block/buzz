@@ -33,20 +33,16 @@ const _messageMediaMaxInlineWidth = 320.0;
 const _messageMediaMaxImageHeight = 240.0;
 
 typedef OpenDownloadedFile =
-    Future<void> Function(
-      String url,
-      Map<String, String> headers,
-      String filename,
-    );
+    Future<void> Function(List<MediaRequestTarget> targets, String filename);
 
 final openDownloadedFileProvider = Provider<OpenDownloadedFile>((ref) {
   final client = ref.watch(mediaHttpClientProvider);
-  return (url, headers, filename) async {
-    final response = await client.get(Uri.parse(url), headers: headers);
+  return (targets, filename) async {
+    final response = await fetchMediaResponse(client, targets);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpException(
         'Attachment download failed (${response.statusCode})',
-        uri: Uri.parse(url),
+        uri: response.request?.url ?? targets.last.uri,
       );
     }
 
@@ -362,8 +358,7 @@ class MessageContent extends HookConsumerWidget {
 
         try {
           await ref.read(openDownloadedFileProvider)(
-            url,
-            auth.headersFor(url),
+            auth.requestTargetsFor(url),
             text,
           );
         } catch (_) {

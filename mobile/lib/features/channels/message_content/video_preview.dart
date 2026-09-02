@@ -30,7 +30,15 @@ final videoPreviewFrameLoaderProvider = Provider<VideoPreviewFrameLoader>((
   ref,
 ) {
   final auth = ref.watch(mediaGetAuthServiceProvider);
-  return (url) => _loadVideoPreviewFrame(url, headers: auth.headersFor(url));
+  return (url) {
+    final targets = auth.requestTargetsFor(url);
+    if (targets.isEmpty) return Future.value();
+    final target = targets.first;
+    return _loadVideoPreviewFrame(
+      target.uri.toString(),
+      headers: target.headers,
+    );
+  };
 });
 
 class _MessageVideoPreview extends HookConsumerWidget {

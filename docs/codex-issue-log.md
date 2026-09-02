@@ -181,3 +181,11 @@
 - 处理：将 app-server 主程序和 Code Mode host 解耦探测。只要 `codex.exe` 存在即可启动共享 app-server；仅在同目录存在匹配 `codex-code-mode-host(.exe)` 时传入 `features.code_mode_host=true`。启动日志新增 `code_mode_host=enabled|unavailable`，便于区分可选能力缺失与运行时本身启动失败。
 - 验证：Tauri Codex runtime 单元测试 9/9、桌面 TypeScript typecheck 通过；本次文件 rustfmt 通过。缺少 sidecar 时验证不再带 Code Mode 开关，有 sidecar 时保持原行为。
 - 版本/提交：`0.5.18` / `45e2e9b4`。
+
+## 2026-09-02：Android 附件发送长时间停留在 Sending
+
+- 现象：Android 端发送一个很小的附件仍需约 2 秒，早前个别发送接近 7.8 秒；分阶段日志显示读取约 220 ms、上传约 1.11 秒、消息发布确认约 599 ms。
+- 定位：附件字节和 relay 服务端不是主要瓶颈。平板连接名为 `ASUS_5G` 的网络时实际工作在 2412 MHz，直连 relay 的请求在 136 ms 至 2.1 秒之间抖动；relay 本机处理消息仅约 21 ms，MinIO 健康检查约 5.5 ms。切换到 5220 MHz 网络后，连续请求稳定在 98 至 119 ms。客户端 publish 路径和 relay 出站路径均没有固定 500 ms 等待。
+- 处理：保留文件读取、上传、签名和 relay 确认的分阶段诊断日志；移动端媒体上传优先使用已验证的 LAN transport，并复用 HTTP client；新媒体上传先检查租户 sidecar，sidecar 不存在时跳过无意义的 blob `HEAD`。测试过 Android Wi-Fi low-latency lock，但没有稳定收益，未纳入产品代码。
+- 验证：真实附件发送降至约 1.13 秒，其中读取 57 ms、上传 412 ms、消息准备/签名/确认 650 ms；`buzz-media` 121 项测试和移动端相关 123 项测试通过，`flutter analyze` 无问题，debug APK 已在实机安装验证。
+- 版本/提交：基于 `047c8141`，本次 PR 待提交。
