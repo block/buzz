@@ -340,6 +340,7 @@ test("offscreen top-level unread shows the secondary sidebar arrow", async ({
   await expect(activityArrow).toBeVisible();
   await expect(activityArrow).toContainText("1 unread");
   await expect(activityArrow).not.toHaveClass(/bg-primary/);
+  await expect(activityArrow).toHaveCSS("font-size", "12px");
   await waitForAnimations(page);
   await page.screenshot({
     path: `${SHOTS}/sidebar-unread-overflow-default.png`,
