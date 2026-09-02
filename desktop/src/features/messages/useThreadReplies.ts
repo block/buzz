@@ -115,42 +115,16 @@ export function useThreadReplies(
     null,
   );
 
-  // Notification routing can change expectedEventId while the same thread root
-  // is already mounted and the query is settled. Because the query key
-  // (channelId + rootId) stays the same, the query fn closure does not re-run
-  // automatically. Invalidate explicitly so the new target gets a fresh fetch
-  // and validation pass.
-  //
-  // If the query is still in-flight with no data yet (cold start race: target
-  // arrives before the first page returns), cancel the in-flight fetch first.
-  // Without the cancel the obsolete empty-page response can settle before the
-  // new target's validation closure is active, producing a false authoritative
-  // [] result.
-  const prevExpectedEventIdRef = React.useRef(expectedEventId);
-  React.useEffect(() => {
-    const prev = prevExpectedEventIdRef.current;
-    prevExpectedEventIdRef.current = expectedEventId;
-    if (
-      expectedEventId !== null &&
-      expectedEventId !== undefined &&
-      expectedEventId !== prev &&
-      !exhaustedTargetsRef.current.has(expectedEventId)
-    ) {
-      const state = queryClient.getQueryState(queryKey);
-      if (state?.fetchStatus === "fetching" && state.status === "pending") {
-        // Cold fetch in-flight: cancel and re-fetch atomically so the stale
-        // empty-page response cannot settle as authoritative data before the
-        // new target's validation closure is active.
-        void queryClient.cancelQueries({ queryKey }).then(() => {
-          void queryClient.invalidateQueries({ queryKey });
-        });
-      } else {
-        void queryClient.invalidateQueries({ queryKey });
-      }
-    }
-  }, [expectedEventId, queryClient, queryKey]);
-
-  return useQuery({
+  // useQuery is declared before the target-change invalidation effect so that
+  // TanStack's internal options-update effect (useBaseQuery.ts, registered
+  // inside useQuery) runs first on each render cycle. React runs effects in
+  // declaration order; placing our invalidation effect after useQuery ensures
+  // the observer has installed the new queryFn closure — capturing the current
+  // expectedEventId — before invalidateQueries triggers query.fetch(). Without
+  // this ordering, a settled null→target transition refetches with the previous
+  // (null) queryFn, loadThreadReplies validates against null, and the missing
+  // reply stays absent with no Retry error surface.
+  const queryResult = useQuery({
     queryKey,
     enabled:
       activeChannel !== null &&
@@ -192,6 +166,48 @@ export function useThreadReplies(
     retry: 3,
     retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 30_000),
   });
+
+  // Notification routing can change expectedEventId while the same thread root
+  // is already mounted and the query is settled. Because the query key
+  // (channelId + rootId) stays the same, the query fn closure does not re-run
+  // automatically. Invalidate explicitly so the new target gets a fresh fetch
+  // and validation pass.
+  //
+  // This effect is declared AFTER useQuery so that TanStack's options-update
+  // effect (which installs the new queryFn closure) always runs first within
+  // the same render cycle. The invalidation therefore reaches query.fetch()
+  // with the current expectedEventId already captured — not the previous one.
+  //
+  // If the query is still in-flight with no data yet (cold start race: target
+  // arrives before the first page returns), cancel the in-flight fetch first.
+  // Without the cancel the obsolete empty-page response can settle before the
+  // new target's validation closure is active, producing a false authoritative
+  // [] result.
+  const prevExpectedEventIdRef = React.useRef(expectedEventId);
+  React.useEffect(() => {
+    const prev = prevExpectedEventIdRef.current;
+    prevExpectedEventIdRef.current = expectedEventId;
+    if (
+      expectedEventId !== null &&
+      expectedEventId !== undefined &&
+      expectedEventId !== prev &&
+      !exhaustedTargetsRef.current.has(expectedEventId)
+    ) {
+      const state = queryClient.getQueryState(queryKey);
+      if (state?.fetchStatus === "fetching" && state.status === "pending") {
+        // Cold fetch in-flight: cancel and re-fetch atomically so the stale
+        // empty-page response cannot settle as authoritative data before the
+        // new target's validation closure is active.
+        void queryClient.cancelQueries({ queryKey }).then(() => {
+          void queryClient.invalidateQueries({ queryKey });
+        });
+      } else {
+        void queryClient.invalidateQueries({ queryKey });
+      }
+    }
+  }, [expectedEventId, queryClient, queryKey]);
+
+  return queryResult;
 }
 
 /**

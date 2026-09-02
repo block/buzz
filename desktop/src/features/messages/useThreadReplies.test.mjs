@@ -342,22 +342,37 @@ test("useThreadReplies resolves to data after exhausting missing-event retries",
   }
 });
 
-// ── Test: mounted-thread target change triggers invalidation ──────────────────
+// ── Test: settled null→target change triggers retry and lands target data ──────
 //
-// Load-bearing for the useEffect invalidation seam in useThreadReplies.
+// Load-bearing for the useEffect invalidation seam AND for the TanStack effect-
+// ordering fix in useThreadReplies.
 //
-// When expectedEventId changes from null to a non-null value while the same
-// thread root is already mounted and the query key is constant, the production
-// useEffect calls queryClient.invalidateQueries, triggering a second fetch. If
-// that invalidateQueries call is removed from the useEffect, fetchCount stays
-// at 1 and this test FAILS.
+// Required shape (Carl's requirement, P2 finding on PR #7188):
+//   1. Mount with expectedEventId=null. Wait for the initial fetch to settle
+//      with a non-target reply — query is success with data, no target active.
+//   2. Rerender with expectedEventId="target-evt-settled" (same root, same key).
+//      The useEffect must invalidate; the refetch must use the new queryFn
+//      closure (capturing "target-evt-settled"), not the stale null closure.
+//   3. First post-invalidation fetch returns a page WITHOUT the target —
+//      loadThreadReplies throws ThreadExpectedEventMissingError. This is the
+//      failure path the pre-fix code silently passed: old null closure
+//      validated against null, settled success([]) without retrying.
+//   4. TanStack retries; second post-invalidation fetch returns the target.
+//      Hook settles success with the target event in data.
+//
+// Mutation checks:
+//   - Remove invalidateQueries from the useEffect → hook never re-fetches,
+//     data stays at initial non-target reply → target-bearing assertion red.
+//   - Restore effect but revert useQuery back to before the effect (pre-fix
+//     ordering) → refetch uses old null closure, settles success([]) without
+//     the target or a retry → target-bearing assertion red.
 //
 // Also load-bearing for the ChannelScreen wiring: the source assertion verifies
 // that ChannelScreen.tsx passes threadScrollTargetId as the third argument to
 // useThreadReplies. Removing that argument fails the source check, catching the
 // exact bypass that allowed notification routing to skip the missing-event check.
 
-test("useThreadReplies invalidates when expectedEventId changes on settled query", async () => {
+test("useThreadReplies null-to-target change retries on missing-target page and lands target data", async () => {
   let queryClient;
   let unmount;
   let cleanup;
@@ -373,48 +388,117 @@ test("useThreadReplies invalidates when expectedEventId changes on settled query
     const { useThreadReplies } = await import("./useThreadReplies.ts");
     const { readFile } = await import("node:fs/promises");
 
+    const targetEvent = fakeEvent("target-evt-settled");
+    const otherReply = fakeEvent("other-reply-settled");
+
+    // Phase tracking:
+    //   fetch 1 — initial null-target fetch: returns otherReply (no target active)
+    //   fetch 2 — first post-invalidation fetch: returns otherReply only (target
+    //             absent), triggering ThreadExpectedEventMissingError under the
+    //             new closure (captures "target-evt-settled"). Under the old
+    //             null closure this would silently settle without throwing.
+    //   fetch 3+ — retry fetch: returns targetEvent (relay caught up)
     let fetchCount = 0;
     globalThis.__tauriGetThreadReplies = async () => {
       fetchCount += 1;
-      return singlePage([fakeEvent(`reply-ch-${fetchCount}`)]);
+      if (fetchCount === 1) {
+        // Initial null-target settle — no target validation needed.
+        return singlePage([otherReply]);
+      }
+      if (fetchCount === 2) {
+        // First post-invalidation fetch — target absent. Under the fixed code
+        // the closure captures "target-evt-settled" and loadThreadReplies
+        // throws ThreadExpectedEventMissingError → TanStack retries.
+        // Under the pre-fix code (null closure) → settles success without retry.
+        return singlePage([otherReply]);
+      }
+      // Retry fetch — relay has caught up, target available.
+      return singlePage([targetEvent, otherReply]);
     };
 
     queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+      defaultOptions: { queries: { retry: false } },
     });
-    const channel = { id: "chan-hook", channelType: "group" };
+    const channel = { id: "chan-settled", channelType: "group" };
     const wrapper = ({ children }) =>
       createElement(QueryClientProvider, { client: queryClient }, children);
 
     const hook = renderHook(
       ({ expectedEventId }) =>
-        useThreadReplies(channel, "root-hook", expectedEventId),
+        useThreadReplies(channel, "root-settled", expectedEventId),
       { wrapper, initialProps: { expectedEventId: null } },
     );
     unmount = hook.unmount;
-    const { rerender } = hook;
+    const { rerender, result } = hook;
 
-    // Wait for the initial fetch to settle.
+    // Wait for the initial null-target fetch to settle.
+    for (let i = 0; i < 20; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setImmediate(resolve));
+      });
+      if (!result.current.isPending) break;
+    }
+
+    assert.ok(fetchCount >= 1, "initial fetch must have occurred");
+    assert.equal(
+      result.current.isError,
+      false,
+      "hook must be in success state after initial null-target settle",
+    );
+
+    // Supply the target — hook must invalidate, refetch with current closure,
+    // detect missing target, retry, and land target-bearing data.
+    // The hook uses retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 30_000).
+    // Attempt 0 retries after 1_000ms (real time). Wait up to 3s for the retry.
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      rerender({ expectedEventId: "target-evt-settled" });
     });
 
-    const afterFirstFetch = fetchCount;
-    assert.ok(afterFirstFetch >= 1, "initial fetch must have occurred");
-
-    // Change expectedEventId to a non-null value — the useEffect must invalidate
-    // and trigger a second fetch.
-    await act(async () => {
-      rerender({ expectedEventId: "evt-target" });
-    });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    });
+    // Poll for target-bearing success, waiting up to 3 seconds total.
+    // The retry delay is 1s (attempt 0), so the hook should settle in ~1.1s.
+    let settled = false;
+    for (let i = 0; i < 40; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      if (
+        !result.current.isPending &&
+        !result.current.isError &&
+        result.current.data?.some((e) => e.id === targetEvent.id)
+      ) {
+        settled = true;
+        break;
+      }
+    }
 
     assert.ok(
-      fetchCount > afterFirstFetch,
-      `expectedEventId change must trigger an invalidation fetch ` +
-        `(fetchCount=${fetchCount}, afterFirstFetch=${afterFirstFetch})`,
+      settled,
+      `hook must settle with target data after retry within 4s ` +
+        `(isError=${result.current.isError}, ` +
+        `data ids: ${result.current.data?.map((e) => e.id).join(",")}, ` +
+        `fetchCount=${fetchCount})`,
+    );
+
+    // Additional assertions on the settled state.
+    assert.ok(
+      !result.current.isError,
+      `hook must not be in error state (error=${result.current.error})`,
+    );
+    assert.ok(
+      Array.isArray(result.current.data),
+      `hook must expose reply data (data=${JSON.stringify(result.current.data)})`,
+    );
+    assert.ok(
+      result.current.data?.some((e) => e.id === targetEvent.id),
+      `data must include the target event after retry ` +
+        `(got ids: ${result.current.data?.map((e) => e.id).join(",")})`,
+    );
+
+    // At minimum two more fetches must have occurred: the invalidation fetch
+    // (fetch 2, missing target → throw) and the retry (fetch 3+, target present).
+    assert.ok(
+      fetchCount >= 3,
+      `missing-target retry must have fired (fetchCount=${fetchCount})`,
     );
 
     // ── ChannelScreen wiring assertion ────────────────────────────────────────
