@@ -145,11 +145,38 @@ async fn list_relay_agents_for_selection(
     if let Some(channel_id) = channel_id {
         membership_filter["#d"] = serde_json::json!([channel_id]);
     }
-    let membership_events = query_all_relay_pages(state, membership_filter)
-        .await
-        .map_err(|error| format!("relay agent channel-membership query failed: {error}"))?;
+    let mut dm_metadata_filter = serde_json::json!({
+        "kinds": [39000],
+        "authors": [&relay_pubkey],
+        "#p": [&viewer_pubkey],
+    });
+    if let Some(channel_id) = channel_id {
+        dm_metadata_filter["#d"] = serde_json::json!([channel_id]);
+    }
+    let (membership_events, dm_metadata_events) = tokio::try_join!(
+        async {
+            query_all_relay_pages(state, membership_filter)
+                .await
+                .map_err(|error| format!("relay agent channel-membership query failed: {error}"))
+        },
+        async {
+            query_all_relay_pages(state, dm_metadata_filter)
+                .await
+                .map_err(|error| format!("relay agent DM-participant query failed: {error}"))
+        },
+    )?;
     let mut member_agent_channel_ids =
         nostr_convert::member_agent_channel_ids_from_events(&membership_events, &relay_pubkey);
+    for (pubkey, channel_ids) in nostr_convert::dm_participant_channel_ids_from_events(
+        &dm_metadata_events,
+        &relay_pubkey,
+        &viewer_pubkey,
+    ) {
+        let existing = member_agent_channel_ids.entry(pubkey).or_default();
+        existing.extend(channel_ids);
+        existing.sort();
+        existing.dedup();
+    }
     if let Some(requested_pubkeys) = requested_pubkeys {
         member_agent_channel_ids.retain(|pubkey, _| requested_pubkeys.contains(pubkey));
     }

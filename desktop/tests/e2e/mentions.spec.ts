@@ -1532,6 +1532,61 @@ test("relay-only shared agents stay hidden from DM mentions", async ({
   await expect(autocomplete(page)).toHaveCount(0);
 });
 
+test("an existing remote agent in a DM is mentioned without creating a local runtime", async ({
+  page,
+}) => {
+  const remoteAgentPubkey = "7".repeat(64);
+  await installMockBridge(page, {
+    acpRuntimesCatalog: [],
+    personas: [
+      {
+        id: "pm-persona",
+        displayName: "PM Bot",
+        systemPrompt: "Own product management.",
+        isActive: true,
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: remoteAgentPubkey,
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        name: "PM Bot",
+        channelNames: ["alice-tyler"],
+        respondTo: "owner-only",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: remoteAgentPubkey,
+        displayName: "PM Bot",
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("channel-alice-tyler")).toBeVisible();
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@PM Bot");
+  await autocomplete(page)
+    .getByTestId(`mention-suggestion-${remoteAgentPubkey}`)
+    .click();
+  await input.press("End");
+  await input.type("keep going");
+  await input.press("Enter");
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@PM Bot keep going"))
+    .toContain(remoteAgentPubkey);
+  expect(await readCommandLog(page)).not.toContain("create_managed_agent");
+  await expect(
+    page.getByText(/No agent runtime available/, { exact: false }),
+  ).toHaveCount(0);
+});
+
 test("cached relay-agent suggestions are removed when channel authorization disappears", async ({
   page,
 }) => {
