@@ -38,6 +38,17 @@ export function ExternalLinkAnchor({
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
 
+  // `buzzDeepLinkUrlTransform` delegates anything it does not recognise to
+  // react-markdown's `defaultUrlTransform`, which replaces a disallowed scheme
+  // (`obsidian://`, `javascript:`, an unrecognised `buzz://` verb, …) with the
+  // empty string. Rendering that as an anchor leaves an underlined,
+  // link-coloured label that navigates nowhere on click, and the context menu
+  // below bails on a falsy href — so "Copy link" cannot recover the URL
+  // either. Render the label as inert text so it does not claim to be a link.
+  if (!href) {
+    return <span className="font-medium text-current">{children}</span>;
+  }
+
   const anchor = (
     <a
       {...anchorProps}

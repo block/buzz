@@ -1474,3 +1474,83 @@ test("renderEntityLinkAnchor keeps chip styling when interaction is disabled", (
   assert.match(html, /class="mention-chip\s/);
   assert.doesNotMatch(html, /<button/);
 });
+
+// ── sanitized hrefs must not render as links ─────────────────────────────────
+//
+// `defaultUrlTransform` replaces a disallowed scheme with `""`. The anchor used
+// to be rendered anyway, so the label stayed underlined and link-coloured while
+// the click went nowhere and the right-click menu (which bails on a falsy href)
+// could not copy the URL either.
+
+import { TooltipProvider } from "../ui/tooltip.tsx";
+
+function renderMarkdownWithComponents(content, variant) {
+  const markdown = renderCachedMarkdown({
+    components: createMarkdownComponents(true, false),
+    content,
+    variant,
+  });
+  return renderToStaticMarkup(
+    React.createElement(
+      TooltipProvider,
+      null,
+      React.createElement(
+        MarkdownRuntimeContext.Provider,
+        {
+          value: {
+            channels: [],
+            onOpenChannel: () => {},
+            onOpenEntityLink: () => {},
+            onOpenMessageLink: () => {},
+            relayOrigin: null,
+          },
+        },
+        markdown,
+      ),
+    ),
+  );
+}
+
+test("a link whose scheme was stripped renders as inert text", () => {
+  const html = renderMarkdownWithComponents(
+    "[Open in Obsidian](obsidian://open?vault=hive-vault&file=wiki%2Fexample)",
+    "stripped-scheme-anchor-test",
+  );
+  assert.match(html, />Open in Obsidian</);
+  assert.doesNotMatch(html, /<a /);
+  assert.doesNotMatch(html, /underline-offset-4/);
+});
+
+test("a stripped javascript: link renders as inert text", () => {
+  const html = renderMarkdownWithComponents(
+    "[click me](javascript:alert(1))",
+    "stripped-javascript-anchor-test",
+  );
+  assert.match(html, />click me</);
+  assert.doesNotMatch(html, /<a /);
+  assert.doesNotMatch(html, /javascript:/);
+});
+
+test("a malformed buzz:// entity link renders as inert text", () => {
+  // The strict entity parser rejects the unknown `extra` param, so
+  // `buzzDeepLinkUrlTransform` hands the URL to `defaultUrlTransform` and the
+  // href is blanked — the same stripped-href path as `obsidian://`, reached
+  // through a scheme Buzz does support. Asserted through the production
+  // components, not just the transform.
+  const html = renderMarkdownWithComponents(
+    `[buzz pr](buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world&extra=ignored)`,
+    "stripped-entity-anchor-test",
+  );
+  assert.match(html, />buzz pr</);
+  assert.doesNotMatch(html, /<a /);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("an http link still renders as a link", () => {
+  const html = renderMarkdownWithComponents(
+    "[example](https://example.com/path)",
+    "unstripped-anchor-test",
+  );
+  assert.match(html, /href="https:\/\/example\.com\/path"/);
+  assert.match(html, /underline-offset-4/);
+});
