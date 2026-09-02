@@ -5,7 +5,7 @@
 #   PRODUCTION (default) — external Postgres/Redis/S3, existingSecret
 #   refs everywhere, no chart-side autogeneration, GitOps-safe (ArgoCD/Flux).
 #   HA-ready: replicaCount >= 2 (requires Redis; git state is object-store-
-#   backed, so no ReadWriteMany volume is needed — RWO per replica is fine).
+#   backed, so disable git persistence for a per-pod emptyDir).
 #
 #   QUICKSTART — bundles in-cluster Postgres + Redis + MinIO and
 #   auto-generates relay secrets via the `lookup` pattern (NOT GitOps-safe —
@@ -31,10 +31,11 @@ image:
 
 # ── Topology ────────────────────────────────────────────────────────────────
 # replicaCount > 1 hard-requires Redis for buzz-pubsub (in-cluster or external).
-# It does NOT require ReadWriteMany git storage: git ref/object state is
-# object-store-backed (each request hydrates an ephemeral repo from S3; writer
-# serialization is the object-store pointer CAS), and repo-name uniqueness lives
-# in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
+# It does NOT require persistent or ReadWriteMany git storage: git ref/object
+# state is object-store-backed (each request hydrates an ephemeral repo from S3;
+# writer serialization is the object-store pointer CAS), and repo-name
+# uniqueness lives in Postgres. Set persistence.git.enabled=false so each
+# replica receives its own emptyDir.
 replicaCount: 1
 
 # ── Autoscaling ──────────────────────────────────────────────────────────────
@@ -83,8 +84,8 @@ ownerPubkey: ""
 
 # ── Chart-managed secrets ────────────────────────────────────────────────────
 # Production / GitOps path: create a Secret out-of-band with these keys and
-# point `secrets.existingSecret` at it. Any key omitted from the existing
-# Secret falls back to chart-side autogen (only effective at first install).
+# point `secrets.existingSecret` at it. The chart does not generate a second
+# Secret or fill missing keys when an existing Secret is selected.
 #
 # Expected keys (all optional unless required by relay config):
 #   BUZZ_RELAY_PRIVATE_KEY        — 64-char hex; relay identity (rotation = identity change)
@@ -371,6 +372,7 @@ minio:
   mcImage: minio/mc:RELEASE.2025-08-13T08-35-41Z
   persistence:
     enabled: true
+    storageClass: ""
     size: 10Gi
 
 # ── Git server config ────────────────────────────────────────────────────────

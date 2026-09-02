@@ -25,7 +25,7 @@ spec:
   chart:
     spec:
       chart: buzz
-      version: "0.1.0"
+      version: "0.1.7"
       sourceRef:
         kind: HelmRepository
         name: buzz
@@ -46,9 +46,9 @@ spec:
 
     persistence:
       git:
-        enabled: true
-        accessMode: ReadWriteOnce      # RWO is fine at any replicaCount (object-store-backed git)
-        storageClass: ""               # any RWO class; no shared/RWX filesystem needed
+        # Git state is object-store-backed. emptyDir gives each relay pod
+        # independent scratch space and avoids sharing one PVC.
+        enabled: false
         size: 50Gi
 
     ingress:
