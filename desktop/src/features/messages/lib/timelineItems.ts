@@ -106,17 +106,10 @@ function membershipChangesCanGroup(
   first: MembershipChangePayload,
   second: MembershipChangePayload,
 ): boolean {
-  if (first.mode === "self-arrival") {
-    return (
-      second.mode === "self-arrival" ||
-      (second.mode === "departure" && first.target === second.target)
-    );
+  if (second.mode === "departure") {
+    return first.mode === "self-arrival" && first.target === second.target;
   }
-  return (
-    first.mode === "addition" &&
-    second.mode === "addition" &&
-    first.actor === second.actor
-  );
+  return first.mode !== "departure";
 }
 
 /**

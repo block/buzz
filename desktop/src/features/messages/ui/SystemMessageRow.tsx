@@ -48,6 +48,7 @@ const SYSTEM_ACTION_ICON_CLASS = "!h-4 !w-4";
 type SystemMessagePayload = {
   type: string;
   actor?: string;
+  arrivals?: Array<{ actor: string; target: string }>;
   target?: string;
   targets?: string[];
   topic?: string;
@@ -98,35 +99,14 @@ function buildGroupedMembershipPayload(
   });
   if (arrivals.some((arrival) => !arrival)) return null;
 
-  const membershipArrivals = arrivals as {
+  const membershipArrivals = arrivals as Array<{
     actor: string;
     target: string;
-  }[];
+  }>;
   const targets = membershipArrivals.map(({ target }) => target);
-  const isSelfJoinGroup = membershipArrivals.every(
-    ({ actor, target }) => actor === target,
-  );
-
-  if (isSelfJoinGroup) {
-    return {
-      type: "members_joined",
-      target: targets[0],
-      targets,
-    };
-  }
-
-  const actor = membershipArrivals[0].actor;
-  const isSameAdderGroup = membershipArrivals.every(
-    ({ actor: candidateActor, target }) =>
-      candidateActor === actor && candidateActor !== target,
-  );
-  if (!isSameAdderGroup) {
-    return null;
-  }
-
   return {
-    type: "members_added",
-    actor,
+    arrivals: membershipArrivals,
+    type: "members_arrived",
     target: targets[0],
     targets,
   };
@@ -319,7 +299,7 @@ function ProfileName({
 
 function membershipActivityPubkeys(payload: SystemMessagePayload): string[] {
   const pubkeys =
-    payload.type === "members_added" || payload.type === "members_joined"
+    payload.type === "members_arrived"
       ? (payload.targets ?? [])
       : payload.type === "member_removed"
         ? [payload.target ?? payload.actor]
@@ -458,6 +438,70 @@ function MemberNamesInlineList({
   );
 }
 
+function describeGroupedArrivals({
+  agentPubkeys,
+  currentPubkey,
+  isTargetCurrentUser,
+  membershipTitle,
+  payload,
+  personaLookup,
+  profiles,
+}: {
+  agentPubkeys?: ReadonlySet<string>;
+  currentPubkey: string | undefined;
+  isTargetCurrentUser: boolean;
+  membershipTitle: React.ReactNode;
+  payload: SystemMessagePayload;
+  personaLookup?: Map<string, string>;
+  profiles: UserProfileLookup | undefined;
+}): SystemMessageDescription | null {
+  const arrivals = payload.arrivals;
+  if (!arrivals?.length || !payload.targets?.length) return null;
+
+  const sharedActor = arrivals[0].actor;
+  const isSameAdderGroup = arrivals.every(
+    ({ actor, target }) => actor === sharedActor && actor !== target,
+  );
+
+  if (isSameAdderGroup) {
+    return {
+      title: membershipTitle,
+      action: (
+        <>
+          {addedByActionPrefix(isTargetCurrentUser)}{" "}
+          <ProfileName pubkey={sharedActor} underlineOnHover>
+            {resolveInlineDisplayLabel(sharedActor, currentPubkey, profiles)}
+          </ProfileName>
+          , along with{" "}
+          <MemberNamesInlineList
+            agentPubkeys={agentPubkeys}
+            currentPubkey={currentPubkey}
+            personaLookup={personaLookup}
+            profiles={profiles}
+            targets={payload.targets.slice(1)}
+          />
+        </>
+      ),
+    };
+  }
+
+  return {
+    title: membershipTitle,
+    action: (
+      <>
+        joined the channel along with{" "}
+        <MemberNamesInlineList
+          agentPubkeys={agentPubkeys}
+          currentPubkey={currentPubkey}
+          personaLookup={personaLookup}
+          profiles={profiles}
+          targets={payload.targets.slice(1)}
+        />
+      </>
+    ),
+  };
+}
+
 function describeSystemEvent(
   payload: SystemMessagePayload,
   currentPubkey: string | undefined,
@@ -509,48 +553,16 @@ function describeSystemEvent(
   );
 
   switch (payload.type) {
-    case "members_added":
-      if (!payload.actor || !payload.targets?.length) return null;
-      return {
-        title: membershipTitle,
-        action: (
-          <>
-            {addedByActionPrefix(isTargetCurrentUser)}{" "}
-            <ProfileName pubkey={payload.actor} underlineOnHover>
-              {resolveInlineDisplayLabel(
-                payload.actor,
-                currentPubkey,
-                profiles,
-              )}
-            </ProfileName>
-            , along with{" "}
-            <MemberNamesInlineList
-              agentPubkeys={agentPubkeys}
-              currentPubkey={currentPubkey}
-              personaLookup={personaLookup}
-              profiles={profiles}
-              targets={payload.targets.slice(1)}
-            />
-          </>
-        ),
-      };
-    case "members_joined":
-      if (!payload.targets?.length) return null;
-      return {
-        title: membershipTitle,
-        action: (
-          <>
-            joined the channel along with{" "}
-            <MemberNamesInlineList
-              agentPubkeys={agentPubkeys}
-              currentPubkey={currentPubkey}
-              personaLookup={personaLookup}
-              profiles={profiles}
-              targets={payload.targets.slice(1)}
-            />
-          </>
-        ),
-      };
+    case "members_arrived":
+      return describeGroupedArrivals({
+        agentPubkeys,
+        currentPubkey,
+        isTargetCurrentUser,
+        membershipTitle,
+        payload,
+        personaLookup,
+        profiles,
+      });
     case "member_joined_then_left":
       if (!payload.target) return null;
       return {
@@ -730,9 +742,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     return null;
   }
   const isMembershipArrival =
-    payload.type === "member_joined" ||
-    payload.type === "members_added" ||
-    payload.type === "members_joined";
+    payload.type === "member_joined" || payload.type === "members_arrived";
   const isMembershipActivity =
     isMembershipArrival ||
     payload.type === "member_joined_then_left" ||

@@ -34,11 +34,26 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
 const HUDDLE_EPHEMERAL_CHANNEL_ID = "3f9f2c4e-8b7a-4b1c-9d2e-5a6f7c8d9e0f";
+const ELROND_PUBKEY = "11".repeat(32);
+const LEGOLAS_PUBKEY = "12".repeat(32);
+const GIMLI_PUBKEY = "13".repeat(32);
+const GANDALF_PUBKEY = "14".repeat(32);
+const JOIN_COLLAPSE_CHANNEL_NAME = "random";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
 const DM_THREAD_MEMBERS_LOADING_ERROR_TEXT =
   "Checking conversation members. Try again in a moment.";
+const JOIN_COLLAPSE_SPLIT_TEXTS = [
+  "Elrond added by you",
+  "Legolas added by Elrond, along with Gimli",
+  "Gandalf added by you",
+];
+const JOIN_COLLAPSE_GROUPED_TEXT =
+  "Elrond joined the channel along with Legolas, Gimli, and Gandalf";
+const JOIN_COLLAPSE_CAPTURE_WIDTH = 560;
+const JOIN_COLLAPSE_CAPTURE_HEIGHT = 260;
+const JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING = 24;
 
 /** Locator scoped to the mention autocomplete dropdown inside the composer. */
 function autocomplete(page: import("@playwright/test").Page) {
@@ -234,6 +249,75 @@ async function waitForMockLiveSubscription(
 // freshly-sent content so the assertion does not race the deferred commit.
 async function waitForTimelineSettled(page: import("@playwright/test").Page) {
   await expect(page.locator("[data-render-pending]")).toHaveCount(0);
+}
+
+function normalizeVisibleText(text: string) {
+  return text.replace(/\s+,/g, ",").replace(/\s+/g, " ").trim();
+}
+
+async function collectJoinCollapseRows(page: import("@playwright/test").Page) {
+  const rows = page.getByTestId("system-message-row").filter({
+    hasText: /Elrond|Legolas|Gimli|Gandalf/,
+  });
+  const texts: string[] = [];
+  const count = await rows.count();
+  for (let index = 0; index < count; index += 1) {
+    texts.push(normalizeVisibleText(await rows.nth(index).innerText()));
+  }
+  return { rows, texts };
+}
+
+async function maybeCaptureJoinCollapseTimeline(
+  page: import("@playwright/test").Page,
+) {
+  const capturePath = process.env.JOIN_COLLAPSE_CAPTURE_PATH;
+  if (!capturePath) return;
+  await waitForAnimations(page);
+  const timeline = page.getByTestId("message-timeline");
+  const timelineBox = await timeline.boundingBox();
+  const { rows } = await collectJoinCollapseRows(page);
+  const rowBoxes = await Promise.all(
+    Array.from({ length: await rows.count() }, (_, index) =>
+      rows.nth(index).boundingBox(),
+    ),
+  );
+  const visibleRowBoxes = rowBoxes.filter(
+    (box): box is NonNullable<typeof box> => box !== null,
+  );
+  if (!timelineBox || visibleRowBoxes.length === 0) {
+    throw new Error("Join-collapse screenshot target is not visible");
+  }
+  const minRowY = Math.min(...visibleRowBoxes.map((box) => box.y));
+  const maxRowY = Math.max(...visibleRowBoxes.map((box) => box.y + box.height));
+  const minRowX = Math.min(...visibleRowBoxes.map((box) => box.x));
+  const maxRowX = Math.max(...visibleRowBoxes.map((box) => box.x + box.width));
+  const desiredTop = minRowY - JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING;
+  const desiredBottom = maxRowY + JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING;
+  const desiredCenter = (desiredTop + desiredBottom) / 2;
+  const desiredHorizontalCenter = (minRowX + maxRowX) / 2;
+  const viewportHeight = page.viewportSize()?.height ?? 720;
+  const clip = {
+    x: Math.max(
+      Math.round(timelineBox.x),
+      Math.min(
+        Math.round(desiredHorizontalCenter - JOIN_COLLAPSE_CAPTURE_WIDTH / 2),
+        Math.round(
+          timelineBox.x + timelineBox.width - JOIN_COLLAPSE_CAPTURE_WIDTH,
+        ),
+      ),
+    ),
+    y: Math.max(
+      0,
+      Math.min(
+        Math.round(desiredCenter - JOIN_COLLAPSE_CAPTURE_HEIGHT / 2),
+        viewportHeight - JOIN_COLLAPSE_CAPTURE_HEIGHT,
+      ),
+    ),
+    width: JOIN_COLLAPSE_CAPTURE_WIDTH,
+    height: JOIN_COLLAPSE_CAPTURE_HEIGHT,
+  };
+  await page.screenshot({ path: capturePath, clip });
+  console.log(`JOIN_COLLAPSE_CAPTURE_PATH=${capturePath}`);
 }
 
 async function expectOwnedAgentProfileActions(
@@ -3611,14 +3695,14 @@ test("system add rows use plain names while remove rows retain agent mention sty
     ],
   });
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
 
   await page.evaluate(
     ({ actorPubkey, kind, targetPubkey }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
+        channelName: "random",
         content: JSON.stringify({
           type: "member_joined",
           actor: actorPubkey,
@@ -3627,7 +3711,7 @@ test("system add rows use plain names while remove rows retain agent mention sty
         kind,
       });
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
+        channelName: "random",
         content: JSON.stringify({
           type: "member_removed",
           actor: actorPubkey,
@@ -3680,16 +3764,16 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
     searchProfiles: [actor, ...targets],
   });
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
 
   await page.evaluate(
     ({ actorPubkey, addedTargets, kind }) => {
       const createdAt = Math.floor(Date.now() / 1_000);
       for (const [index, target] of addedTargets.entries()) {
         window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-          channelName: "general",
+          channelName: "random",
           content: JSON.stringify({
             type: "member_joined",
             actor: actorPubkey,
@@ -3753,16 +3837,114 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await expect(avatarStack.locator("..")).toHaveCSS("align-items", "center");
 });
 
+test("collapses contiguous mixed join arrivals into one actor-neutral cohort", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      { pubkey: ELROND_PUBKEY, displayName: "Elrond" },
+      { pubkey: LEGOLAS_PUBKEY, displayName: "Legolas" },
+      { pubkey: GIMLI_PUBKEY, displayName: "Gimli" },
+      { pubkey: GANDALF_PUBKEY, displayName: "Gandalf" },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText(
+    JOIN_COLLAPSE_CHANNEL_NAME,
+  );
+  await waitForMockLiveSubscription(
+    page,
+    JOIN_COLLAPSE_CHANNEL_NAME,
+    SYSTEM_MESSAGE_KIND,
+  );
+
+  await page.evaluate(
+    ({ channelName, currentUser, elrond, legolas, gimli, gandalf, kind }) => {
+      const createdAt = Math.floor(Date.now() / 1_000);
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName,
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: currentUser,
+          target: elrond,
+        }),
+        createdAt,
+        kind,
+        pubkey: currentUser,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName,
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: elrond,
+          target: legolas,
+        }),
+        createdAt: createdAt + 1,
+        kind,
+        pubkey: elrond,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName,
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: elrond,
+          target: gimli,
+        }),
+        createdAt: createdAt + 2,
+        kind,
+        pubkey: elrond,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName,
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: currentUser,
+          target: gandalf,
+        }),
+        createdAt: createdAt + 3,
+        kind,
+        pubkey: currentUser,
+      });
+    },
+    {
+      channelName: JOIN_COLLAPSE_CHANNEL_NAME,
+      currentUser: MOCK_VIEWER_PUBKEY,
+      elrond: ELROND_PUBKEY,
+      legolas: LEGOLAS_PUBKEY,
+      gimli: GIMLI_PUBKEY,
+      gandalf: GANDALF_PUBKEY,
+      kind: SYSTEM_MESSAGE_KIND,
+    },
+  );
+  await waitForTimelineSettled(page);
+  await page.getByTestId("message-timeline").evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await waitForAnimations(page);
+
+  const { rows, texts } = await collectJoinCollapseRows(page);
+  console.log(`JOIN_COLLAPSE_VISIBLE_TEXTS=${JSON.stringify(texts)}`);
+  if (process.env.JOIN_COLLAPSE_EXPECT_SPLIT === "1") {
+    expect(texts).toEqual(JOIN_COLLAPSE_SPLIT_TEXTS);
+  }
+  await maybeCaptureJoinCollapseTimeline(page);
+
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText(JOIN_COLLAPSE_GROUPED_TEXT);
+});
+
 test("system agent profile exposes owned agent actions", async ({ page }) => {
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
 
   await page.evaluate(
     ({ actorPubkey, kind, targetPubkey }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
+        channelName: "random",
         content: JSON.stringify({
           type: "member_joined",
           actor: actorPubkey,
