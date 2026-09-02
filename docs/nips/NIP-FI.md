@@ -528,9 +528,8 @@ On each protected HTTP request:
 3. Validate the NIP-98 `Authorization` event per NIP-98; extract the proven
    pubkey `k` from the event.  An absent, malformed, or invalid NIP-98 event
    → deny `missing_evidence` or `evidence_rejected` as appropriate.
-   For requests with an authorization-relevant body (any request whose body
-   constitutes a state-changing operation), the NIP-98 event MUST contain
-   exactly one `payload` tag whose value is the lowercase hexadecimal
+   For requests with an authorization-relevant body, the NIP-98 event MUST
+   contain exactly one `payload` tag whose value is the lowercase hexadecimal
    SHA-256 hash of the exact consumed request body bytes.  An absent,
    duplicate, or mismatched `payload` tag on such a request → deny
    `evidence_rejected`.  [FI-TRACE-HTTP-INGRESS]
@@ -540,9 +539,14 @@ On each protected HTTP request:
    `authorization_denied`.  [FI-TRACE-DENY-SET]
 6. Admit the request.
 
-The deployment classifies body relevance server-side.  The classification
-MUST be fail-closed: a body that cannot be classified as non-authorization-relevant
-MUST be treated as authorization-relevant and a `payload` tag required.
+A body is **authorization-relevant** whenever any body byte influences the
+authorization decision, target resource, requested capability, effect
+selector, or state change.  Every state-changing body is authorization-relevant.
+A body may be classified non-authorization-relevant only if none of those
+properties derive from body fields that are not otherwise bound.  The
+classification MUST be fail-closed: a body that cannot be classified as
+non-authorization-relevant MUST be treated as authorization-relevant and a
+`payload` tag required.
 
 ### Per-request verification
 
@@ -611,18 +615,24 @@ A relay SHOULD advertise core support in NIP-11 as:
     "core": "client-attached",
     "assertion_freshness": {
       "class": "offline-jwt",
-      "maximum_residual_upstream_revocation_seconds": <seconds>
+      "maximum_residual_upstream_revocation_seconds": null
     }
   }
 }
 ```
 
-where `maximum_residual_upstream_revocation_seconds` SHOULD be set to the relay's
-configured `maximum_assertion_age` ceiling — the maximum duration between a
-successful disconnect call and full denial of any still-live assertion.  This
-value is non-null because the deny-until-TTL model provides a protocol-level
-bound: the issuer supplies an `until` timestamp and the relay enforces the
-ceiling at command time.
+`maximum_residual_upstream_revocation_seconds` is `null` for the
+`offline-jwt` class because this spec provides no unconditional finite
+upstream-revocation bound.  The deny-until-TTL mechanism closes the
+reconnect window when the issuer issues a well-formed disconnect command
+and the relay retains the entry, but neither condition is guaranteed by
+the protocol: `until` is an upper ceiling on deny duration, not a lower
+bound ensuring denial outlasts all live assertions; a past or short
+`until` is valid; and a relay restart MAY forget active entries.  If the
+issuer stops issuance after a successful deny, the residual ceiling is
+`max(0, min(exp, iat + maximum_assertion_age) - now)` — but this is an
+issuer-operational property, not a protocol invariant this field can
+advertise unconditionally.
 
 Discovery MUST NOT state issuer URLs, audiences, claim names, tenant IDs, or
 deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
