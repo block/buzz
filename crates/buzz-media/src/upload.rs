@@ -11,7 +11,10 @@ use crate::error::MediaError;
 use crate::storage::{BlobMeta, MediaStorage};
 use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
-use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
+use crate::upload_record::{
+    correct_upload_event_facts, record_upload_event, record_upload_event_with_handle,
+    UploadAttribution, UploadEventFacts,
+};
 use crate::validation::{
     looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content_with_hints,
     validate_video_file,
@@ -91,16 +94,26 @@ where
     let key = format!("{sha256}.{ext}");
     let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256);
 
-    // Idempotent: short-circuit only if BOTH sidecar and blob exist. If the
-    // sidecar exists but the blob is missing, fall through to re-upload.
-    let sidecar_exists = storage.head(&meta_key).await?;
-    let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
+    // The sidecar is the authoritative classification for already-published
+    // bytes. Validator output can change across releases, but immutable message
+    // URLs cannot: if the sidecar's canonical blob still exists, preserve its
+    // extension and MIME instead of publishing a competing key and rewriting
+    // the shared hash-keyed sidecar. A missing canonical blob is an inconsistent
+    // storage state: fail without publishing anything. Restoring it here would
+    // make the pre-existing serve gate readable before this upload's moderation
+    // record is durable.
+    if storage.head(&meta_key).await? {
         let meta = storage.get_sidecar(ctx, &sha256).await?;
+        let existing_key = format!("{sha256}.{}", meta.ext);
+        if !storage.head(&existing_key).await? {
+            return Err(MediaError::StorageError(
+                "canonical sidecar blob is missing".to_string(),
+            ));
+        }
         // A re-upload of known bytes is still a distinct upload *event*: no
-        // blob PUT happens, so without this record the uploader would be
-        // invisible to the moderation pipeline (and takedown re-uploads
-        // would go unscanned).
+        // sidecar PUT happens, so without this record the uploader would be
+        // invisible to the moderation pipeline (and takedown re-uploads would
+        // go unscanned).
         if let Some(attribution) = &attribution {
             record_upload_event(
                 storage,
@@ -109,8 +122,8 @@ where
                 attribution,
                 UploadEventFacts {
                     sha256: &sha256,
-                    ext: &ext,
-                    mime: &mime,
+                    ext: &meta.ext,
+                    mime: &meta.mime_type,
                     size: body.len() as u64,
                     uploaded_at: chrono::Utc::now().timestamp(),
                 },
@@ -120,8 +133,8 @@ where
         return Ok(build_descriptor(
             config,
             &sha256,
-            &ext,
-            &mime,
+            &meta.ext,
+            &meta.mime_type,
             body.len() as u64,
             Some(&meta),
             meta.uploaded_at,
@@ -156,35 +169,104 @@ where
         }
     };
 
+    // Claim the canonical classification before recording this upload. The
+    // claim is not read by the serve path, so it can coordinate concurrent
+    // writers without making bytes public before moderation state is durable.
+    // A writer publishes its blob/thumbnail before its claim, which means a
+    // losing writer can safely use the winner's metadata and objects.
+    let claim_created = storage
+        .put_classification_claim_if_absent(ctx, &sha256, &meta)
+        .await?;
+    let claimed_meta = if claim_created {
+        meta
+    } else {
+        storage.get_classification_claim(ctx, &sha256).await?
+    };
+
+    // A legacy writer can publish a sidecar after our initial existence check
+    // but before the claim. Published metadata remains authoritative, so close
+    // that race before choosing the facts for this upload record.
+    let canonical_meta = if storage.head(&meta_key).await? {
+        storage.get_sidecar(ctx, &sha256).await?
+    } else {
+        claimed_meta
+    };
+    let canonical_key = format!("{sha256}.{}", canonical_meta.ext);
+    if !storage.head(&canonical_key).await? {
+        return Err(MediaError::StorageError(
+            "canonical classification blob is missing".to_string(),
+        ));
+    }
+
     // The moderation record precedes the sidecar publish gate. If this write
     // fails, the blob and any thumbnail remain orphaned but the media cannot be
     // served. Conversely, record existence still implies those objects exist.
-    if let Some(attribution) = &attribution {
-        record_upload_event(
-            storage,
-            ctx,
-            &auth_event.pubkey,
-            attribution,
-            UploadEventFacts {
-                sha256: &sha256,
-                ext: &ext,
-                mime: &mime,
-                size: body.len() as u64,
-                uploaded_at,
-            },
+    let mut upload_record = if let Some(attribution) = &attribution {
+        Some(
+            record_upload_event_with_handle(
+                storage,
+                ctx,
+                &auth_event.pubkey,
+                attribution,
+                UploadEventFacts {
+                    sha256: &sha256,
+                    ext: &canonical_meta.ext,
+                    mime: &canonical_meta.mime_type,
+                    size: body.len() as u64,
+                    uploaded_at,
+                },
+            )
+            .await?,
         )
+    } else {
+        None
+    };
+    // Every updated writer uses the first-writer claim, so it records and
+    // publishes the same canonical facts. The conditional sidecar PUT also
+    // preserves any sidecar won by a legacy writer during a rollout race.
+    let sidecar_created = storage
+        .put_sidecar_if_absent(ctx, &sha256, &canonical_meta)
         .await?;
+    let published_meta = if sidecar_created {
+        canonical_meta
+    } else {
+        let published = storage.get_sidecar(ctx, &sha256).await?;
+        if published.ext != canonical_meta.ext || published.mime_type != canonical_meta.mime_type {
+            if let Some(record) = &mut upload_record {
+                correct_upload_event_facts(
+                    storage,
+                    record,
+                    UploadEventFacts {
+                        sha256: &sha256,
+                        ext: &published.ext,
+                        mime: &published.mime_type,
+                        size: body.len() as u64,
+                        uploaded_at,
+                    },
+                )
+                .await?;
+            }
+            return Err(MediaError::StorageError(
+                "published sidecar classification changed during upload".to_string(),
+            ));
+        }
+        published
+    };
+    let published_key = format!("{sha256}.{}", published_meta.ext);
+    if !storage.head(&published_key).await? {
+        return Err(MediaError::StorageError(
+            "canonical sidecar blob is missing after concurrent upload".to_string(),
+        ));
     }
-    storage.put_sidecar(ctx, &sha256, &meta).await?;
 
     Ok(build_descriptor(
         config,
         &sha256,
-        &ext,
-        &mime,
+        &published_meta.ext,
+        &published_meta.mime_type,
         body.len() as u64,
-        Some(&meta),
-        uploaded_at,
+        Some(&published_meta),
+        published_meta.uploaded_at,
     ))
 }
 
@@ -472,9 +554,14 @@ pub async fn process_video_upload(
 
     // --- 5. Idempotency check ---
     let sidecar_exists = storage.head(&meta_key).await?;
-    let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
+    if sidecar_exists {
         let meta = storage.get_sidecar(ctx, &sha256_hex).await?;
+        let canonical_key = format!("{sha256_hex}.{}", meta.ext);
+        if !storage.head(&canonical_key).await? {
+            return Err(MediaError::StorageError(
+                "canonical sidecar blob is missing".to_string(),
+            ));
+        }
         // Re-upload of known bytes: still a distinct upload event — see the
         // buffered path's short-circuit for the rationale.
         if let Some(attribution) = &attribution {
@@ -485,8 +572,8 @@ pub async fn process_video_upload(
                 attribution,
                 UploadEventFacts {
                     sha256: &sha256_hex,
-                    ext,
-                    mime: &mime,
+                    ext: &meta.ext,
+                    mime: &meta.mime_type,
                     size: file_size,
                     uploaded_at: chrono::Utc::now().timestamp(),
                 },
@@ -496,8 +583,8 @@ pub async fn process_video_upload(
         return Ok(build_descriptor(
             config,
             &sha256_hex,
-            ext,
-            &mime,
+            &meta.ext,
+            &meta.mime_type,
             file_size,
             Some(&meta),
             meta.uploaded_at,
@@ -522,33 +609,90 @@ pub async fn process_video_upload(
         duration_secs: Some(video_meta.duration_secs),
     };
 
-    // Record before publishing the sidecar serve gate. See the buffered path.
-    if let Some(attribution) = &attribution {
-        record_upload_event(
-            storage,
-            ctx,
-            &auth_event.pubkey,
-            attribution,
-            UploadEventFacts {
-                sha256: &sha256_hex,
-                ext,
-                mime: &mime,
-                size: file_size,
-                uploaded_at,
-            },
-        )
+    let claim_created = storage
+        .put_classification_claim_if_absent(ctx, &sha256_hex, &meta)
         .await?;
+    let claimed_meta = if claim_created {
+        meta
+    } else {
+        storage.get_classification_claim(ctx, &sha256_hex).await?
+    };
+    let canonical_meta = if storage.head(&meta_key).await? {
+        storage.get_sidecar(ctx, &sha256_hex).await?
+    } else {
+        claimed_meta
+    };
+    let canonical_key = format!("{sha256_hex}.{}", canonical_meta.ext);
+    if !storage.head(&canonical_key).await? {
+        return Err(MediaError::StorageError(
+            "canonical classification blob is missing".to_string(),
+        ));
     }
-    storage.put_sidecar(ctx, &sha256_hex, &meta).await?;
+
+    // Record before publishing the sidecar serve gate. See the buffered path.
+    let mut upload_record = if let Some(attribution) = &attribution {
+        Some(
+            record_upload_event_with_handle(
+                storage,
+                ctx,
+                &auth_event.pubkey,
+                attribution,
+                UploadEventFacts {
+                    sha256: &sha256_hex,
+                    ext: &canonical_meta.ext,
+                    mime: &canonical_meta.mime_type,
+                    size: file_size,
+                    uploaded_at,
+                },
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let sidecar_created = storage
+        .put_sidecar_if_absent(ctx, &sha256_hex, &canonical_meta)
+        .await?;
+    let published_meta = if sidecar_created {
+        canonical_meta
+    } else {
+        let published = storage.get_sidecar(ctx, &sha256_hex).await?;
+        if published.ext != canonical_meta.ext || published.mime_type != canonical_meta.mime_type {
+            if let Some(record) = &mut upload_record {
+                correct_upload_event_facts(
+                    storage,
+                    record,
+                    UploadEventFacts {
+                        sha256: &sha256_hex,
+                        ext: &published.ext,
+                        mime: &published.mime_type,
+                        size: file_size,
+                        uploaded_at,
+                    },
+                )
+                .await?;
+            }
+            return Err(MediaError::StorageError(
+                "published sidecar classification changed during upload".to_string(),
+            ));
+        }
+        published
+    };
+    let published_key = format!("{sha256_hex}.{}", published_meta.ext);
+    if !storage.head(&published_key).await? {
+        return Err(MediaError::StorageError(
+            "canonical sidecar blob is missing after concurrent upload".to_string(),
+        ));
+    }
 
     Ok(build_descriptor(
         config,
         &sha256_hex,
-        ext,
-        &mime,
+        &published_meta.ext,
+        &published_meta.mime_type,
         file_size,
-        Some(&meta),
-        uploaded_at,
+        Some(&published_meta),
+        published_meta.uploaded_at,
     ))
 }
 

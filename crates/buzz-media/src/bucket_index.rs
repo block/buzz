@@ -8,7 +8,7 @@
 //! [`crate::storage::MediaStorage::list_page`] closure at the call site (see
 //! `buzz-relay`'s storage sweep task).
 //!
-//! Five key classes (thumb matched first, everything unrecognized is
+//! Six key classes (thumb matched first, everything unrecognized is
 //! `Unknown` — never silently folded into another class):
 //!
 //! | Class | Shape |
@@ -16,6 +16,7 @@
 //! | thumb | `{sha256}.thumb.jpg` |
 //! | blob | `{sha256}.{ext}` (ext: 1-8 mixed-case alphanumeric) |
 //! | sidecar | `_meta/{community-uuid}/{sha256}.json` |
+//! | classification claim | `_meta/{community-uuid}/claims/{sha256}.json` |
 //! | auxiliary | `_uploads/{community-uuid}/{sha256}/{ulid}.json` |
 //! | unknown | everything else |
 
@@ -38,25 +39,31 @@ pub enum KeyClass {
     Blob { sha256: String, ext: String },
     /// `_meta/{community}/{sha256}.json` — the (community, sha) binding.
     Sidecar { community: Uuid, sha256: String },
+    /// `_meta/{community}/claims/{sha256}.json` — first-writer classification.
+    ClassificationClaim { community: Uuid, sha256: String },
     /// `_uploads/{community}/{sha256}/{event_id}.json` — fleet physical only.
     Auxiliary {
         community: Uuid,
         sha256: String,
         event_id: String,
     },
-    /// Anything that doesn't match one of the four strict shapes above.
+    /// Anything that doesn't match one of the strict shapes above.
     Unknown,
 }
 
 /// Classify one bucket key. Matches `thumb` first (its suffix is a superset
 /// shape of the blob pattern's segment count), then blob, sidecar,
-/// auxiliary, and finally unknown. See module docs for the exact shapes.
+/// classification claim, auxiliary, and finally unknown. See module docs for
+/// the exact shapes.
 pub fn classify_key(key: &str) -> KeyClass {
     if let Some(sha256) = parse_thumb_key(key) {
         return KeyClass::Thumb { sha256 };
     }
     if let Some((sha256, ext)) = parse_blob_key(key) {
         return KeyClass::Blob { sha256, ext };
+    }
+    if let Some((community, sha256)) = parse_classification_claim_key(key) {
+        return KeyClass::ClassificationClaim { community, sha256 };
     }
     if let Some((community, sha256)) = parse_sidecar_key(key) {
         return KeyClass::Sidecar { community, sha256 };
@@ -168,6 +175,29 @@ fn parse_sidecar_key(key: &str) -> Option<(Uuid, String)> {
     Some((community, sha256.to_string()))
 }
 
+/// `_meta/{community}/claims/{sha256}.json`
+fn parse_classification_claim_key(key: &str) -> Option<(Uuid, String)> {
+    let mut segments = key.split('/');
+    if segments.next()? != "_meta" {
+        return None;
+    }
+    let community = parse_canonical_uuid(segments.next()?)?;
+    if segments.next()? != "claims" {
+        return None;
+    }
+    let last = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    let mut last_parts = last.split('.');
+    let sha256 = last_parts.next()?;
+    let json = last_parts.next()?;
+    if last_parts.next().is_some() || json != "json" || !is_sha256(sha256) {
+        return None;
+    }
+    Some((community, sha256.to_string()))
+}
+
 /// `_uploads/{community}/{sha256}/{event_id}.json`, `event_id` a ULID.
 fn parse_auxiliary_key(key: &str) -> Option<(Uuid, String, String)> {
     let mut segments = key.split('/');
@@ -263,7 +293,7 @@ impl BucketAggregate {
             KeyClass::Sidecar { community, sha256 } => {
                 self.sidecar_bindings.insert((community, sha256), size);
             }
-            KeyClass::Auxiliary { .. } => {
+            KeyClass::Auxiliary { .. } | KeyClass::ClassificationClaim { .. } => {
                 // Fleet physical only — never enters logical/orphan math (F4).
             }
             KeyClass::Unknown => {
@@ -466,6 +496,19 @@ mod tests {
         assert_eq!(
             classify_key(&format!("_meta/{c}/{s}.json")),
             KeyClass::Sidecar {
+                community: c,
+                sha256: s
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_classification_claim_key() {
+        let s = sha(0xde);
+        let c = community(1);
+        assert_eq!(
+            classify_key(&format!("_meta/{c}/claims/{s}.json")),
+            KeyClass::ClassificationClaim {
                 community: c,
                 sha256: s
             }
@@ -768,12 +811,15 @@ pub fn tenant_prefixes(community: Uuid) -> [String; 3] {
 }
 
 /// Whether one bucket key is a tenant-owned binding of `community` in the
-/// exact writer taxonomy: a media sidecar, an upload record, or a Git
-/// repository pointer. A malformed key under a tenant prefix is NOT owned —
-/// deletion fails closed on shapes this binary did not write.
+/// exact writer taxonomy: a media sidecar, classification claim, upload
+/// record, or Git repository pointer. A malformed key under a tenant prefix
+/// is NOT owned — deletion fails closed on shapes this binary did not write.
 pub fn is_tenant_owned_key(community: Uuid, key: &str) -> bool {
     match classify_key(key) {
         KeyClass::Sidecar {
+            community: owner, ..
+        }
+        | KeyClass::ClassificationClaim {
             community: owner, ..
         }
         | KeyClass::Auxiliary {
@@ -785,8 +831,8 @@ pub fn is_tenant_owned_key(community: Uuid, key: &str) -> bool {
 }
 
 /// Whether one bucket key belongs to the fleet's known writer taxonomy:
-/// blob/thumb/sidecar/upload shapes, any community's Git pointer, shared Git
-/// CAS data, or a `probe/` connectivity key.
+/// blob/thumb/sidecar/claim/upload shapes, any community's Git pointer, shared
+/// Git CAS data, or a `probe/` connectivity key.
 pub fn is_known_fleet_key(key: &str) -> bool {
     !matches!(classify_key(key), KeyClass::Unknown)
         || git_pointer_community(key).is_some()
@@ -902,6 +948,10 @@ mod deletion_taxonomy_tests {
         ));
         assert!(is_tenant_owned_key(
             target,
+            &format!("_meta/{target}/claims/{sha}.json")
+        ));
+        assert!(is_tenant_owned_key(
+            target,
             &format!("_uploads/{target}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json")
         ));
         assert!(is_tenant_owned_key(
@@ -933,6 +983,7 @@ mod deletion_taxonomy_tests {
         let sha = "c".repeat(64);
         for key in [
             format!("_meta/{community}/{sha}.json"),
+            format!("_meta/{community}/claims/{sha}.json"),
             format!("_uploads/{community}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json"),
             format!("repos/{community}/{}/repo/pointer", "d".repeat(64)),
         ] {
@@ -954,6 +1005,7 @@ mod deletion_taxonomy_tests {
             (format!("{sha}.png"), 1),
             (format!("{sha}.thumb.jpg"), 1),
             (format!("_meta/{community}/{sha}.json"), 1),
+            (format!("_meta/{community}/claims/{sha}.json"), 1),
             (format!("packs/{sha}"), 1),
             (
                 format!("repos/{community}/{}/repo/pointer", "b".repeat(64)),
@@ -987,7 +1039,7 @@ mod deletion_taxonomy_tests {
         })
         .await
         .expect("sweep synthetic listing");
-        assert_eq!(outcome.listed_objects, 9);
+        assert_eq!(outcome.listed_objects, 10);
         assert_eq!(outcome.unknown_object_count, 3);
         assert_eq!(
             outcome.unknown_key_sample,

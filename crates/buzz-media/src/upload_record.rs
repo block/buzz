@@ -129,6 +129,13 @@ pub struct UploadEventFacts<'a> {
     pub uploaded_at: i64,
 }
 
+/// Handle used internally to correct a just-written record when a concurrent
+/// legacy sidecar writer wins with different canonical facts.
+pub(crate) struct StoredUploadRecord {
+    key: String,
+    record: UploadRecord,
+}
+
 /// Build and store the per-event record for one accepted upload.
 ///
 /// Called after blob and derived-artifact durability but before the sidecar
@@ -143,6 +150,18 @@ pub async fn record_upload_event(
     attribution: &UploadAttribution,
     facts: UploadEventFacts<'_>,
 ) -> Result<(), crate::error::MediaError> {
+    record_upload_event_with_handle(storage, ctx, uploader, attribution, facts)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn record_upload_event_with_handle(
+    storage: &crate::storage::MediaStorage,
+    ctx: &TenantContext,
+    uploader: &nostr::PublicKey,
+    attribution: &UploadAttribution,
+    facts: UploadEventFacts<'_>,
+) -> Result<StoredUploadRecord, crate::error::MediaError> {
     use nostr::ToBech32;
 
     let event_id = ulid::Ulid::new().to_string();
@@ -170,7 +189,22 @@ pub async fn record_upload_event(
     };
     let key = upload_record_key(ctx, facts.sha256, &event_id);
     let json = serde_json::to_vec(&record)?;
-    storage.put(&key, &json, "application/json").await
+    storage.put(&key, &json, "application/json").await?;
+    Ok(StoredUploadRecord { key, record })
+}
+
+pub(crate) async fn correct_upload_event_facts(
+    storage: &crate::storage::MediaStorage,
+    stored: &mut StoredUploadRecord,
+    facts: UploadEventFacts<'_>,
+) -> Result<(), crate::error::MediaError> {
+    stored.record.sha256 = facts.sha256.to_string();
+    stored.record.ext = facts.ext.to_string();
+    stored.record.mime_type = facts.mime.to_string();
+    stored.record.size = facts.size;
+    stored.record.uploaded_at = facts.uploaded_at;
+    let json = serde_json::to_vec(&stored.record)?;
+    storage.put(&stored.key, &json, "application/json").await
 }
 
 /// Build the per-event record key:
