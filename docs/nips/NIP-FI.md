@@ -222,9 +222,15 @@ On WebSocket upgrade:
 3. Complete NIP-42 handshake; validate AUTH event, extract `k`.
 4. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
    [FI-TRACE-ASSERTION-KEY-MISMATCH]
-5. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
+5. Register the session's proven `k` in the relay's session table, making it
+   visible to the disconnect close scan.  Registration MUST occur before the
+   deny-set check in step 6.  This ordering ensures any connection that straddles
+   a concurrent disconnect is caught by one side or the other: either the close
+   scan sees the registered session, or the deny-set check (step 6) sees the
+   inserted entry.
+6. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
    `authorization_denied`.  [FI-TRACE-DENY-SET]
-6. Admit the connection.  The session's authority deadline is the minimum of all
+7. Admit the connection.  The session's authority deadline is the minimum of all
    `authority_deadlines`; see Session policy.
 
 ## Session policy
@@ -293,9 +299,12 @@ attempt, the residual exposure after a restart is bounded by
 issuing or re-push does not complete in time, that formula does not apply and
 access may continue beyond it.  [FI-TRACE-DENY-SET]
 
-The relay MUST bound the deny set size.  Implementations MUST evict only
-expired entries; when the set is at capacity and all entries are still active,
-the relay MUST reject the new command `503` without removing any existing entry.
+The relay MUST bound the deny set size **per issuer**.  Capacity exhaustion under
+one issuer MUST NOT cause rejection of another issuer's commands; the `503`
+capacity check is evaluated against the command's own issuer bound.
+Implementations MUST evict only expired entries; when an issuer's partition is
+at capacity and all entries are still active, the relay MUST reject the new
+command `503` without removing any existing entry.
 
 The `until` timestamp MUST NOT exceed the maximum possible remaining assertion
 validity for any assertion the issuer could currently mint.  Because an
@@ -441,7 +450,9 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   // leaves neither behind: the jti is not burned, and the caller may safely
   // retry the same signed command.  Performing the jti reservation alone
   // (without the deny-entry insertion) would burn the command identity on a
-  // capacity failure, making the new 503 contract unimplementable.
+  // capacity failure, making the new 503 contract unimplementable.  Capacity
+  // is checked against the per-issuer bound for claims.iss; a different
+  // issuer's capacity exhaustion does not produce a 503 here.
   effective_expiry := min(claims.exp, claims.iat + policy.maximum_command_age)
   AtomicReserveJtiAndDenyEntry(
       iss=claims.iss, jti=claims.jti, effective_expiry=effective_expiry,
@@ -676,7 +687,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-JWKS-REMOVE` | Connections verified under a removed key deny on next revalidation or reconnect. |
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
-| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions and does not deny future admissions; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
+| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions and does not deny future admissions; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` is registered before the deny-set check, ensuring the close scan catches it); a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
 | `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
