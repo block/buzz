@@ -341,7 +341,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_CHANNELS", value_delimiter = ',')]
     pub channels: Option<Vec<String>>,
 
-    #[arg(long, env = "BUZZ_ACP_NO_MENTION_FILTER")]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_MENTION_FILTER",
+        help = "Disable the #p mention gate (logged as mention_filter=off in the startup summary)"
+    )]
     pub no_mention_filter: bool,
 
     #[arg(long, env = "BUZZ_ACP_CONFIG", default_value = "./buzz-acp.toml")]
@@ -1194,6 +1198,9 @@ impl Config {
     }
 
     /// Human-readable summary (no secrets).
+    ///
+    /// Includes `mention_filter=on|off` so `--no-mention-filter` deployments are
+    /// distinguishable from gated `subscribe=mentions` in journal logs (#4228).
     pub fn summary(&self) -> String {
         let respond_to_detail = match &self.respond_to {
             RespondTo::Allowlist => {
@@ -1209,7 +1216,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} mention_filter={} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1220,6 +1227,7 @@ impl Config {
             self.agents,
             self.heartbeat_interval_secs,
             self.subscribe_mode,
+            if self.no_mention_filter { "off" } else { "on" },
             self.dedup_mode,
             self.session_policy,
             self.multiple_event_handling,
@@ -2590,6 +2598,39 @@ channels = "ALL"
         assert!(
             s.contains("respond_to=allowlist(2)"),
             "should show allowlist count, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_summary_mention_filter_on_by_default() {
+        let config = test_config(SubscribeMode::Mentions);
+        let s = config.summary();
+        assert!(
+            s.contains("mention_filter=on"),
+            "default config should show mention_filter=on, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_summary_mention_filter_off_when_no_mention_filter() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.no_mention_filter = true;
+        let s = config.summary();
+        assert!(
+            s.contains("mention_filter=off"),
+            "--no-mention-filter should show mention_filter=off, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_summary_mention_filter_distinguishes_no_mention_filter() {
+        let mut gated = test_config(SubscribeMode::Mentions);
+        let mut ungated = test_config(SubscribeMode::Mentions);
+        ungated.no_mention_filter = true;
+        assert_ne!(
+            gated.summary(),
+            ungated.summary(),
+            "gated and ungated mentions mode must produce distinct summary lines"
         );
     }
 

@@ -262,9 +262,11 @@ Forum event kinds:
 
 > **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible.
 
+After startup, confirm the flag in the journal: `mention_filter=off` means the `#p` gate is disabled; `mention_filter=on` under `subscribe=Mentions` means only @mentions wake the agent (#4228).
+
 ## How It Works
 
-1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.
+1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth. Logs a one-line config summary (relay, pubkey, subscribe mode, **`mention_filter=on|off`**, dedup, respond_to, …) so operators can confirm `--no-mention-filter` took effect from the journal alone.
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
 3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
