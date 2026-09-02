@@ -84,6 +84,25 @@ function withDotOnlyBadge(baseline: { state: string; count: number }) {
   return baseline.count > 0 ? baseline : { state: "dot", count: 0 };
 }
 
+async function getUnreadPillComposition(
+  pill: import("@playwright/test").Locator,
+) {
+  return pill.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const icon = element.querySelector("svg")?.getBoundingClientRect();
+    return {
+      fontSize: style.fontSize,
+      gap: style.gap,
+      height: element.getBoundingClientRect().height,
+      iconHeight: icon?.height,
+      iconWidth: icon?.width,
+      letterSpacing: style.letterSpacing,
+      paddingBlock: `${style.paddingTop} ${style.paddingBottom}`,
+      paddingInline: `${style.paddingLeft} ${style.paddingRight}`,
+    };
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -321,6 +340,40 @@ test("offscreen top-level unread shows the secondary sidebar arrow", async ({
   await expect(activityArrow).toBeVisible();
   await expect(activityArrow).toContainText("1 unread");
   await expect(activityArrow).not.toHaveClass(/bg-primary/);
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/sidebar-unread-overflow-default.png`,
+    clip: { x: 0, y: 0, width: 320, height: 360 },
+  });
+
+  const defaultComposition = await getUnreadPillComposition(activityArrow);
+
+  await page.evaluate(
+    ({ pubkey, mentionPubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: "A priority mention for @tyler",
+        kind: 40002,
+        pubkey,
+        mentionPubkeys: [mentionPubkey],
+      });
+    },
+    {
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      mentionPubkey: DEFAULT_MOCK_PUBKEY,
+    },
+  );
+
+  await expect(activityArrow).toContainText("2 unread");
+  await expect(activityArrow).toHaveClass(/bg-primary/);
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/sidebar-unread-overflow-primary.png`,
+    clip: { x: 0, y: 0, width: 320, height: 360 },
+  });
+  const primaryComposition = await getUnreadPillComposition(activityArrow);
+  expect(primaryComposition).toEqual(defaultComposition);
+
   await activityArrow.click();
   await expect(page.getByTestId("channel-random")).toBeInViewport();
   await waitForAnimations(page);

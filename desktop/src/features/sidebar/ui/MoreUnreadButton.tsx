@@ -93,7 +93,7 @@ export function MoreUnreadButton({
     >
       <UnreadPill
         accessibleLabel={accessibleLabel}
-        className="max-w-full"
+        className="max-w-full overflow-hidden"
         direction={position === "top" ? "up" : "down"}
         emphasis={emphasis}
         label={resolvedLabel}
