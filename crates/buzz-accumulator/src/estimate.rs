@@ -53,9 +53,14 @@ pub fn estimate_tokens(chars: usize) -> u64 {
 /// Output tokens reserved out of the model window before sizing the input.
 pub const RESERVED_OUTPUT_TOKENS: u64 = 16_384;
 
-/// Safety margin reserved for tokenizer drift (chars/4 is a heuristic) and
-/// the runner's own system prompt.
-pub const SAFETY_MARGIN_TOKENS: u64 = 8_192;
+/// Safety margin reserved for tokenizer drift and the runner envelope.
+///
+/// Claude CLI reports a roughly 62k-token difference between its nominal 200k
+/// model window and the conversation budget available to a single exchange;
+/// that space is consumed by its system prompt, tool definitions, and bundled
+/// attachment instructions. Reserve 70k so accumulator planning targets the
+/// runner's effective limit rather than the bare model limit.
+pub const SAFETY_MARGIN_TOKENS: u64 = 70_000;
 
 /// Conservative input budget when the model's window is not curated — the
 /// pre-model-aware planning ceiling, kept as the honest fallback.
@@ -201,8 +206,8 @@ mod tests {
             b.input_budget_tokens as usize * PLANNING_CHARS_PER_TOKEN
         );
         assert!(
-            b.input_budget_chars > 3 * FALLBACK_INPUT_BUDGET_CHARS,
-            "a 200k window must remain materially larger than the fallback"
+            b.input_budget_chars >= 2 * FALLBACK_INPUT_BUDGET_CHARS,
+            "a curated 200k window must remain materially larger than the fallback"
         );
         assert!(b.input_budget_chars <= EMERGENCY_MAX_INPUT_CHARS);
     }
