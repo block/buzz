@@ -1,4 +1,5 @@
 import * as React from "react";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { useQueryClient, type QueryStatus } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -57,6 +58,8 @@ function seedWelcomeExperience(
   const promise = (async () => {
     try {
       await ensureWelcomeTeam(channelId, communityScope);
+      // Team setup writes membership directly, outside the member mutations.
+      await invalidateChannelMembersRosters(queryClient, [channelId]);
       await ensureWelcomeCanvas(channelId);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
