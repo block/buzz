@@ -1,5 +1,5 @@
 import * as React from "react";
-import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
+import { EllipsisVertical, Link2, OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
@@ -20,11 +20,19 @@ import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import { RegisterExistingAgentDialog } from "./RegisterExistingAgentDialog";
+import { RemoveRegisteredAgentDialog } from "./RemoveRegisteredAgentDialog";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
-import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
+import {
+  useBakedBuildEnvQuery,
+  useRegisteredAgentsQuery,
+  useRegisterExistingAgentMutation,
+  useUnregisterExistingAgentMutation,
+} from "@/features/agents/hooks";
+import type { RegisteredAgentReference } from "@/shared/api/tauriRegisteredAgents";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
@@ -49,6 +57,13 @@ export function AgentsView() {
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const compactActionsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
+  const [isRegisterExistingOpen, setIsRegisterExistingOpen] =
+    React.useState(false);
+  const [referenceToRemove, setReferenceToRemove] =
+    React.useState<RegisteredAgentReference | null>(null);
+  const registeredReferencesQuery = useRegisteredAgentsQuery();
+  const registerReferenceMutation = useRegisterExistingAgentMutation();
+  const unregisterReferenceMutation = useUnregisterExistingAgentMutation();
 
   function openAiDefaults(trigger: HTMLButtonElement | null) {
     aiDefaultsTriggerRef.current = trigger;
@@ -148,6 +163,18 @@ export function AgentsView() {
               <>
                 <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
                   <Button
+                    aria-label="Register existing agent"
+                    className="[@container(max-width:48rem)]:size-8 [@container(max-width:48rem)]:px-0"
+                    onClick={() => setIsRegisterExistingOpen(true)}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <Link2 />
+                    <span className="[@container(max-width:48rem)]:sr-only">
+                      Register existing agent
+                    </span>
+                  </Button>
+                  <Button
                     data-testid="agent-defaults-button"
                     ref={fullAiDefaultsTriggerRef}
                     onClick={(event) => openAiDefaults(event.currentTarget)}
@@ -189,6 +216,12 @@ export function AgentsView() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onSelect={() => setIsRegisterExistingOpen(true)}
+                    >
+                      <Link2 />
+                      Register existing agent
+                    </DropdownMenuItem>
                     <DropdownMenuItem
                       onSelect={() => {
                         openAiDefaults(compactActionsTriggerRef.current);
@@ -250,6 +283,20 @@ export function AgentsView() {
               }}
               // Persona props
               personas={personas.libraryPersonas}
+              registeredReferences={registeredReferencesQuery.data ?? []}
+              registeredReferencesError={
+                registeredReferencesQuery.error instanceof Error
+                  ? registeredReferencesQuery.error
+                  : null
+              }
+              isRegisteredReferencesLoading={
+                registeredReferencesQuery.isLoading
+              }
+              isRegisteredReferencePending={
+                registerReferenceMutation.isPending ||
+                unregisterReferenceMutation.isPending
+              }
+              onRemoveRegisteredReference={setReferenceToRemove}
               personasError={
                 personas.personasQuery.error instanceof Error
                   ? personas.personasQuery.error
@@ -310,6 +357,40 @@ export function AgentsView() {
         onOpenChange={setAiDefaultsDialogOpen}
         open={isAiDefaultsOpen}
         returnFocusRef={aiDefaultsTriggerRef}
+      />
+      <RegisterExistingAgentDialog
+        error={
+          registerReferenceMutation.error instanceof Error
+            ? registerReferenceMutation.error
+            : null
+        }
+        isPending={registerReferenceMutation.isPending}
+        onOpenChange={(open) => {
+          setIsRegisterExistingOpen(open);
+          if (!open) registerReferenceMutation.reset();
+        }}
+        onSubmit={(input) => registerReferenceMutation.mutateAsync(input)}
+        open={isRegisterExistingOpen}
+      />
+      <RemoveRegisteredAgentDialog
+        isPending={unregisterReferenceMutation.isPending}
+        onConfirm={(reference) => {
+          agents.setActionErrorMessage(null);
+          void unregisterReferenceMutation
+            .mutateAsync(reference)
+            .then(() => setReferenceToRemove(null))
+            .catch((error) => {
+              agents.setActionErrorMessage(
+                error instanceof Error
+                  ? error.message
+                  : "Couldn't remove registered agent reference.",
+              );
+            });
+        }}
+        onOpenChange={(open) => {
+          if (!open) setReferenceToRemove(null);
+        }}
+        reference={referenceToRemove}
       />
 
       {agents.agentToAddToChannel ? (

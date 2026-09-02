@@ -68,6 +68,12 @@ import {
   setPersonaActive,
   updatePersona,
 } from "@/shared/api/tauriPersonas";
+import {
+  listRegisteredAgentReferences,
+  registerExistingAgentReference,
+  unregisterExistingAgentReference,
+} from "@/shared/api/tauriRegisteredAgents";
+import type { RegisteredAgentReference } from "@/shared/api/tauriRegisteredAgents";
 import { teamsQueryKey } from "@/features/agents/teamHooks";
 import type {
   AcpRuntime,
@@ -133,6 +139,9 @@ export const managedAgentLogFocusRefetchPolicy = {
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
+export const registeredAgentsQueryKey = [
+  "registered-agent-references",
+] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
@@ -405,6 +414,45 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
         : false;
     },
     ...agentsFocusRefetchPolicy,
+  });
+}
+
+export function useRegisteredAgentsQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    enabled: options?.enabled ?? true,
+    queryKey: registeredAgentsQueryKey,
+    queryFn: listRegisteredAgentReferences,
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+export function useRegisterExistingAgentMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      pubkey: string;
+      label?: string | null;
+      roleSummary?: string | null;
+    }) => registerExistingAgentReference(input),
+    onSettled: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: registeredAgentsQueryKey,
+      });
+    },
+  });
+}
+
+export function useUnregisterExistingAgentMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (reference: RegisteredAgentReference) =>
+      unregisterExistingAgentReference(reference.pubkey),
+    onSettled: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: registeredAgentsQueryKey,
+      });
+    },
   });
 }
 

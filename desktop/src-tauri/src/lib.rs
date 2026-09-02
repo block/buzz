@@ -79,9 +79,10 @@ use huddle::{
 use initial_window::*;
 use managed_agents::{
     backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
+    list_registered_agent_references, put_managed_agent_runtime_lifecycle,
+    reconcile_managed_agent_runtimes, register_existing_agent_reference,
     restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
-    try_regenerate_nest,
+    try_regenerate_nest, unregister_existing_agent_reference,
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
@@ -725,6 +726,9 @@ pub fn run() {
             mesh_installed_models,
             mesh_model_catalog,
             update_managed_agent,
+            list_registered_agent_references,
+            register_existing_agent_reference,
+            unregister_existing_agent_reference,
             discover_backend_providers,
             probe_backend_provider,
             persona_catalog::fetch_persona_catalog,

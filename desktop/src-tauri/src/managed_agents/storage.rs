@@ -260,6 +260,43 @@ fn load_agent_store<R: tauri::Runtime>(
     })
 }
 
+/// Check managed-agent ownership without hydrating private keys or touching
+/// runtime state. Command boundaries use this before any lifecycle side effect.
+pub(crate) fn managed_agent_record_exists(app: &AppHandle, pubkey: &str) -> Result<bool, String> {
+    managed_agent_record_exists_at_path(&managed_agents_store_path(app)?, pubkey)
+}
+
+/// Minimal projection for ownership preflight. Unknown fields—including any
+/// inline private key fallback—are skipped by Serde instead of materialized in
+/// a `ManagedAgentRecord`.
+#[derive(serde::Deserialize)]
+struct ManagedAgentOwnershipRecord {
+    #[serde(default)]
+    pubkey: String,
+}
+
+/// Path-based ownership lookup used by the command-boundary regression tests.
+/// It intentionally reads only the public-key projection used in production so
+/// proving a rejected target cannot touch the keyring or materialize secrets.
+pub(crate) fn managed_agent_record_exists_at_path(
+    path: &Path,
+    pubkey: &str,
+) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("failed to read agent store: {error}"))?;
+    let records: Vec<ManagedAgentOwnershipRecord> =
+        serde_json::from_str(&content).map_err(|error| {
+            backup_invalid_store(path);
+            format!("failed to parse agent store (preserved as .invalid): {error}")
+        })?;
+    Ok(records
+        .iter()
+        .any(|record| !record.pubkey.is_empty() && record.pubkey == pubkey))
+}
+
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
 /// folded into the same store) are filtered out so every pre-fold call site
 /// keeps seeing exactly the records it always did.

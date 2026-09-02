@@ -135,6 +135,14 @@ type MockManagedAgentRuntimeSeed = {
   lifecycle?: MockManagedAgentRuntimeRow["lifecycle"];
 };
 
+type MockRegisteredAgentReference = {
+  pubkey: string;
+  label?: string | null;
+  role_summary?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type MockRelayAgentSeed = {
   pubkey: string;
   ownerPubkey?: string | null;
@@ -306,6 +314,8 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    registeredAgents?: MockRegisteredAgentReference[];
+    registeredAgentsError?: string;
     /** Result returned by the mocked `add_agent_to_huddle` command. */
     addAgentToHuddleResult?: {
       ephemeral_added: boolean;
@@ -3225,6 +3235,7 @@ let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
+let mockRegisteredAgents: MockRegisteredAgentReference[] = [];
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -11229,6 +11240,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
+  mockRegisteredAgents = structuredClone(config.mock?.registeredAgents ?? []);
   resetMockPersonas(config);
   resetMockTeams(config);
   seedMockSearchProfiles(config);
@@ -13713,6 +13725,69 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
+      case "list_registered_agent_references":
+        if (activeConfig?.mock?.registeredAgentsError) {
+          throw new Error(activeConfig.mock.registeredAgentsError);
+        }
+        return structuredClone(mockRegisteredAgents).sort((left, right) =>
+          left.pubkey.localeCompare(right.pubkey),
+        );
+      case "register_existing_agent_reference": {
+        const input = (payload as { input?: Record<string, unknown> } | null)
+          ?.input;
+        if (
+          !input ||
+          Object.keys(input).some(
+            (key) => !["pubkey", "label", "roleSummary"].includes(key),
+          )
+        ) {
+          throw new Error("invalid registered agent input");
+        }
+        const pubkey = String(input.pubkey ?? "")
+          .trim()
+          .toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(pubkey)) {
+          throw new Error("invalid public key");
+        }
+        if (
+          mockManagedAgents.some(
+            (agent) => agent.pubkey.toLowerCase() === pubkey,
+          )
+        ) {
+          throw new Error(`agent ${pubkey} is already a managed agent`);
+        }
+        const now = new Date().toISOString();
+        const existing = mockRegisteredAgents.find(
+          (reference) => reference.pubkey === pubkey,
+        );
+        const reference: MockRegisteredAgentReference = {
+          pubkey,
+          label:
+            typeof input.label === "string" && input.label.trim()
+              ? input.label.trim()
+              : null,
+          role_summary:
+            typeof input.roleSummary === "string" && input.roleSummary.trim()
+              ? input.roleSummary.trim()
+              : null,
+          created_at: existing?.created_at ?? now,
+          updated_at: now,
+        };
+        mockRegisteredAgents = [
+          ...mockRegisteredAgents.filter((item) => item.pubkey !== pubkey),
+          reference,
+        ];
+        return structuredClone(reference);
+      }
+      case "unregister_existing_agent_reference": {
+        const pubkey = String(
+          (payload as { pubkey?: unknown } | null)?.pubkey ?? "",
+        ).toLowerCase();
+        mockRegisteredAgents = mockRegisteredAgents.filter(
+          (item) => item.pubkey !== pubkey,
+        );
+        return null;
+      }
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},

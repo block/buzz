@@ -220,6 +220,14 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  registeredAgents?: Array<{
+    pubkey: string;
+    label?: string | null;
+    role_summary?: string | null;
+    created_at: string;
+    updated_at: string;
+  }>;
+  registeredAgentsError?: string;
   /** Result returned by the mocked `add_agent_to_huddle` command. */
   addAgentToHuddleResult?: {
     ephemeral_added: boolean;
