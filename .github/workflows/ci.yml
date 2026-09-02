@@ -1157,7 +1157,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/binaries
-          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+          for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
             touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
           done
       - name: Clippy (workspace)
