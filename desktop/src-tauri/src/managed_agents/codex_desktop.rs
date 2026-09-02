@@ -3,9 +3,15 @@ use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(windows)]
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -21,6 +27,12 @@ const SHARED_RUNTIME_COMMAND_ENV: &str = "BUZZ_CODEX_APP_SERVER_COMMAND";
 const SHARED_RUNTIME_ERROR_TAIL_BYTES: u64 = 4096;
 const CODEX_CODE_MODE_HOST_FLAG: &str = "features.code_mode_host=true";
 #[cfg(windows)]
+const WINDOWS_CODEX_RUNTIME_COMPANIONS: [&str; 3] = [
+    "codex-code-mode-host.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+];
+#[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 const WINDOWS_CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -28,6 +40,12 @@ const WINDOWS_CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 #[cfg(windows)]
 fn windows_shared_runtime_creation_flags() -> u32 {
     WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_NEW_PROCESS_GROUP
+}
+
+fn detach_shared_runtime(child: Child) -> u32 {
+    let process_id = child.id();
+    drop(child);
+    process_id
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -641,6 +659,127 @@ fn find_codex_app_server_executable() -> Result<PathBuf, String> {
     )
 }
 
+#[cfg(windows)]
+fn codex_runtime_bundle_files(executable: &Path) -> Result<Vec<(PathBuf, &'static str)>, String> {
+    let parent = executable.parent().ok_or_else(|| {
+        format!(
+            "Codex runtime executable has no parent directory: {}",
+            executable.display()
+        )
+    })?;
+    let mut files = vec![(executable.to_path_buf(), "codex.exe")];
+    files.extend(
+        WINDOWS_CODEX_RUNTIME_COMPANIONS
+            .into_iter()
+            .filter_map(|name| {
+                let path = parent.join(name);
+                path.is_file().then_some((path, name))
+            }),
+    );
+    Ok(files)
+}
+
+#[cfg(windows)]
+fn codex_runtime_bundle_key(executable: &Path) -> Result<String, String> {
+    let mut hasher = DefaultHasher::new();
+    for (path, destination_name) in codex_runtime_bundle_files(executable)? {
+        let metadata = path
+            .metadata()
+            .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+        destination_name.hash(&mut hasher);
+        metadata.len().hash(&mut hasher);
+        metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .hash(&mut hasher);
+    }
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+#[cfg(windows)]
+fn codex_runtime_copy_matches(source_executable: &Path, destination: &Path) -> bool {
+    let Ok(files) = codex_runtime_bundle_files(source_executable) else {
+        return false;
+    };
+    files.into_iter().all(|(source, destination_name)| {
+        let Ok(source_metadata) = source.metadata() else {
+            return false;
+        };
+        destination
+            .join(destination_name)
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() == source_metadata.len())
+    })
+}
+
+#[cfg(windows)]
+fn prepare_managed_codex_runtime(
+    source_executable: &Path,
+    cache_root: &Path,
+) -> Result<PathBuf, String> {
+    let key = codex_runtime_bundle_key(source_executable)?;
+    fs::create_dir_all(cache_root)
+        .map_err(|error| format!("failed to create {}: {error}", cache_root.display()))?;
+    let destination = cache_root.join(&key);
+    let managed_executable = destination.join("codex.exe");
+    if codex_runtime_copy_matches(source_executable, &destination) {
+        return Ok(managed_executable);
+    }
+    if destination.exists() {
+        return Err(format!(
+            "Buzz's cached Codex runtime is incomplete: {}. Remove that directory while the shared runtime is stopped, then retry.",
+            destination.display()
+        ));
+    }
+
+    let staging = cache_root.join(format!(
+        ".{key}.{}.{}.staging",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir(&staging)
+        .map_err(|error| format!("failed to create {}: {error}", staging.display()))?;
+    let copy_result = (|| {
+        for (source, destination_name) in codex_runtime_bundle_files(source_executable)? {
+            let target = staging.join(destination_name);
+            fs::copy(&source, &target).map_err(|error| {
+                format!(
+                    "failed to copy {} to {}: {error}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+        }
+        if !codex_runtime_copy_matches(source_executable, &staging) {
+            return Err("Buzz's copied Codex runtime failed verification".to_string());
+        }
+        fs::rename(&staging, &destination).map_err(|error| {
+            format!(
+                "failed to activate Codex runtime {}: {error}",
+                destination.display()
+            )
+        })?;
+        Ok(managed_executable)
+    })();
+    if copy_result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    copy_result
+}
+
+#[cfg(windows)]
+fn managed_codex_app_server_executable(
+    app: &AppHandle,
+    source_executable: &Path,
+) -> Result<PathBuf, String> {
+    prepare_managed_codex_runtime(
+        source_executable,
+        &managed_agents_base_dir(app)?.join("codex-runtime"),
+    )
+}
+
 fn codex_shared_runtime_args(url: &str, code_mode_host_available: bool) -> Vec<String> {
     let mut args = Vec::with_capacity(if code_mode_host_available { 5 } else { 3 });
     if code_mode_host_available {
@@ -682,8 +821,12 @@ fn append_shared_runtime_launch_log(
     .map_err(|error| format!("failed to write {}: {error}", log_path.display()))
 }
 
-fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> {
-    let executable = find_codex_app_server_executable()?;
+fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<u32, String> {
+    let source_executable = find_codex_app_server_executable()?;
+    #[cfg(windows)]
+    let executable = managed_codex_app_server_executable(app, &source_executable)?;
+    #[cfg(not(windows))]
+    let executable = source_executable;
     let code_mode_host_available = codex_code_mode_host_available(&executable);
 
     #[cfg(windows)]
@@ -725,7 +868,7 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
             .stderr(Stdio::from(stderr))
             .creation_flags(windows_shared_runtime_creation_flags())
             .spawn();
-        let child = match child {
+        let mut child = match child {
             Ok(child) => child,
             Err(error) => {
                 let mut log = fs::OpenOptions::new()
@@ -754,14 +897,23 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
                 return Err(format!("failed to start {}: {error}", executable.display()));
             }
         };
-        append_shared_runtime_launch_log(
+        let process_id = child.id();
+        if let Err(error) = append_shared_runtime_launch_log(
             &stderr_log,
             &executable,
             url,
             code_mode_host_available,
-            Some(child.id()),
-        )?;
-        Ok(())
+            Some(process_id),
+        ) {
+            let _ = super::terminate_process(process_id);
+            let _ = child.wait();
+            return Err(error);
+        }
+        // The shared app-server is a computer service used by both Buzz and
+        // Codex Desktop. Dropping Child intentionally detaches it from the Buzz
+        // window lifecycle; the versioned copy above prevents it from locking
+        // the source runtime while Codex updates.
+        Ok(detach_shared_runtime(child))
     }
 
     #[cfg(not(windows))]
@@ -788,10 +940,10 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
-        command
+        let child = command
             .spawn()
             .map_err(|error| format!("failed to start {}: {error}", executable.display()))?;
-        Ok(())
+        Ok(detach_shared_runtime(child))
     }
 }
 
@@ -812,7 +964,7 @@ pub async fn enable_codex_shared_runtime(
     )?;
     let url = codex_shared_app_server_url()?;
     if probe_codex_shared_runtime(&url).await.is_err() {
-        spawn_codex_shared_runtime(app, &url)?;
+        let spawned_pid = spawn_codex_shared_runtime(app, &url)?;
         let mut last_error = None;
         for _ in 0..50 {
             match probe_codex_shared_runtime(&url).await {
@@ -825,6 +977,7 @@ pub async fn enable_codex_shared_runtime(
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         if let Some(error) = last_error {
+            let _ = super::terminate_process(spawned_pid);
             return Ok(attach_desktop_process_status(CodexSharedRuntimeStatus {
                 enabled: true,
                 state: CodexSharedRuntimeState::Unavailable,
@@ -1127,6 +1280,69 @@ mod tests {
         fs::write(dir.path().join("codex-code-mode-host.exe"), []).unwrap();
         assert!(is_usable_codex_app_server_executable(&codex));
         assert!(codex_code_mode_host_available(&codex));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shared_runtime_uses_an_immutable_versioned_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let cache = dir.path().join("cache");
+        fs::create_dir(&source).unwrap();
+        let codex = source.join("codex.exe");
+        fs::write(&codex, b"codex-v1").unwrap();
+        fs::write(source.join("codex-code-mode-host.exe"), b"host-v1").unwrap();
+        fs::write(source.join("codex-command-runner.exe"), b"runner-v1").unwrap();
+        fs::write(
+            source.join("codex-windows-sandbox-setup.exe"),
+            b"sandbox-v1",
+        )
+        .unwrap();
+
+        let first = prepare_managed_codex_runtime(&codex, &cache).unwrap();
+        let reused = prepare_managed_codex_runtime(&codex, &cache).unwrap();
+        assert_eq!(reused, first);
+        assert_eq!(fs::read(&first).unwrap(), b"codex-v1");
+        assert_eq!(
+            fs::read(first.parent().unwrap().join("codex-code-mode-host.exe")).unwrap(),
+            b"host-v1"
+        );
+
+        fs::write(&codex, b"codex-v2-with-a-new-size").unwrap();
+        let second = prepare_managed_codex_runtime(&codex, &cache).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(fs::read(&first).unwrap(), b"codex-v1");
+        assert_eq!(fs::read(&second).unwrap(), b"codex-v2-with-a-new-size");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detached_shared_runtime_survives_dropping_the_buzz_child_handle() {
+        use std::{thread, time::Duration};
+
+        use std::os::windows::process::CommandExt;
+
+        let child = Command::new("cmd.exe")
+            .args(["/d", "/c", "ping -n 30 127.0.0.1 >NUL"])
+            .creation_flags(WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .unwrap();
+        let process_id = detach_shared_runtime(child);
+        thread::sleep(Duration::from_millis(100));
+
+        let survived = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "if (Get-Process -Id $env:BUZZ_TEST_PID -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
+            ])
+            .env("BUZZ_TEST_PID", process_id.to_string())
+            .creation_flags(WINDOWS_CREATE_NO_WINDOW)
+            .status()
+            .is_ok_and(|status| status.success());
+        let _ = super::super::terminate_process(process_id);
+        assert!(survived, "shared runtime exited when Buzz dropped Child");
     }
 
     #[cfg(not(windows))]
