@@ -95,6 +95,7 @@ pub(crate) use session_policy::{
     AcpSessionPolicy, ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
 };
 pub use storage::*;
+pub(crate) use storage::load_managed_agents_for_active_community;
 pub use teams::*;
 pub use types::*;
 

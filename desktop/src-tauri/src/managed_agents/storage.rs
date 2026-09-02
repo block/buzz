@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -7,11 +7,111 @@ use std::{
 
 use tauri::{AppHandle, Manager};
 
-use crate::app_state::keyring_service;
+use crate::app_state::{keyring_service, AppState};
 use crate::managed_agents::{
     ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
 };
 use crate::secret_store::{KeyringProbe, SecretStore};
+
+/// Filename prefix of the per-community agent store shards. Each community
+/// (relay host) gets `managed-agents-community.<host>.json` next to the legacy
+/// global store. The prefix is deliberately distinct from
+/// `managed-agents.json` so hand-made backup copies (e.g.
+/// `managed-agents.my-community.json`) are never mistaken for a shard.
+const COMMUNITY_SHARD_PREFIX: &str = "managed-agents-community.";
+const COMMUNITY_SHARD_SUFFIX: &str = ".json";
+
+/// Extract the host component of a relay URL for use in a shard filename.
+///
+/// Returns `None` when the URL is empty, has no host, or the host contains
+/// characters that would be unsafe as a filename component (anything outside
+/// `[a-z0-9.-]`). A `None` means the record cannot be scoped to a community
+/// and must stay in the legacy global store (fail-open to the pre-#7184
+/// behavior) — never silently dropped.
+fn relay_host_of(relay_url: &str) -> Option<String> {
+    let trimmed = relay_url.trim().trim_end_matches('/');
+    // An authority is only present after "scheme://". A bare string without a
+    // scheme separator ("localhost:3000", "wss") is not a relay URL — treat it
+    // as hostless so it can never become a misleading shard filename.
+    let (_, after_scheme) = trimmed.split_once("://")?;
+    let host_port = after_scheme.split('/').next()?;
+    if host_port.is_empty() {
+        return None;
+    }
+    let host = host_port
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(host_port);
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let safe = host
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+        && !host.starts_with('.')
+        && !host.contains("..")
+        && host.split('.').all(|label| !label.is_empty());
+    safe.then_some(host)
+}
+
+/// Shard filename for a relay host (host is already sanitized).
+fn community_shard_file_name(host: &str) -> String {
+    format!("{COMMUNITY_SHARD_PREFIX}{host}{COMMUNITY_SHARD_SUFFIX}")
+}
+
+/// Enumerate existing community shard files under `base_dir`, sorted by name
+/// for deterministic load order. Only files whose middle segment parses as a
+/// sanitized relay host are returned; anything else (backups, hand copies,
+/// `.invalid` preserves) is ignored.
+pub(crate) fn community_shard_paths(base_dir: &Path) -> Vec<PathBuf> {
+    let mut shards = Vec::new();
+    let Ok(entries) = fs::read_dir(base_dir) else {
+        return shards;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(host) = name
+            .strip_prefix(COMMUNITY_SHARD_PREFIX)
+            .and_then(|rest| rest.strip_suffix(COMMUNITY_SHARD_SUFFIX))
+        else {
+            continue;
+        };
+        let safe = !host.is_empty()
+            && host
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.');
+        if safe {
+            shards.push(entry.path());
+        }
+    }
+    shards.sort();
+    shards
+}
+
+/// Partition keyed instances by destination store: records carrying a
+/// sanitized relay host go to that community's shard; everything else
+/// (unpinned legacy records, and by construction all key-less definitions,
+/// which callers keep separate anyway) stays in the legacy global store.
+fn partition_by_community(
+    instances: Vec<ManagedAgentRecord>,
+) -> (
+    Vec<ManagedAgentRecord>,
+    BTreeMap<String, Vec<ManagedAgentRecord>>,
+) {
+    let mut legacy = Vec::new();
+    let mut shards: BTreeMap<String, Vec<ManagedAgentRecord>> = BTreeMap::new();
+    for record in instances {
+        match relay_host_of(&record.relay_url) {
+            Some(host) => shards.entry(host).or_default().push(record),
+            None => legacy.push(record),
+        }
+    }
+    (legacy, shards)
+}
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
@@ -238,26 +338,43 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
 
 /// Read the raw unified store — keyed instances AND key-less definitions —
 /// with fail-loud parse handling. Internal seam; public readers filter.
-fn load_agent_store<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Vec<ManagedAgentRecord>, String> {
-    let path = managed_agents_store_path(app)?;
+///
+/// Reads the legacy global store PLUS every community shard found on disk and
+/// concatenates their records (legacy first, then shards in filename order).
+/// Fail-loud contract per file: a malformed shard is preserved as
+/// `<shard>.invalid` and its parse error propagates exactly like the global
+/// store's (a later save would rewrite it wholesale, so silent swallowing
+/// would destroy a malformed hand edit).
+fn read_store_file(path: &Path) -> Result<Vec<ManagedAgentRecord>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read agent store: {error}"))?;
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read agent store {}: {error}", path.display()))?;
     serde_json::from_str(&content).map_err(|error| {
-        // Fail loudly and preserve the evidence: a later in-app save rewrites
-        // this file wholesale, which would silently destroy a malformed hand
-        // edit. Best-effort file-authoring contract (see managed_agents::
-        // reconcile): the broken content survives as `.invalid` for the user
-        // to recover, and the parse error propagates instead of being
-        // swallowed into an empty store.
-        backup_invalid_store(&path);
-        format!("failed to parse agent store (preserved as .invalid): {error}")
+        backup_invalid_store(path);
+        format!(
+            "failed to parse agent store {} (preserved as .invalid): {error}",
+            path.display()
+        )
     })
+}
+
+fn load_agent_store<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ManagedAgentRecord>, String> {
+    let base_dir = managed_agents_base_dir(app)?;
+    let mut records = read_store_file(&legacy_store_path(&base_dir))?;
+    for shard in community_shard_paths(&base_dir) {
+        records.extend(read_store_file(&shard)?);
+    }
+    Ok(records)
+}
+
+/// Legacy (pre-sharding) store filename, still used for key-less definitions
+/// and unpinned records. Path = `<base>/managed-agents.json`.
+fn legacy_store_path(base_dir: &Path) -> PathBuf {
+    base_dir.join("managed-agents.json")
 }
 
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
@@ -269,6 +386,44 @@ pub fn load_managed_agents<R: tauri::Runtime>(
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);
+    Ok(records)
+}
+
+/// Active workspace relay host, or `None` when it cannot be resolved.
+///
+/// Precedence mirrors `relay::relay_ws_url_with_override`: workspace override
+/// first (community switch), then env/build vars, then the default. Resolving
+/// through `relay_ws_url_with_override` (not the override alone) keeps the
+/// pre-apply boot path working: before the frontend applies the first
+/// workspace, no override is set and the default/env relay is the host used.
+fn active_community_host<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let state = app.try_state::<AppState>()?;
+    let url = crate::relay::relay_ws_url_with_override(&state);
+    relay_host_of(&url)
+}
+
+/// Load the keyed instances VISIBLE to the active community (#7184).
+///
+/// A record is visible when its `relay_url` is empty (unpinned legacy record —
+/// fail-open, matches the pre-sharding shared-roster behavior and keeps boot
+/// migrations working before a workspace is applied) or when its relay host
+/// equals the active workspace host. Records pinned to another community are
+/// invisible here: their definitions never leak across the tenant boundary.
+///
+/// Fail-open rule: when the active host cannot be resolved at all (no state,
+/// unparseable URL) every instance is returned — isolation degrades to the
+/// pre-fix behavior, never to an empty roster that would look like data loss.
+pub fn load_managed_agents_for_active_community<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ManagedAgentRecord>, String> {
+    let mut records = load_managed_agents(app)?;
+    if let Some(active) = active_community_host(app) {
+        records.retain(|record| {
+            relay_host_of(&record.relay_url)
+                .map(|host| host == active)
+                .unwrap_or(true) // unpinned → visible everywhere (fail-open)
+        });
+    }
     Ok(records)
 }
 
@@ -405,27 +560,83 @@ pub(crate) fn save_agent_definitions<R: tauri::Runtime>(
     write_agent_store(app, definitions, instances)
 }
 
-/// Serialize definitions + instances into the single unified store file.
-/// Definitions sort first (by slug) for stable diffs; instances keep the
-/// name/pubkey order their save path established.
+/// Serialize definitions + instances into the store files.
+///
+/// Definitions (key-less) and unpinned instances always land in the legacy
+/// global store (`managed-agents.json`). Keyed instances whose `relay_url`
+/// carries a sanitized host are written to that community's shard
+/// (`managed-agents-community.<host>.json`) — the #7184 tenant-isolation
+/// boundary. A shard holds ONLY its community's records: saving one
+/// community's roster never rewrites another's file, and the fail-open rule
+/// (unparseable relay → legacy store) means a record is never dropped by a
+/// save.
 fn write_agent_store<R: tauri::Runtime>(
     app: &AppHandle<R>,
     mut definitions: Vec<ManagedAgentRecord>,
     instances: Vec<ManagedAgentRecord>,
 ) -> Result<(), String> {
     definitions.sort_by(|left, right| left.slug.cmp(&right.slug));
-    let mut all = definitions;
-    all.extend(instances);
 
-    let path = managed_agents_store_path(app)?;
-    let payload = serde_json::to_vec_pretty(&all)
-        .map_err(|error| format!("failed to serialize agent store: {error}"))?;
+    let (legacy_instances, shards) = partition_by_community(instances);
+
+    let base_dir = managed_agents_base_dir(app)?;
+    let legacy_path = legacy_store_path(&base_dir);
+
+    // Persist each key to the keyring before serializing so the inline copy
+    // can be stripped on success (keyring-unreachable keys stay inline).
+    let mut all: Vec<ManagedAgentRecord> = definitions;
+    all.extend(legacy_instances);
+    for shard_records in shards.values() {
+        all.extend(shard_records.iter().cloned());
+    }
+    persist_agent_keys(&mut all);
+
+    // Re-partition after key handling: `persist_agent_keys` only blanks
+    // in-memory inline copies, it does not touch `relay_url`, so membership
+    // is stable — but serialize from the same records we just stripped.
+    let mut definitions_out: Vec<ManagedAgentRecord> = Vec::new();
+    let mut legacy_out: Vec<ManagedAgentRecord> = Vec::new();
+    for record in all {
+        if record.pubkey.is_empty() {
+            definitions_out.push(record);
+        } else {
+            legacy_out.push(record);
+        }
+    }
+    definitions_out.sort_by(|left, right| left.slug.cmp(&right.slug));
+
+    // Legacy store: definitions + unpinned instances (the pre-#7184 shape).
+    let legacy_payload = serde_json::to_vec_pretty(&{
+        let mut combined = definitions_out;
+        combined.extend(legacy_out);
+        combined
+    })
+    .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
     // `managed-agents.json` carries plaintext agent nsecs in the keyringless
     // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
     // keyring-backed case (it is the user's own agent store) and closes the
     // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)
+    atomic_write_json_restricted(&legacy_path, &legacy_payload)?;
+
+    // Per-community shards: each holds only its own records. A shard for a
+    // community that no longer has any records is rewritten as `[]` rather
+    // than deleted — deletion would race a concurrent reader and `[]` keeps
+    // the fail-loud parse contract uniform (a missing file is also valid).
+    for (host, mut shard_records) in shards {
+        shard_records.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.pubkey.cmp(&right.pubkey))
+        });
+        let shard_path = base_dir.join(community_shard_file_name(&host));
+        let payload = serde_json::to_vec_pretty(&shard_records)
+            .map_err(|error| format!("failed to serialize agent shard {host}: {error}"))?;
+        atomic_write_json_restricted(&shard_path, &payload)?;
+    }
+
+    Ok(())
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy
