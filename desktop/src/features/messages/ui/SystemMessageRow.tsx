@@ -26,6 +26,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
+  addedToChannelActionPrefix,
   addedByActionPrefix,
   describeChannelTextFieldChange,
   toInlineName,
@@ -459,9 +460,15 @@ function describeGroupedArrivals({
   if (!arrivals?.length || !payload.targets?.length) return null;
 
   const sharedActor = arrivals[0].actor;
-  const isSameAdderGroup = arrivals.every(
-    ({ actor, target }) => actor === sharedActor && actor !== target,
-  );
+  const hasSelfJoins = arrivals.some(({ actor, target }) => actor === target);
+  const hasAdditions = arrivals.some(({ actor, target }) => actor !== target);
+  const isSameAdderGroup =
+    hasAdditions &&
+    arrivals.every(
+      ({ actor, target }) => actor === sharedActor && actor !== target,
+    );
+  const isAllAdditionGroup = hasAdditions && !hasSelfJoins;
+  const isAllSelfJoinGroup = hasSelfJoins && !hasAdditions;
   const additionalTargets = payload.targets.slice(1);
 
   if (payload.targets.length === 1) {
@@ -479,9 +486,23 @@ function describeGroupedArrivals({
       };
     }
 
+    if (isAllAdditionGroup) {
+      return {
+        title: membershipTitle,
+        action: addedToChannelActionPrefix(isTargetCurrentUser),
+      };
+    }
+
+    if (isAllSelfJoinGroup) {
+      return {
+        title: membershipTitle,
+        action: "joined the channel",
+      };
+    }
+
     return {
       title: membershipTitle,
-      action: "joined the channel",
+      action: "arrived in the channel",
     };
   }
 
@@ -507,11 +528,47 @@ function describeGroupedArrivals({
     };
   }
 
+  if (isAllAdditionGroup) {
+    return {
+      title: membershipTitle,
+      action: (
+        <>
+          {addedToChannelActionPrefix(isTargetCurrentUser)} along with{" "}
+          <MemberNamesInlineList
+            agentPubkeys={agentPubkeys}
+            currentPubkey={currentPubkey}
+            personaLookup={personaLookup}
+            profiles={profiles}
+            targets={additionalTargets}
+          />
+        </>
+      ),
+    };
+  }
+
+  if (isAllSelfJoinGroup) {
+    return {
+      title: membershipTitle,
+      action: (
+        <>
+          joined the channel along with{" "}
+          <MemberNamesInlineList
+            agentPubkeys={agentPubkeys}
+            currentPubkey={currentPubkey}
+            personaLookup={personaLookup}
+            profiles={profiles}
+            targets={additionalTargets}
+          />
+        </>
+      ),
+    };
+  }
+
   return {
     title: membershipTitle,
     action: (
       <>
-        joined the channel along with{" "}
+        arrived in the channel along with{" "}
         <MemberNamesInlineList
           agentPubkeys={agentPubkeys}
           currentPubkey={currentPubkey}

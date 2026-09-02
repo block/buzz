@@ -34,10 +34,10 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
 const HUDDLE_EPHEMERAL_CHANNEL_ID = "3f9f2c4e-8b7a-4b1c-9d2e-5a6f7c8d9e0f";
-const ELROND_PUBKEY = "11".repeat(32);
-const LEGOLAS_PUBKEY = "12".repeat(32);
-const GIMLI_PUBKEY = "13".repeat(32);
-const GANDALF_PUBKEY = "14".repeat(32);
+const ELROND_PUBKEY = "15".repeat(32);
+const LEGOLAS_PUBKEY = "16".repeat(32);
+const GIMLI_PUBKEY = "17".repeat(32);
+const GANDALF_PUBKEY = "18".repeat(32);
 const JOIN_COLLAPSE_CHANNEL_NAME = "random";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
@@ -50,7 +50,7 @@ const JOIN_COLLAPSE_SPLIT_TEXTS = [
   "Gandalf added by you",
 ];
 const JOIN_COLLAPSE_GROUPED_TEXT =
-  "Elrond joined the channel along with Legolas, Gimli, and Gandalf";
+  "Elrond was added to the channel along with Legolas, Gimli, and Gandalf";
 const JOIN_COLLAPSE_CAPTURE_WIDTH = 560;
 const JOIN_COLLAPSE_CAPTURE_HEIGHT = 260;
 const JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING = 24;
