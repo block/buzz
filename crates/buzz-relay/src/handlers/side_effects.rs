@@ -3257,13 +3257,32 @@ pub async fn reconcile_large_channel_member_snapshots(
 }
 
 /// Reconcile channels that exist in the DB but don't have kind:39000 events.
+/// Discovery kinds that must ALL be present for a channel to be considered
+/// reconciled. Probing only 39000 caused issue #3460: a channel whose
+/// metadata event was written but whose member-list (39002) or admin-list
+/// (39001) emission failed would pass the old check and forever surface a
+/// stale (or missing) member list to `#p` queries.
+const REQUIRED_DISCOVERY_KINDS: [i32; 3] = [39000, 39001, 39002];
+
+/// Reconcile per-channel NIP-29 discovery events signed by the relay.
 ///
-/// This handles the case where channels were created via direct SQL inserts
-/// (e.g. test seed scripts) rather than through the Nostr event pipeline.
-/// Emits kind:39000 (metadata) and kind:39002 (members) for each channel
-/// that is missing its discovery events.
+/// Emission is out-of-band and best-effort: every site that changes membership
+/// or metadata *tries* to emit, but tolerates failure (e.g. `handle_join_request`
+/// `warn!`-logs and proceeds on `emit_group_discovery_events` error). That means
+/// a channel can exist whose metadata event (kind:39000) was published (with the
+/// then-empty member list) while the members event (kind:39002) was rolled back
+/// or never written — and previously the reconcile pass only probed for 39000,
+/// so every subsequent startup classified the channel as reconciled and left
+/// 39002 missing forever. The result was exactly issue #3460: the relay's
+/// published member list omitted pubkeys that the `channel_members` table held,
+/// and the client's `#p` query for their memberships returned empty on cold boot.
 ///
-/// Idempotent: checks for existing kind:39000 events before emitting.
+/// The check now requires **all three** discovery kinds (metadata 39000, admins
+/// 39001, members 39002 — see [`REQUIRED_DISCOVERY_KINDS`]) to be present for a
+/// channel before it is considered reconciled. If any is missing we re-emit all
+/// of them (idempotent; the emission is a full replace of the current snapshot),
+/// catching both the "39002 was never written" shape and the "39001 (admins)
+/// got lost" shape that otherwise would have fallen through the 39000-only probe.
 pub async fn reconcile_channel_events(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -3277,31 +3296,47 @@ pub async fn reconcile_channel_events(
 
     let mut reconciled = 0u32;
     for channel in &channels {
-        // Check if kind:39000 event already exists for this channel.
         let channel_id_str = channel.id.to_string();
-        let existing = match state
-            .db
-            .query_events(&EventQuery {
-                kinds: Some(vec![39000]),
-                d_tag: Some(channel_id_str.clone()),
-                limit: Some(1),
-                ..EventQuery::for_community(tenant.community())
-            })
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    channel_id = %channel.id,
-                    error = %e,
-                    "reconcile: failed to query existing discovery events"
-                );
-                continue;
+
+        // Probe one addressable event per required kind; any missing kind
+        // forces a re-emission. One query per kind is acceptable here: this
+        // runs once at boot per channel. Returns none of the loop body's work
+        // on a query error — we fail closed and skip the channel rather than
+        // re-emitting on a shaky connection.
+        let needs_emission = 'probe: {
+            for kind in REQUIRED_DISCOVERY_KINDS {
+                let present = match state
+                    .db
+                    .query_events(&EventQuery {
+                        kinds: Some(vec![kind]),
+                        d_tag: Some(channel_id_str.clone()),
+                        limit: Some(1),
+                        ..EventQuery::for_community(tenant.community())
+                    })
+                    .await
+                {
+                    Ok(v) => !v.is_empty(),
+                    Err(e) => {
+                        tracing::warn!(
+                            channel_id = %channel.id,
+                            kind,
+                            error = %e,
+                            "reconcile: failed to query existing discovery event"
+                        );
+                        // Fail closed on DB error: skip this channel rather than
+                        // re-emitting on a shaky connection.
+                        break 'probe false;
+                    }
+                };
+                if !present {
+                    break 'probe true;
+                }
             }
+            false
         };
 
-        if existing.is_empty() {
-            // No discovery event — emit one.
+        if needs_emission {
+            // At least one required discovery kind is missing — re-emit all.
             if let Err(e) = emit_group_discovery_events(tenant, state, channel.id).await {
                 tracing::warn!(
                     channel_id = %channel.id,
@@ -3683,6 +3718,23 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3460: the reconcile pass must probe **all three** NIP-29 discovery
+    /// kinds (39000 metadata, 39001 admins, 39002 members), not just 39000.
+    /// A channel whose metadata event was written at creation (when the member
+    /// list was empty) but whose member-list emission later failed would
+    /// otherwise pass the old 39000-only probe forever, hiding members from
+    /// the client's `#p` query on cold boot. This pins the contract so the
+    /// revert can't silently regress.
+    #[test]
+    fn reconcile_probes_metadata_admins_and_members_kinds() {
+        assert_eq!(REQUIRED_DISCOVERY_KINDS, [39000, 39001, 39002]);
+        assert_eq!(REQUIRED_DISCOVERY_KINDS.len(), 3);
+        // Sanity: each kind is a distinct NIP-29 discovery kind, in the order
+        // the relay's own NIP-29 doc-comment groups them.
+        assert_eq!(REQUIRED_DISCOVERY_KINDS[0], buzz_core::kind::KIND_NIP29_GROUP_METADATA as i32);
+        assert_eq!(REQUIRED_DISCOVERY_KINDS[2], buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as i32);
+    }
 
     #[test]
     fn group_members_snapshot_keeps_members_past_one_thousand() {
