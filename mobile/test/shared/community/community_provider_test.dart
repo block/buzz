@@ -80,6 +80,55 @@ void main() {
       expect(communities.first.name, 'Renamed');
     });
 
+    test('updateLanRelayUrl saves and clears the private transport', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+
+      final community = Community.create(
+        name: 'Test',
+        relayUrl: 'https://test.example.com',
+      );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+
+      await notifier.updateLanRelayUrl(community.id, 'ws://10.24.11.82:3000');
+      expect(
+        (await container.read(communityListProvider.future)).single.lanRelayUrl,
+        'ws://10.24.11.82:3000',
+      );
+
+      await notifier.updateLanRelayUrl(community.id, null);
+      expect(
+        (await container.read(communityListProvider.future)).single.lanRelayUrl,
+        isNull,
+      );
+    });
+
+    test('re-pairing updates the private transport', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+
+      final original = Community.create(
+        name: 'Test',
+        relayUrl: 'https://test.example.com',
+      );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(original);
+
+      await notifier.addCommunity(
+        Community.create(
+          name: 'Test',
+          relayUrl: original.relayUrl,
+          lanRelayUrl: 'ws://10.24.11.82:3000',
+        ),
+      );
+
+      expect(
+        (await container.read(communityListProvider.future)).single.lanRelayUrl,
+        'ws://10.24.11.82:3000',
+      );
+    });
+
     test('switchCommunity updates active ID', () async {
       container = createContainer();
       await container.read(communityListProvider.future);

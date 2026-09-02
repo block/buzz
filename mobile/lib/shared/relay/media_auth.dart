@@ -1,7 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'relay_provider.dart';
@@ -12,6 +15,60 @@ const _mediaGetAuthLifetimeSeconds = 600;
 /// Re-sign this long before the cached auth event expires, so an in-flight
 /// request signed just before the boundary still lands well within validity.
 const _mediaGetAuthRefreshMarginSeconds = 60;
+
+class MediaRequestTarget {
+  final Uri uri;
+  final Map<String, String> headers;
+
+  const MediaRequestTarget({required this.uri, required this.headers});
+}
+
+Future<http.Response> fetchMediaResponse(
+  http.Client client,
+  List<MediaRequestTarget> targets,
+) async {
+  if (targets.isEmpty) {
+    throw const FormatException('No valid media request target');
+  }
+
+  Object? lastError;
+  for (var index = 0; index < targets.length; index++) {
+    final target = targets[index];
+    final hasFallback = index + 1 < targets.length;
+    try {
+      final response = await client.get(target.uri, headers: target.headers);
+      if (kDebugMode) {
+        debugPrint(
+          'Buzz media GET ${target.uri} '
+          'host=${target.headers[HttpHeaders.hostHeader] ?? target.uri.authority} '
+          'auth=${target.headers.keys.any((key) => key.toLowerCase() == HttpHeaders.authorizationHeader)} '
+          'status=${response.statusCode}',
+        );
+      }
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return response;
+      }
+      if (hasFallback &&
+          (response.statusCode == HttpStatus.notFound ||
+              response.statusCode >= 500)) {
+        lastError = HttpException(
+          'Media request failed (${response.statusCode})',
+          uri: target.uri,
+        );
+        continue;
+      }
+      return response;
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Buzz media GET ${target.uri} failed: $error');
+      }
+      if (!hasFallback) rethrow;
+      lastError = error;
+    }
+  }
+
+  throw lastError ?? StateError('No relay media transport available');
+}
 
 /// Builds BUD-01 Blossom `t=get` auth headers for relay-host media URLs.
 ///
@@ -26,6 +83,7 @@ const _mediaGetAuthRefreshMarginSeconds = 60;
 /// identity — changes, via [mediaGetAuthServiceProvider].
 class MediaGetAuthService {
   final String _baseUrl;
+  final String? _lanRelayUrl;
   final String? _nsec;
   final DateTime Function() _now;
 
@@ -34,17 +92,18 @@ class MediaGetAuthService {
 
   MediaGetAuthService({
     required String baseUrl,
+    String? lanRelayUrl,
     required String? nsec,
     DateTime Function()? now,
   }) : _baseUrl = baseUrl,
+       _lanRelayUrl = lanRelayUrl,
        _nsec = nsec,
        _now = now ?? DateTime.now;
 
   bool isRelayMediaUrl(String url) {
     final uri = Uri.tryParse(url);
-    final relayUri = Uri.tryParse(_baseUrl);
-    if (uri == null || relayUri == null) return false;
-    return _isRelayMediaUrl(uri, relayUri);
+    if (uri == null) return false;
+    return _isRelayMediaUrl(uri);
   }
 
   Map<String, String> headersFor(String url) {
@@ -83,19 +142,72 @@ class MediaGetAuthService {
     }
   }
 
-  bool _isRelayMediaUrl(Uri uri, Uri relayUri) {
+  List<MediaRequestTarget> requestTargetsFor(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme) return const [];
+    final canonicalHeaders = headersFor(url);
+    if (!isRelayMediaUrl(url)) {
+      return [MediaRequestTarget(uri: uri, headers: canonicalHeaders)];
+    }
+
+    final canonicalUri = _canonicalMediaUri(uri);
+    final canonicalTarget = MediaRequestTarget(
+      uri: canonicalUri,
+      headers: canonicalHeaders,
+    );
+    final lanUri = _lanMediaUri(uri);
+    if (lanUri == null || lanUri == uri) return [canonicalTarget];
+    final lanHeaders = Map<String, String>.unmodifiable({
+      ...canonicalHeaders,
+      HttpHeaders.hostHeader: Uri.parse(_baseUrl).authority,
+    });
+    return [
+      MediaRequestTarget(uri: lanUri, headers: lanHeaders),
+      canonicalTarget,
+    ];
+  }
+
+  Uri? _lanMediaUri(Uri mediaUri) {
+    final relay = Uri.tryParse(_lanRelayUrl ?? '');
+    if (relay == null || relay.host.isEmpty) return null;
+    if (!const {'ws', 'wss', 'http', 'https'}.contains(relay.scheme)) {
+      return null;
+    }
+    return Uri(
+      scheme: 'http',
+      host: relay.host,
+      port: relay.hasPort ? relay.port : null,
+      path: mediaUri.path,
+      query: mediaUri.hasQuery ? mediaUri.query : null,
+    );
+  }
+
+  Uri _canonicalMediaUri(Uri mediaUri) {
+    final relay = Uri.parse(_baseUrl);
+    return Uri(
+      scheme: relay.scheme,
+      host: relay.host,
+      port: relay.hasPort ? relay.port : null,
+      path: mediaUri.path,
+      query: mediaUri.hasQuery ? mediaUri.query : null,
+    );
+  }
+
+  bool _isRelayMediaUrl(Uri uri) {
     if (uri.scheme != 'http' && uri.scheme != 'https') return false;
-    if (uri.host.isEmpty || relayUri.host.isEmpty) return false;
+    if (uri.host.isEmpty || !uri.path.startsWith('/media/')) return false;
     // Extract the URL's origin and path. Query strings are ignored for media
     // host/path detection, matching the fetch target shape used by descriptors.
     final base = '${uri.scheme}://${uri.authority}';
     final mediaAuthority = extractServerAuthority(base);
-    final relayAuthority = extractServerAuthority(_baseUrl);
-    if (mediaAuthority == null || relayAuthority == null) return false;
-    if (mediaAuthority.toLowerCase() != relayAuthority.toLowerCase()) {
-      return false;
-    }
-    return uri.path.startsWith('/media/');
+    if (mediaAuthority == null) return false;
+    final relayAuthorities = [
+      extractServerAuthority(_baseUrl),
+      if (_lanRelayUrl != null) extractServerAuthority(_lanRelayUrl),
+    ].whereType<String>();
+    return relayAuthorities.any(
+      (authority) => mediaAuthority.toLowerCase() == authority.toLowerCase(),
+    );
   }
 
   nostr.Event _buildGetAuthEvent(String nsec) {
@@ -125,7 +237,11 @@ class MediaGetAuthService {
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return MediaGetAuthService(baseUrl: config.baseUrl, nsec: config.nsec);
+  return MediaGetAuthService(
+    baseUrl: config.baseUrl,
+    lanRelayUrl: config.lanRelayUrl,
+    nsec: config.nsec,
+  );
 });
 
 Map<String, String> mediaGetHeadersFor(WidgetRef ref, String url) {

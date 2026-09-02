@@ -64,4 +64,71 @@ void main() {
       expect(config.wsUrl, 'wss://relay.example.com:8443');
     });
   });
+
+  group('Campus / LAN relay', () {
+    test('normalizes a bare private address', () {
+      expect(normalizeLanRelayUrl('10.24.11.82:3000'), 'ws://10.24.11.82:3000');
+    });
+
+    test('accepts private and Tailscale IPv4 addresses', () {
+      expect(
+        normalizeLanRelayUrl('ws://192.168.1.5:3000'),
+        'ws://192.168.1.5:3000',
+      );
+      expect(
+        normalizeLanRelayUrl('ws://100.71.241.45:3000'),
+        'ws://100.71.241.45:3000',
+      );
+    });
+
+    test('accepts private IPv6 addresses', () {
+      expect(
+        normalizeLanRelayUrl('ws://[fd00::1]:3000'),
+        'ws://[fd00::1]:3000',
+      );
+      expect(
+        normalizeLanRelayUrl('ws://[fe80::1]:3000'),
+        'ws://[fe80::1]:3000',
+      );
+    });
+
+    test('rejects public, TLS, and path-bearing transports', () {
+      expect(
+        () => normalizeLanRelayUrl('ws://8.8.8.8:3000'),
+        throwsFormatException,
+      );
+      expect(
+        () => normalizeLanRelayUrl('wss://10.24.11.82:3000'),
+        throwsFormatException,
+      );
+      expect(
+        () => normalizeLanRelayUrl('ws://10.24.11.82:3000/query'),
+        throwsFormatException,
+      );
+      expect(
+        () => normalizeLanRelayUrl('ws://fcorp.example:3000'),
+        throwsFormatException,
+      );
+    });
+
+    test('orders private transports before the canonical relay', () {
+      final config = RelayConfig(
+        baseUrl: 'wss://content.example.app',
+        lanRelayUrl: 'ws://10.24.11.82:3000',
+      );
+
+      expect(config.wsUrls, [
+        'ws://10.24.11.82:3000',
+        'wss://content.example.app',
+      ]);
+      expect(config.httpBaseUrls, [
+        'http://10.24.11.82:3000',
+        'https://content.example.app',
+      ]);
+    });
+
+    test('an empty value disables the private transport', () {
+      expect(normalizeLanRelayUrl('  '), isNull);
+    });
+  });
 }

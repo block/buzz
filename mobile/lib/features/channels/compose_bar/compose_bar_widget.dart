@@ -615,7 +615,13 @@ class ComposeBar extends HookConsumerWidget {
       try {
         final picked = await pick();
         if (picked == null || !context.mounted) return;
-        queueAttachment(picked, kind);
+        queueAttachment(
+          picked,
+          kind,
+          deleteAfterUse:
+              defaultTargetPlatform == TargetPlatform.android &&
+              kind == _PendingAttachmentKind.file,
+        );
       } catch (error) {
         if (context.mounted) {
           uploadError.value = _formatUploadError(error);

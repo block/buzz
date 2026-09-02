@@ -79,6 +79,50 @@ void main() {
     expect(tags.any((tag) => tag.length == 2 && tag[0] == 'nonce'), isTrue);
   });
 
+  test(
+    'queryRelay preserves canonical identity over a LAN transport',
+    () async {
+      http.Request? capturedRequest;
+      final client = http_testing.MockClient((request) async {
+        capturedRequest = request;
+        return http.Response('[]', 200);
+      });
+      final session = RelaySessionNotifier(httpClient: client);
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              lanRelayUrl: 'ws://10.24.11.82:3000',
+              nsec: nostr.Keys.generate().nsec,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(relaySessionProvider.notifier).queryRelay(const []);
+
+      expect(capturedRequest!.url.toString(), 'http://10.24.11.82:3000/query');
+      expect(capturedRequest!.headers['Host'], 'relay.example');
+      final encoded = capturedRequest!.headers['Authorization']!.substring(
+        'Nostr '.length,
+      );
+      final decoded = utf8.decode(
+        base64Url.decode(base64Url.normalize(encoded)),
+      );
+      final authEvent = jsonDecode(decoded) as Map<String, dynamic>;
+      final tags = (authEvent['tags'] as List<dynamic>)
+          .map((tag) => (tag as List<dynamic>).cast<String>())
+          .toList();
+      expect(
+        tags,
+        anyElement(equals(<String>['u', 'https://relay.example/query'])),
+      );
+    },
+  );
+
   test('queryRelay rejects malformed event arrays', () async {
     final keychain = nostr.Keys.generate();
     final session = RelaySessionNotifier(
@@ -377,6 +421,40 @@ void main() {
     },
   );
 
+  test(
+    'relay event echo completes a publish when its OK frame is lost',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = RelaySocket(
+        wsUrl: 'ws://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      session.debugAttachSocketForTest(socket);
+      addTearDown(session.debugDispose);
+      const event = NostrEvent(
+        id: 'published-event',
+        pubkey: 'author',
+        createdAt: 1,
+        kind: EventKind.streamMessage,
+        tags: [],
+        content: 'hello',
+        sig: 'signature',
+      );
+
+      final published = session.publish(
+        event,
+        timeout: const Duration(seconds: 1),
+      );
+      await Future<void>.delayed(Duration.zero);
+      session.debugHandleMessage(['EVENT', 'live-1', event.toJson()]);
+
+      expect((await published).id, event.id);
+    },
+  );
+
   test('background disconnect rejects in-flight history', () async {
     final session = RelaySessionNotifier();
     final container = ProviderContainer(
@@ -455,6 +533,7 @@ void main() {
       socketFactory:
           ({
             required wsUrl,
+            required transportUrl,
             required nsec,
             required onMessage,
             required onConnected,
@@ -462,6 +541,7 @@ void main() {
           }) {
             final socket = _ControlledRelaySocket(
               wsUrl: wsUrl,
+              transportUrl: transportUrl,
               nsec: nsec,
               onMessage: onMessage,
               onConnected: onConnected,
@@ -502,6 +582,115 @@ void main() {
     expect(session.state.status, SessionStatus.connected);
   });
 
+  test('falls back from a failed LAN socket to the public relay', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required transportUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              transportUrl: transportUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(
+            baseUrl: 'https://relay.example',
+            lanRelayUrl: 'ws://10.24.11.82:3000',
+            nsec: keychain.nsec,
+          ),
+        ),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(sockets.single.wsUrl, 'wss://relay.example');
+    expect(sockets.single.transportUrl, 'ws://10.24.11.82:3000');
+    sockets.single.disconnectWith(Exception('LAN unavailable'));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(sockets, hasLength(2));
+    expect(sockets.last.wsUrl, 'wss://relay.example');
+    expect(sockets.last.transportUrl, isNull);
+    sockets.last.connectSuccessfully();
+    expect(session.state.status, SessionStatus.connected);
+  });
+
+  test('does not hide an authentication rejection behind fallback', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required transportUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              transportUrl: transportUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(
+            baseUrl: 'https://relay.example',
+            lanRelayUrl: 'ws://10.24.11.82:3000',
+            nsec: keychain.nsec,
+          ),
+        ),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+
+    sockets.single.disconnectWith(
+      const RelayAuthRejectedException('restricted: access revoked'),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(sockets, hasLength(1));
+    expect(session.state.status, SessionStatus.disconnected);
+  });
+
   test('does not schedule reconnects after background disconnect', () {
     final session = RelaySessionNotifier();
     final container = ProviderContainer(
@@ -528,6 +717,7 @@ void main() {
         socketFactory:
             ({
               required wsUrl,
+              required transportUrl,
               required nsec,
               required onMessage,
               required onConnected,
@@ -535,6 +725,7 @@ void main() {
             }) {
               final socket = _ControlledRelaySocket(
                 wsUrl: wsUrl,
+                transportUrl: transportUrl,
                 nsec: nsec,
                 onMessage: onMessage,
                 onConnected: onConnected,
@@ -585,6 +776,7 @@ void main() {
         socketFactory:
             ({
               required wsUrl,
+              required transportUrl,
               required nsec,
               required onMessage,
               required onConnected,
@@ -592,6 +784,7 @@ void main() {
             }) {
               final socket = _ControlledRelaySocket(
                 wsUrl: wsUrl,
+                transportUrl: transportUrl,
                 nsec: nsec,
                 onMessage: onMessage,
                 onConnected: onConnected,
@@ -1393,18 +1586,22 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
 }
 
 class _ControlledRelaySocket extends RelaySocket {
+  final String wsUrl;
+  final String? transportUrl;
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
   int disposeCalls = 0;
 
   _ControlledRelaySocket({
-    required super.wsUrl,
+    required this.wsUrl,
+    required this.transportUrl,
     required super.nsec,
     required super.onMessage,
     required super.onConnected,
     required super.onDisconnected,
   }) : _connected = onConnected,
-       _disconnected = onDisconnected;
+       _disconnected = onDisconnected,
+       super(wsUrl: wsUrl, transportUrl: transportUrl);
 
   @override
   Future<void> connect() async {}
@@ -1423,14 +1620,20 @@ const _channelId = '11111111-1111-4111-8111-111111111111';
 
 class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   final String _baseUrl;
+  final String? _lanRelayUrl;
   final String? _nsec;
 
-  _FakeRelayConfigNotifier({required String baseUrl, required String? nsec})
-    : _baseUrl = baseUrl,
-      _nsec = nsec;
+  _FakeRelayConfigNotifier({
+    required String baseUrl,
+    String? lanRelayUrl,
+    required String? nsec,
+  }) : _baseUrl = baseUrl,
+       _lanRelayUrl = lanRelayUrl,
+       _nsec = nsec;
 
   @override
-  RelayConfig build() => RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
+  RelayConfig build() =>
+      RelayConfig(baseUrl: _baseUrl, lanRelayUrl: _lanRelayUrl, nsec: _nsec);
 }
 
 NostrEvent _event({int createdAt = 20}) {

@@ -249,3 +249,34 @@ test("clearing demand closes current without opening a replacement", async () =>
   assert.deepEqual(actions, [`open:${A}`, `close:${A}`]);
   reconciler.dispose();
 });
+
+test("default timers keep the browser global as their receiver", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const scheduled = [];
+  globalThis.setTimeout = function (callback) {
+    assert.equal(this, globalThis);
+    scheduled.push(callback);
+    return scheduled.length;
+  };
+  globalThis.clearTimeout = function () {
+    assert.equal(this, globalThis);
+  };
+
+  try {
+    const reconciler = new PresenceSubscriptionReconciler({
+      open: async () => {
+        throw new Error("relay unavailable");
+      },
+      retryDelay: () => 1,
+    });
+
+    reconciler.setAuthors([A]);
+    await Promise.resolve();
+    assert.equal(scheduled.length, 1);
+    reconciler.dispose();
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});

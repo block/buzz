@@ -7,6 +7,7 @@ class Community {
   final String id;
   final String name;
   final String relayUrl;
+  final String? lanRelayUrl;
   final String? pubkey;
   final String? nsec;
   final DateTime addedAt;
@@ -15,6 +16,7 @@ class Community {
     required this.id,
     required this.name,
     required this.relayUrl,
+    this.lanRelayUrl,
     this.pubkey,
     this.nsec,
     required this.addedAt,
@@ -23,6 +25,7 @@ class Community {
   factory Community.create({
     required String name,
     required String relayUrl,
+    String? lanRelayUrl,
     String? pubkey,
     String? nsec,
   }) {
@@ -30,6 +33,7 @@ class Community {
       id: _uuid.v4(),
       name: name,
       relayUrl: relayUrl,
+      lanRelayUrl: lanRelayUrl,
       pubkey: pubkey,
       nsec: nsec,
       addedAt: DateTime.now(),
@@ -39,6 +43,7 @@ class Community {
   Community copyWith({
     String? name,
     String? relayUrl,
+    Object? lanRelayUrl = _sentinel,
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
   }) {
@@ -46,6 +51,9 @@ class Community {
       id: id,
       name: name ?? this.name,
       relayUrl: relayUrl ?? this.relayUrl,
+      lanRelayUrl: lanRelayUrl == _sentinel
+          ? this.lanRelayUrl
+          : lanRelayUrl as String?,
       pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       addedAt: addedAt,
@@ -56,6 +64,7 @@ class Community {
     'id': id,
     'name': name,
     'relayUrl': relayUrl,
+    if (lanRelayUrl != null) 'lanRelayUrl': lanRelayUrl,
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'addedAt': addedAt.toIso8601String(),
@@ -65,6 +74,7 @@ class Community {
     id: json['id'] as String,
     name: json['name'] as String,
     relayUrl: json['relayUrl'] as String,
+    lanRelayUrl: json['lanRelayUrl'] as String?,
     pubkey: json['pubkey'] as String?,
     nsec: json['nsec'] as String?,
     addedAt: DateTime.parse(json['addedAt'] as String),

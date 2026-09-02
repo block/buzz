@@ -91,11 +91,12 @@ where
     let key = format!("{sha256}.{ext}");
     let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256);
 
-    // Idempotent: short-circuit only if BOTH sidecar and blob exist. If the
+    // Idempotent: short-circuit only if BOTH sidecar and blob exist. Check the
+    // tenant sidecar first because it is absent for every fresh upload. That
+    // avoids an unnecessary object-store round trip on the common path. If the
     // sidecar exists but the blob is missing, fall through to re-upload.
     let sidecar_exists = storage.head(&meta_key).await?;
-    let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
+    if sidecar_exists && storage.head(&key).await? {
         let meta = storage.get_sidecar(ctx, &sha256).await?;
         // A re-upload of known bytes is still a distinct upload *event*: no
         // blob PUT happens, so without this record the uploader would be
@@ -431,9 +432,10 @@ pub async fn process_video_upload(
     let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256_hex);
 
     // --- 5. Idempotency check ---
+    // Probe the tenant sidecar first so fresh uploads do not pay for a second
+    // object-store HEAD request.
     let sidecar_exists = storage.head(&meta_key).await?;
-    let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
+    if sidecar_exists && storage.head(&key).await? {
         let meta = storage.get_sidecar(ctx, &sha256_hex).await?;
         // Re-upload of known bytes: still a distinct upload event — see the
         // buffered path's short-circuit for the rationale.

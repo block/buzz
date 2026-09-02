@@ -568,6 +568,7 @@ class _AttachmentStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final thumbWidth = 72.0;
+    final fileCardWidth = 208.0;
     final thumbHeight = 72.0;
 
     return SizedBox(
@@ -578,9 +579,10 @@ class _AttachmentStrip extends StatelessWidget {
         separatorBuilder: (_, _) => const SizedBox(width: Grid.half),
         itemBuilder: (context, index) {
           final attachment = attachments[index];
+          final isFile = attachment.kind == _PendingAttachmentKind.file;
           return Container(
             key: ValueKey('compose-attachment:${attachment.id}'),
-            width: thumbWidth,
+            width: isFile ? fileCardWidth : thumbWidth,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(Radii.md),
               border: Border.all(color: context.colors.outlineVariant),
@@ -619,24 +621,31 @@ class _AttachmentStrip extends StatelessWidget {
                       : ColoredBox(
                           color: context.colors.surface,
                           child: Padding(
-                            padding: const EdgeInsets.all(Grid.xxs),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
+                            padding: const EdgeInsets.fromLTRB(
+                              Grid.half,
+                              Grid.xs,
+                              36,
+                              Grid.xs,
+                            ),
+                            child: Row(
                               children: [
                                 Icon(
                                   LucideIcons.file,
                                   color: context.colors.onSurfaceVariant,
                                 ),
-                                const SizedBox(height: Grid.quarter),
-                                Text(
-                                  attachment.file.name.isEmpty
-                                      ? 'File'
-                                      : attachment.file.name,
-                                  maxLines: 2,
-                                  textAlign: TextAlign.center,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: context.textTheme.labelSmall?.copyWith(
-                                    color: context.colors.onSurfaceVariant,
+                                const SizedBox(width: Grid.half),
+                                Expanded(
+                                  child: Text(
+                                    attachment.file.name.isEmpty
+                                        ? 'File'
+                                        : attachment.file.name,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: context.textTheme.labelSmall
+                                        ?.copyWith(
+                                          color:
+                                              context.colors.onSurfaceVariant,
+                                        ),
                                   ),
                                 ),
                               ],

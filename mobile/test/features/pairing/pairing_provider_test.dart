@@ -14,13 +14,10 @@ import 'package:buzz/shared/relay/relay.dart';
 /// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
 /// SSRF-prevention validation.
 ///
-/// The pairing flow used to validate by calling `GET /api/users/me/profile`
-/// over HTTP. That has been replaced with a NIP-42 WebSocket handshake via
-/// [RelaySocket], which is constructed directly inside the provider with no
-/// dependency-injection hook — so the "happy path" that exercises the
-/// network is no longer mockable in a unit test.
+/// Credential validation uses an injected [RelaySocket] factory so LAN
+/// transport selection and canonical fallback stay unit-testable.
 ///
-/// What we still cover here:
+/// What we cover here:
 ///   - Initial state.
 ///   - Parsing every documented payload format (raw base64, `buzz://`
 ///     prefix, whitespace).
@@ -186,6 +183,236 @@ void main() {
       expect(container.read(pairingProvider).status, PairingStatus.idle);
     });
 
+    test('validates credentials over LAN before storing identity', () async {
+      final calls = <(String, String?)>[];
+      final notifier = PairingNotifier(
+        credentialSocketFactory:
+            ({
+              required wsUrl,
+              required transportUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              calls.add((wsUrl, transportUrl));
+              return _CredentialSocket(
+                connects: true,
+                wsUrl: wsUrl,
+                transportUrl: transportUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              );
+            },
+      );
+      fakeAuth = FakeAuthNotifier();
+      container = ProviderContainer(
+        overrides: [
+          authProvider.overrideWith(() => fakeAuth),
+          pairingProvider.overrideWith(() => notifier),
+        ],
+      );
+
+      await container
+          .read(pairingProvider.notifier)
+          .pair(
+            _encodePairingCode(
+              relayUrl: 'https://community.example',
+              lanRelayUrl: 'ws://10.24.11.82:3000',
+              nsec: _testNsec,
+            ),
+          );
+
+      expect(container.read(pairingProvider).status, PairingStatus.success);
+      expect(calls, [('wss://community.example', 'ws://10.24.11.82:3000')]);
+      expect(fakeAuth.lastCommunity?.relayUrl, 'https://community.example');
+      expect(fakeAuth.lastCommunity?.lanRelayUrl, 'ws://10.24.11.82:3000');
+    });
+
+    test('falls back to canonical relay when LAN validation fails', () async {
+      final transports = <String?>[];
+      final notifier = PairingNotifier(
+        credentialSocketFactory:
+            ({
+              required wsUrl,
+              required transportUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              transports.add(transportUrl);
+              return _CredentialSocket(
+                connects: transportUrl == null,
+                wsUrl: wsUrl,
+                transportUrl: transportUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              );
+            },
+      );
+      fakeAuth = FakeAuthNotifier();
+      container = ProviderContainer(
+        overrides: [
+          authProvider.overrideWith(() => fakeAuth),
+          pairingProvider.overrideWith(() => notifier),
+        ],
+      );
+
+      await container
+          .read(pairingProvider.notifier)
+          .pair(
+            _encodePairingCode(
+              relayUrl: 'https://community.example',
+              lanRelayUrl: 'ws://10.24.11.82:3000',
+              nsec: _testNsec,
+            ),
+          );
+
+      expect(container.read(pairingProvider).status, PairingStatus.success);
+      expect(transports, ['ws://10.24.11.82:3000', null]);
+    });
+
+    test('does not store identity when every relay transport fails', () async {
+      final notifier = PairingNotifier(
+        credentialSocketFactory:
+            ({
+              required wsUrl,
+              required transportUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) => _CredentialSocket(
+              connects: false,
+              wsUrl: wsUrl,
+              transportUrl: transportUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            ),
+      );
+      fakeAuth = FakeAuthNotifier();
+      container = ProviderContainer(
+        overrides: [
+          authProvider.overrideWith(() => fakeAuth),
+          pairingProvider.overrideWith(() => notifier),
+        ],
+      );
+
+      await container
+          .read(pairingProvider.notifier)
+          .pair(
+            _encodePairingCode(
+              relayUrl: 'https://community.example',
+              lanRelayUrl: 'ws://10.24.11.82:3000',
+              nsec: _testNsec,
+            ),
+          );
+
+      expect(container.read(pairingProvider).status, PairingStatus.error);
+      expect(fakeAuth.lastCommunity, isNull);
+    });
+
+    group('desktop identity transfer', () {
+      const sourceSecret =
+          '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
+      const sessionSecretHex =
+          'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+      late _ControllableSocket socket;
+      late PairingNotifier notifier;
+      late String pairingCode;
+
+      setUp(() {
+        final source = nostr.Keys(sourceSecret);
+        pairingCode =
+            'nostrpair://${source.public}'
+            '?secret=$sessionSecretHex'
+            '&relay=wss%3A%2F%2Fpairing.buzz.xyz&v=1';
+        notifier = PairingNotifier(
+          socketFactory:
+              ({
+                required wsUrl,
+                required ephemeralPrivkey,
+                required onMessage,
+                required onDisconnected,
+              }) {
+                socket = _ControllableSocket(
+                  ephemeralPrivkey: ephemeralPrivkey,
+                  onMessage: onMessage,
+                  onDisconnected: onDisconnected,
+                );
+                return socket;
+              },
+          credentialSocketFactory:
+              ({
+                required wsUrl,
+                required transportUrl,
+                required nsec,
+                required onMessage,
+                required onConnected,
+                required onDisconnected,
+              }) => _CredentialSocket(
+                connects: true,
+                wsUrl: wsUrl,
+                transportUrl: transportUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              ),
+        );
+        fakeAuth = FakeAuthNotifier();
+        container = ProviderContainer(
+          overrides: [
+            authProvider.overrideWith(() => fakeAuth),
+            pairingProvider.overrideWith(() => notifier),
+          ],
+        );
+        container.read(pairingProvider);
+        notifier = container.read(pairingProvider.notifier);
+      });
+
+      test('verified payload accepts a private canonical relay', () async {
+        await notifier.pair(pairingCode);
+        notifier.confirmSas();
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        expect(
+          container.read(pairingProvider).status,
+          PairingStatus.transferring,
+        );
+
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {
+            'type': 'payload',
+            'payload_type': 'credentials',
+            'payload': jsonEncode({
+              'relayUrl': 'http://10.24.11.82:3000',
+              'pubkey': nostr.Keys(sourceSecret).public,
+              'nsec': _testNsec,
+            }),
+          },
+        );
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(fakeAuth.lastCommunity?.relayUrl, 'http://10.24.11.82:3000');
+      });
+    });
+
     group('desktop identity recovery', () {
       const sourceSecret =
           '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
@@ -300,11 +527,14 @@ void main() {
 /// Encode a credentials payload the same way the desktop app would.
 String _encodePairingCode({
   String relayUrl = 'http://test:3000',
+  String? lanRelayUrl,
   String? pubkey,
   String? nsec,
 }) {
   final json = <String, dynamic>{
     'relayUrl': relayUrl,
+    // ignore: use_null_aware_elements
+    if (lanRelayUrl != null) 'lanRelayUrl': lanRelayUrl,
     // ignore: use_null_aware_elements
     if (pubkey != null) 'pubkey': pubkey,
     // ignore: use_null_aware_elements
@@ -312,6 +542,10 @@ String _encodePairingCode({
   };
   return base64Url.encode(utf8.encode(jsonEncode(json)));
 }
+
+final _testNsec = nostr.Keys(
+  '2222222222222222222222222222222222222222222222222222222222222222',
+).nsec;
 
 /// A fake [AuthNotifier] that records calls instead of touching secure storage.
 class FakeAuthNotifier extends AsyncNotifier<AuthState>
@@ -353,6 +587,34 @@ class _DisconnectingSocket extends PairingSocket {
   @override
   Future<void> connect() async {
     disconnectCallback(Exception('Connection closed'));
+  }
+}
+
+class _CredentialSocket extends RelaySocket {
+  final bool connects;
+  SocketState _fakeState = SocketState.disconnected;
+
+  _CredentialSocket({
+    required this.connects,
+    required super.wsUrl,
+    required super.transportUrl,
+    required super.nsec,
+    required super.onMessage,
+    required super.onConnected,
+    required super.onDisconnected,
+  });
+
+  @override
+  SocketState get state => _fakeState;
+
+  @override
+  Future<void> connect() async {
+    _fakeState = connects ? SocketState.connected : SocketState.disconnected;
+  }
+
+  @override
+  Future<void> disconnect() async {
+    _fakeState = SocketState.disconnected;
   }
 }
 

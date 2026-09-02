@@ -29,6 +29,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     if (existingIndex >= 0) {
       final existing = current[existingIndex];
       final updated = existing.copyWith(
+        lanRelayUrl: community.lanRelayUrl ?? existing.lanRelayUrl,
         pubkey: community.pubkey,
         nsec: community.nsec,
       );
@@ -85,6 +86,20 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     if (index < 0) return;
 
     final updated = current[index].copyWith(name: name);
+    await storage.save(updated);
+
+    final updatedList = [...current];
+    updatedList[index] = updated;
+    state = AsyncData(updatedList);
+  }
+
+  Future<void> updateLanRelayUrl(String id, String? lanRelayUrl) async {
+    final storage = ref.read(communityStorageProvider);
+    final current = state.value ?? [];
+    final index = current.indexWhere((community) => community.id == id);
+    if (index < 0) return;
+
+    final updated = current[index].copyWith(lanRelayUrl: lanRelayUrl);
     await storage.save(updated);
 
     final updatedList = [...current];

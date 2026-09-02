@@ -1,5 +1,6 @@
 use super::{
-    pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url, PairingRelay,
+    pairing_relay_from_nip11, pairing_relay_transport_url, probe_pairing_relay,
+    resolve_pairing_relay_url, PairingRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -101,4 +102,40 @@ fn main_relay_pairing_uses_main_relay_url() {
     .expect("resolve main pairing relay");
 
     assert_eq!(resolved, "wss://sprout-oss.stage.blox.sqprod.co");
+}
+
+#[test]
+fn main_relay_pairing_uses_lan_transport_when_configured() {
+    let resolved = pairing_relay_transport_url(
+        "wss://community.example",
+        "wss://community.example",
+        Some("ws://10.24.11.82:3000"),
+    )
+    .expect("resolve LAN pairing relay");
+
+    assert_eq!(resolved, "ws://10.24.11.82:3000/");
+}
+
+#[test]
+fn legacy_pairing_path_is_preserved_on_lan_transport() {
+    let resolved = pairing_relay_transport_url(
+        "wss://community.example/base",
+        "wss://community.example/base/pair",
+        Some("ws://10.24.11.82:3000"),
+    )
+    .expect("resolve LAN legacy pairing relay");
+
+    assert_eq!(resolved, "ws://10.24.11.82:3000/base/pair");
+}
+
+#[test]
+fn dedicated_pairing_relay_does_not_use_main_relay_lan_alias() {
+    let resolved = pairing_relay_transport_url(
+        "wss://community.example",
+        "wss://pairing.example",
+        Some("ws://10.24.11.82:3000"),
+    )
+    .expect("resolve dedicated pairing relay");
+
+    assert_eq!(resolved, "wss://pairing.example");
 }

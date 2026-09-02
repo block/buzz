@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -33,11 +34,13 @@ Exception classifyRelayAuthFailure(String message) {
 class RelaySocket {
   /// Interval for sending a ping and awaiting its pong before disconnecting.
   static const pingInterval = Duration(seconds: 30);
+  static const _lanConnectTimeout = Duration(milliseconds: 650);
 
   @visibleForTesting
   static Duration debugPingInterval = pingInterval;
 
   final String _wsUrl;
+  final String? _transportUrl;
   final String? _nsec;
   final void Function(List<dynamic> message) _onMessage;
   final void Function() _onConnected;
@@ -54,11 +57,13 @@ class RelaySocket {
 
   RelaySocket({
     required String wsUrl,
+    String? transportUrl,
     required String? nsec,
     required void Function(List<dynamic> message) onMessage,
     required void Function() onConnected,
     required void Function(Object? error) onDisconnected,
   }) : _wsUrl = wsUrl,
+       _transportUrl = transportUrl,
        _nsec = nsec,
        _onMessage = onMessage,
        _onConnected = onConnected,
@@ -70,13 +75,28 @@ class RelaySocket {
     _state = SocketState.connecting;
 
     try {
+      final canonicalUri = Uri.parse(_wsUrl);
+      final transportUri = _transportUrl == null
+          ? canonicalUri
+          : Uri.parse(_transportUrl).replace(
+              path: canonicalUri.path,
+              query: canonicalUri.hasQuery ? canonicalUri.query : null,
+            );
       _channel = IOWebSocketChannel.connect(
-        Uri.parse(_wsUrl),
+        transportUri,
+        headers: _transportUrl == null
+            ? null
+            : {HttpHeaders.hostHeader: canonicalUri.authority},
         pingInterval: debugPingInterval,
       );
-      await _channel!.ready;
+      final ready = _channel!.ready;
+      if (_transportUrl == null) {
+        await ready;
+      } else {
+        await ready.timeout(_lanConnectTimeout);
+      }
     } catch (e) {
-      _state = SocketState.disconnected;
+      await disconnect();
       _onDisconnected(e);
       return;
     }
@@ -148,6 +168,8 @@ class RelaySocket {
   }
 
   void _resetConnection() {
+    _failAuth(Exception('Relay socket closed'));
+    _authCompleter = null;
     _state = SocketState.disconnected;
     _subscription?.cancel();
     _subscription = null;

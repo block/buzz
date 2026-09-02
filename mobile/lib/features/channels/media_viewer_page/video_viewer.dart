@@ -46,7 +46,10 @@ class MediaVideoViewerPage extends HookConsumerWidget {
       var disposed = false;
       Future<void> initializeVideo() async {
         final auth = ref.read(mediaGetAuthServiceProvider);
-        final uri = Uri.parse(videoUrl);
+        final targets = auth.requestTargetsFor(videoUrl);
+        if (targets.isEmpty) throw const FormatException('Invalid video URL');
+        final target = targets.first;
+        final uri = target.uri;
 
         // ExoPlayer supports the request headers on every range request, so
         // keep Android on its streaming path. iOS uses the authenticated local
@@ -57,7 +60,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
           try {
             streamingController = VideoPlayerController.networkUrl(
               uri,
-              httpHeaders: auth.headersFor(videoUrl),
+              httpHeaders: target.headers,
             );
             await streamingController.initialize();
             await streamingController.play();
@@ -84,7 +87,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             'GET',
             uri,
             abortTrigger: requestAbort.future,
-          )..headers.addAll(auth.headersFor(videoUrl));
+          )..headers.addAll(target.headers);
           late final http.StreamedResponse response;
           try {
             response = await client.send(request);

@@ -427,6 +427,132 @@ void main() {
     });
 
     test(
+      'uploads through LAN while preserving canonical host and auth',
+      () async {
+        final requests = <http.Request>[];
+        final client = http_testing.MockClient((request) async {
+          requests.add(request);
+          if (request.method == 'GET') return http.Response('{}', 200);
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/test.png',
+              'sha256': request.headers['X-SHA-256'],
+              'size': _pngBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        });
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          baseUrls: const ['http://10.24.11.82:3000', 'https://relay.example'],
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: client,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+
+        await service.uploadBytes(_pngBytes, mimeType: 'image/png');
+
+        expect(requests.map((request) => request.url.toString()), [
+          'http://10.24.11.82:3000/',
+          'http://10.24.11.82:3000/upload',
+        ]);
+        final upload = requests.last;
+        expect(upload.headers[HttpHeaders.hostHeader], 'relay.example');
+        final encoded = upload.headers['Authorization']!.substring(
+          'Nostr '.length,
+        );
+        final authEvent =
+            jsonDecode(
+                  utf8.decode(base64Url.decode(base64Url.normalize(encoded))),
+                )
+                as Map<String, dynamic>;
+        expect(
+          authEvent['tags'],
+          anyElement(equals(<String>['server', 'relay.example'])),
+        );
+      },
+    );
+
+    test(
+      'reuses a confirmed LAN media transport without probing again',
+      () async {
+        final requests = <http.Request>[];
+        final client = http_testing.MockClient((request) async {
+          requests.add(request);
+          if (request.method == 'GET') return http.Response('{}', 200);
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/test.png',
+              'sha256': request.headers['X-SHA-256'],
+              'size': _pngBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        });
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          baseUrls: const ['http://10.24.11.82:3000', 'https://relay.example'],
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: client,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+
+        await service.uploadBytes(_pngBytes, mimeType: 'image/png');
+        await service.uploadBytes(_pngBytes, mimeType: 'image/png');
+
+        expect(
+          requests.where((request) => request.method == 'GET'),
+          hasLength(1),
+        );
+        expect(
+          requests.where((request) => request.method == 'PUT'),
+          hasLength(2),
+        );
+      },
+    );
+
+    test('falls back to canonical upload when the LAN probe fails', () async {
+      final requests = <http.Request>[];
+      final client = http_testing.MockClient((request) async {
+        requests.add(request);
+        if (request.url.host == '10.24.11.82') {
+          throw http.ClientException('LAN unavailable', request.url);
+        }
+        return http.Response(
+          jsonEncode({
+            'url': 'https://relay.example/media/test.png',
+            'sha256': request.headers['X-SHA-256'],
+            'size': _pngBytes.length,
+            'type': 'image/png',
+            'uploaded': 1,
+          }),
+          200,
+        );
+      });
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        baseUrls: const ['http://10.24.11.82:3000', 'https://relay.example'],
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: client,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+
+      await service.uploadBytes(_pngBytes, mimeType: 'image/png');
+
+      expect(requests.map((request) => request.url.toString()), [
+        'http://10.24.11.82:3000/',
+        'https://relay.example/upload',
+      ]);
+    });
+
+    test(
       'retries the legacy upload route when the standard route is absent',
       () async {
         final requests = <http.Request>[];

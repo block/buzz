@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:buzz/shared/relay/relay_socket.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 /// A server that completes the WS handshake then never speaks again: no pongs,
 /// no close frame. Only a client-side ping timeout can notice.
@@ -108,4 +109,49 @@ void main() {
     await socket.disconnect();
     await server.close(force: true);
   });
+
+  test(
+    'LAN transport preserves the canonical host and auth relay tag',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final observedHost = Completer<String?>();
+      final observedRelayTag = Completer<String>();
+      server.listen((request) async {
+        observedHost.complete(request.headers.host);
+        final ws = await WebSocketTransformer.upgrade(request);
+        ws.listen((raw) {
+          final message = jsonDecode(raw as String) as List<dynamic>;
+          if (message.first != 'AUTH') return;
+          final event = message[1] as Map<String, dynamic>;
+          final tags = (event['tags'] as List<dynamic>)
+              .map((tag) => (tag as List<dynamic>).cast<String>())
+              .toList();
+          observedRelayTag.complete(
+            tags.firstWhere((tag) => tag.first == 'relay')[1],
+          );
+          ws.add(jsonEncode(['OK', event['id'], true, '']));
+        });
+        ws.add(jsonEncode(['AUTH', 'test-challenge']));
+      });
+
+      var connected = false;
+      final socket = RelaySocket(
+        wsUrl: 'ws://canonical.example/relay',
+        transportUrl: 'ws://127.0.0.1:${server.port}',
+        nsec: nostr.Keys.generate().nsec,
+        onMessage: (_) {},
+        onConnected: () => connected = true,
+        onDisconnected: (_) {},
+      );
+
+      await socket.connect().timeout(const Duration(seconds: 2));
+
+      expect(connected, isTrue);
+      expect(await observedHost.future, 'canonical.example');
+      expect(await observedRelayTag.future, 'ws://canonical.example/relay');
+
+      await socket.disconnect();
+      await server.close(force: true);
+    },
+  );
 }

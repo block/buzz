@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
@@ -53,6 +54,10 @@ class SendMessage {
     Channel? channel,
     List<List<String>> mediaTags = const [],
   }) async {
+    final sendStopwatch = Stopwatch()..start();
+    _debugMessageSend(
+      'begin channel=$channelId contentChars=${content.length} mediaTags=${mediaTags.length}',
+    );
     _ensureDeliveryValid();
     // Use explicitly passed pubkeys, or resolve @mentions against
     // channel members to avoid matching the wrong user.
@@ -70,6 +75,9 @@ class SendMessage {
             dmRecipientPubkeys: dmRecipientPubkeys,
           )
         : explicitMentions;
+    _debugMessageSend(
+      'prepared channel=$channelId elapsedMs=${sendStopwatch.elapsedMilliseconds}',
+    );
 
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
     // the desktop's normalizeMentionPubkeys).
@@ -95,15 +103,24 @@ class SendMessage {
         content: content,
         tags: tags,
         onSigned: (event) {
+          _debugMessageSend(
+            'signed event=${_shortEventId(event.id)} elapsedMs=${sendStopwatch.elapsedMilliseconds}',
+          );
           localMessage = event;
           _addLocalMessage(channelId, event);
         },
       );
       final event = localMessage;
       if (event != null) _completeLocalMessage(channelId, event.id);
-    } catch (_) {
+      _debugMessageSend(
+        'accepted event=${_shortEventId(event?.id)} totalMs=${sendStopwatch.elapsedMilliseconds}',
+      );
+    } catch (error) {
       final event = localMessage;
       if (event != null) _removeLocalMessage(channelId, event.id);
+      _debugMessageSend(
+        'failed event=${_shortEventId(event?.id)} totalMs=${sendStopwatch.elapsedMilliseconds} error=$error',
+      );
       rethrow;
     }
   }
@@ -215,6 +232,15 @@ class SendMessage {
       ['e', parentEventId, '', 'reply'],
     ];
   }
+}
+
+void _debugMessageSend(String message) {
+  if (kDebugMode) debugPrint('Buzz message send $message');
+}
+
+String _shortEventId(String? eventId) {
+  if (eventId == null || eventId.isEmpty) return 'unsigned';
+  return eventId.length <= 8 ? eventId : '${eventId.substring(0, 8)}…';
 }
 
 final sendMessageProvider = Provider<SendMessage>((ref) {

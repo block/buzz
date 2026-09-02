@@ -1,5 +1,6 @@
 package xyz.block.buzz.mobile
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -9,6 +10,7 @@ import android.media.MediaExtractor
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
+import android.provider.OpenableColumns
 import androidx.annotation.RequiresApi
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -79,6 +81,7 @@ internal object AndroidImageProcessor {
 
 class MainActivity : FlutterActivity() {
     private var mediaUploadChannel: MethodChannel? = null
+    private var pendingAttachmentResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -104,10 +107,116 @@ class MainActivity : FlutterActivity() {
                     REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD -> {
                         result.success(Build.VERSION.SDK_INT <= Build.VERSION_CODES.P)
                     }
+                    PICK_ATTACHMENT_FILE_METHOD -> handlePickAttachmentFile(result)
                     else -> result.notImplemented()
                 }
             }
         }
+    }
+
+    private fun handlePickAttachmentFile(result: MethodChannel.Result) {
+        if (pendingAttachmentResult != null) {
+            result.error("picker_busy", "A file picker is already open.", null)
+            return
+        }
+
+        pendingAttachmentResult = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        try {
+            startActivityForResult(intent, PICK_ATTACHMENT_FILE_REQUEST_CODE)
+        } catch (error: Exception) {
+            pendingAttachmentResult = null
+            result.error(
+                "picker_failed",
+                error.message ?: "Unable to open the file picker.",
+                null,
+            )
+        }
+    }
+
+    @Deprecated("Android activity result callback used for document picker compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != PICK_ATTACHMENT_FILE_REQUEST_CODE) return
+
+        val result = pendingAttachmentResult ?: return
+        if (resultCode != RESULT_OK) {
+            pendingAttachmentResult = null
+            result.success(null)
+            return
+        }
+        val uri = data?.data
+        if (uri == null) {
+            pendingAttachmentResult = null
+            result.error("picker_failed", "The file picker returned no document.", null)
+            return
+        }
+
+        Thread {
+            var outputFile: File? = null
+            try {
+                val displayName = attachmentDisplayName(uri) ?: "attachment"
+                val safeName = safeAttachmentFilename(displayName)
+                val attachmentRoot = File(cacheDir, "picked_attachments")
+                val outputDirectory = File(attachmentRoot, UUID.randomUUID().toString()).apply {
+                    if (!exists() && !mkdirs()) {
+                        throw IllegalStateException("Unable to prepare attachment storage.")
+                    }
+                }
+                val copiedFile = File(outputDirectory, safeName)
+                outputFile = copiedFile
+                val input = contentResolver.openInputStream(uri)
+                    ?: throw IllegalArgumentException("Unable to read the selected file.")
+                input.use { source ->
+                    copiedFile.outputStream().use(source::copyTo)
+                }
+                val response = mapOf(
+                    "path" to copiedFile.absolutePath,
+                    "name" to safeName,
+                    "mimeType" to contentResolver.getType(uri),
+                )
+                runOnUiThread {
+                    pendingAttachmentResult = null
+                    result.success(response)
+                }
+            } catch (error: Exception) {
+                outputFile?.delete()
+                runOnUiThread {
+                    pendingAttachmentResult = null
+                    result.error(
+                        "picker_failed",
+                        error.message ?: "Unable to copy the selected file.",
+                        null,
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun attachmentDisplayName(uri: android.net.Uri): String? {
+        return contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) return@use null
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index < 0) null else cursor.getString(index)
+        }
+    }
+
+    private fun safeAttachmentFilename(displayName: String): String {
+        val leaf = displayName.substringAfterLast('/').substringAfterLast('\\')
+        val sanitized = leaf
+            .replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_")
+            .trim()
+            .take(180)
+        return sanitized.ifEmpty { "attachment" }
     }
 
     private fun handleSanitizeImageForUpload(
@@ -341,6 +450,8 @@ class MainActivity : FlutterActivity() {
         private const val TRANSCODE_IMAGE_TO_JPEG_METHOD = "transcodeImageToJpeg"
         private const val TRANSCODE_VIDEO_TO_MP4_METHOD = "transcodeVideoToMp4"
         private const val GENERATE_VIDEO_POSTER_METHOD = "generateVideoPoster"
+        private const val PICK_ATTACHMENT_FILE_METHOD = "pickAttachmentFile"
+        private const val PICK_ATTACHMENT_FILE_REQUEST_CODE = 41042
         private const val REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD =
             "requiresLegacyMediaStoragePermission"
     }

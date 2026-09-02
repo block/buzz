@@ -92,7 +92,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       final uri = Uri.parse(url);
       final http.Response response;
       try {
-        response = await client.get(uri, headers: auth.headersFor(url));
+        response = await fetchMediaResponse(
+          client,
+          auth.requestTargetsFor(url),
+        );
       } catch (_) {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
         rethrow;

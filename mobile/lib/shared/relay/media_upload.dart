@@ -24,12 +24,14 @@ const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
 const _generateVideoPosterMethod = 'generateVideoPoster';
 const _transcodeImageToJpegMethod = 'transcodeImageToJpeg';
+const _pickAttachmentFileMethod = 'pickAttachmentFile';
 const _requiresLegacyMediaStoragePermissionMethod =
     'requiresLegacyMediaStoragePermission';
 const _readClipboardImageMethod = 'readClipboardImage';
 const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
 const _uploadAuthLifetimeSeconds = 300;
+const _lanMediaProbeTimeout = Duration(seconds: 2);
 const _heicBrands = {
   'heic',
   'heix',
@@ -216,6 +218,7 @@ class BlobDescriptor {
 
 class MediaUploadService {
   final String _baseUrl;
+  final List<String> _uploadBaseUrls;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
   final PickGalleryImages _pickGalleryImages;
@@ -229,9 +232,11 @@ class MediaUploadService {
   final DateTime Function() _now;
   final http.Client _http;
   final bool _ownsHttpClient;
+  final Set<String> _confirmedUploadBaseUrls = {};
 
   MediaUploadService({
     required String baseUrl,
+    List<String>? baseUrls,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
     PickGalleryImages? pickGalleryImages,
@@ -245,6 +250,7 @@ class MediaUploadService {
     DateTime Function()? now,
     http.Client? httpClient,
   }) : _baseUrl = baseUrl,
+       _uploadBaseUrls = _normalizeUploadBaseUrls(baseUrl, baseUrls),
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
        _pickGalleryImages =
@@ -435,6 +441,7 @@ class MediaUploadService {
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
+    final totalStopwatch = Stopwatch()..start();
     _throwIfCancelled(cancellationToken);
     final length = await pickedFile.length();
     if (length == 0) {
@@ -445,17 +452,25 @@ class MediaUploadService {
         'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
       );
     }
+    final readStopwatch = Stopwatch()..start();
     final bytes = await pickedFile.readAsBytes();
+    _debugMediaUpload(
+      'file read bytes=$length elapsedMs=${readStopwatch.elapsedMilliseconds}',
+    );
     _throwIfCancelled(cancellationToken);
+    final filename = _safeAttachmentFilename(pickedFile.name);
     final descriptor = await _uploadPreparedBytes(
       bytes,
       mimeType: 'application/octet-stream',
       allowGenericFile: true,
-      filename: _safeAttachmentFilename(pickedFile.name),
+      filename: filename,
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
-    return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
+    _debugMediaUpload(
+      'file complete bytes=$length totalMs=${totalStopwatch.elapsedMilliseconds}',
+    );
+    return descriptor.withFilename(filename);
   }
 
   Future<BlobDescriptor?> pickAndUploadFile() async {
@@ -504,28 +519,87 @@ class MediaUploadService {
     }
 
     final sha256 = _sha256Hex(bytes);
-    var response = await _sendUploadRequest(
-      bytes: bytes,
-      mimeType: mimeType,
-      sha256: sha256,
-      filename: filename,
-      path: _mediaUploadPath,
-      onProgress: onProgress,
-      cancellationToken: cancellationToken,
+    Object? lastTransportError;
+    _debugMediaUpload(
+      'begin type=$mimeType bytes=${bytes.length} targets='
+      '${_uploadBaseUrls.map(_uploadTargetLabel).join(',')}',
     );
-    if (response.statusCode == HttpStatus.notFound ||
-        response.statusCode == HttpStatus.methodNotAllowed) {
-      response = await _sendUploadRequest(
-        bytes: bytes,
-        mimeType: mimeType,
-        sha256: sha256,
-        filename: filename,
-        path: _legacyMediaUploadPath,
-        onProgress: onProgress,
-        cancellationToken: cancellationToken,
-      );
-    }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
+    for (var index = 0; index < _uploadBaseUrls.length; index++) {
+      final requestBaseUrl = _uploadBaseUrls[index];
+      final hasFallback = index + 1 < _uploadBaseUrls.length;
+      final isLanCandidate = requestBaseUrl != _baseUrl;
+
+      if (isLanCandidate &&
+          !_confirmedUploadBaseUrls.contains(requestBaseUrl)) {
+        final probeStopwatch = Stopwatch()..start();
+        final available = await _probeUploadBaseUrl(requestBaseUrl);
+        _debugMediaUpload(
+          'probe target=${_uploadTargetLabel(requestBaseUrl)} '
+          'available=$available elapsedMs=${probeStopwatch.elapsedMilliseconds}',
+        );
+        if (!available) {
+          lastTransportError = TimeoutException(
+            'LAN media transport is unavailable: $requestBaseUrl',
+          );
+          continue;
+        }
+      }
+
+      late http.Response response;
+      try {
+        response = await _sendUploadRequest(
+          bytes: bytes,
+          mimeType: mimeType,
+          sha256: sha256,
+          filename: filename,
+          path: _mediaUploadPath,
+          requestBaseUrl: requestBaseUrl,
+          onProgress: onProgress,
+          cancellationToken: cancellationToken,
+        );
+        if (response.statusCode == HttpStatus.notFound ||
+            response.statusCode == HttpStatus.methodNotAllowed) {
+          response = await _sendUploadRequest(
+            bytes: bytes,
+            mimeType: mimeType,
+            sha256: sha256,
+            filename: filename,
+            path: _legacyMediaUploadPath,
+            requestBaseUrl: requestBaseUrl,
+            onProgress: onProgress,
+            cancellationToken: cancellationToken,
+          );
+        }
+      } on http.ClientException catch (error) {
+        _confirmedUploadBaseUrls.remove(requestBaseUrl);
+        _throwIfCancelled(cancellationToken);
+        if (!hasFallback) rethrow;
+        lastTransportError = error;
+        continue;
+      } on SocketException catch (error) {
+        _confirmedUploadBaseUrls.remove(requestBaseUrl);
+        _throwIfCancelled(cancellationToken);
+        if (!hasFallback) rethrow;
+        lastTransportError = error;
+        continue;
+      }
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        _confirmedUploadBaseUrls.add(requestBaseUrl);
+        return BlobDescriptor.fromJson(
+          jsonDecode(response.body) as Map<String, dynamic>,
+        );
+      }
+      if (hasFallback &&
+          (response.statusCode == HttpStatus.unauthorized ||
+              response.statusCode == HttpStatus.notFound ||
+              response.statusCode == HttpStatus.methodNotAllowed ||
+              response.statusCode >= 500)) {
+        lastTransportError = Exception(
+          'upload failed (${response.statusCode}): ${response.body}',
+        );
+        continue;
+      }
       if (_allowedImageMimeTypes.contains(mimeType) &&
           (response.statusCode == HttpStatus.unsupportedMediaType ||
               response.statusCode == HttpStatus.unprocessableEntity)) {
@@ -536,9 +610,28 @@ class MediaUploadService {
       );
     }
 
-    return BlobDescriptor.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
+    throw lastTransportError ??
+        StateError('No relay media upload transport available');
+  }
+
+  Future<bool> _probeUploadBaseUrl(String requestBaseUrl) async {
+    try {
+      final response = await _http
+          .get(
+            Uri.parse(requestBaseUrl).resolve('/'),
+            headers: {HttpHeaders.hostHeader: Uri.parse(_baseUrl).authority},
+          )
+          .timeout(_lanMediaProbeTimeout);
+      return response.statusCode >= 200 &&
+          response.statusCode < 500 &&
+          response.statusCode != HttpStatus.notFound;
+    } on TimeoutException {
+      return false;
+    } on http.ClientException {
+      return false;
+    } on SocketException {
+      return false;
+    }
   }
 
   Future<http.Response> _sendUploadRequest({
@@ -546,14 +639,17 @@ class MediaUploadService {
     required String mimeType,
     required String sha256,
     required String path,
+    required String requestBaseUrl,
     String? filename,
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
+    final stopwatch = Stopwatch()..start();
+    final target = _uploadTargetLabel(requestBaseUrl);
     _throwIfCancelled(cancellationToken);
     final request = http.AbortableStreamedRequest(
       'PUT',
-      Uri.parse(_baseUrl).resolve(path),
+      Uri.parse(requestBaseUrl).resolve(path),
       abortTrigger: cancellationToken?.whenCancelled,
     );
     request.contentLength = bytes.length;
@@ -564,13 +660,29 @@ class MediaUploadService {
         filename: filename,
       ),
     );
+    if (requestBaseUrl != _baseUrl) {
+      request.headers[HttpHeaders.hostHeader] = Uri.parse(_baseUrl).authority;
+    }
     final writeRequest = request.sink
         .addStream(_uploadByteStream(bytes, onProgress))
         .whenComplete(request.sink.close);
-    final response = await _http.send(request);
-    await writeRequest;
-    _throwIfCancelled(cancellationToken);
-    return http.Response.fromStream(response);
+    try {
+      final response = await _http.send(request);
+      await writeRequest;
+      _throwIfCancelled(cancellationToken);
+      final buffered = await http.Response.fromStream(response);
+      _debugMediaUpload(
+        'request target=$target path=$path status=${buffered.statusCode} '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+      );
+      return buffered;
+    } catch (error) {
+      _debugMediaUpload(
+        'request target=$target path=$path failed=${error.runtimeType} '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+      );
+      rethrow;
+    }
   }
 
   void _throwIfCancelled(UploadCancellationToken? cancellationToken) {
@@ -694,6 +806,30 @@ class MediaUploadService {
     }
     return sanitizedBytes;
   }
+}
+
+void _debugMediaUpload(String message) {
+  if (kDebugMode) debugPrint('Buzz media upload $message');
+}
+
+String _uploadTargetLabel(String baseUrl) {
+  final uri = Uri.tryParse(baseUrl);
+  if (uri == null || uri.authority.isEmpty) return 'invalid-target';
+  return '${uri.scheme}://${uri.authority}';
+}
+
+List<String> _normalizeUploadBaseUrls(
+  String canonicalBaseUrl,
+  List<String>? candidates,
+) {
+  final normalized = <String>[];
+  for (final candidate in [...?candidates, canonicalBaseUrl]) {
+    final value = candidate.trim();
+    if (value.isNotEmpty && !normalized.contains(value)) {
+      normalized.add(value);
+    }
+  }
+  return List.unmodifiable(normalized);
 }
 
 String _safeAttachmentFilename(String filename) {
@@ -995,11 +1131,30 @@ Future<Uint8List> _invokeRequiredPlatformBytesMethod(
   return result;
 }
 
+Future<XFile?> _pickAttachmentFile() async {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    return file_selector.openFile();
+  }
+
+  final result = await _mediaUploadPlatformChannel
+      .invokeMapMethod<String, Object?>(_pickAttachmentFileMethod);
+  if (result == null) return null;
+
+  final path = result['path'] as String?;
+  final name = result['name'] as String?;
+  final mimeType = result['mimeType'] as String?;
+  if (path == null || path.isEmpty || name == null || name.isEmpty) {
+    throw const FormatException('Android file picker returned invalid data.');
+  }
+  return XFile(path, name: name, mimeType: mimeType);
+}
+
 final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
   final config = ref.watch(relayConfigProvider);
   final picker = ImagePicker();
   final service = MediaUploadService(
     baseUrl: config.baseUrl,
+    baseUrls: config.httpBaseUrls,
     nsec: config.nsec,
     pickGalleryImage: () => picker.pickImage(
       source: ImageSource.gallery,
@@ -1007,7 +1162,7 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
     ),
     pickGalleryImages: () => picker.pickMultiImage(requestFullMetadata: false),
     pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
-    pickAttachmentFile: file_selector.openFile,
+    pickAttachmentFile: _pickAttachmentFile,
   );
   ref.onDispose(service.dispose);
   return service;

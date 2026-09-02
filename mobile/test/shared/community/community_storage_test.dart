@@ -106,6 +106,7 @@ void main() {
       final ws = Community.create(
         name: 'Test',
         relayUrl: 'https://relay.example.com',
+        lanRelayUrl: 'ws://10.24.11.82:3000',
         pubkey: 'abc123',
       );
 
@@ -116,7 +117,23 @@ void main() {
       expect(loaded.first.id, ws.id);
       expect(loaded.first.name, 'Test');
       expect(loaded.first.relayUrl, 'https://relay.example.com');
+      expect(loaded.first.lanRelayUrl, 'ws://10.24.11.82:3000');
       expect(loaded.first.pubkey, 'abc123');
+    });
+
+    test('loads communities saved before LAN transports existed', () async {
+      fakeSecure['buzz_communities'] = jsonEncode([
+        {
+          'id': 'legacy-community',
+          'name': 'Legacy',
+          'relayUrl': 'https://relay.example.com',
+          'addedAt': DateTime(2026).toIso8601String(),
+        },
+      ]);
+
+      final loaded = await storage.loadAll();
+
+      expect(loaded.single.lanRelayUrl, isNull);
     });
 
     test('save updates existing community with same id', () async {
