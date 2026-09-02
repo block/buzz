@@ -188,3 +188,7 @@ lib/
 - **Spacing:** `Grid` tokens for consistent spacing
 - **Linting:** `flutter_lints` + `riverpod_lint` via `custom_lint`
 - **Feature isolation:** No cross-feature imports except `shared/`
+
+## Agent activity
+
+Mobile already has several Activity surfaces: the bottom **Activity** tab (including an Agent updates filter), **Pulse** agent cards, channel **Members → View activity**, and — when an agent is working — a channel-header activity shortcut that opens the live transcript sheet.

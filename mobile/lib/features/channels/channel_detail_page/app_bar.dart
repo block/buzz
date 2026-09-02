@@ -192,6 +192,57 @@ class _MembersButton extends ConsumerWidget {
   }
 }
 
+/// One-tap entry to a working agent's live transcript (#3907).
+///
+/// The members badge alone was easy to miss; this dedicated control opens
+/// [AgentActivitySheet] for the first typing bot without an extra hop through
+/// the members sheet.
+class _AgentActivityButton extends ConsumerWidget {
+  final String channelId;
+
+  const _AgentActivityButton({required this.channelId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final working = ref.watch(workingBotPubkeysProvider(channelId));
+    if (working.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final agentPubkey = working.first;
+
+    return IconButton(
+      color: context.colors.primary,
+      onPressed: () {
+        showAgentActivitySheet(
+          context: context,
+          channelId: channelId,
+          agentPubkey: agentPubkey,
+        );
+      },
+      tooltip: 'View agent activity',
+      icon: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          const Icon(LucideIcons.activity, size: 22),
+          Positioned(
+            top: -2,
+            right: -2,
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: context.appColors.success,
+                shape: BoxShape.circle,
+                border: Border.all(color: context.colors.surface, width: 1.5),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _DmAppBarTitle extends ConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
