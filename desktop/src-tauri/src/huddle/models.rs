@@ -211,6 +211,10 @@ pub enum ModelStatus {
 pub struct VoiceModelStatus {
     pub stt: ModelStatus,
     pub tts: ModelStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kroko: Option<ModelStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kokoro: Option<ModelStatus>,
 }
 
 // ── Safe archive extraction ───────────────────────────────────────────────────
@@ -602,6 +606,8 @@ pub struct ModelManager {
     models_dir: PathBuf,
     stt: ModelSlot,
     tts: ModelSlot,
+    kroko: ModelSlot,
+    kokoro: ModelSlot,
 }
 
 impl ModelManager {
@@ -614,7 +620,10 @@ impl ModelManager {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
             tts: tts_model_slot(),
-        };
+            kroko: ModelSlot::new("kroko-de", &[], "1"),
+            kokoro: ModelSlot::new("kokoro-de", &[], "1"),
+        }
+        .with_german_slots();
         manager.tts.recover_interrupted_install(&manager.models_dir);
         Some(manager)
     }
@@ -991,6 +1000,11 @@ pub fn is_tts_ready() -> bool {
         .map(|m| m.is_tts_ready())
         .unwrap_or(false)
 }
+
+#[path = "models_german.rs"]
+mod german;
+
+pub use german::{is_kokoro_ready, is_kroko_ready, kokoro_model_dir, kroko_model_dir};
 
 #[cfg(test)]
 #[path = "models_tests.rs"]

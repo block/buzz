@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activeTtsBackend,
   selectedVoiceForBackend,
+  speechLanguageLabel,
   voiceOptionLabel,
   voicesForBackend,
 } from "./voiceSettingsLogic.ts";
@@ -21,6 +23,13 @@ const voice = (key, displayName, fallbackKey = "pocket:mary") => ({
     license: null,
     sourceUrl: null,
   },
+});
+
+test("English stays on Pocket and Deutsch routes to Kokoro", () => {
+  assert.equal(activeTtsBackend("en"), "pocket");
+  assert.equal(activeTtsBackend("de"), "kokoro");
+  assert.equal(speechLanguageLabel("en"), "English (Original)");
+  assert.equal(speechLanguageLabel("de"), "Deutsch");
 });
 
 test("Pocket-only V1 filters the shared registry by backend", () => {

@@ -39,6 +39,7 @@ pub mod pipeline;
 pub mod playout;
 pub mod pocket;
 pub mod preprocessing;
+pub mod speech_profile;
 pub mod reconnect;
 pub mod relay_api;
 pub mod state;
@@ -787,14 +788,48 @@ pub async fn download_voice_models(state: State<'_, AppState>) -> Result<(), Str
     Ok(())
 }
 
-/// Return the current download status for all voice models.
 #[tauri::command]
-pub fn get_model_status(_state: State<'_, AppState>) -> Result<models::VoiceModelStatus, String> {
+pub async fn download_german_speech_models(state: State<'_, AppState>) -> Result<(), String> {
     let manager = models::global_model_manager()
         .ok_or("model manager unavailable (home directory could not be resolved)")?;
+    manager.start_kroko_download(state.http_client.clone());
+    manager.start_kokoro_download(state.http_client.clone());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_german_speech_models() -> Result<(), String> {
+    let manager = models::global_model_manager()
+        .ok_or("model manager unavailable (home directory could not be resolved)")?;
+    manager.remove_kroko_model().await?;
+    manager.remove_kokoro_model().await?;
+    Ok(())
+}
+
+/// Return the current download status for all voice models.
+#[tauri::command]
+pub fn get_model_status(state: State<'_, AppState>) -> Result<models::VoiceModelStatus, String> {
+    let manager = models::global_model_manager()
+        .ok_or("model manager unavailable (home directory could not be resolved)")?;
+    let language = state
+        .huddle_audio
+        .tts
+        .lock()
+        .map(|settings| settings.speech_language)
+        .unwrap_or_default();
+    let (stt, tts) = match language {
+        crate::huddle::speech_profile::SpeechLanguage::De => {
+            (manager.kroko_status(), manager.kokoro_status())
+        }
+        crate::huddle::speech_profile::SpeechLanguage::En => {
+            (manager.stt_status(), manager.tts_status())
+        }
+    };
     Ok(models::VoiceModelStatus {
-        stt: manager.stt_status(),
-        tts: manager.tts_status(),
+        stt,
+        tts,
+        kroko: Some(manager.kroko_status()),
+        kokoro: Some(manager.kokoro_status()),
     })
 }
 

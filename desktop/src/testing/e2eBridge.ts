@@ -208,6 +208,7 @@ type E2eConfig = {
       version: number;
       agentTextToSpeech: boolean;
       voicePreferences: string[];
+      speechLanguage?: "en" | "de";
     };
     /** Native picker boundary result for Pocket voice import tests. */
     pocketVoiceImportResult?: "success" | "cancel" | "invalid";
@@ -12015,6 +12016,7 @@ export function maybeInstallE2eTauriMocks() {
             version: 1,
             agentTextToSpeech: true,
             voicePreferences: ["pocket:mary"],
+            speechLanguage: "en",
           }
         );
       case "list_voice_registry":
@@ -12122,6 +12124,38 @@ export function maybeInstallE2eTauriMocks() {
             }),
           ),
           ...mockImportedVoices,
+          {
+            key: "kokoro:de_martin",
+            displayName: "Martin",
+            backend: "kokoro",
+            backendName: "Kokoro",
+            availability: "installed",
+            fallbackKey: null,
+            referenceFile: null,
+            provenance: {
+              source: "kokoro-de",
+              contentHash: null,
+              license: "Apache-2.0",
+              sourceUrl:
+                "https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin",
+            },
+          },
+          {
+            key: "kokoro:de_victoria",
+            displayName: "Victoria",
+            backend: "kokoro",
+            backendName: "Kokoro",
+            availability: "installed",
+            fallbackKey: "kokoro:de_martin",
+            referenceFile: null,
+            provenance: {
+              source: "kokoro-de",
+              contentHash: null,
+              license: "Apache-2.0",
+              sourceUrl:
+                "https://huggingface.co/kikiri-tts/kikiri-german-victoria",
+            },
+          },
         ];
       case "set_tts_enabled": {
         const enabled = (payload as { enabled?: boolean })?.enabled;
@@ -12132,6 +12166,8 @@ export function maybeInstallE2eTauriMocks() {
           agentTextToSpeech: enabled,
           voicePreferences: activeConfig?.mock?.ttsSettings
             ?.voicePreferences ?? ["pocket:mary"],
+          speechLanguage:
+            activeConfig?.mock?.ttsSettings?.speechLanguage ?? "en",
         };
         if (activeConfig) {
           activeConfig.mock ??= {};
@@ -12161,6 +12197,69 @@ export function maybeInstallE2eTauriMocks() {
           voiceKey,
         );
         const settings = { ...current, voicePreferences: preferences };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.ttsSettings = settings;
+        }
+        return settings;
+      }
+      case "set_speech_language": {
+        const language = (payload as { language?: string })?.language;
+        if (language !== "en" && language !== "de") {
+          throw new Error("Unsupported speech language");
+        }
+        const current = activeConfig?.mock?.ttsSettings ?? {
+          version: 1,
+          agentTextToSpeech: true,
+          voicePreferences: ["pocket:mary"],
+          speechLanguage: "en" as const,
+        };
+        const preferences = [...current.voicePreferences];
+        if (
+          language === "de" &&
+          !preferences.some((key) => key.startsWith("kokoro:"))
+        ) {
+          preferences.unshift("kokoro:de_martin");
+        }
+        const settings: {
+          version: number;
+          agentTextToSpeech: boolean;
+          voicePreferences: string[];
+          speechLanguage: "en" | "de";
+        } = {
+          ...current,
+          speechLanguage: language,
+          voicePreferences: preferences,
+        };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.ttsSettings = settings;
+        }
+        return settings;
+      }
+      case "set_german_voice": {
+        const voiceKey = (payload as { voiceKey?: string })?.voiceKey;
+        if (
+          voiceKey !== "kokoro:de_martin" &&
+          voiceKey !== "kokoro:de_victoria"
+        ) {
+          throw new Error("Unknown German voice");
+        }
+        const current = activeConfig?.mock?.ttsSettings ?? {
+          version: 1,
+          agentTextToSpeech: true,
+          voicePreferences: ["pocket:mary"],
+          speechLanguage: "de" as const,
+        };
+        const preferences = current.voicePreferences.filter(
+          (key) => !key.startsWith("kokoro:"),
+        );
+        preferences.unshift(voiceKey);
+        const settings = {
+          ...current,
+          speechLanguage: "de" as const,
+          voicePreferences: preferences,
+        };
         if (activeConfig) {
           activeConfig.mock ??= {};
           activeConfig.mock.ttsSettings = settings;

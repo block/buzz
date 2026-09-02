@@ -20,6 +20,10 @@ use crate::{app_state::AppState, managed_agents::storage::atomic_write_json_rest
 use super::{
     models,
     pocket::DEFAULT_VOICE,
+    speech_profile::{
+        default_german_voice_key, is_german_voice_key, resolve_german_voice_key, SpeechLanguage,
+        GERMAN_VOICE_MARTIN, GERMAN_VOICE_VICTORIA, KOKORO_BACKEND_ID,
+    },
     tts_voice_registry::{source_url, MARY_VOICE_KEY, POCKET_VOICES},
     HuddlePhase, HuddleState,
 };
@@ -103,9 +107,48 @@ pub fn bundled_voice_registry() -> Vec<VoiceRegistryEntry> {
         .collect()
 }
 
+fn german_voice_registry() -> Vec<VoiceRegistryEntry> {
+    let kokoro_ready = models::is_kokoro_ready();
+    let availability = if kokoro_ready {
+        VOICE_AVAILABILITY_INSTALLED
+    } else {
+        "downloadable"
+    };
+    [
+        (
+            GERMAN_VOICE_MARTIN,
+            "Martin",
+            "Godelaune/Kokoro-82M-ONNX-German-Martin",
+        ),
+        (
+            GERMAN_VOICE_VICTORIA,
+            "Victoria",
+            "kikiri-tts/kikiri-german-victoria",
+        ),
+    ]
+    .into_iter()
+    .map(|(key, display_name, source_url)| VoiceRegistryEntry {
+        key: key.to_string(),
+        display_name: display_name.to_string(),
+        backend: KOKORO_BACKEND_ID.to_string(),
+        backend_name: "Kokoro".to_string(),
+        availability: availability.to_string(),
+        fallback_key: (key != GERMAN_VOICE_MARTIN).then(|| GERMAN_VOICE_MARTIN.to_string()),
+        reference_file: None,
+        provenance: VoiceProvenance {
+            source: "kokoro-de".to_string(),
+            content_hash: None,
+            license: Some("Apache-2.0".to_string()),
+            source_url: Some(format!("https://huggingface.co/{source_url}")),
+        },
+    })
+    .collect()
+}
+
 /// Cross-backend registry of bundled and locally installed voices.
 pub fn voice_registry(app: &AppHandle) -> Vec<VoiceRegistryEntry> {
     let mut registry = bundled_voice_registry();
+    registry.extend(german_voice_registry());
     match super::tts_voice_import::load_registry(app) {
         Ok(imported) => registry.extend(imported.into_iter().map(|voice| VoiceRegistryEntry {
             key: voice.key,
@@ -137,6 +180,8 @@ pub struct TtsSettings {
     pub version: u32,
     pub agent_text_to_speech: bool,
     pub voice_preferences: VoicePreferences,
+    #[serde(default)]
+    pub speech_language: SpeechLanguage,
 }
 
 impl Default for TtsSettings {
@@ -145,6 +190,7 @@ impl Default for TtsSettings {
             version: CURRENT_VERSION,
             agent_text_to_speech: true,
             voice_preferences: vec![MARY_VOICE_KEY.to_string()],
+            speech_language: SpeechLanguage::En,
         }
     }
 }
@@ -272,6 +318,7 @@ pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
             voice_preferences: vec![voice_key],
+            speech_language: SpeechLanguage::En,
         });
     }
 
@@ -306,6 +353,15 @@ pub(crate) fn save_to_path(path: &Path, settings: &TtsSettings) -> Result<(), St
         .map_err(|error| format!("could not encode text-to-speech settings: {error}"))?;
     atomic_write_json_restricted(path, &payload)
         .map_err(|error| format!("could not save text-to-speech settings: {error}"))
+}
+
+pub fn current_speech_language(state: &AppState) -> SpeechLanguage {
+    state
+        .huddle_audio
+        .tts
+        .lock()
+        .map(|settings| settings.speech_language)
+        .unwrap_or_default()
 }
 
 pub fn load_for_app(app: &AppHandle) -> (TtsSettings, Option<String>) {
@@ -445,7 +501,10 @@ async fn apply_tts_settings(
     if settings.agent_text_to_speech {
         let (active, voice_change_ack) = {
             let mut huddle = state.huddle()?;
-            let voice_reference = pocket_voice_reference(app, &settings.voice_preferences)?;
+            let voice_reference = match settings.speech_language {
+                SpeechLanguage::De => resolve_german_voice_key(&settings.voice_preferences).to_string(),
+                SpeechLanguage::En => pocket_voice_reference(app, &settings.voice_preferences)?,
+            };
             let voice_change_ack = enable_tts_runtime(&mut huddle, &voice_reference);
             (
                 matches!(huddle.phase, HuddlePhase::Connected | HuddlePhase::Active),
@@ -517,6 +576,63 @@ async fn wait_for_voice_change_ack(
 
 /// Compatibility command for the huddle speaker button. It updates the same
 /// installation-global preference as Settings; there is no per-huddle override.
+#[tauri::command]
+pub async fn set_speech_language(
+    language: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TtsSettings, String> {
+    let language = SpeechLanguage::parse(&language)?;
+    let transition = state.huddle_audio.tts_transition.lock().await;
+    let mut settings = current_settings(&state)?;
+    settings.speech_language = language;
+    if language == SpeechLanguage::De
+        && !settings
+            .voice_preferences
+            .iter()
+            .any(|key| is_german_voice_key(key))
+    {
+        settings
+            .voice_preferences
+            .insert(0, default_german_voice_key().to_string());
+    }
+    eprintln!(
+        "buzz-desktop: Speech language: {}",
+        settings.speech_language.as_str()
+    );
+    if language.should_load_kroko() || language.should_load_kokoro() {
+        if let Some(manager) = models::global_model_manager() {
+            manager.start_kroko_download(state.http_client.clone());
+            manager.start_kokoro_download(state.http_client.clone());
+        }
+    }
+    let voice_change = apply_tts_settings(settings, &app, &state).await?;
+    drop(transition);
+    finish_voice_change(voice_change).await?;
+    current_settings(&state)
+}
+
+#[tauri::command]
+pub async fn set_german_voice(
+    voice_key: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TtsSettings, String> {
+    if !is_german_voice_key(&voice_key) {
+        return Err(format!("Unknown German voice: {voice_key}"));
+    }
+    let transition = state.huddle_audio.tts_transition.lock().await;
+    let mut settings = current_settings(&state)?;
+    settings
+        .voice_preferences
+        .retain(|key| !is_german_voice_key(key));
+    settings.voice_preferences.insert(0, voice_key);
+    let voice_change = apply_tts_settings(settings, &app, &state).await?;
+    drop(transition);
+    finish_voice_change(voice_change).await?;
+    current_settings(&state)
+}
+
 #[tauri::command]
 pub async fn set_tts_enabled(
     enabled: bool,
@@ -733,6 +849,34 @@ mod tests {
     }
 
     #[test]
+    fn deutsch_victoria_survives_round_trip() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(SETTINGS_FILE);
+        let settings = TtsSettings {
+            speech_language: SpeechLanguage::De,
+            voice_preferences: vec![GERMAN_VOICE_VICTORIA.to_string(), MARY_VOICE_KEY.to_string()],
+            ..TtsSettings::default()
+        };
+        save_to_path(&path, &settings).expect("save");
+        let loaded = load_from_path(&path).expect("load");
+        assert_eq!(loaded.speech_language, SpeechLanguage::De);
+        assert_eq!(resolve_german_voice_key(&loaded.voice_preferences), GERMAN_VOICE_VICTORIA);
+    }
+
+    #[test]
+    fn missing_speech_language_defaults_to_english() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(SETTINGS_FILE);
+        std::fs::write(
+            &path,
+            r#"{"version":1,"agentTextToSpeech":true,"voicePreferences":["pocket:mary"]}"#,
+        )
+        .expect("fixture write");
+        let loaded = load_from_path(&path).expect("load");
+        assert_eq!(loaded.speech_language, SpeechLanguage::En);
+    }
+
+    #[test]
     fn defaults_are_backwards_compatible_and_use_mary() {
         assert_eq!(
             TtsSettings::default(),
@@ -740,6 +884,7 @@ mod tests {
                 version: 1,
                 agent_text_to_speech: true,
                 voice_preferences: vec!["pocket:mary".to_string()],
+                speech_language: SpeechLanguage::En,
             }
         );
     }
@@ -866,6 +1011,7 @@ mod tests {
                 version: 1,
                 agent_text_to_speech: false,
                 voice_preferences: vec![EVE_VOICE_KEY.to_string()],
+                speech_language: SpeechLanguage::En,
             }
         );
     }
