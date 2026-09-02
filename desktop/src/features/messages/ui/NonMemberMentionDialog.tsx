@@ -49,7 +49,7 @@ export function NonMemberMentionDialog({
             {names.join(", ")} {names.length === 1 ? "is" : "are"} not in this
             channel.{" "}
             {canInvite
-              ? "Invite them to the channel, or send without inviting them."
+              ? "Invite them (this re-adds previously removed members), or send without inviting them."
               : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} You can still send without inviting them.`}
           </AlertDialogDescription>
         </AlertDialogHeader>

@@ -181,11 +181,14 @@ export function useMentionSendFlow({
               await startAgentMutation.mutateAsync(readyAgent.pubkey);
             }
           } else {
-            await attachAgentMutation.mutateAsync({
-              channelId: capturedChannelId,
-              agent: readyAgent,
-              role: "bot",
-            });
+            // Never silently re-attach a non-member agent on mention.
+            // Channel membership changes go through the invite confirmation
+            // (handleInviteNonMembers) so a prior Remove cannot be undone by
+            // typing @Name (#3577).
+            errors.push(
+              `${agent.name}: not in this channel — invite them before mentioning.`,
+            );
+            continue;
           }
           pubkeys.push(pubkey);
         } catch (error) {
@@ -197,7 +200,6 @@ export function useMentionSendFlow({
       return { errors, pubkeys: uniqueNormalizedPubkeys(pubkeys) };
     },
     [
-      attachAgentMutation,
       getManagedAgentsByPubkey,
       getPersonas,
       mentions.memberPubkeys,
@@ -761,20 +763,13 @@ export function useMentionSendFlow({
             : uniqueNormalizedPubkeys(pubkeys).filter(
                 (pubkey) => !mentions.memberPubkeys.has(pubkey),
               );
-        let promptNonMemberPubkeys = nonMemberPubkeys.filter(
+        // Include managed agents that aren't channel members so a mention
+        // cannot silently re-attach a previously removed agent (#3577).
+        // Newly created persona agents are already being attached above.
+        const promptNonMemberPubkeys = nonMemberPubkeys.filter(
           (pubkey) =>
-            !mentions.isManagedAgentPubkey(pubkey) &&
             !createdPersonaAgentPubkeySet.has(normalizePubkey(pubkey)),
         );
-        if (promptNonMemberPubkeys.length > 0) {
-          try {
-            const managedAgentsByPubkey = await getManagedAgentsByPubkey();
-            if (isSendCancelled()) return;
-            promptNonMemberPubkeys = promptNonMemberPubkeys.filter(
-              (pubkey) => !managedAgentsByPubkey.has(normalizePubkey(pubkey)),
-            );
-          } catch {}
-        }
         const savedMentionRefs = mentions.getDraftMentionRefs(trimmed);
         const pendingDraft: PendingNonMemberMentionSend = {
           addressedAgentPubkeys: uniqueNormalizedPubkeys(addressedAgentPubkeys),
@@ -826,12 +821,10 @@ export function useMentionSendFlow({
       channelType,
       createMentionedPersonaAgents,
       customEmoji,
-      getManagedAgentsByPubkey,
       mentions.extractMentionPersonas,
       mentions.extractMentionPubkeys,
       mentions.hasResolvedMembers,
       mentions.isAgentPubkey,
-      mentions.isManagedAgentPubkey,
       mentions.memberPubkeys,
       mentions.getDraftMentionRefs,
       onPrepareSendChannel,
@@ -891,8 +884,11 @@ export function useMentionSendFlow({
       if (!isMountedRef.current) return;
       const peoplePubkeys: string[] = [];
       const relayAgentPubkeys: string[] = [];
+      const managedAgentsToAttach: ManagedAgent[] = [];
       for (const pubkey of nonMemberPubkeys) {
-        if (managedAgentsByPubkey.has(pubkey)) {
+        const managed = managedAgentsByPubkey.get(pubkey);
+        if (managed) {
+          managedAgentsToAttach.push(managed);
           continue;
         }
         if (mentions.isAgentPubkey(pubkey)) {
@@ -918,6 +914,19 @@ export function useMentionSendFlow({
         });
         errors.push(...result.errors.map((error) => error.error));
       }
+      for (const agent of managedAgentsToAttach) {
+        try {
+          await attachAgentMutation.mutateAsync({
+            channelId: pendingNonMemberSend.capturedChannelId ?? "",
+            agent,
+            role: "bot",
+          });
+        } catch (error) {
+          errors.push(
+            `${agent.name}: ${getErrorMessage(error, "Could not invite agent.")}`,
+          );
+        }
+      }
       if (errors.length > 0) {
         setNonMemberPromptError(errors.join("; "));
         return;
@@ -938,6 +947,7 @@ export function useMentionSendFlow({
     });
   }, [
     addMembersMutation,
+    attachAgentMutation,
     canInviteNonMembers,
     completeSend,
     getManagedAgentsByPubkey,
