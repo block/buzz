@@ -16,6 +16,10 @@ import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 import { formatRelativeTime } from "../lib/time";
 import { DeleteActionMenu } from "./DeleteActionMenu";
+import {
+  countCharacters,
+  truncateByCharacters,
+} from "@/shared/lib/truncateByCharacters";
 
 type ForumPostCardProps = {
   post: ForumPost;
@@ -59,8 +63,8 @@ export function ForumPostCard({
   const imetaByUrl = useMemo(() => parseImetaTags(post.tags), [post.tags]);
   const summary = post.threadSummary;
   const previewContent =
-    post.content.length > 200
-      ? `${post.content.slice(0, 200)}...`
+    countCharacters(post.content) > 200
+      ? `${truncateByCharacters(post.content, 200)}...`
       : post.content;
 
   return (

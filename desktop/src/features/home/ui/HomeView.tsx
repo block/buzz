@@ -73,7 +73,7 @@ import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { Button } from "@/shared/ui/button";
 import { HomeMembersSidebarOverlay } from "./HomeMembersSidebarOverlay";
-
+import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
 const INBOX_SEARCH_KEYS = [
   "item",
   "profile",
@@ -715,7 +715,7 @@ export function HomeView({
                   authorPubkey: item.item.pubkey,
                   channelId,
                   eventId: item.id,
-                  preview: item.preview.slice(0, 100),
+                  preview: truncateByCharacters(item.preview, 100),
                 });
               }}
               onSelect={(itemId) => {

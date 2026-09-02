@@ -23,6 +23,7 @@ import {
   PopoverContent,
 } from "@/shared/ui/popover";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
 
 const HOVER_CLOSE_DELAY_MS = 180;
 const ACTIVITY_POPOVER_MOTION_STYLE = {
@@ -449,7 +450,7 @@ export function ChannelActivityPopover({
                         authorPubkey: item.item.pubkey,
                         channelId: channel.id,
                         eventId: item.id,
-                        preview: item.preview.slice(0, 100),
+                        preview: truncateByCharacters(item.preview, 100),
                       });
                     }}
                   />
