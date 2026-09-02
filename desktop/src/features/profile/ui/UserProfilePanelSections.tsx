@@ -443,9 +443,8 @@ export function ProfileSummaryView({
           }
           onAgentRestart={
             isOwner === true &&
-            managedAgent?.backend.type === "local" &&
-            (managedAgent.status === "running" ||
-              managedAgent.status === "deployed")
+            managedAgent &&
+            isManagedAgentActive(managedAgent)
               ? handleAgentRestart
               : undefined
           }
