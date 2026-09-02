@@ -18,9 +18,12 @@ struct EmojiEntry {
 /// Parse `["emoji", shortcode, url]` tags from one event into entries.
 ///
 /// Mirrors desktop `customEmojiFromTags` (`desktop/src/shared/api/customEmoji.ts`):
-/// - Shortcode is normalized to lowercase (relay stores original case; scanner
-///   always lowercases, so an upper-case stored key would never resolve without
-///   this step).
+/// - Shortcode is canonicalized via `buzz_sdk::normalize_custom_emoji_shortcode`
+///   (trim whitespace/colons, validate charset/length, lowercase). The relay
+///   validates with the same fn at ingest but stores the original signed tag,
+///   so a relay-valid stored key like `"  :WAVE:  "` must be normalized here or
+///   it will never resolve against `scan_shortcodes` output. Malformed tags
+///   (where normalization returns `Err`) are skipped.
 /// - Entries with a missing or empty URL are skipped.
 /// - Within one event the first occurrence of a normalized shortcode wins;
 ///   later duplicates are dropped.
@@ -48,8 +51,15 @@ fn emoji_tags_of(event: &serde_json::Value) -> Vec<EmojiEntry> {
         if url.is_empty() {
             continue;
         }
-        // Normalize to lowercase so palette lookups match scan_shortcodes output.
-        let shortcode = raw_shortcode.to_lowercase();
+        // Canonicalize via the SDK normalizer: trim whitespace/colons, validate
+        // charset/length, lowercase.  Relay validates with this same fn at
+        // ingest but stores the original tag — so a relay-valid key like
+        // "  :WAVE:  " must map to "wave" here or it will never resolve against
+        // scan_shortcodes output.  Skip on Err (malformed tag).
+        let shortcode = match buzz_sdk::normalize_custom_emoji_shortcode(raw_shortcode) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
         // First occurrence within this event wins; later duplicates are dropped.
         if seen.insert(shortcode.clone()) {
             out.push(EmojiEntry {
@@ -501,12 +511,13 @@ mod tests {
     #[test]
     fn emoji_tags_of_normalizes_uppercase_shortcode_to_lowercase() {
         // Relay stores the original case; scanner always lowercases; so a
-        // stored "WAVE" must map to "wave" for resolution to work.
+        // stored "WAVE" must map to "wave" for resolution to work.  Also
+        // covers relay-valid keys with surrounding whitespace/colons.
         let event = serde_json::json!({
             "created_at": 100,
             "tags": [
                 ["emoji", "WAVE", "https://example.com/wave.png"],
-                ["emoji", "SweatBlob", "https://example.com/sweatblob.gif"],
+                ["emoji", "  :SweatBlob:  ", "https://example.com/sweatblob.gif"],
             ]
         });
         let entries = emoji_tags_of(&event);
@@ -761,6 +772,39 @@ mod tests {
             *call_count.lock().unwrap(),
             1,
             "must query palette once even when no shortcodes resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_non_canonical_palette_key_resolves() {
+        // The relay validates shortcodes via normalize_custom_emoji_shortcode but
+        // stores the original signed tag.  A relay-valid stored key like
+        // "  :WAVE:  " must resolve when content contains `:wave:`.
+        // This is the production-resolver regression that proves emoji_tags_of
+        // uses the SDK normalizer rather than a plain lowercase conversion.
+        let non_canonical_palette = serde_json::json!([{
+            "created_at": 100,
+            "tags": [
+                ["d", "buzz:custom-emoji"],
+                // Relay-valid but non-canonical: whitespace + surrounding colons + uppercase.
+                ["emoji", "  :WAVE:  ", "https://cdn.example.com/wave.png"],
+            ]
+        }])
+        .to_string();
+        let (url, _calls) = fake_query_server(non_canonical_palette).await;
+        let client = test_client(&url);
+        let tags = resolve_emoji_tags_for_content(&client, "hello :wave:")
+            .await
+            .unwrap();
+        assert_eq!(
+            tags.len(),
+            1,
+            "non-canonical palette key must resolve; got tags: {tags:?}"
+        );
+        assert_eq!(
+            tags[0],
+            vec!["emoji", "wave", "https://cdn.example.com/wave.png"],
+            "resolved tag must use the canonical lowercase shortcode"
         );
     }
 }
