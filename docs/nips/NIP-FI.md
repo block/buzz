@@ -6,7 +6,7 @@ Federated identity authorization — stateless core
 
 `draft` `optional` `relay`
 
-**Protocol dependencies**: NIP-01, NIP-42.
+**Protocol dependencies**: NIP-01, NIP-42, NIP-98.
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHOULD", "SHOULD NOT", and
 "MAY" in this document are to be interpreted as described in BCP 14 (RFC 2119
@@ -279,7 +279,7 @@ A disconnect call causes the relay to:
    pubkey, synchronously.
 2. Insert a **deny entry** keyed by `(iss, target_pubkey)` into the relay's
    in-memory deny set, with an absolute expiry of `until` (a Unix timestamp
-   supplied in the command body; see Request below).  Any subsequent connection
+   carried in the signed command JWT; see Command JWT).  Any subsequent connection
    or admission attempt for that pubkey under the same issuer is denied
    `authorization_denied` until `now >= until`.
 
@@ -409,6 +409,10 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   AssertAuthorizedIssuerPrincipal(claims.iss, claims.sub) or DENY(authorization_denied)
 
   // 6. Signed-target / request-body agreement (pure check — no side effects)
+  // The body carries the target pubkey so the relay can route the disconnect
+  // without parsing the JWS first; the signed claim MUST agree with this
+  // independently parsed input.  `until` has no such external routing role —
+  // the signed claim is the sole authority and is not repeated in the body.
   assert target_k == request_body_pubkey or DENY(authorization_denied)
 
   // 7. Atomically reserve jti — final admission step, immediately before side effects.
@@ -436,14 +440,16 @@ POST /api/nip-fi/disconnect HTTP/1.1
 Nostr-Federated-Identity: Bearer <compact-command-JWS>
 Content-Type: application/json
 
-{"pubkey": "<lowercase-hex-32-byte-pubkey>", "until": <unix-timestamp>}
+{"pubkey": "<lowercase-hex-32-byte-pubkey>"}
 ```
 
 The relay calls `VerifyCommandJwt` passing the request method, path, and
 body `pubkey` field; any failure denies per the rejection table.  On success,
 the relay closes all live connections whose proven `k` equals
 `CommandResult.target_pubkey` and inserts a deny entry for `(iss, target_pubkey)`
-with expiry `CommandResult.until`.  An unknown or unprovable pubkey is not an
+with expiry `CommandResult.until`.  The `until` expiry is taken exclusively
+from the signed command JWT claim; the request body carries no `until` field.
+An unknown or unprovable pubkey is not an
 error; the relay responds `200` with `{"disconnected": 0}`.  An `until` value in
 the past is not an error; sessions are closed and the deny entry expires
 immediately.
@@ -462,9 +468,11 @@ immediately.
 In enforce mode, every protected HTTP request MUST carry both a NIP-98
 authorization event and a NIP-FI assertion bound to the same key, and the
 deployment verifies both.  NIP-98 proves key possession; NIP-FI proves
-identity.  Without the assertion check, an offboarded principal's key
-continues to authorize HTTP requests for the full remaining assertion TTL —
-bypassing the identity system on every HTTP surface.
+identity.  Without the assertion check, a principal holding an active key
+can mint fresh NIP-98 events indefinitely and retain HTTP access for as long
+as the key remains accepted — the assertion's TTL provides no bound because
+the assertion is never examined.  Pairing introduces the assertion lifetime
+bound; an active deny-set entry blocks the next request immediately.
 
 ### Protected surfaces
 
@@ -476,6 +484,13 @@ protected set MUST be configured fail-closed: a route that cannot be
 classified as exempt MUST be treated as protected.  Deployment operators
 define the set; this spec assigns no normative route names.
 
+The NIP-FI issuer→relay administrative API (e.g. `/api/nip-fi/disconnect`)
+is **not** a protected HTTP surface.  It is a distinct administrative
+transport governed exclusively by the command-JWT contract in Admin
+disconnect API.  It carries `Nostr-Federated-Identity` for its command JWS,
+not for an identity assertion, and MUST NOT be subjected to the HTTP ingress
+admission procedure.
+
 > **Non-normative examples of surfaces that may appear in a protected set:**
 > HTTP API bridge, invite redemption, media storage, git smart-HTTP.
 
@@ -484,11 +499,17 @@ define the set; this spec assigns no normative route names.
 Each protected HTTP request MUST present both of the following:
 
 ```text
-Authorization: Nostr <base64url-NIP-98-event>
+Authorization: Nostr <base64-NIP-98-event>
 Nostr-Federated-Identity: Bearer <compact-JWS>
 ```
 
 `Authorization` carries the NIP-98 authorization event as specified in NIP-98.
+The field MUST be present exactly once, MUST use the `Nostr` scheme with a
+single base64-encoded event value, and MUST NOT be repeated, comma-combined,
+empty, use an alternative scheme, or carry a fallback credential.  Missing,
+repeated, comma-combined, empty, malformed, non-`Nostr`, or wrong-scheme
+`Authorization` values deny.
+
 `Nostr-Federated-Identity` carries the compact-JWS assertion, identical in
 format to the WebSocket transport field.  The field names are distinct; they
 serve different roles and MUST NOT be combined or substituted for each other.
@@ -507,11 +528,21 @@ On each protected HTTP request:
 3. Validate the NIP-98 `Authorization` event per NIP-98; extract the proven
    pubkey `k` from the event.  An absent, malformed, or invalid NIP-98 event
    → deny `missing_evidence` or `evidence_rejected` as appropriate.
+   For requests with an authorization-relevant body (any request whose body
+   constitutes a state-changing operation), the NIP-98 event MUST contain
+   exactly one `payload` tag whose value is the lowercase hexadecimal
+   SHA-256 hash of the exact consumed request body bytes.  An absent,
+   duplicate, or mismatched `payload` tag on such a request → deny
+   `evidence_rejected`.  [FI-TRACE-HTTP-INGRESS]
 4. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
    [FI-TRACE-ASSERTION-KEY-MISMATCH]
 5. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
    `authorization_denied`.  [FI-TRACE-DENY-SET]
 6. Admit the request.
+
+The deployment classifies body relevance server-side.  The classification
+MUST be fail-closed: a body that cannot be classified as non-authorization-relevant
+MUST be treated as authorization-relevant and a `payload` tag required.
 
 ### Per-request verification
 
@@ -609,7 +640,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
 | `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions and does not deny future admissions; a deny-set-full command is rejected `503` without closing sessions. |
-| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected. |
+| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal `sub` values under different `iss` values remain distinct identities. |
@@ -655,13 +686,13 @@ race is bounded by `max(0, min(exp, iat + maximum_assertion_age) - now)` — the
 same bound as issuer-stops-issuance without a deny call, and finite by the
 assertion contract.
 
-**HTTP ingress bypass.** Without the pairing rule, a principal whose key is
-still valid for HTTP but whose assertion has been revoked (issuer stops
-issuance or a deny-until-TTL entry is active) would retain HTTP access for
-the full remaining assertion TTL.  The pairing rule closes this gap by
-requiring assertion verification on every protected HTTP request.  The per-request
-re-verification model means there is no cached admission window; a deny-set
-entry takes effect on the very next request.
+**HTTP ingress bypass.** Without the pairing rule, a principal holding an
+active key can mint fresh NIP-98 events indefinitely and retain HTTP access
+for as long as the key remains accepted — the assertion TTL provides no
+bound when the assertion is never examined.  The pairing rule closes this
+gap by requiring assertion verification on every protected HTTP request.
+The per-request re-verification model means there is no cached admission
+window; a deny-set entry takes effect on the very next request.
 
 **SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
@@ -679,7 +710,7 @@ is bounded before any attacker-controlled lookup.
 ## Sources
 
 - NIP-42 authentication: <https://github.com/nostr-protocol/nips/blob/6d2979b3f503a8539c983efbcdcf901bbcf9ed23/42.md>
-- NIP-98 HTTP authorization: <https://github.com/nostr-protocol/nips/blob/master/98.md>
+- NIP-98 HTTP authorization: <https://github.com/nostr-protocol/nips/blob/ae0fd96907d0767f07fb54ca1de9f197c600cb27/98.md>
 - JWT BCP: <https://www.rfc-editor.org/rfc/rfc8725>
 - JWT access-token profile: <https://www.rfc-editor.org/rfc/rfc9068>
 - DPoP: <https://www.rfc-editor.org/rfc/rfc9449>
