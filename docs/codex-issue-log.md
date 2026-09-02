@@ -189,3 +189,11 @@
 - 处理：保留文件读取、上传、签名和 relay 确认的分阶段诊断日志；移动端媒体上传优先使用已验证的 LAN transport，并复用 HTTP client；新媒体上传先检查租户 sidecar，sidecar 不存在时跳过无意义的 blob `HEAD`。测试过 Android Wi-Fi low-latency lock，但没有稳定收益，未纳入产品代码。
 - 验证：真实附件发送降至约 1.13 秒，其中读取 57 ms、上传 412 ms、消息准备/签名/确认 650 ms；`buzz-media` 121 项测试和移动端相关 123 项测试通过，`flutter analyze` 无问题，debug APK 已在实机安装验证。
 - 版本/提交：基于 `047c8141`，本次 PR 待提交。
+
+## 2026-09-02：登录后 Inbox 线程部分上下文未加载
+
+- 现象：登录后打开 Home/Inbox 的线程详情，消息主体可以显示，但顶部出现 `Some message context could not be loaded.`，部分根消息、父消息或上下文没有补齐。
+- 定位：Inbox 冷启动会通过 `get_event` 按事件 ID补拉线程祖先；桌面 Tauri 命令此前只查询少量 kind，遗漏了 legacy stream、job 生命周期、workflow、Git、forum vote 及 huddle 生命周期等公开事件。另一个问题是请求可能发生在首次 AUTH 或重连窗口，临时 relay 失败会被永久记录为加载错误。
+- 处理：新增明确的公开 `EVENT_LOOKUP_KINDS` 集合，覆盖可作为线程根/父事件的公开类型，同时排除 recipient-gated、author-only 和其他受限事件，避免放宽 relay 访问边界；Inbox 上下文加载现在监听 relay 连接状态，非 `connected` 阶段的失败不再显示为持久错误，并会在连接认证成功后重新 hydration。
+- 验证：新增 Rust 单元测试锁定关键公开 kind 均可查找且 lookup filter 不含 p-gated kind；消息命令测试 13/13、Inbox 辅助测试 23/23、桌面 TypeScript、Biome、E2E 构建和本次文件 rustfmt 检查通过。全量桌面测试共 4,883 个用例，其中 4,882 个通过、1 个与本次改动无关的既有失败。
+- 版本/提交：待提交。

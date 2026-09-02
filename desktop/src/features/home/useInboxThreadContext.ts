@@ -7,6 +7,7 @@ import { getThreadReference } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
 import { getEventById } from "@/shared/api/tauri";
+import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
 import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
@@ -116,12 +117,24 @@ export function useInboxThreadContext(
     : null;
   const selectedChannelId = item?.channelId ?? null;
   const fullChannel = options.fullChannel === true;
+  const relayConnectionState = useRelayConnection();
 
   React.useEffect(() => {
     let isCancelled = false;
 
     if (fullChannel || !selectedEvent || !selectedThreadRootId) {
       setFetchedEvents([]);
+      setHasLoadError(false);
+      setIsLoading(false);
+      return () => {
+        isCancelled = true;
+      };
+    }
+
+    // Wait for the authenticated relay before starting cold-context reads.
+    // Keeping the existing events here prevents a reconnect from blanking an
+    // already-rendered thread; the `connected` transition reruns this effect.
+    if (relayConnectionState !== "connected") {
       setHasLoadError(false);
       setIsLoading(false);
       return () => {
@@ -219,7 +232,13 @@ export function useInboxThreadContext(
           return;
         }
 
-        setHasLoadError(ancestorResult.failed || descendantResult.failed);
+        // A context request can begin during login or a reconnect. Do not
+        // turn that transient failure into a persistent red banner; the
+        // connection-state dependency reruns hydration after AUTH succeeds.
+        setHasLoadError(
+          relayConnectionState === "connected" &&
+            (ancestorResult.failed || descendantResult.failed),
+        );
         setFetchedEvents(
           dedupeEvents(
             [...ancestorResult.events, ...descendantResult.events].filter(
@@ -231,7 +250,7 @@ export function useInboxThreadContext(
       } catch (error) {
         if (!isCancelled) {
           console.error("Failed to load Inbox message context", error);
-          setHasLoadError(true);
+          setHasLoadError(relayConnectionState === "connected");
         }
       } finally {
         if (!isCancelled) {
@@ -251,6 +270,7 @@ export function useInboxThreadContext(
     selectedParentId,
     selectedThreadRootId,
     fullChannel,
+    relayConnectionState,
   ]);
 
   const events = React.useMemo(() => {

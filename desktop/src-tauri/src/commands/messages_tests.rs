@@ -185,6 +185,25 @@ fn thread_replies_filter_pages_with_composite_cursor() {
 }
 
 #[test]
+fn event_lookup_kinds_cover_public_thread_events_without_p_gated_kinds() {
+    for kind in [
+        40001, 43001, 43006, 46010, 46012, 48101, 48103, 1617, 1618, 1633,
+    ] {
+        assert!(
+            EVENT_LOOKUP_KINDS.contains(&kind),
+            "public thread event kind {kind} must be resolvable by get_event"
+        );
+    }
+
+    for kind in EVENT_LOOKUP_KINDS {
+        assert!(
+            !buzz_core_pkg::kind::P_GATED_KINDS.contains(kind),
+            "event lookup filter must not include p-gated kind {kind}"
+        );
+    }
+}
+
+#[test]
 fn stored_managed_agent_auth_tag_trims_blank_values() {
     assert_eq!(
         stored_managed_agent_auth_tag(Some("  [\"auth\",\"owner\",\"\",\"sig\"]  ")),

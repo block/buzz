@@ -45,6 +45,61 @@ const TIMELINE_KINDS: [u32; 11] = [
     buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
 ];
 
+// Public event kinds that can be referenced as a message, thread root, or
+// parent by desktop surfaces. Keep recipient-gated and author-only kinds out
+// of this filter: the relay's filter-level access gate rejects a mixed query
+// before it can answer an otherwise valid public event-id lookup.
+const EVENT_LOOKUP_KINDS: &[u32] = &[
+    0,     // profile
+    1,     // text note
+    3,     // contact list
+    5,     // NIP-09 deletion
+    7,     // reaction
+    9,     // legacy stream message
+    40001, // legacy stream message
+    40002, // stream message v2
+    40003, // stream message edit
+    40004, // pinned message
+    40005, // bookmarked message
+    40006, // scheduled message
+    40007, // reminder
+    40008, // message diff
+    40099, // system message
+    40100, // canvas
+    43001, // job request
+    43002, // job accepted
+    43003, // job progress
+    43004, // job result
+    43005, // job cancelled
+    43006, // job error
+    45001, // forum post
+    45002, // forum vote
+    45003, // forum comment
+    46001, // workflow triggered
+    46002, // workflow step started
+    46003, // workflow step completed
+    46004, // workflow step failed
+    46005, // workflow completed
+    46006, // workflow failed
+    46007, // workflow cancelled
+    46010, // workflow approval requested
+    46011, // workflow approval granted
+    46012, // workflow approval denied
+    48100, // huddle started
+    48101, // huddle participant joined
+    48102, // huddle participant left
+    48103, // huddle ended
+    1617,  // git patch
+    1618,  // git pull request
+    1619,  // git pull request update
+    1621,  // git issue
+    1630,  // git status open
+    1631,  // git status merged
+    1632,  // git status closed
+    1633,  // git status draft
+    30078, // local read-state projection
+];
+
 #[tauri::command]
 pub async fn get_feed(
     since: Option<i64>,
@@ -415,7 +470,7 @@ pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<S
         &state,
         &[serde_json::json!({
             "ids": [event_id],
-            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
+            "kinds": EVENT_LOOKUP_KINDS,
             "limit": 1
         })],
     )
