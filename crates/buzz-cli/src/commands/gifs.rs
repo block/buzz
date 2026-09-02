@@ -323,6 +323,24 @@ pub async fn cmd_search(
     query: &str,
     locale: Option<&str>,
 ) -> Result<(), CliError> {
+    let entries = search_entries(client, query, locale).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&entries)
+            .map_err(|e| CliError::Other(format!("output serialization failed: {e}")))?
+    );
+    Ok(())
+}
+
+/// Resolve NIP-11, POST the search, normalize and return typed GIF entries.
+///
+/// Extracted from `cmd_search` so tests can assert the typed result directly
+/// without capturing stdout.
+pub(crate) async fn search_entries(
+    client: &BuzzClient,
+    query: &str,
+    locale: Option<&str>,
+) -> Result<Vec<GifEntry>, CliError> {
     let (search_path, _) = resolve_gif_descriptor(client).await?;
     let cid = customer_id(
         client.keys().secret_key().as_secret_bytes(),
@@ -336,13 +354,7 @@ pub async fn cmd_search(
         "locale": locale,
     });
     let raw = client.post_json_authed(&search_path, &body).await?;
-    let entries = normalize_gif_response(&raw)?;
-    println!(
-        "{}",
-        serde_json::to_string(&entries)
-            .map_err(|e| CliError::Other(format!("output serialization failed: {e}")))?
-    );
-    Ok(())
+    normalize_gif_response(&raw)
 }
 
 /// `buzz gifs share --slug <slug>`
@@ -656,24 +668,37 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::post;
     use axum::Router;
-    use nostr::Keys;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use nostr::{JsonUtil, Keys, Tag};
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
     /// Captured request data from the fake server.
     #[derive(Clone, Default)]
-    #[allow(dead_code)]
     struct Captured {
-        method: String,
         path: String,
         auth_header: String,
         auth_tag_header: String,
         body: String,
     }
 
-    /// A simple fake relay: serves NIP-11 at `/info` and captures POST bodies
-    /// at `/gifs/search` and `/gifs/share`.
+    /// NIP-11 JSON that advertises non-default search/share paths.
+    ///
+    /// Production code must read the advertised paths from NIP-11 and POST to
+    /// them.  Using non-default paths here means hardcoded "/gifs/search" /
+    /// "/gifs/share" in production would target 404 routes and the tests would
+    /// fail — proving that the relay-advertised path is actually used.
+    const ALT_SEARCH_PATH: &str = "/x/search-alt";
+    const ALT_SHARE_PATH: &str = "/x/share-alt";
+
+    fn alt_nip11() -> &'static str {
+        // Embedded as a literal so there is no run-time allocation in the const.
+        r#"{"supported_extensions":["buzz-gif"],"gif":{"provider":"klipy","search":"/x/search-alt","share":"/x/share-alt"}}"#
+    }
+
+    /// A simple fake relay: serves NIP-11 at `/info` advertising non-default
+    /// paths, then captures POST bodies at those paths.
     async fn fake_server(
         search_status: StatusCode,
         search_body: String,
@@ -684,77 +709,76 @@ mod tests {
         type S = (Arc<Mutex<Vec<Captured>>>, StatusCode, String, StatusCode);
         let state: S = (captured.clone(), search_status, search_body, share_status);
 
-        let app = Router::new()
-            .route(
-                "/info",
-                axum::routing::get(|| async {
-                    (
-                        StatusCode::OK,
-                        [("content-type", "application/nostr+json")],
-                        r#"{"supported_extensions":["buzz-gif"],"gif":{"provider":"klipy","search":"/gifs/search","share":"/gifs/share"}}"#,
-                    )
-                }),
-            )
-            .route(
-                "/gifs/search",
-                post(
-                    |State((cap, search_st, search_bd, _)): State<S>,
-                     headers: HeaderMap,
-                     body: Bytes| async move {
-                        let body_str = String::from_utf8_lossy(&body).to_string();
-                        cap.lock().unwrap().push(Captured {
-                            method: "POST".to_string(),
-                            path: "/gifs/search".to_string(),
-                            auth_header: headers
-                                .get("authorization")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string(),
-                            auth_tag_header: headers
-                                .get("x-auth-tag")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string(),
-                            body: body_str,
-                        });
-                        axum::response::Response::builder()
-                            .status(search_st)
-                            .header("content-type", "application/json")
-                            .body(axum::body::Body::from(search_bd.clone()))
-                            .unwrap()
-                    },
-                ),
-            )
-            .route(
-                "/gifs/share",
-                post(
-                    |State((cap, _, _, share_st)): State<S>,
-                     headers: HeaderMap,
-                     body: Bytes| async move {
-                        let body_str = String::from_utf8_lossy(&body).to_string();
-                        cap.lock().unwrap().push(Captured {
-                            method: "POST".to_string(),
-                            path: "/gifs/share".to_string(),
-                            auth_header: headers
-                                .get("authorization")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string(),
-                            auth_tag_header: headers
-                                .get("x-auth-tag")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string(),
-                            body: body_str,
-                        });
-                        axum::response::Response::builder()
-                            .status(share_st)
-                            .body(axum::body::Body::empty())
-                            .unwrap()
-                    },
-                ),
-            )
-            .with_state(state);
+        let app =
+            Router::new()
+                .route(
+                    "/info",
+                    axum::routing::get(|| async {
+                        (
+                            StatusCode::OK,
+                            [("content-type", "application/nostr+json")],
+                            alt_nip11(),
+                        )
+                    }),
+                )
+                .route(
+                    ALT_SEARCH_PATH,
+                    post(
+                        |State((cap, search_st, search_bd, _)): State<S>,
+                         headers: HeaderMap,
+                         body: Bytes| async move {
+                            let body_str = String::from_utf8_lossy(&body).to_string();
+                            cap.lock().unwrap().push(Captured {
+                                path: ALT_SEARCH_PATH.to_string(),
+                                auth_header: headers
+                                    .get("authorization")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                auth_tag_header: headers
+                                    .get("x-auth-tag")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                body: body_str,
+                            });
+                            axum::response::Response::builder()
+                                .status(search_st)
+                                .header("content-type", "application/json")
+                                .body(axum::body::Body::from(search_bd.clone()))
+                                .unwrap()
+                        },
+                    ),
+                )
+                .route(
+                    ALT_SHARE_PATH,
+                    post(
+                        |State((cap, _, _, share_st)): State<S>,
+                         headers: HeaderMap,
+                         body: Bytes| async move {
+                            let body_str = String::from_utf8_lossy(&body).to_string();
+                            cap.lock().unwrap().push(Captured {
+                                path: ALT_SHARE_PATH.to_string(),
+                                auth_header: headers
+                                    .get("authorization")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                auth_tag_header: headers
+                                    .get("x-auth-tag")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                body: body_str,
+                            });
+                            axum::response::Response::builder()
+                                .status(share_st)
+                                .body(axum::body::Body::empty())
+                                .unwrap()
+                        },
+                    ),
+                )
+                .with_state(state);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
@@ -762,33 +786,67 @@ mod tests {
         (format!("http://{addr}"), captured)
     }
 
+    /// Client without an auth tag — used for basic NIP-98 / body / path tests.
     fn test_client(base_url: &str) -> BuzzClient {
         let keys = Keys::generate();
         BuzzClient::new(base_url.to_string(), keys, None, None).unwrap()
     }
 
-    #[tokio::test]
-    async fn search_sends_nip98_auth_and_correct_body() {
-        let search_resp = r#"{"result":true,"data":{"data":[
+    /// Client with a synthetic `x-auth-tag` — used to assert that the header
+    /// is forwarded verbatim and that its value is the raw JSON of the tag.
+    fn test_client_with_tag(base_url: &str) -> (BuzzClient, String) {
+        let keys = Keys::generate();
+        // Construct a minimal auth tag: ["auth", <owner_hex>, "conditions", <sig_hex>]
+        let owner_hex = "a".repeat(64);
+        let sig_hex = "b".repeat(128);
+        let tag_vec = vec![
+            "auth".to_string(),
+            owner_hex,
+            "conditions".to_string(),
+            sig_hex,
+        ];
+        let tag_json = serde_json::to_string(&tag_vec).unwrap();
+        let tag = Tag::parse(tag_vec).unwrap();
+        let client = BuzzClient::new(
+            base_url.to_string(),
+            keys,
+            Some(tag),
+            Some(tag_json.clone()),
+        )
+        .unwrap();
+        (client, tag_json)
+    }
+
+    fn one_gif_response() -> String {
+        serde_json::json!({"result":true,"data":{"data":[
             {"type":"gif","slug":"test-slug","title":"Test","file":{
                 "md":{"gif":{"url":"https://cdn.klipy.com/test.gif","width":320,"height":180,"size":50}}
             }}
-        ]}}"#.to_string();
+        ]}})
+        .to_string()
+    }
+
+    // ── item 1: relay-advertised path binding ──────────────────────────────
+
+    #[tokio::test]
+    async fn search_posts_to_relay_advertised_path_not_hardcoded() {
+        // Fake advertises ALT_SEARCH_PATH; hardcoded "/gifs/search" would 404.
         let (url, captured) =
-            fake_server(StatusCode::OK, search_resp, StatusCode::NO_CONTENT).await;
+            fake_server(StatusCode::OK, one_gif_response(), StatusCode::NO_CONTENT).await;
         let client = test_client(&url);
 
         cmd_search(&client, "hello", Some("en_US")).await.unwrap();
 
         let calls = captured.lock().unwrap();
-        let call = calls.iter().find(|c| c.path == "/gifs/search").unwrap();
-        // NIP-98 Authorization header must be present and start with "Nostr ".
+        let call = calls
+            .iter()
+            .find(|c| c.path == ALT_SEARCH_PATH)
+            .expect("POST must arrive at the NIP-11-advertised path");
         assert!(
             call.auth_header.starts_with("Nostr "),
-            "Authorization must be NIP-98 Nostr token, got: {:?}",
+            "Authorization must be a NIP-98 Nostr token, got: {:?}",
             call.auth_header
         );
-        // Body must contain the expected fields.
         let body: serde_json::Value = serde_json::from_str(&call.body).unwrap();
         assert_eq!(body["query"], "hello");
         assert_eq!(body["locale"], "en_US");
@@ -802,20 +860,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_output_contains_cdn_url() {
-        let search_resp = r#"{"result":true,"data":{"data":[
-            {"type":"gif","slug":"test-slug","title":"Test","file":{
-                "md":{"gif":{"url":"https://cdn.klipy.com/test.gif","width":320,"height":180,"size":50}}
-            }}
-        ]}}"#.to_string();
-        let (url, _) = fake_server(StatusCode::OK, search_resp, StatusCode::NO_CONTENT).await;
-        let client = test_client(&url);
-        // If cmd_search completes without error, the normalized output was valid.
-        cmd_search(&client, "", None).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn share_sends_nip98_auth_and_correct_body() {
+    async fn share_posts_to_relay_advertised_path_not_hardcoded() {
+        // Fake advertises ALT_SHARE_PATH; hardcoded "/gifs/share" would 404.
         let (url, captured) =
             fake_server(StatusCode::OK, "[]".to_string(), StatusCode::NO_CONTENT).await;
         let client = test_client(&url);
@@ -823,10 +869,13 @@ mod tests {
         cmd_share(&client, "my-gif-slug").await.unwrap();
 
         let calls = captured.lock().unwrap();
-        let call = calls.iter().find(|c| c.path == "/gifs/share").unwrap();
+        let call = calls
+            .iter()
+            .find(|c| c.path == ALT_SHARE_PATH)
+            .expect("POST must arrive at the NIP-11-advertised share path");
         assert!(
             call.auth_header.starts_with("Nostr "),
-            "Authorization must be NIP-98 Nostr token"
+            "Authorization must be a NIP-98 Nostr token"
         );
         let body: serde_json::Value = serde_json::from_str(&call.body).unwrap();
         assert_eq!(body["slug"], "my-gif-slug");
@@ -839,11 +888,128 @@ mod tests {
         );
     }
 
+    // ── item 2: x-auth-tag forwarded + NIP-98 deep assertions ─────────────
+
+    #[tokio::test]
+    async fn search_forwards_x_auth_tag_header() {
+        let (url, captured) =
+            fake_server(StatusCode::OK, one_gif_response(), StatusCode::NO_CONTENT).await;
+        let (client, expected_tag_json) = test_client_with_tag(&url);
+
+        cmd_search(&client, "", None).await.unwrap();
+
+        let calls = captured.lock().unwrap();
+        let call = calls
+            .iter()
+            .find(|c| c.path == ALT_SEARCH_PATH)
+            .expect("search POST must arrive");
+        assert_eq!(
+            call.auth_tag_header, expected_tag_json,
+            "x-auth-tag must equal the exact JSON of the auth tag"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_nip98_token_has_correct_u_method_and_payload_hash() {
+        let (url, captured) =
+            fake_server(StatusCode::OK, one_gif_response(), StatusCode::NO_CONTENT).await;
+        let client = test_client(&url);
+
+        cmd_search(&client, "cats", Some("en_US")).await.unwrap();
+
+        let calls = captured.lock().unwrap();
+        let call = calls
+            .iter()
+            .find(|c| c.path == ALT_SEARCH_PATH)
+            .expect("search POST must arrive");
+
+        // Decode "Nostr <base64>" → JSON event
+        let token = call
+            .auth_header
+            .strip_prefix("Nostr ")
+            .expect("must start with Nostr ");
+        let json_bytes = B64.decode(token).expect("must be valid base64");
+        let event: nostr::Event =
+            nostr::Event::from_json(std::str::from_utf8(&json_bytes).unwrap()).unwrap();
+
+        // kind:27235 (NIP-98)
+        assert_eq!(event.kind.as_u16(), 27235);
+
+        // `u` tag must be the exact POST URL
+        let expected_url = format!("{url}{ALT_SEARCH_PATH}");
+        let u_tag = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("u"))
+            .expect("NIP-98 event must have a u tag");
+        assert_eq!(
+            u_tag.as_slice().get(1).map(|s| s.as_str()).unwrap_or(""),
+            expected_url
+        );
+
+        // `method` tag must be "POST"
+        let method_tag = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("method"))
+            .expect("NIP-98 event must have a method tag");
+        assert_eq!(
+            method_tag
+                .as_slice()
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or(""),
+            "POST"
+        );
+
+        // `payload` tag must equal SHA-256 of the request body
+        use sha2::{Digest, Sha256};
+        let body_bytes = call.body.as_bytes();
+        let expected_hash = hex::encode(Sha256::digest(body_bytes));
+        let payload_tag = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("payload"))
+            .expect("NIP-98 event must have a payload tag for POST with body");
+        assert_eq!(
+            payload_tag
+                .as_slice()
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or(""),
+            expected_hash,
+            "payload tag must be SHA-256 of the request body"
+        );
+    }
+
+    // ── item 3: search_output_contains_cdn_url asserts typed result ────────
+
+    #[tokio::test]
+    async fn search_entries_returns_top_level_cdn_url() {
+        // Tests that cmd_search delegates to search_entries() which returns
+        // typed output with cdn_url at the top level.  A raw-passthrough
+        // regression (no normalize_gif_response) would produce a different
+        // struct shape and cdn_url would be absent.
+        let (url, _) =
+            fake_server(StatusCode::OK, one_gif_response(), StatusCode::NO_CONTENT).await;
+        let client = test_client(&url);
+
+        let entries = search_entries(&client, "", None).await.unwrap();
+
+        assert!(!entries.is_empty(), "must return at least one entry");
+        assert_eq!(
+            entries[0].cdn_url, "https://cdn.klipy.com/test.gif",
+            "cdn_url must be the normalized top-level URL from md.gif"
+        );
+        assert_eq!(entries[0].slug, "test-slug");
+    }
+
+    // ── existing negative gate ─────────────────────────────────────────────
+
     #[tokio::test]
     async fn share_returns_accepted_true_on_204() {
         let (url, _) = fake_server(StatusCode::OK, "[]".to_string(), StatusCode::NO_CONTENT).await;
         let client = test_client(&url);
-        // Completes without error = accepted.
         cmd_share(&client, "slug-abc").await.unwrap();
     }
 
@@ -856,7 +1022,7 @@ mod tests {
                 (
                     StatusCode::OK,
                     [("content-type", "application/nostr+json")],
-                    r#"{"supported_extensions":[],"gif":{"provider":"klipy","search":"/gifs/search","share":"/gifs/share"}}"#,
+                    r#"{"supported_extensions":[],"gif":{"provider":"klipy","search":"/x/search-alt","share":"/x/share-alt"}}"#,
                 )
             }),
         );
