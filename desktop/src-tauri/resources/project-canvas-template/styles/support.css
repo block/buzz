@@ -1,0 +1,307 @@
+.release-notes {
+  height: 100%;
+  overflow: auto;
+  padding: 12px;
+}
+
+.release-header {
+  align-items: center;
+  border-bottom: 1px solid #e7eaf0;
+  display: flex;
+  gap: 9px;
+  padding-bottom: 10px;
+}
+
+.release-header h3,
+.release-header p,
+.release-row h4,
+.release-row p {
+  margin: 0;
+}
+
+.release-header h3 {
+  font-size: 0.875rem;
+}
+
+.release-header p,
+.release-row p {
+  font-size: 0.65rem;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+.release-icon {
+  background: #172033;
+  border-radius: 7px;
+  color: #ffffff;
+  height: 36px;
+  width: 36px;
+}
+
+.live-badge {
+  background: #e4f8ed;
+  border-radius: 999px;
+  color: #047857;
+  font-size: 0.575rem;
+  font-weight: 700;
+  margin-left: auto;
+  padding: 3px 7px;
+}
+
+.release-row {
+  align-items: flex-start;
+  border-bottom: 1px solid #eceef2;
+  display: flex;
+  gap: 9px;
+  padding: 10px 0;
+}
+
+.release-row:last-child {
+  border-bottom: 0;
+}
+
+.release-row h4 {
+  font-size: 0.72rem;
+}
+
+.release-row .icon {
+  border-radius: 5px;
+  height: 28px;
+  width: 28px;
+}
+
+.release-tone-0 {
+  background: #cffafe;
+  color: #0e7490;
+}
+.release-tone-1 {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+.release-tone-2 {
+  background: #d1fae5;
+  color: #047857;
+}
+
+.known-issues {
+  background: #f7f7f5;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+}
+
+.issues-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  padding-bottom: 9px;
+}
+
+.issues-header h3,
+.issues-header p {
+  margin: 0;
+}
+
+.issues-header h3 {
+  font-size: 0.75rem;
+}
+
+.issues-header p,
+.issues-header span {
+  font-size: 0.575rem;
+}
+
+.issue-grid {
+  display: grid;
+  flex: 1;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+  min-height: 0;
+  overflow: auto;
+}
+
+.issue-note {
+  border: 1px solid rgba(107, 114, 128, 0.22);
+  box-shadow: 0 3px 8px rgba(31, 41, 55, 0.08);
+  font-size: 0.625rem;
+  min-height: 108px;
+  padding: 12px 10px 9px;
+  position: relative;
+}
+
+.issue-note::before {
+  background: #ef4444;
+  border-radius: 50%;
+  content: "";
+  height: 6px;
+  left: 50%;
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  width: 6px;
+}
+
+.issue-note.wide {
+  grid-column: span 2;
+}
+
+.issue-note.tone-amber {
+  background: #fff0b8;
+  color: #5c4310;
+}
+.issue-note.tone-sky {
+  background: #d8f1ff;
+  color: #164e63;
+}
+.issue-note.tone-violet {
+  background: #eee3ff;
+  color: #4c1d95;
+}
+
+.issue-title {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+}
+
+.issue-title h4,
+.issue-note p {
+  margin: 0;
+}
+
+.issue-title h4 {
+  font-size: 0.7rem;
+}
+
+.issue-title span {
+  opacity: 0.6;
+}
+
+.issue-note p {
+  line-height: 1.4;
+  margin-top: 6px;
+  opacity: 0.82;
+}
+
+.issue-status {
+  display: block;
+  font-size: 0.575rem;
+  margin-top: 8px;
+  opacity: 0.74;
+}
+
+.bug-reporter {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+}
+
+.bug-header {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+  padding-bottom: 9px;
+}
+
+.bug-header h3,
+.bug-header p {
+  margin: 0;
+}
+
+.bug-header h3 {
+  font-size: 0.75rem;
+}
+
+.bug-header p {
+  font-size: 0.575rem;
+  margin-top: 2px;
+}
+
+.bug-icon {
+  background: #fce7f3;
+  border-radius: 7px;
+  color: #be185d;
+  height: 32px;
+  width: 32px;
+}
+
+.bug-editor {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.bug-editor textarea {
+  background: #fbfcfd;
+  border: 1px solid #d7dce4;
+  border-radius: 7px;
+  color: #172033;
+  height: 100%;
+  line-height: 1.4;
+  padding: 10px 10px 42px;
+  resize: none;
+  touch-action: auto;
+  user-select: text;
+  width: 100%;
+}
+
+.submit-button {
+  background: #172033;
+  border: 0;
+  border-radius: 5px;
+  bottom: 8px;
+  color: #ffffff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 6px 10px;
+  position: absolute;
+  right: 8px;
+}
+
+.submit-button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.bug-success {
+  align-items: center;
+  background: #e9f8ef;
+  border: 1px solid #b8e5c9;
+  border-radius: 7px;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+  text-align: center;
+}
+
+.bug-success h4,
+.bug-success p {
+  margin: 3px 0 0;
+}
+
+.bug-success h4 {
+  font-size: 0.8rem;
+}
+
+.bug-success p {
+  font-size: 0.625rem;
+}
+
+.success-circle,
+.success {
+  background: #10b981;
+  border-radius: 50%;
+  color: #ffffff;
+}
+
+.success-circle {
+  height: 34px;
+  width: 34px;
+}

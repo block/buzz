@@ -105,6 +105,7 @@ export function DroppableUngroupedBody({
         isOver && "ring-2 ring-primary/30",
         className,
       )}
+      data-sidebar-drop-ungrouped
     >
       {children}
     </div>

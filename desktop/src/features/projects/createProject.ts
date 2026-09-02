@@ -30,6 +30,7 @@ import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 export type CreateProjectInput = {
   name: string;
   description?: string;
+  homeChannel?: Channel;
   channelVisibility?: ChannelVisibility;
   projectVisibility?: ProjectListingVisibility;
   agents?: readonly CreateChannelManagedAgentInput[];
@@ -215,7 +216,7 @@ async function finishCreate(
   return { channel, project };
 }
 
-/** Creates the home channel, a bound default repository, and the NIP-MP project. */
+/** Creates or reuses the home channel, then binds a default repository and project. */
 export async function createProject(
   input: CreateProjectInput,
   resume: CreateProjectResumeState,
@@ -238,7 +239,8 @@ export async function createProject(
     throw new Error(`You already have a project named "${dtagPreview}".`);
   }
   if (existingProject && !existingProject.legacy) {
-    const cachedChannel = resume.channels.get(projectId) ?? null;
+    const cachedChannel =
+      resume.channels.get(projectId) ?? input.homeChannel ?? null;
     const channelId =
       cachedChannel?.id ?? existingProject.projectChannelId ?? "";
     const project = channelId
@@ -263,7 +265,7 @@ export async function createProject(
   }
 
   resume.projectIds.add(projectId);
-  let channel = resume.channels.get(projectId);
+  let channel = resume.channels.get(projectId) ?? input.homeChannel;
   if (!channel) {
     channel = await createChannel({
       channelType: "stream",
@@ -271,8 +273,8 @@ export async function createProject(
       name: input.name.trim(),
       visibility: input.channelVisibility ?? "open",
     });
-    resume.channels.set(projectId, channel);
   }
+  resume.channels.set(projectId, channel);
 
   const templates = buildProjectBootstrapTemplates({
     description: input.description,

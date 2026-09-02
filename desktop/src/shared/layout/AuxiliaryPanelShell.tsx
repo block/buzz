@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { useIsAuxiliaryPanelOverlay } from "@/shared/hooks/use-mobile";
-import { AUXILIARY_PANEL_MIN_WIDTH_PX } from "@/shared/layout/auxiliaryPanelLayout";
+import { resolveAuxiliaryPanelWidth } from "@/shared/layout/auxiliaryPanelLayout";
 import {
   AuxiliaryPanelContext,
   type AuxiliaryPanelLayout,
@@ -100,11 +100,12 @@ export function AuxiliaryPanel({
     ],
   );
 
-  const panelWidth = isSinglePanelView
-    ? "100%"
-    : splitPaneClamp
-      ? `min(${widthPx}px, calc(100% - ${AUXILIARY_PANEL_MIN_WIDTH_PX}px))`
-      : `${widthPx}px`;
+  const panelWidth = resolveAuxiliaryPanelWidth({
+    floatingOverlay: isFloatingOverlay,
+    singlePanelView: isSinglePanelView,
+    splitPaneClamp,
+    widthPx,
+  });
 
   const resizeHandle =
     !isSplitLayout &&

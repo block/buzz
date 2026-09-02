@@ -18,6 +18,8 @@ import {
   sortChannelsForSidebar,
 } from "@/features/sidebar/lib/channelSortPreference";
 import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortPreference";
+import { useProjectMoveDestinations } from "@/features/sidebar/lib/useProjectMoveDestinations";
+import { useProjectSidebarMembership } from "@/features/projects/lib/useProjectSidebarMembership";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { isSidebarBackgroundTarget } from "@/features/sidebar/lib/sidebarBackgroundTarget";
 import { useSidebarActivityOverflow } from "@/features/sidebar/lib/useSidebarActivityOverflow";
@@ -34,10 +36,11 @@ import {
   AppSidebarPrimaryMenu,
 } from "@/features/sidebar/ui/AppSidebarPinnedHeader";
 import {
-  canPreviewUnreadDm,
+  buildUnreadDmPreviews,
   MoreUnreadButton,
   preferredUnreadTarget,
 } from "@/features/sidebar/ui/MoreUnreadButton";
+import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
 import { unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
 import {
@@ -64,6 +67,7 @@ import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
 import type { Channel, ChannelVisibility } from "@/shared/api/types";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import {
   Sidebar,
   SidebarContent,
@@ -155,44 +159,6 @@ export function AppSidebar({
   // biome-ignore format: keep compact to stay within file size limit
   const { scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadMessageBelowChannelIds, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, previewActivityChannelIds, scrollRef, unreadChannelIds });
 
-  React.useEffect(() => {
-    const scrollElement = scrollRef.current;
-    if (!scrollElement) return;
-
-    const handleWheel = (event: WheelEvent) => {
-      if (event.deltaY === 0) return;
-
-      const maxScrollTop =
-        scrollElement.scrollHeight - scrollElement.clientHeight;
-      if (maxScrollTop <= 0) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-
-      const atTop = scrollElement.scrollTop <= 0;
-      const atBottom = scrollElement.scrollTop >= maxScrollTop - 1;
-      const scrollingPastTop = event.deltaY < 0 && atTop;
-      const scrollingPastBottom = event.deltaY > 0 && atBottom;
-
-      if (scrollingPastTop || scrollingPastBottom) {
-        event.preventDefault();
-        event.stopPropagation();
-        scrollElement.scrollTop = scrollingPastTop ? 0 : maxScrollTop;
-      }
-    };
-
-    scrollElement.addEventListener("wheel", handleWheel, {
-      capture: true,
-      passive: false,
-    });
-    return () => {
-      scrollElement.removeEventListener("wheel", handleWheel, {
-        capture: true,
-      });
-    };
-  }, []);
-
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
   const { openNextFrame: openModalNextFrame } = useDeferredModalOpen();
@@ -261,6 +227,23 @@ export function AppSidebar({
     assignChannel,
     unassignChannel,
   } = useChannelSections(currentPubkey, activeCommunity?.relayUrl);
+  const relayOrigin = useRelayOrigin();
+  const { assignChannelToProject, destinations: projectMoveDestinations } =
+    useProjectMoveDestinations({
+      assignChannel,
+      channels,
+      createSection,
+      currentPubkey,
+      relayOrigin,
+      relayUrl: activeCommunity?.relayUrl,
+      sections: channelSections,
+    });
+  const sidebarProjectAddresses = useProjectSidebarMembership(
+    relayOrigin,
+    currentPubkey,
+  );
+  const [visibleSidebarProjectAddresses, setVisibleSidebarProjectAddresses] =
+    React.useState<readonly string[]>([]);
 
   const sectionIds = React.useMemo(
     () => channelSections.map((s) => s.id),
@@ -338,6 +321,40 @@ export function AppSidebar({
     );
   }, [streamChannels, starredChannelIds, sortModeFor]);
 
+  const sidebarProjectAddressSet = new Set(visibleSidebarProjectAddresses);
+  const sidebarProjectDestinations = projectMoveDestinations.filter(
+    (destination) => sidebarProjectAddressSet.has(destination.projectAddress),
+  );
+  const projectSectionIds = new Set(
+    sidebarProjectDestinations.flatMap((destination) =>
+      destination.sectionId ? [destination.sectionId] : [],
+    ),
+  );
+  const visibleChannelSections = channelSections.filter(
+    (section) => !projectSectionIds.has(section.id),
+  );
+  const projectHomeChannelIds = new Set(
+    sidebarProjectDestinations.map(
+      (destination) => destination.projectChannelId,
+    ),
+  );
+  const projectSectionChannels = new Map(
+    sidebarProjectDestinations.map((destination) => [
+      destination.projectAddress,
+      destination.sectionId
+        ? (sectionBuckets.bySection[destination.sectionId] ?? []).filter(
+            (channel) => channel.id !== destination.projectChannelId,
+          )
+        : [],
+    ]),
+  );
+  const channelsListItems = sortChannelsForSidebar(
+    sectionBuckets.unassigned.filter(
+      (channel) => !projectHomeChannelIds.has(channel.id),
+    ),
+    sortModeFor("channels"),
+  );
+
   const handleCreateSectionForChannel = React.useCallback(
     (channelId: string) => {
       setCreateSectionState({ open: true, pendingChannelId: channelId });
@@ -395,41 +412,12 @@ export function AppSidebar({
       ),
     [directMessages, dmChannelLabels, sortModeFor],
   );
-  const unreadDmPreviewsBelow = React.useMemo(
-    () =>
-      unreadMessageBelowChannelIds.flatMap((channelId) => {
-        const channel = directMessages.find(
-          (candidate) => candidate.id === channelId,
-        );
-        const participants = dmParticipantsByChannelId[channelId];
-        const participant = participants?.[0];
-        if (
-          !channel ||
-          !participant ||
-          !canPreviewUnreadDm(
-            channel.participantPubkeys.length,
-            participants?.length ?? 0,
-          )
-        ) {
-          return [];
-        }
-        return [
-          {
-            accessibleLabel: participant.label,
-            avatarUrl: participant.avatarUrl,
-            channelId,
-            isAgent: participant.isAgent,
-            label: dmChannelLabels[channelId] ?? participant.label,
-          },
-        ];
-      }),
-    [
-      directMessages,
-      dmChannelLabels,
-      dmParticipantsByChannelId,
-      unreadMessageBelowChannelIds,
-    ],
-  );
+  const unreadDmPreviewsBelow = buildUnreadDmPreviews({
+    channels: directMessages,
+    channelLabels: dmChannelLabels,
+    participantsByChannelId: dmParticipantsByChannelId,
+    unreadChannelIds: unreadMessageBelowChannelIds,
+  });
   const unreadDmChannelIds = React.useMemo(
     () => new Set(directMessages.map(({ id }) => id)),
     [directMessages],
@@ -569,44 +557,6 @@ export function AppSidebar({
 
               {!isLoading ? (
                 <>
-                  {starredChannels.length > 0 ? (
-                    <ChannelGroupSection
-                      hasUnread={starredChannels.some((c) =>
-                        unreadChannelIds.has(c.id),
-                      )}
-                      isCollapsed={collapsedGroups.starred}
-                      isActiveChannel={selectedView === "channel"}
-                      activeWorkingByChannelId={activeWorkingByChannelId}
-                      items={starredChannels}
-                      sortMode={sortModeFor("starred")}
-                      onSortModeChange={(mode) =>
-                        setSortModeFor("starred", mode)
-                      }
-                      actionsTestId="section-actions-starred"
-                      listTestId="starred-list"
-                      onMarkAllRead={() => {
-                        for (const channel of starredChannels) {
-                          onMarkChannelRead(channel.id, channel.lastMessageAt);
-                        }
-                      }}
-                      onMarkChannelRead={onMarkChannelRead}
-                      onMarkChannelUnread={onMarkChannelUnread}
-                      onSelectChannel={onSelectChannel}
-                      onToggleCollapsed={() => toggleCollapsedGroup("starred")}
-                      selectedChannelId={selectedChannelId}
-                      title="Starred"
-                      unreadChannelCounts={unreadChannelCounts}
-                      unreadChannelIds={unreadChannelIds}
-                      mutedChannelIds={mutedChannelIds}
-                      onMuteChannel={onMuteChannel}
-                      onUnmuteChannel={onUnmuteChannel}
-                      starredChannelIds={starredChannelIds}
-                      onStarChannel={onStarChannel}
-                      onUnstarChannel={onUnstarChannel}
-                      onDeleteChannel={requestDeleteChannel}
-                      onLeaveChannel={requestLeaveChannel}
-                    />
-                  ) : null}
                   <SidebarDndContext
                     channels={channels}
                     sections={channelSections}
@@ -615,58 +565,72 @@ export function AppSidebar({
                     onUnassignChannel={unassignChannel}
                     onReorderSections={reorderSections}
                   >
-                    {channelSections.map((section, idx) => (
-                      <CustomChannelSection
-                        key={section.id}
-                        section={section}
-                        channels={sectionBuckets.bySection[section.id] ?? []}
-                        hasUnread={
-                          sectionBuckets.bySection[section.id]?.some((c) =>
-                            unreadChannelIds.has(c.id),
-                          ) ?? false
-                        }
-                        isCollapsed={collapsedSections[section.id] ?? false}
+                    <SidebarProjectsSection
+                      addedProjectAddresses={sidebarProjectAddresses}
+                      channelRowContext={{
+                        activeWorkingByChannelId,
+                        assignments: channelAssignments,
+                        isActiveChannel: selectedView === "channel",
+                        mutedChannelIds,
+                        onAssignChannel: assignChannel,
+                        onAssignChannelToProject: assignChannelToProject,
+                        onCreateSectionForChannel:
+                          handleCreateSectionForChannel,
+                        onDeleteChannel: requestDeleteChannel,
+                        onLeaveChannel: requestLeaveChannel,
+                        onMarkChannelRead,
+                        onMarkChannelUnread,
+                        onMuteChannel,
+                        onSelectChannel,
+                        onStarChannel,
+                        onUnassignChannel: unassignChannel,
+                        onUnmuteChannel,
+                        onUnstarChannel,
+                        projectDestinations: projectMoveDestinations,
+                        sections: channelSections,
+                        selectedChannelId,
+                        starredChannelIds,
+                        unreadChannelCounts,
+                        unreadChannelIds,
+                      }}
+                      onVisibleProjectAddressesChange={
+                        setVisibleSidebarProjectAddresses
+                      }
+                      sectionChannelsByProjectAddress={projectSectionChannels}
+                    />
+                    {starredChannels.length > 0 ? (
+                      <ChannelGroupSection
+                        hasUnread={starredChannels.some((c) =>
+                          unreadChannelIds.has(c.id),
+                        )}
+                        isCollapsed={collapsedGroups.starred}
                         isActiveChannel={selectedView === "channel"}
                         activeWorkingByChannelId={activeWorkingByChannelId}
-                        selectedChannelId={selectedChannelId}
-                        unreadChannelCounts={unreadChannelCounts}
-                        unreadChannelIds={unreadChannelIds}
-                        sections={channelSections}
-                        assignments={channelAssignments}
-                        isFirst={idx === 0}
-                        isLast={idx === channelSections.length - 1}
-                        sortMode={sortModeFor(sectionSortGroupKey(section.id))}
+                        items={starredChannels}
+                        sortMode={sortModeFor("starred")}
                         onSortModeChange={(mode) =>
-                          setSortModeFor(sectionSortGroupKey(section.id), mode)
+                          setSortModeFor("starred", mode)
                         }
-                        onToggleCollapsed={() =>
-                          toggleCollapsedSection(section.id)
-                        }
-                        onSelectChannel={onSelectChannel}
-                        onMarkChannelRead={onMarkChannelRead}
-                        onMarkChannelUnread={onMarkChannelUnread}
-                        onMarkSectionRead={() => {
-                          for (const channel of sectionBuckets.bySection[
-                            section.id
-                          ] ?? []) {
+                        actionsTestId="section-actions-starred"
+                        listTestId="starred-list"
+                        onMarkAllRead={() => {
+                          for (const channel of starredChannels) {
                             onMarkChannelRead(
                               channel.id,
                               channel.lastMessageAt,
                             );
                           }
                         }}
-                        onAssignChannel={assignChannel}
-                        onUnassignChannel={unassignChannel}
-                        onCreateSectionForChannel={
-                          handleCreateSectionForChannel
+                        onMarkChannelRead={onMarkChannelRead}
+                        onMarkChannelUnread={onMarkChannelUnread}
+                        onSelectChannel={onSelectChannel}
+                        onToggleCollapsed={() =>
+                          toggleCollapsedGroup("starred")
                         }
-                        onCreateChannel={() =>
-                          handleCreateChannelInSection(section.id)
-                        }
-                        onRenameSection={() => setRenameSectionTarget(section)}
-                        onDeleteSection={() => setDeleteSectionTarget(section)}
-                        onMoveSectionUp={() => moveSectionUp(section.id)}
-                        onMoveSectionDown={() => moveSectionDown(section.id)}
+                        selectedChannelId={selectedChannelId}
+                        title="Starred"
+                        unreadChannelCounts={unreadChannelCounts}
+                        unreadChannelIds={unreadChannelIds}
                         mutedChannelIds={mutedChannelIds}
                         onMuteChannel={onMuteChannel}
                         onUnmuteChannel={onUnmuteChannel}
@@ -676,14 +640,91 @@ export function AppSidebar({
                         onDeleteChannel={requestDeleteChannel}
                         onLeaveChannel={requestLeaveChannel}
                       />
-                    ))}
+                    ) : null}
+                    {visibleChannelSections.map((section, idx) => {
+                      const sectionChannels =
+                        sectionBuckets.bySection[section.id] ?? [];
+                      return (
+                        <CustomChannelSection
+                          key={section.id}
+                          section={section}
+                          channels={sectionChannels}
+                          hasUnread={
+                            sectionBuckets.bySection[section.id]?.some((c) =>
+                              unreadChannelIds.has(c.id),
+                            ) ?? false
+                          }
+                          isCollapsed={collapsedSections[section.id] ?? false}
+                          isActiveChannel={selectedView === "channel"}
+                          activeWorkingByChannelId={activeWorkingByChannelId}
+                          selectedChannelId={selectedChannelId}
+                          unreadChannelCounts={unreadChannelCounts}
+                          unreadChannelIds={unreadChannelIds}
+                          sections={channelSections}
+                          projectDestinations={projectMoveDestinations}
+                          assignments={channelAssignments}
+                          isFirst={idx === 0}
+                          isLast={idx === visibleChannelSections.length - 1}
+                          sortMode={sortModeFor(
+                            sectionSortGroupKey(section.id),
+                          )}
+                          onSortModeChange={(mode) =>
+                            setSortModeFor(
+                              sectionSortGroupKey(section.id),
+                              mode,
+                            )
+                          }
+                          onToggleCollapsed={() =>
+                            toggleCollapsedSection(section.id)
+                          }
+                          onSelectChannel={onSelectChannel}
+                          onMarkChannelRead={onMarkChannelRead}
+                          onMarkChannelUnread={onMarkChannelUnread}
+                          onMarkSectionRead={() => {
+                            for (const channel of sectionBuckets.bySection[
+                              section.id
+                            ] ?? []) {
+                              onMarkChannelRead(
+                                channel.id,
+                                channel.lastMessageAt,
+                              );
+                            }
+                          }}
+                          onAssignChannel={assignChannel}
+                          onAssignChannelToProject={assignChannelToProject}
+                          onUnassignChannel={unassignChannel}
+                          onCreateSectionForChannel={
+                            handleCreateSectionForChannel
+                          }
+                          onCreateChannel={() =>
+                            handleCreateChannelInSection(section.id)
+                          }
+                          onRenameSection={() =>
+                            setRenameSectionTarget(section)
+                          }
+                          onDeleteSection={() =>
+                            setDeleteSectionTarget(section)
+                          }
+                          onMoveSectionUp={() => moveSectionUp(section.id)}
+                          onMoveSectionDown={() => moveSectionDown(section.id)}
+                          mutedChannelIds={mutedChannelIds}
+                          onMuteChannel={onMuteChannel}
+                          onUnmuteChannel={onUnmuteChannel}
+                          starredChannelIds={starredChannelIds}
+                          onStarChannel={onStarChannel}
+                          onUnstarChannel={onUnstarChannel}
+                          onDeleteChannel={requestDeleteChannel}
+                          onLeaveChannel={requestLeaveChannel}
+                        />
+                      );
+                    })}
                     <ChannelGroupSection
                       draggable
                       hasUnread={unreadChannelIds.size > 0}
                       isCollapsed={collapsedGroups.channels}
                       isActiveChannel={selectedView === "channel"}
                       activeWorkingByChannelId={activeWorkingByChannelId}
-                      items={sectionBuckets.unassigned}
+                      items={channelsListItems}
                       sortMode={sortModeFor("channels")}
                       onSortModeChange={(mode) =>
                         setSortModeFor("channels", mode)
@@ -703,8 +744,10 @@ export function AppSidebar({
                       unreadChannelCounts={unreadChannelCounts}
                       unreadChannelIds={unreadChannelIds}
                       sections={channelSections}
+                      projectDestinations={projectMoveDestinations}
                       assignments={channelAssignments}
                       onAssignChannel={assignChannel}
+                      onAssignChannelToProject={assignChannelToProject}
                       onUnassignChannel={unassignChannel}
                       onCreateSectionForChannel={handleCreateSectionForChannel}
                       mutedChannelIds={mutedChannelIds}

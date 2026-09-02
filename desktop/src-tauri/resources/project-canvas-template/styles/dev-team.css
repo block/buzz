@@ -1,0 +1,262 @@
+.active-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 100%;
+  overflow: auto;
+  padding: 8px;
+}
+
+.reviews,
+.tasks,
+.meetings {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 12px 8px;
+}
+
+.reviews-intro {
+  align-items: center;
+  border-bottom: 1px solid #e7eaf0;
+  display: flex;
+  font-size: 0.72rem;
+  font-weight: 650;
+  justify-content: space-between;
+  padding: 3px 0 9px;
+}
+
+.count-badge,
+.scheduled {
+  background: #e7f4ff;
+  border-radius: 5px;
+  color: #075985;
+  font-size: 0.625rem;
+  padding: 4px 7px;
+}
+
+.reviews .buzz-review-row,
+.active-channels .buzz-channel-row {
+  flex: none;
+}
+
+.reviews .buzz-review-row {
+  margin-top: 6px;
+}
+
+.task-row {
+  align-items: center;
+  border-bottom: 1px solid #e7eaf0;
+  display: flex;
+  gap: 8px;
+  padding: 7px 0;
+}
+
+.task-row:last-child {
+  border-bottom: 0;
+}
+
+.task-summary {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.task-id {
+  color: #0369a1;
+  font-size: 0.625rem;
+  font-weight: 700;
+}
+
+.task-title {
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.status-pill {
+  align-items: center;
+  background: #e8f5ff;
+  border-radius: 5px;
+  color: #0369a1;
+  display: inline-flex;
+  flex: none;
+  font-size: 0.625rem;
+  font-weight: 700;
+  padding: 4px 7px;
+}
+
+.status-pill[data-status="done"] {
+  background: #e4f8ed;
+  color: #047857;
+}
+
+.status-pill[data-status="closed"] {
+  background: #fff1e7;
+  color: #b54708;
+}
+
+.snapshot-state {
+  align-items: center;
+  color: #667085;
+  display: flex;
+  flex: 1;
+  font-size: 0.75rem;
+  justify-content: center;
+  min-height: 100px;
+  text-align: center;
+}
+
+.client-time {
+  height: 100%;
+  overflow: auto;
+  padding: 10px 12px;
+}
+
+.time-summary {
+  border-bottom: 1px solid #e7eaf0;
+  padding-bottom: 10px;
+}
+
+.time-total {
+  display: inline-block;
+  font-size: 1.35rem;
+  margin-top: 4px;
+}
+
+.capacity-bar {
+  border-radius: 3px;
+  display: flex;
+  height: 9px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.capacity-note {
+  color: #667085;
+  font-size: 0.625rem;
+  margin: 5px 0 0;
+}
+
+.client-row {
+  align-items: center;
+  border-bottom: 1px solid #eceef2;
+  display: flex;
+  gap: 8px;
+  padding: 9px 0;
+}
+
+.client-row:last-child {
+  border-bottom: 0;
+}
+
+.client-mark {
+  border-radius: 2px;
+  height: 28px;
+  width: 4px;
+}
+
+.client-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  font-size: 0.7rem;
+  min-width: 0;
+}
+
+.client-copy span {
+  font-size: 0.625rem;
+  margin-top: 2px;
+}
+
+.client-hours {
+  font-size: 0.72rem;
+}
+
+.meetings .eyebrow {
+  padding: 2px 0 4px;
+}
+
+.meeting-previous {
+  align-items: center;
+  border-bottom: 1px solid #e7eaf0;
+  display: flex;
+  gap: 9px;
+  padding-bottom: 8px;
+}
+
+.meeting-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  font-size: 0.7rem;
+  min-width: 0;
+}
+
+.meeting-copy span {
+  font-size: 0.625rem;
+  margin-top: 2px;
+}
+
+.meeting-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.small-button {
+  background: #ffffff;
+  border: 1px solid #d7dce4;
+  border-radius: 5px;
+  color: #344054;
+  font-size: 0.625rem;
+  font-weight: 650;
+  padding: 5px 7px;
+}
+
+.meetings .upcoming-label {
+  padding-top: 7px;
+}
+
+.upcoming-meetings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.upcoming-row {
+  align-items: center;
+  border-bottom: 1px solid #eceef2;
+  display: flex;
+  gap: 9px;
+  padding: 5px 0;
+}
+
+.upcoming-row:last-child {
+  border-bottom: 0;
+}
+
+.meeting-time {
+  display: flex;
+  flex: 0 0 70px;
+  flex-direction: column;
+  font-size: 0.625rem;
+}
+
+.meeting-time strong {
+  color: #0369a1;
+}
+
+.scheduled {
+  flex: 0 0 auto;
+  font-size: 0.575rem;
+}

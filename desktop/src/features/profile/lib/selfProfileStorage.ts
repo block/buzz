@@ -365,19 +365,27 @@ export function resolveAvatarDataUrl(
 }
 
 /**
- * Fetches an avatar from `avatarProxyUrl` and converts it to a base64 data URL.
+ * Upper bound on a fetched avatar's encoded bytes. Keeps localStorage usage
+ * bounded across communities and accounts, and bounds the work any single
+ * decode can be asked to do.
+ */
+const MAX_AVATAR_BLOB_BYTES = 256 * 1024;
+
+/**
+ * Fetches an avatar from `avatarProxyUrl` as an image blob.
  *
  * The caller should pass the `rewriteRelayUrl()`-proxied URL and invoke this
  * only immediately after a successful profile fetch — at that moment the relay
  * is known to be reachable, so the fetch has the best chance of succeeding.
  *
- * The data URL is capped at 256 KB to keep localStorage usage bounded across
- * communities and accounts. Returns null on ANY failure: network error, non-OK
- * response, wrong content-type, blob too large, or FileReader error.
+ * Returns null on ANY failure: network error, non-OK response, wrong
+ * content-type, or blob too large. Callers that need the raw bytes (to
+ * re-encode at a smaller size, say) use this; callers that want the image
+ * verbatim use {@link fetchAvatarDataUrl}.
  */
-export async function fetchAvatarDataUrl(
+export async function fetchAvatarBlob(
   avatarProxyUrl: string,
-): Promise<string | null> {
+): Promise<Blob | null> {
   try {
     const response = await fetch(avatarProxyUrl);
     if (!response.ok) return null;
@@ -386,18 +394,34 @@ export async function fetchAvatarDataUrl(
     if (!contentType.startsWith("image/")) return null;
 
     const blob = await response.blob();
-    if (blob.size > 256 * 1024) return null;
+    if (blob.size > MAX_AVATAR_BLOB_BYTES) return null;
 
-    return await new Promise<string | null>((resolve) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result;
-        resolve(typeof result === "string" ? result : null);
-      };
-      reader.onerror = () => resolve(null);
-      reader.readAsDataURL(blob);
-    });
+    return blob;
   } catch {
     return null;
   }
+}
+
+/**
+ * Fetches an avatar from `avatarProxyUrl` and converts it to a base64 data URL.
+ *
+ * Shares {@link fetchAvatarBlob}'s fetch policy, so the same 256 KB ceiling and
+ * failure modes apply. Returns null on any failure, including a FileReader
+ * error.
+ */
+export async function fetchAvatarDataUrl(
+  avatarProxyUrl: string,
+): Promise<string | null> {
+  const blob = await fetchAvatarBlob(avatarProxyUrl);
+  if (!blob) return null;
+
+  return await new Promise<string | null>((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      resolve(typeof result === "string" ? result : null);
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(blob);
+  });
 }

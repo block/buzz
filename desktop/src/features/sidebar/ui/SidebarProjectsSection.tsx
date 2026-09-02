@@ -6,10 +6,8 @@ import {
   EllipsisVertical,
   Folder,
   Folders,
-  Hash,
   Link2,
   ListMinus,
-  Lock,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -31,16 +29,15 @@ import {
   addProjectToSidebar,
   removeProjectFromSidebar,
 } from "@/features/projects/lib/projectSidebarMembership";
-import { useProjectSidebarMembership } from "@/features/projects/lib/useProjectSidebarMembership";
 import { projectMatchesRouteId } from "@/features/projects/projectRoutes";
 import { ProjectBrowserDialog } from "@/features/projects/ui/ProjectBrowserDialog";
 import { ProjectChannelIcon } from "@/features/projects/ui/ProjectChannelIcon";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { FeatureGate } from "@/shared/features";
+import type { Channel } from "@/shared/api/types";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { cn } from "@/shared/lib/cn";
-import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -95,7 +92,6 @@ import {
   readSidebarProjectExpansion,
   readSidebarProjectsFilter,
   readSidebarProjectsSort,
-  selectedChannelRouteId,
   selectedProjectRouteId,
   type SidebarProjectExpansionState,
   type SidebarProjectsFilter,
@@ -104,6 +100,10 @@ import {
   writeSidebarProjectsFilter,
   writeSidebarProjectsSort,
 } from "@/features/sidebar/ui/listSidebarProjects";
+import {
+  SidebarProjectChildChannelRow,
+  type SidebarProjectChildChannelRowContext,
+} from "@/features/sidebar/ui/SidebarProjectChildChannelRow";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -113,29 +113,30 @@ const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 
 /**
- * Collapsible list of the viewer's projects in the left sidebar. Rendered
- * only when the Projects experiment is enabled, and only includes projects
- * the viewer owns or contributes to (optionally owned-only).
+ * Collapsible list of the viewer's projects in the left sidebar. Only
+ * includes projects the viewer owns or contributes to (optionally
+ * owned-only).
  */
-export function SidebarProjectsSection() {
-  return (
-    <FeatureGate feature="projects">
-      <SidebarProjectsSectionContent />
-    </FeatureGate>
-  );
-}
-
-function SidebarProjectsSectionContent() {
+export function SidebarProjectsSection({
+  addedProjectAddresses,
+  channelRowContext,
+  onVisibleProjectAddressesChange,
+  sectionChannelsByProjectAddress,
+}: {
+  addedProjectAddresses: readonly string[];
+  channelRowContext: SidebarProjectChildChannelRowContext;
+  onVisibleProjectAddressesChange: (addresses: readonly string[]) => void;
+  sectionChannelsByProjectAddress?: ReadonlyMap<string, readonly Channel[]>;
+}) {
   const projectsQuery = useProjectsQuery();
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
   const ownerProfiles = useProjectOwnerProfiles(projectsQuery.data ?? []);
   const currentPubkey = identityQuery.data?.pubkey;
-  const { goChannel, goProject, goProjects } = useAppNavigation();
+  const { goProject, goProjects } = useAppNavigation();
   const pathname = useLocation({ select: (location) => location.pathname });
   const routeProjectId = selectedProjectRouteId(pathname);
-  const routeChannelId = selectedChannelRouteId(pathname);
-  const relayOrigin = getCachedRelayOrigin();
+  const relayOrigin = useRelayOrigin();
   const [collapsed, setCollapsed] = React.useState(false);
   const [actionsOpen, setActionsOpen] = React.useState(false);
   const [browserOpen, setBrowserOpen] = React.useState(false);
@@ -152,10 +153,6 @@ function SidebarProjectsSectionContent() {
     React.useState<SidebarProjectExpansionState>(() =>
       readSidebarProjectExpansion(relayOrigin, currentPubkey),
     );
-  const addedProjectAddresses = useProjectSidebarMembership(
-    relayOrigin,
-    currentPubkey,
-  );
   const createProjectMutation = useCreateProjectMutation();
   const deleteProjectMutation = useDeleteProjectMutation();
   const isPending = projectsQuery.isPending || identityQuery.isPending;
@@ -183,6 +180,11 @@ function SidebarProjectsSectionContent() {
       }),
     [addedProjectAddressSet, currentPubkey, filter, projectsQuery.data, sort],
   );
+  React.useEffect(() => {
+    onVisibleProjectAddressesChange(
+      projects.map((project) => project.projectAddress),
+    );
+  }, [onVisibleProjectAddressesChange, projects]);
   const channelsById = React.useMemo(
     () =>
       new Map(
@@ -306,6 +308,23 @@ function SidebarProjectsSectionContent() {
                     return channel ? [{ binding, channel }] : [];
                   },
                 );
+                const childChannelIds = new Set(
+                  childChannels.map(({ channel }) => channel.id),
+                );
+                for (const channel of sectionChannelsByProjectAddress?.get(
+                  project.projectAddress,
+                ) ?? []) {
+                  if (childChannelIds.has(channel.id)) continue;
+                  childChannelIds.add(channel.id);
+                  childChannels.push({
+                    binding: {
+                      channelId: channel.id,
+                      repositoryId: null,
+                      role: "related",
+                    },
+                    channel,
+                  });
+                }
                 const isExpanded =
                   childChannels.length > 0 &&
                   (projectExpansion[project.projectAddress] ?? false);
@@ -334,28 +353,13 @@ function SidebarProjectsSectionContent() {
                     />
                     {isExpanded
                       ? childChannels.map(({ binding, channel }) => {
-                          const ChannelIcon =
-                            channel.visibility === "private" ? Lock : Hash;
                           return (
-                            <SidebarMenuItem
+                            <SidebarProjectChildChannelRow
+                              channel={channel}
+                              context={channelRowContext}
                               key={`${project.id}:${binding.role}:${channel.id}`}
-                            >
-                              <SidebarMenuButton
-                                className="h-7 pl-7 text-sidebar-foreground/70 data-[active=true]:!bg-transparent data-[active=true]:font-semibold data-[active=true]:text-sidebar-foreground data-[active=true]:shadow-none data-[active=true]:hover:!bg-transparent data-[active=true]:hover:text-sidebar-foreground data-[active=true]:active:!bg-transparent"
-                                data-testid={`sidebar-project-channel-${project.dtag}-${channel.name}`}
-                                isActive={channel.id === routeChannelId}
-                                onClick={() => {
-                                  void goChannel(channel.id);
-                                }}
-                                tooltip={`#${channel.name}`}
-                                type="button"
-                              >
-                                <ChannelIcon className="h-3.5 w-3.5" />
-                                <SidebarMenuLabel>
-                                  {`#${channel.name}`}
-                                </SidebarMenuLabel>
-                              </SidebarMenuButton>
-                            </SidebarMenuItem>
+                              projectDtag={project.dtag}
+                            />
                           );
                         })
                       : null}

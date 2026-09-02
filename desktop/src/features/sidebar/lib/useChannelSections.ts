@@ -3,6 +3,7 @@ import * as React from "react";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   boundChannelSectionsStore,
+  CHANNEL_SECTIONS_CHANGED_EVENT,
   DEFAULT_STORE,
   readChannelSectionsStore,
   storageKey,
@@ -67,15 +68,23 @@ export function useChannelSections(
       return;
     }
     const key = storageKey(pubkey, relayUrl);
-    const handler = (e: StorageEvent) => {
-      if (e.key !== key) {
+    const handler = (e: StorageEvent | Event) => {
+      if (
+        e.type === CHANNEL_SECTIONS_CHANGED_EVENT &&
+        (e as CustomEvent<{ key?: string }>).detail?.key !== key
+      ) {
+        return;
+      }
+      if (e.type === "storage" && (e as StorageEvent).key !== key) {
         return;
       }
       setStore(readChannelSectionsStore(pubkey, relayUrl));
     };
     window.addEventListener("storage", handler);
+    window.addEventListener(CHANNEL_SECTIONS_CHANGED_EVENT, handler);
     return () => {
       window.removeEventListener("storage", handler);
+      window.removeEventListener(CHANNEL_SECTIONS_CHANGED_EVENT, handler);
     };
   }, [pubkey, relayUrl]);
 

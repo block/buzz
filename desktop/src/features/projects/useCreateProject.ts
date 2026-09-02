@@ -67,8 +67,9 @@ export function useCreateProjectMutation() {
           refetchType: "none",
         });
         const useProjectHomeTemplate =
-          input.templateId === undefined ||
-          input.templateId === PROJECT_HOME_TEMPLATE_ID;
+          !input.homeChannel &&
+          (input.templateId === undefined ||
+            input.templateId === PROJECT_HOME_TEMPLATE_ID);
         if (useProjectHomeTemplate) {
           const applied = await applyProjectHomeCanvas({
             channelId: channel.id,

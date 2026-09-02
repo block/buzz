@@ -29,3 +29,20 @@ export function clampAuxiliaryPanelWidth(
     Math.min(getAuxiliaryPanelMaxWidth(viewportWidth), width),
   );
 }
+
+/** Resolve the CSS width without reserving main-pane space for overlays. */
+export function resolveAuxiliaryPanelWidth({
+  floatingOverlay,
+  singlePanelView,
+  splitPaneClamp,
+  widthPx,
+}: {
+  floatingOverlay: boolean;
+  singlePanelView: boolean;
+  splitPaneClamp: boolean;
+  widthPx: number;
+}): string {
+  if (singlePanelView) return "100%";
+  if (floatingOverlay || !splitPaneClamp) return `${widthPx}px`;
+  return `min(${widthPx}px, calc(100% - ${AUXILIARY_PANEL_MIN_WIDTH_PX}px))`;
+}

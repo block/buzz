@@ -46,6 +46,8 @@ export type ProjectHomeWorkspaceDetail = {
 
 export function ProjectHomeWorkspaceSheet({
   identityPubkey,
+  initialIssueId = null,
+  initialPullRequestId = null,
   onCreateActionChange,
   onDetailChange,
   onOpenCommit,
@@ -57,6 +59,9 @@ export function ProjectHomeWorkspaceSheet({
   tab,
 }: {
   identityPubkey?: string;
+  /** Preselected work item (e.g. canvas navigation). Remount to change. */
+  initialIssueId?: string | null;
+  initialPullRequestId?: string | null;
   onCreateActionChange?: (
     action: ProjectHomeWorkspaceCreateAction | null,
   ) => void;
@@ -72,11 +77,11 @@ export function ProjectHomeWorkspaceSheet({
   const { goProject } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const [selectedIssueId, setSelectedIssueId] = React.useState<string | null>(
-    null,
+    initialIssueId,
   );
   const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
     string | null
-  >(null);
+  >(initialPullRequestId);
   const [selectedCommitHash, setSelectedCommitHash] = React.useState<
     string | null
   >(null);

@@ -184,6 +184,11 @@ echo "# Canvas from stdin" | buzz canvas set --channel "$CHANNEL_ID" --content -
 # canvas get
 buzz canvas get --channel "$CHANNEL_ID"
 # Expected: raw markdown string, or: null
+
+# Local project Canvas notification (Buzz Desktop must be running)
+buzz canvas notify --source "$CANVAS_SOURCE" --widget chores --change data | jq .
+buzz canvas notify --source "$CANVAS_SOURCE" --widget chores --change presentation | jq .
+# Expected: accepted true; data preserves the iframe, presentation reloads it
 ```
 
 ### 6.3 Messages
@@ -587,41 +592,42 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 22 | `channels remove-member` | ☐ | Needs admin:channels |
 | 23 | `canvas get` | ☐ | |
 | 24 | `canvas set` | ☐ | Direct and stdin |
-| 25 | `reactions add` | ☐ | |
-| 26 | `reactions remove` | ☐ | |
-| 27 | `reactions get` | ☐ | |
-| 28 | `dms list` | ☐ | |
-| 29 | `dms open` | ☐ | |
-| 30 | `dms add-member` | ☐ | Needs messages:write |
-| 31 | `users get` | ☐ | Self, single, batch |
-| 32 | `users set-profile` | ☐ | |
-| 33 | `users presence` | ☐ | |
-| 34 | `users set-presence` | ☐ | online, away, offline |
-| 35 | `workflows list` | ☐ | |
-| 36 | `workflows create` | ☐ | |
-| 37 | `workflows update` | ☐ | |
-| 38 | `workflows delete` | ☐ | |
-| 39 | `workflows trigger` | ☐ | |
-| 40 | `workflows runs` | ☐ | |
-| 41 | `workflows get` | ☐ | |
-| 42 | `workflows approve` | ☐ | Validation only (needs approval gate); bare = approve, `--approved false` = deny |
-| 43 | `feed get` | ☐ | |
-| 44 | `social publish` | ☐ | |
-| 45 | `social set-contacts` | ☐ | |
-| 46 | `social event` | ☐ | |
-| 47 | `social notes` | ☐ | |
-| 48 | `social contacts` | ☐ | |
-| 49 | `repos create` | ☐ | |
-| 50 | `repos get` | ☐ | |
-| 51 | `repos list` | ☐ | |
-| 52 | `repos protect list` | ☐ | Empty/populated rules; unknown rules visible; malformed rule reported in validation_error |
-| 53 | `repos protect set` | ☐ | Create and replace complete exact-ref rule; verify metadata is preserved |
-| 54 | `repos protect remove` | ☐ | Remove exact ref; missing rule → NotFound |
-| 55 | `upload file` | ☐ | |
-| 56 | `pack validate` | ☐ | Local, no relay |
-| 57 | `pack inspect` | ☐ | Local, no relay |
-| 58 | `notes set` | ☐ | First publish, edit/carry, --clear-tags, ambiguity, empty-stdin guard |
-| 59 | `notes get` | ☐ | By name, by naddr, --content-only, cross-author, ambiguous → exit 1 |
-| 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
-| 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
-| 62 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |
+| 25 | `canvas notify` | ☐ | Data and presentation with Desktop running |
+| 26 | `reactions add` | ☐ | |
+| 27 | `reactions remove` | ☐ | |
+| 28 | `reactions get` | ☐ | |
+| 29 | `dms list` | ☐ | |
+| 30 | `dms open` | ☐ | |
+| 31 | `dms add-member` | ☐ | Needs messages:write |
+| 32 | `users get` | ☐ | Self, single, batch |
+| 33 | `users set-profile` | ☐ | |
+| 34 | `users presence` | ☐ | |
+| 35 | `users set-presence` | ☐ | online, away, offline |
+| 36 | `workflows list` | ☐ | |
+| 37 | `workflows create` | ☐ | |
+| 38 | `workflows update` | ☐ | |
+| 39 | `workflows delete` | ☐ | |
+| 40 | `workflows trigger` | ☐ | |
+| 41 | `workflows runs` | ☐ | |
+| 42 | `workflows get` | ☐ | |
+| 43 | `workflows approve` | ☐ | Validation only (needs approval gate); bare = approve, `--approved false` = deny |
+| 44 | `feed get` | ☐ | |
+| 45 | `social publish` | ☐ | |
+| 46 | `social set-contacts` | ☐ | |
+| 47 | `social event` | ☐ | |
+| 48 | `social notes` | ☐ | |
+| 49 | `social contacts` | ☐ | |
+| 50 | `repos create` | ☐ | |
+| 51 | `repos get` | ☐ | |
+| 52 | `repos list` | ☐ | |
+| 53 | `repos protect list` | ☐ | Empty/populated rules; unknown rules visible; malformed rule reported in validation_error |
+| 54 | `repos protect set` | ☐ | Create and replace complete exact-ref rule; verify metadata is preserved |
+| 55 | `repos protect remove` | ☐ | Remove exact ref; missing rule → NotFound |
+| 56 | `upload file` | ☐ | |
+| 57 | `pack validate` | ☐ | Local, no relay |
+| 58 | `pack inspect` | ☐ | Local, no relay |
+| 59 | `notes set` | ☐ | First publish, edit/carry, --clear-tags, ambiguity, empty-stdin guard |
+| 60 | `notes get` | ☐ | By name, by naddr, --content-only, cross-author, ambiguous → exit 1 |
+| 61 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
+| 62 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
+| 63 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |

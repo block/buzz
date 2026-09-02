@@ -31,6 +31,7 @@ export function ProjectRepositoryManagement({
   project,
   projects,
   repository,
+  showAccessManagement = true,
 }: {
   compact?: boolean;
   createOpen?: boolean;
@@ -41,6 +42,7 @@ export function ProjectRepositoryManagement({
   project: Project;
   projects: Project[];
   repository?: Repository | null;
+  showAccessManagement?: boolean;
 }) {
   const [uncontrolledCreateOpen, setUncontrolledCreateOpen] =
     React.useState(false);
@@ -185,7 +187,7 @@ export function ProjectRepositoryManagement({
           </DropdownMenuContent>
         </DropdownMenu>
       ) : null}
-      {canManageAccess ? (
+      {showAccessManagement && canManageAccess ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button

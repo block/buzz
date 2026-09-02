@@ -82,6 +82,7 @@ import {
   useChannelModerationCapabilities,
 } from "./ChannelManagementModerationActions";
 import { ChannelMemberAvatarStack } from "./ChannelMemberAvatarStack";
+import { ChannelProjectFeaturesSettings } from "@/features/projects/ui/ChannelProjectFeaturesSettings";
 
 type ChannelManagementSheetProps = {
   channel: Channel | null;
@@ -207,14 +208,10 @@ export function ChannelManagementSheet({
       setActiveView("summary");
       return;
     }
-    if (!detail) {
-      return;
-    }
+    if (!detail) return;
 
     const key = detail.id;
-    if (syncedForRef.current === key) {
-      return;
-    }
+    if (syncedForRef.current === key) return;
     syncedForRef.current = key;
 
     setNameDraft(detail.name);
@@ -226,9 +223,7 @@ export function ChannelManagementSheet({
     setActiveView("summary");
   }, [cancelDeferredModalOpen, detail, open]);
 
-  if (!channel) {
-    return null;
-  }
+  if (!channel) return null;
 
   function handleDeleteDialogOpenChange(next: boolean) {
     deleteChannelMutation.reset();
@@ -247,9 +242,7 @@ export function ChannelManagementSheet({
   }
 
   function handlePanelOpenChange(next: boolean) {
-    if (!next) {
-      handleDeleteDialogOpenChange(false);
-    }
+    if (!next) handleDeleteDialogOpenChange(false);
 
     onOpenChange(next);
   }
@@ -815,6 +808,13 @@ function ChannelManagementPanelContent({
                 value={resolvedChannel.id}
               />
             </FieldGroup>
+
+            {canEditChannel && resolvedChannel.channelType !== "dm" ? (
+              <ChannelProjectFeaturesSettings
+                channel={resolvedChannel}
+                currentPubkey={currentPubkey}
+              />
+            ) : null}
 
             {canOpenCanvas ? (
               <div className="space-y-3">

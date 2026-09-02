@@ -80,3 +80,23 @@ export function buildGitStatusTags(input: {
   repoAddress?: string | null;
   repoOwner?: string | null;
 }): string[][];
+
+export type ProjectIssueLifecycleStatus = "open" | "done" | "closed" | "draft";
+
+export const ISSUE_STATUS_KIND_BY_LIFECYCLE: Record<
+  ProjectIssueLifecycleStatus,
+  number
+>;
+
+export function buildProjectIssueStatusEventTemplate(input: {
+  issue: ProjectIssue;
+  now: number;
+  repoAddress?: string | null;
+  repoOwner?: string | null;
+  status: ProjectIssueLifecycleStatus;
+}): {
+  kind: number;
+  content: string;
+  createdAt: number;
+  tags: string[][];
+};

@@ -1,0 +1,278 @@
+:root {
+  color: #172033;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  font-size: 16px;
+  font-synthesis: none;
+  letter-spacing: 0;
+}
+
+* {
+  box-sizing: border-box;
+  letter-spacing: 0;
+}
+
+html,
+body,
+#canvas-root {
+  height: 100%;
+  margin: 0;
+  min-height: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button {
+  cursor: pointer;
+}
+
+[hidden][hidden] {
+  display: none;
+}
+
+.canvas {
+  background-color: #f4f6f8;
+  background-image: radial-gradient(
+    circle,
+    rgba(84, 96, 115, 0.28) 1px,
+    transparent 1px
+  );
+  background-size: 24px 24px;
+  cursor: grab;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  touch-action: none;
+  user-select: none;
+  width: 100%;
+}
+
+.canvas.dragging {
+  cursor: grabbing;
+}
+
+.canvas.tone-home {
+  background-color: #fff7f8;
+}
+
+.canvas.tone-work {
+  background-color: #f2f5f7;
+}
+
+.canvas.tone-support {
+  background-color: #fffaf0;
+}
+
+.canvas-world {
+  height: 0;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  width: 0;
+  will-change: transform;
+}
+
+.widget-group {
+  left: 0;
+  pointer-events: auto;
+  position: absolute;
+  top: 0;
+  transform-origin: 0 0;
+  z-index: 10;
+}
+
+.widget-group.active {
+  z-index: 30;
+}
+
+.widget {
+  background: #ffffff;
+  border: 1px solid rgba(122, 133, 150, 0.3);
+  border-radius: 8px;
+  box-shadow:
+    0 12px 30px rgba(31, 41, 55, 0.12),
+    0 2px 7px rgba(31, 41, 55, 0.08);
+  cursor: grab;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  outline: none;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.widget:focus-visible {
+  box-shadow:
+    0 0 0 3px rgba(37, 99, 235, 0.28),
+    0 12px 30px rgba(31, 41, 55, 0.12);
+}
+
+.widget-group.dragging .widget {
+  cursor: grabbing;
+}
+
+.resize-handle {
+  background: transparent;
+  border: 0;
+  bottom: 2px;
+  color: #98a2b3;
+  cursor: nwse-resize;
+  height: 18px;
+  opacity: 0;
+  padding: 0;
+  position: absolute;
+  right: 2px;
+  touch-action: none;
+  width: 18px;
+  z-index: 20;
+}
+
+.resize-handle::after {
+  border-bottom: 2px solid currentColor;
+  border-bottom-right-radius: 5px;
+  border-right: 2px solid currentColor;
+  bottom: 3px;
+  content: "";
+  height: 9px;
+  position: absolute;
+  right: 3px;
+  width: 9px;
+}
+
+.widget-group:hover .resize-handle,
+.widget-group:focus-within .resize-handle {
+  opacity: 1;
+}
+
+.resize-handle:focus-visible {
+  border-radius: 5px;
+  opacity: 1;
+  outline: 2px solid rgba(37, 99, 235, 0.6);
+  outline-offset: -1px;
+}
+
+.widget-group.resizing .resize-handle {
+  color: #475467;
+  opacity: 1;
+}
+
+.widget-header {
+  align-items: center;
+  border-bottom: 1px solid #e7eaf0;
+  display: flex;
+  flex: 0 0 40px;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.widget-header h2 {
+  font-size: 0.875rem;
+  font-weight: 650;
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.widget-content {
+  flex: 1;
+  min-height: 0;
+}
+
+.icon {
+  align-items: center;
+  color: #667085;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  font-weight: 750;
+  height: 20px;
+  justify-content: center;
+  line-height: 1;
+  width: 20px;
+}
+
+.muted {
+  color: #667085;
+}
+
+.eyebrow {
+  color: #667085;
+  font-size: 0.625rem;
+  font-weight: 700;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.reset-button {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid #d7dce4;
+  border-radius: 6px;
+  box-shadow: 0 3px 10px rgba(31, 41, 55, 0.1);
+  display: flex;
+  height: 34px;
+  justify-content: center;
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  width: 34px;
+  z-index: 50;
+}
+
+.companion {
+  pointer-events: none;
+  position: absolute;
+  z-index: 20;
+}
+
+.gloopie-video,
+.henry-canvas {
+  filter: drop-shadow(0 7px 8px rgba(31, 41, 55, 0.18));
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.home-schedule-companion {
+  bottom: -72px;
+  height: 144px;
+  left: -72px;
+  width: 144px;
+}
+
+.henry-companion {
+  height: 176px;
+  right: -88px;
+  top: 32px;
+  width: 176px;
+}
+
+.bug-companion {
+  height: 144px;
+  right: -76px;
+  top: 72px;
+  width: 112px;
+}
+
+.henry-source {
+  height: 1px;
+  left: -9999px;
+  opacity: 0;
+  pointer-events: none;
+  position: fixed;
+  width: 1px;
+}

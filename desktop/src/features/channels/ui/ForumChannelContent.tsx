@@ -4,6 +4,8 @@ import {
   ForumView,
   UserProfilePanel,
 } from "@/features/channels/ui/ChannelScreenLazyViews";
+import { ChannelPaneMainColumn } from "@/features/channels/ui/ChannelPaneMainColumn";
+import { useChannelViewOverride } from "@/features/channels/ui/ChannelViewOverrideContext";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import type {
   ProfilePanelTab,
@@ -76,6 +78,8 @@ export function ForumChannelContent({
   targetSearchMessageId,
   targetSearchQuery,
 }: ForumChannelContentProps) {
+  const mainContent = useChannelViewOverride()?.mainContent;
+
   return (
     <>
       {header}
@@ -84,18 +88,25 @@ export function ForumChannelContent({
           aria-label="Forum posts"
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         >
-          <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
-            <ForumView
-              channel={channel}
-              currentPubkey={currentPubkey}
-              onClosePost={onClosePost}
-              onSelectPost={onSelectPost}
-              selectedPostId={selectedPostId}
-              targetReplyId={targetReplyId}
-              targetSearchMessageId={targetSearchMessageId}
-              targetSearchQuery={targetSearchQuery}
-            />
-          </React.Suspense>
+          <ChannelPaneMainColumn>
+            <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
+              <ForumView
+                channel={channel}
+                currentPubkey={currentPubkey}
+                onClosePost={onClosePost}
+                onSelectPost={onSelectPost}
+                selectedPostId={selectedPostId}
+                targetReplyId={targetReplyId}
+                targetSearchMessageId={targetSearchMessageId}
+                targetSearchQuery={targetSearchQuery}
+              />
+            </React.Suspense>
+          </ChannelPaneMainColumn>
+          {mainContent ? (
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-(--buzz-channel-content-top-padding,5.75rem)">
+              {mainContent}
+            </div>
+          ) : null}
         </section>
         {profilePanelPubkey ? (
           <RightAuxiliaryPane

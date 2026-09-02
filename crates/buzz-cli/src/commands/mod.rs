@@ -12,6 +12,7 @@ pub mod notes;
 pub mod pack;
 pub mod patches;
 pub mod pr;
+pub mod project_canvas;
 pub mod project_channel;
 pub mod projects;
 pub mod reactions;

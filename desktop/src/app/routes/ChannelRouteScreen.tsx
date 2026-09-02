@@ -295,11 +295,13 @@ export function ChannelRouteScreen({
     );
   }
 
-  if (projectHome && !isHuddleTranscript) {
+  if (projectHome && activeChannel && !isHuddleTranscript) {
     return (
       <ProjectChannelHome
         allowRepositoryHealing={isProjectRelayValidated(projectHome)}
         autoSendDraftKey={autoSendDraftKey}
+        channel={activeChannel}
+        key={activeChannel.id}
         project={projectHome}
         projects={projectsQuery.data ?? [projectHome]}
         targetMessageEvents={targetMessageEvents}

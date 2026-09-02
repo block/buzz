@@ -1,4 +1,4 @@
-import { ChevronRight, Folders } from "lucide-react";
+import { ChevronRight, Folders, Hash } from "lucide-react";
 import type * as React from "react";
 
 import { AppTopChromePortal } from "@/app/AppTopChromePortal";
@@ -15,7 +15,7 @@ export function ProjectDetailChrome({
   activeTabCrumb,
   activeWorkItemCrumb,
   onGoProjectHome,
-  onGoProjects,
+  onGoRootChannel,
   project,
   repository,
 }: {
@@ -24,7 +24,7 @@ export function ProjectDetailChrome({
   activeTabCrumb: string | null;
   activeWorkItemCrumb: ProjectDetailWorkItemCrumb | null;
   onGoProjectHome: () => void;
-  onGoProjects: () => void;
+  onGoRootChannel: () => void;
   project: Project;
   repository?: Repository | null;
 }) {
@@ -99,11 +99,11 @@ export function ProjectDetailChrome({
         >
           <button
             className="flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1 font-medium transition-colors hover:text-sidebar-accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            onClick={onGoProjects}
+            onClick={onGoRootChannel}
             type="button"
           >
-            <Folders className="h-3.5 w-3.5" />
-            Projects
+            <Hash className="h-3.5 w-3.5" />
+            Channel
           </button>
           <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
           {repositoryCrumb ? (

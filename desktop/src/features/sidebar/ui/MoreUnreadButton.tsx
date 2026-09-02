@@ -1,6 +1,8 @@
 import { topChromeInset } from "@/shared/layout/chromeLayout";
+import type { Channel } from "@/shared/api/types";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
+import type { SidebarDmParticipant } from "@/features/sidebar/ui/SidebarSection";
 
 export type UnreadDmPreview = {
   accessibleLabel: string;
@@ -15,6 +17,43 @@ export function canPreviewUnreadDm(
   resolvedParticipantCount: number,
 ) {
   return participantPubkeyCount === 2 && resolvedParticipantCount === 1;
+}
+
+export function buildUnreadDmPreviews({
+  channels,
+  channelLabels,
+  participantsByChannelId,
+  unreadChannelIds,
+}: {
+  channels: Channel[];
+  channelLabels: Record<string, string>;
+  participantsByChannelId: Record<string, SidebarDmParticipant[]>;
+  unreadChannelIds: string[];
+}): UnreadDmPreview[] {
+  return unreadChannelIds.flatMap((channelId) => {
+    const channel = channels.find((candidate) => candidate.id === channelId);
+    const participants = participantsByChannelId[channelId];
+    const participant = participants?.[0];
+    if (
+      !channel ||
+      !participant ||
+      !canPreviewUnreadDm(
+        channel.participantPubkeys.length,
+        participants.length,
+      )
+    ) {
+      return [];
+    }
+    return [
+      {
+        accessibleLabel: participant.label,
+        avatarUrl: participant.avatarUrl,
+        channelId,
+        isAgent: participant.isAgent,
+        label: channelLabels[channelId] ?? participant.label,
+      },
+    ];
+  });
 }
 
 export function visibleUnreadDmPreviews(dmPreviews: UnreadDmPreview[]) {

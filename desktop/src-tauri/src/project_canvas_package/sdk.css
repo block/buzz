@@ -1,0 +1,239 @@
+/* Host-owned Project Canvas SDK styles. Served from /__buzz/sdk.css and
+ * loaded before every package stylesheet. Packages should build on the
+ * --buzz-* custom properties so their surfaces track the host theme. */
+
+:root {
+  --buzz-background: #ffffff;
+  --buzz-foreground: #18181b;
+  --buzz-muted: #f4f4f5;
+  --buzz-muted-foreground: #71717a;
+  --buzz-border: #e4e4e7;
+  --buzz-primary: #2563eb;
+  --buzz-primary-foreground: #ffffff;
+  --buzz-success: #059669;
+  --buzz-destructive: #dc2626;
+  --buzz-radius: 8px;
+  --buzz-avatar-tone-0: #3b82f6;
+  --buzz-avatar-tone-0-fg: #ffffff;
+  --buzz-avatar-tone-1: #10b981;
+  --buzz-avatar-tone-1-fg: #ffffff;
+  --buzz-avatar-tone-2: #fbbf24;
+  --buzz-avatar-tone-2-fg: #451a03;
+  --buzz-avatar-tone-3: #f43f5e;
+  --buzz-avatar-tone-3-fg: #ffffff;
+  --buzz-avatar-tone-4: #22d3ee;
+  --buzz-avatar-tone-4-fg: #083344;
+  --buzz-avatar-tone-5: #8b5cf6;
+  --buzz-avatar-tone-5-fg: #ffffff;
+  --buzz-avatar-tone-6: #f97316;
+  --buzz-avatar-tone-6-fg: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --buzz-background: #18181b;
+    --buzz-foreground: #fafafa;
+    --buzz-muted: #27272a;
+    --buzz-muted-foreground: #a1a1aa;
+    --buzz-border: #3f3f46;
+    --buzz-primary: #60a5fa;
+    --buzz-primary-foreground: #0c0a09;
+  }
+}
+
+.buzz-avatar {
+  align-items: center;
+  background: var(--buzz-muted);
+  color: var(--buzz-muted-foreground);
+  display: inline-flex;
+  flex: none;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+  vertical-align: middle;
+}
+
+.buzz-avatar[data-shape="circle"] {
+  border-radius: 9999px;
+}
+
+.buzz-avatar[data-shape="squircle"] {
+  border-radius: 30%;
+}
+
+.buzz-avatar[data-size="xs"] {
+  font-size: 8px;
+  height: 20px;
+  width: 20px;
+}
+
+.buzz-avatar[data-size="sm"] {
+  font-size: 11px;
+  height: 24px;
+  width: 24px;
+}
+
+.buzz-avatar[data-size="md"] {
+  font-size: 12px;
+  height: 36px;
+  width: 36px;
+}
+
+/* Stacked over the initials rather than beside them: the picture is present
+   from the first paint but only covers the fallback once it has decoded, so a
+   person whose avatar is still loading — or was never published — shows
+   initials instead of an empty box. */
+.buzz-avatar-image {
+  height: 100%;
+  inset: 0;
+  object-fit: cover;
+  position: absolute;
+  width: 100%;
+}
+
+.buzz-avatar-fallback {
+  font-weight: 600;
+  line-height: 1;
+}
+
+.buzz-avatar[data-tone="0"] {
+  background: var(--buzz-avatar-tone-0);
+  color: var(--buzz-avatar-tone-0-fg);
+}
+.buzz-avatar[data-tone="1"] {
+  background: var(--buzz-avatar-tone-1);
+  color: var(--buzz-avatar-tone-1-fg);
+}
+.buzz-avatar[data-tone="2"] {
+  background: var(--buzz-avatar-tone-2);
+  color: var(--buzz-avatar-tone-2-fg);
+}
+.buzz-avatar[data-tone="3"] {
+  background: var(--buzz-avatar-tone-3);
+  color: var(--buzz-avatar-tone-3-fg);
+}
+.buzz-avatar[data-tone="4"] {
+  background: var(--buzz-avatar-tone-4);
+  color: var(--buzz-avatar-tone-4-fg);
+}
+.buzz-avatar[data-tone="5"] {
+  background: var(--buzz-avatar-tone-5);
+  color: var(--buzz-avatar-tone-5-fg);
+}
+.buzz-avatar[data-tone="6"] {
+  background: var(--buzz-avatar-tone-6);
+  color: var(--buzz-avatar-tone-6-fg);
+}
+
+.buzz-review-row,
+.buzz-channel-row {
+  align-items: center;
+  background: var(--buzz-background);
+  border: 1px solid var(--buzz-border);
+  border-radius: var(--buzz-radius);
+  color: var(--buzz-foreground);
+  display: flex;
+  font: inherit;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 8px 10px;
+  text-align: left;
+  width: 100%;
+}
+
+button.buzz-review-row,
+button.buzz-channel-row {
+  cursor: pointer;
+}
+
+button.buzz-review-row:hover,
+button.buzz-channel-row:hover {
+  background: var(--buzz-muted);
+}
+
+button.buzz-review-row:focus-visible,
+button.buzz-channel-row:focus-visible {
+  outline: 2px solid var(--buzz-primary);
+  outline-offset: 1px;
+}
+
+.buzz-review-summary,
+.buzz-channel-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.buzz-review-id {
+  color: var(--buzz-muted-foreground);
+  font-size: 11px;
+}
+
+.buzz-review-title,
+.buzz-channel-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.buzz-review-branch {
+  color: var(--buzz-muted-foreground);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.buzz-channel-meta {
+  color: var(--buzz-muted-foreground);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.buzz-review-status {
+  align-items: center;
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+}
+
+.buzz-channel-people {
+  display: inline-flex;
+  flex: none;
+}
+
+.buzz-channel-people .buzz-avatar + .buzz-avatar {
+  margin-left: -6px;
+}
+
+.buzz-status-pill {
+  background: var(--buzz-muted);
+  border-radius: 9999px;
+  color: var(--buzz-muted-foreground);
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+}
+
+.buzz-status-pill[data-status="open"],
+.buzz-status-pill[data-status="approved"] {
+  background: color-mix(in srgb, var(--buzz-success) 15%, transparent);
+  color: var(--buzz-success);
+}
+
+.buzz-status-pill[data-status="merged"] {
+  background: color-mix(in srgb, var(--buzz-primary) 15%, transparent);
+  color: var(--buzz-primary);
+}
+
+.buzz-status-pill[data-status="closed"],
+.buzz-status-pill[data-status="changes-requested"] {
+  background: color-mix(in srgb, var(--buzz-destructive) 15%, transparent);
+  color: var(--buzz-destructive);
+}

@@ -1,6 +1,7 @@
 import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
+export const CHANNEL_SECTIONS_CHANGED_EVENT = "buzz:channel-sections-changed";
 export const MAX_CHANNEL_SECTIONS = 100;
 export const MAX_CHANNEL_SECTION_ASSIGNMENTS = 1_000;
 
@@ -185,10 +186,24 @@ export function writeChannelSectionsStore(
   relayUrl?: string,
 ): boolean {
   try {
+    const key = storageKey(pubkey, relayUrl);
     window.localStorage.setItem(
-      storageKey(pubkey, relayUrl),
+      key,
       JSON.stringify(boundChannelSectionsStore(store)),
     );
+    globalThis.queueMicrotask(() => {
+      if (
+        typeof window.dispatchEvent !== "function" ||
+        typeof window.CustomEvent !== "function"
+      ) {
+        return;
+      }
+      window.dispatchEvent(
+        new window.CustomEvent(CHANNEL_SECTIONS_CHANGED_EVENT, {
+          detail: { key },
+        }),
+      );
+    });
     return true;
   } catch {
     return false;

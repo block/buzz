@@ -33,7 +33,7 @@ export function ProjectDetailUnavailableState(
           </Button>
           <Button onClick={props.onBack} size="sm" variant="ghost">
             <ArrowLeft className="mr-1.5 h-4 w-4" />
-            Back to Projects
+            Back to Inbox
           </Button>
         </div>
       </div>
@@ -49,7 +49,7 @@ export function ProjectDetailUnavailableState(
         </p>
         <Button onClick={props.onBack} size="sm" variant="outline">
           <ArrowLeft className="mr-1.5 h-4 w-4" />
-          Back to Projects
+          Back to Inbox
         </Button>
       </div>
     );

@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { useProfileQuery, useSelfProfileCache } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { safeUnlisten } from "@/shared/lib/safeUnlisten";
 import { useHuddle, useHuddleLevels } from "../HuddleContext";
 import { useHuddleParticipantRoster } from "../hooks/useHuddleParticipantRoster";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
@@ -92,13 +93,14 @@ export function HuddleRoomHeader() {
     void listen<HuddleRosterState>("huddle-state-changed", (event) => {
       if (!disposed) setState(event.payload);
     }).then((cleanup) => {
-      if (disposed) cleanup();
+      if (disposed) safeUnlisten(cleanup);
       else unlisten = cleanup;
     });
 
     return () => {
       disposed = true;
-      unlisten?.();
+      safeUnlisten(unlisten);
+      unlisten = null;
     };
   }, []);
 

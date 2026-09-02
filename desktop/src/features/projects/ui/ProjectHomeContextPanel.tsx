@@ -14,6 +14,7 @@ import { presentContextCount } from "@/features/projects/lib/projectHomeSummary"
 import type { ProjectHomeWorkspaceSheetTab } from "@/features/projects/lib/projectHomeWorkspaceSheet";
 import { resolveProjectDefaultBranch } from "@/features/projects/lib/projectBranches";
 import { listProjectBoundChannels } from "@/features/projects/lib/projectRelatedChannels";
+import type { ChannelProjectFeature } from "@/features/projects/channelProjectFeatures";
 import {
   useProjectActivitySummariesQuery,
   useProjectRepoSnapshotQuery,
@@ -182,6 +183,7 @@ export function ProjectHomeContextPanel({
   activeWorkspaceTab,
   channel,
   channels = [],
+  enabledFeatures,
   identityPubkey,
   onAddRepository,
   onOpenChannel,
@@ -194,6 +196,7 @@ export function ProjectHomeContextPanel({
   activeWorkspaceTab?: ProjectHomeWorkspaceSheetTab | null;
   channel: Channel | null;
   channels?: Channel[];
+  enabledFeatures: Record<ChannelProjectFeature, boolean>;
   identityPubkey?: string;
   onAddRepository?: () => void;
   onOpenChannel?: (channelId: string) => void;
@@ -255,143 +258,161 @@ export function ProjectHomeContextPanel({
             },
           ]
         : [];
+  const workspaceEnabled =
+    enabledFeatures.tasks ||
+    enabledFeatures.reviews ||
+    enabledFeatures.repositories;
 
   return (
     <div
       className="space-y-4 px-2 pb-8 pt-3"
       data-testid="project-home-context-panel"
     >
-      <ContextSection testId="project-home-context-workspace">
-        <ContextNavButton
-          count={presentContextCount(activity?.issueCount)}
-          disabled={!firstRepository && !onAddRepository}
-          icon={<CircleDot />}
-          onClick={() => openWorkspace("issues")}
-          pressed={activeWorkspaceTab === "issues"}
-          testId="project-home-context-tasks"
-          title={addRepositoryTitle}
-        >
-          Tasks
-        </ContextNavButton>
-        <ContextNavButton
-          count={presentContextCount(activity?.prCount)}
-          disabled={!firstRepository && !onAddRepository}
-          icon={<GitPullRequest />}
-          onClick={() => openWorkspace("prs")}
-          pressed={activeWorkspaceTab === "prs"}
-          testId="project-home-context-reviews"
-          title={addRepositoryTitle}
-        >
-          Reviews
-        </ContextNavButton>
-        <ContextNavButton
-          count={presentContextCount(activity?.commitCount)}
-          disabled={!firstRepository && !onAddRepository}
-          icon={<GitCommitHorizontal />}
-          onClick={() => openWorkspace("commits")}
-          pressed={activeWorkspaceTab === "commits"}
-          testId="project-home-context-commits"
-          title={addRepositoryTitle}
-        >
-          Commits
-        </ContextNavButton>
-        <ContextNavButton
-          count={presentContextCount(snapshotQuery.data?.files.length)}
-          disabled={!firstRepository && !onAddRepository}
-          icon={<FileCode2 />}
-          onClick={() => openWorkspace("files")}
-          pressed={activeWorkspaceTab === "files"}
-          testId="project-home-context-files"
-          title={addRepositoryTitle}
-        >
-          Files
-        </ContextNavButton>
-        <ContextNavButton
-          count={presentContextCount(peopleCount)}
-          disabled={!firstRepository}
-          icon={<Users />}
-          onClick={() =>
-            firstRepository &&
-            onOpenWorkspace(firstRepository.id, "contributors")
-          }
-          pressed={activeWorkspaceTab === "contributors"}
-          testId="project-home-context-people"
-          title={addRepositoryTitle}
-        >
-          People
-        </ContextNavButton>
-      </ContextSection>
-      <ContextSection
-        collapsible
-        headerAction={
-          <ProjectChannelManagement
-            identityPubkey={identityPubkey}
-            project={project}
-          />
-        }
-        testId="project-home-context-channel"
-        title="Channels"
-      >
-        {listedChannels.length > 0 ? (
-          listedChannels.map((binding) => {
-            const isHome = binding.role === "home";
-            return (
-              <ChannelContextRow
-                channel={binding.channel}
-                key={`${binding.role}:${binding.channel.id}`}
-                onClick={
-                  isHome || !onOpenChannel
-                    ? undefined
-                    : () => onOpenChannel(binding.channel.id)
-                }
-                projectHome={isHome}
-                testId={
-                  isHome
-                    ? "project-home-context-home-channel"
-                    : `project-home-context-channel-${binding.channel.name}`
-                }
-              />
-            );
-          })
-        ) : (
-          <p
-            className={`${PROJECT_HOME_SIDEBAR_ROW_CLASS} pointer-events-none flex items-center`}
-          >
-            <ContextRowContent icon={<Hash />}>Unavailable</ContextRowContent>
-          </p>
-        )}
-      </ContextSection>
-      <ContextSection
-        collapsible
-        headerAction={
-          <ProjectRepositoryManagement
-            compact
-            identityPubkey={identityPubkey}
-            onChange={onRepositoryChange}
-            project={project}
-            projects={projects}
-          />
-        }
-        testId="project-home-context-codebase"
-        title="Codebase"
-      >
-        {project.repositories.length > 0 ? (
-          project.repositories.map((repository) => (
+      {workspaceEnabled ? (
+        <ContextSection testId="project-home-context-workspace">
+          {enabledFeatures.tasks ? (
             <ContextNavButton
-              icon={<FolderGit2 />}
-              key={repository.id}
-              onClick={() => onOpenRepository(repository.id)}
-              testId={`project-home-context-repo-${repository.dtag}`}
+              count={presentContextCount(activity?.issueCount)}
+              disabled={!firstRepository && !onAddRepository}
+              icon={<CircleDot />}
+              onClick={() => openWorkspace("issues")}
+              pressed={activeWorkspaceTab === "issues"}
+              testId="project-home-context-tasks"
+              title={addRepositoryTitle}
             >
-              {repository.name}
+              Tasks
             </ContextNavButton>
-          ))
-        ) : (
-          <p className="px-2 py-1 text-sm text-sidebar-foreground/60">
-            None yet
-          </p>
-        )}
-      </ContextSection>
+          ) : null}
+          {enabledFeatures.reviews ? (
+            <ContextNavButton
+              count={presentContextCount(activity?.prCount)}
+              disabled={!firstRepository && !onAddRepository}
+              icon={<GitPullRequest />}
+              onClick={() => openWorkspace("prs")}
+              pressed={activeWorkspaceTab === "prs"}
+              testId="project-home-context-reviews"
+              title={addRepositoryTitle}
+            >
+              Reviews
+            </ContextNavButton>
+          ) : null}
+          {enabledFeatures.repositories ? (
+            <>
+              <ContextNavButton
+                count={presentContextCount(activity?.commitCount)}
+                disabled={!firstRepository && !onAddRepository}
+                icon={<GitCommitHorizontal />}
+                onClick={() => openWorkspace("commits")}
+                pressed={activeWorkspaceTab === "commits"}
+                testId="project-home-context-commits"
+                title={addRepositoryTitle}
+              >
+                Commits
+              </ContextNavButton>
+              <ContextNavButton
+                count={presentContextCount(snapshotQuery.data?.files.length)}
+                disabled={!firstRepository && !onAddRepository}
+                icon={<FileCode2 />}
+                onClick={() => openWorkspace("files")}
+                pressed={activeWorkspaceTab === "files"}
+                testId="project-home-context-files"
+                title={addRepositoryTitle}
+              >
+                Files
+              </ContextNavButton>
+              <ContextNavButton
+                count={presentContextCount(peopleCount)}
+                disabled={!firstRepository}
+                icon={<Users />}
+                onClick={() =>
+                  firstRepository &&
+                  onOpenWorkspace(firstRepository.id, "contributors")
+                }
+                pressed={activeWorkspaceTab === "contributors"}
+                testId="project-home-context-people"
+                title={addRepositoryTitle}
+              >
+                People
+              </ContextNavButton>
+            </>
+          ) : null}
+        </ContextSection>
+      ) : null}
+      {enabledFeatures.breakouts ? (
+        <ContextSection
+          collapsible
+          headerAction={
+            <ProjectChannelManagement
+              identityPubkey={identityPubkey}
+              project={project}
+            />
+          }
+          testId="project-home-context-channel"
+          title="Channels"
+        >
+          {listedChannels.length > 0 ? (
+            listedChannels.map((binding) => {
+              const isHome = binding.role === "home";
+              return (
+                <ChannelContextRow
+                  channel={binding.channel}
+                  key={`${binding.role}:${binding.channel.id}`}
+                  onClick={
+                    isHome || !onOpenChannel
+                      ? undefined
+                      : () => onOpenChannel(binding.channel.id)
+                  }
+                  projectHome={isHome}
+                  testId={
+                    isHome
+                      ? "project-home-context-home-channel"
+                      : `project-home-context-channel-${binding.channel.name}`
+                  }
+                />
+              );
+            })
+          ) : (
+            <p
+              className={`${PROJECT_HOME_SIDEBAR_ROW_CLASS} pointer-events-none flex items-center`}
+            >
+              <ContextRowContent icon={<Hash />}>Unavailable</ContextRowContent>
+            </p>
+          )}
+        </ContextSection>
+      ) : null}
+      {enabledFeatures.repositories ? (
+        <ContextSection
+          collapsible
+          headerAction={
+            <ProjectRepositoryManagement
+              compact
+              identityPubkey={identityPubkey}
+              onChange={onRepositoryChange}
+              project={project}
+              projects={projects}
+            />
+          }
+          testId="project-home-context-codebase"
+          title="Codebase"
+        >
+          {project.repositories.length > 0 ? (
+            project.repositories.map((repository) => (
+              <ContextNavButton
+                icon={<FolderGit2 />}
+                key={repository.id}
+                onClick={() => onOpenRepository(repository.id)}
+                testId={`project-home-context-repo-${repository.dtag}`}
+              >
+                {repository.name}
+              </ContextNavButton>
+            ))
+          ) : (
+            <p className="px-2 py-1 text-sm text-sidebar-foreground/60">
+              None yet
+            </p>
+          )}
+        </ContextSection>
+      ) : null}
     </div>
   );
 }

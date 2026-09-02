@@ -24,20 +24,14 @@ test("thread-scoped ACP sessions is a default-off desktop experiment", () => {
   assert.equal(feature.defaultEnabled, undefined);
 });
 
-test("existing Projects and Workflows experiments remain unchanged", () => {
+test("the Workflows experiment remains unchanged", () => {
   const existing = Object.fromEntries(
     manifest.features
-      .filter(({ id }) => id === "projects" || id === "workflows")
+      .filter(({ id }) => id === "workflows")
       .map((feature) => [feature.id, feature]),
   );
 
   assert.deepEqual(existing, {
-    projects: {
-      id: "projects",
-      name: "Projects",
-      description: "Git repository browser and collaboration",
-      platforms: ["desktop"],
-    },
     workflows: {
       id: "workflows",
       name: "Workflows",
@@ -45,4 +39,14 @@ test("existing Projects and Workflows experiments remain unchanged", () => {
       platforms: ["desktop"],
     },
   });
+});
+
+// Projects graduated out of preview, so it must not reappear as a gate: a
+// stray manifest entry would hide the shipped sidebar row behind an
+// experiment toggle again.
+test("Projects is no longer a preview experiment", () => {
+  assert.equal(
+    manifest.features.find(({ id }) => id === "projects"),
+    undefined,
+  );
 });

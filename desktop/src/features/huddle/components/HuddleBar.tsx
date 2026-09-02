@@ -22,6 +22,7 @@ import type { RelayEvent } from "@/shared/api/types";
 import { KIND_HUDDLE_REACTION } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { safeUnlisten } from "@/shared/lib/safeUnlisten";
 import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
@@ -248,7 +249,7 @@ export function HuddleBar({
         applyIncomingState(event.payload);
       }
     }).then((fn) => {
-      if (cancelled) fn();
+      if (cancelled) safeUnlisten(fn);
       else unlisten = fn;
     });
 
@@ -263,7 +264,8 @@ export function HuddleBar({
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      safeUnlisten(unlisten);
+      unlisten = null;
       if (id !== null) window.clearInterval(id);
     };
   }, [applyIncomingState, documentVisible]);

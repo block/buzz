@@ -241,7 +241,9 @@ function SidebarChannelIcon({
 }
 
 export function ChannelMenuButton({
+  className,
   channel,
+  hideIcon = false,
   label,
   isActive,
   hasUnread,
@@ -252,7 +254,9 @@ export function ChannelMenuButton({
   presenceStatus,
   onSelectChannel,
 }: {
+  className?: string;
   channel: Channel;
+  hideIcon?: boolean;
   label?: string;
   isActive: boolean;
   hasUnread: boolean;
@@ -307,6 +311,7 @@ export function ChannelMenuButton({
           : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-foreground",
         hasTopLevelUnread &&
           "font-bold text-sidebar-foreground hover:text-sidebar-foreground data-[active=true]:font-bold",
+        className,
       )}
       data-channel-id={channel.id}
       data-testid={`channel-${channel.name}`}
@@ -315,14 +320,16 @@ export function ChannelMenuButton({
       tooltip={resolvedLabel}
       type="button"
     >
-      <SidebarChannelIcon
-        channel={channel}
-        className={
-          channel.channelType === "dm" ? undefined : inactiveContentOpacity
-        }
-        dmParticipants={dmParticipants}
-        presenceStatus={presenceStatus}
-      />
+      {!hideIcon ? (
+        <SidebarChannelIcon
+          channel={channel}
+          className={
+            channel.channelType === "dm" ? undefined : inactiveContentOpacity
+          }
+          dmParticipants={dmParticipants}
+          presenceStatus={presenceStatus}
+        />
+      ) : null}
       <span
         className={cn("min-w-0 flex-1 truncate", inactiveContentOpacity)}
         data-sidebar-row-label

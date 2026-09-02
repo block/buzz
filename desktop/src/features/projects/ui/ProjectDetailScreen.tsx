@@ -48,7 +48,6 @@ import {
 import { wantsProjectRepositorySurface } from "@/features/projects/lib/projectDetailSearch";
 import { hasAuthoritativeHomeBinding } from "@/features/projects/lib/projectHomeChannel";
 import { selectProjectRepository } from "@/features/projects/projectModels";
-import { isProjectRelayValidated } from "@/features/projects/projectSnapshot";
 import { ProjectSelectionProvider } from "@/features/projects/lib/useProjectSelection";
 import { useMemberChannelIds } from "@/features/projects/useRepositoryAccess";
 import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
@@ -64,7 +63,7 @@ import { ProjectDetailChrome } from "./ProjectDetailChrome";
 import { ProjectConversationPanelController } from "./ProjectConversationPanelContext";
 import { ProjectDetailRightPanel } from "./ProjectDetailRightPanel";
 import { ProjectDetailUnavailableState } from "./ProjectDetailUnavailableState";
-import { ProjectChannelHome } from "./ProjectChannelHome";
+import { ProjectHomeChannelRedirect } from "./ProjectHomeChannelRedirect";
 import { ProjectRightPanelControls } from "./ProjectRightPanelControls";
 import { buildProjectDetailCrumbs } from "./useProjectDetailCrumbs";
 import { useProjectDetailPeople } from "./useProjectDetailPeople";
@@ -95,7 +94,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repositoryId,
     tab,
   } = props;
-  const { goProject, goProjects } = useAppNavigation();
+  const { goChannel, goHome, goProject } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const projectQuery = useProjectQuery(projectId);
   const projectsQuery = useProjectsQuery();
@@ -667,7 +666,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     return (
       <ProjectDetailUnavailableState
         kind="load-error"
-        onBack={() => void goProjects()}
+        onBack={() => void goHome()}
         onRetry={() => void projectQuery.refetch()}
       />
     );
@@ -676,7 +675,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     return (
       <ProjectDetailUnavailableState
         kind="not-found"
-        onBack={() => void goProjects()}
+        onBack={() => void goHome()}
       />
     );
   }
@@ -693,11 +692,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     });
   if (showChannelHome) {
     return (
-      <ProjectChannelHome
-        allowRepositoryHealing={isProjectRelayValidated(project)}
-        project={project}
-        projects={projectsQuery.data ?? [project]}
-      />
+      <ProjectHomeChannelRedirect channelId={project.projectChannelId ?? ""} />
     );
   }
   if (!repository) {
@@ -749,7 +744,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     });
   const goChannelHome = () => {
     if (project.projectChannelId) {
-      void goProject(project.id);
+      void goChannel(project.projectChannelId);
       return;
     }
     handleGoToProjectHome();
@@ -869,8 +864,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 activeTabCrumb={activeTabCrumb}
                 activeWorkItemCrumb={activeWorkItemCrumb}
                 onGoProjectHome={goChannelHome}
-                onGoProjects={() => {
-                  void goProjects();
+                onGoRootChannel={() => {
+                  const rootChannelId =
+                    project.projectChannelId ?? repository.channelId;
+                  if (rootChannelId) {
+                    void goChannel(rootChannelId);
+                  } else {
+                    void goHome();
+                  }
                 }}
                 project={project}
                 repository={repository}

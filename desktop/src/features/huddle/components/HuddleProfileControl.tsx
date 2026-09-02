@@ -4,6 +4,7 @@ import { Headphones } from "lucide-react";
 import * as React from "react";
 
 import type { Channel } from "@/shared/api/types";
+import { safeUnlisten } from "@/shared/lib/safeUnlisten";
 import { Button } from "@/shared/ui/button";
 import { useHuddle, useHuddleLevels } from "../HuddleContext";
 import { MicControls } from "./MicControls";
@@ -69,13 +70,14 @@ export function HuddleProfileControl({
     void listen<HuddleProfileState>("huddle-state-changed", (event) => {
       if (!disposed) setState(event.payload);
     }).then((cleanup) => {
-      if (disposed) cleanup();
+      if (disposed) safeUnlisten(cleanup);
       else unlisten = cleanup;
     });
 
     return () => {
       disposed = true;
-      unlisten?.();
+      safeUnlisten(unlisten);
+      unlisten = null;
     };
   }, []);
 

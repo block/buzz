@@ -6,6 +6,7 @@ import {
   AUXILIARY_PANEL_MIN_WIDTH_PX,
   clampAuxiliaryPanelWidth,
   getAuxiliaryPanelMaxWidth,
+  resolveAuxiliaryPanelWidth,
 } from "./auxiliaryPanelLayout.ts";
 
 test("max width falls back to the static cap on narrow viewports", () => {
@@ -33,5 +34,38 @@ test("clamp keeps width within [min, viewport-aware max]", () => {
   assert.equal(
     clampAuxiliaryPanelWidth(2000, 900),
     AUXILIARY_PANEL_MAX_WIDTH_PX,
+  );
+});
+
+test("floating overlays do not reserve width for the covered main pane", () => {
+  assert.equal(
+    resolveAuxiliaryPanelWidth({
+      floatingOverlay: true,
+      singlePanelView: false,
+      splitPaneClamp: true,
+      widthPx: 380,
+    }),
+    "380px",
+  );
+});
+
+test("split panels still reserve the minimum main-pane width", () => {
+  assert.equal(
+    resolveAuxiliaryPanelWidth({
+      floatingOverlay: false,
+      singlePanelView: false,
+      splitPaneClamp: true,
+      widthPx: 380,
+    }),
+    `min(380px, calc(100% - ${AUXILIARY_PANEL_MIN_WIDTH_PX}px))`,
+  );
+  assert.equal(
+    resolveAuxiliaryPanelWidth({
+      floatingOverlay: false,
+      singlePanelView: true,
+      splitPaneClamp: true,
+      widthPx: 380,
+    }),
+    "100%",
   );
 });

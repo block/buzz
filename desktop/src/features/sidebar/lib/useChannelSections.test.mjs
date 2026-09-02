@@ -76,3 +76,43 @@ test("assignChannel refreshes an existing assignment before the next eviction", 
     relayClient.subscribeToReconnects = originalSubscribeToReconnects;
   }
 });
+
+test("separate hook instances observe same-window section changes", async () => {
+  const { act, cleanup, renderHook, waitFor } = await import(
+    "@testing-library/react"
+  );
+  const { relayClient } = await import("@/shared/api/relayClient");
+  const { useChannelSections } = await import("./useChannelSections.ts");
+  const originalFetchEvents = relayClient.fetchEvents;
+  const originalSubscribeLive = relayClient.subscribeLive;
+  const originalSubscribeToReconnects = relayClient.subscribeToReconnects;
+  relayClient.fetchEvents = async () => [];
+  relayClient.subscribeLive = async () => async () => {};
+  relayClient.subscribeToReconnects = () => () => {};
+
+  try {
+    const first = renderHook(() =>
+      useChannelSections("same-window", "wss://relay.example"),
+    );
+    const second = renderHook(() =>
+      useChannelSections("same-window", "wss://relay.example"),
+    );
+    let section;
+    act(() => {
+      section = first.result.current.createSection("Project");
+    });
+    assert.ok(section);
+    act(() => first.result.current.assignChannel("child", section.id));
+
+    await waitFor(() => {
+      assert.equal(second.result.current.assignments.child, section.id);
+    });
+    first.unmount();
+    second.unmount();
+  } finally {
+    cleanup();
+    relayClient.fetchEvents = originalFetchEvents;
+    relayClient.subscribeLive = originalSubscribeLive;
+    relayClient.subscribeToReconnects = originalSubscribeToReconnects;
+  }
+});

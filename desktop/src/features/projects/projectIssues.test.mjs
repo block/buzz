@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   buildGitIssueTags,
+  buildProjectIssueStatusEventTemplate,
   eventToProjectIssue,
   getAllTags,
   getTag,
   ISSUE_ASSIGNMENT_LABEL,
+  ISSUE_STATUS_KIND_BY_LIFECYCLE,
   ISSUE_UNASSIGNMENT_LABEL,
   nextProjectIssueCommentCreatedAt,
   PROJECT_ISSUE_STATUS,
@@ -468,4 +470,50 @@ test("orders consecutive issue comments across whole-second timestamps", () => {
 
   assert.equal(nextProjectIssueCommentCreatedAt(issue, 200, AUTHOR), 202);
   assert.equal(nextProjectIssueCommentCreatedAt(issue, 300, AUTHOR), 300);
+});
+
+test("status templates map lifecycle states to NIP-34 kinds and outrun stale activity", () => {
+  const issue = { id: "e".repeat(64), updatedAt: 500 };
+  const template = buildProjectIssueStatusEventTemplate({
+    issue,
+    now: 100,
+    repoAddress: REPO_ADDRESS,
+    repoOwner: OWNER,
+    status: "done",
+  });
+  assert.equal(template.kind, 1631);
+  assert.equal(template.content, "");
+  // Newest-wins reduction: the status event must postdate observed activity.
+  assert.equal(template.createdAt, 501);
+  assert.deepEqual(template.tags, [
+    ["e", issue.id, "", "root"],
+    ["a", REPO_ADDRESS],
+    ["p", OWNER],
+  ]);
+
+  const fresh = buildProjectIssueStatusEventTemplate({
+    issue,
+    now: 900,
+    repoAddress: REPO_ADDRESS,
+    repoOwner: OWNER,
+    status: "open",
+  });
+  assert.equal(fresh.kind, 1630);
+  assert.equal(fresh.createdAt, 900);
+
+  assert.deepEqual(ISSUE_STATUS_KIND_BY_LIFECYCLE, {
+    closed: 1632,
+    done: 1631,
+    draft: 1633,
+    open: 1630,
+  });
+  assert.throws(() =>
+    buildProjectIssueStatusEventTemplate({
+      issue,
+      now: 900,
+      repoAddress: REPO_ADDRESS,
+      repoOwner: OWNER,
+      status: "merged",
+    }),
+  );
 });

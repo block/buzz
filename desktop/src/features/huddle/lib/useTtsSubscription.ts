@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as React from "react";
 
+import { safeUnlisten } from "@/shared/lib/safeUnlisten";
 import {
   isDocumentVisible,
   subscribeDocumentVisibility,
@@ -253,7 +254,7 @@ export function useTtsSubscription(
     })
       .then((unlisten) => {
         if (disposed) {
-          unlisten();
+          safeUnlisten(unlisten);
           return;
         }
         unlistenHuddleState = unlisten;
@@ -324,7 +325,8 @@ export function useTtsSubscription(
       disposed = true;
       speakInOrder.setEnabled(false);
       cleanup?.();
-      unlistenHuddleState?.();
+      safeUnlisten(unlistenHuddleState);
+      unlistenHuddleState = null;
       unsubscribeDocumentVisibility();
       if (agentRefreshId !== null) window.clearInterval(agentRefreshId);
       if (agentVerificationRetryId !== null) {

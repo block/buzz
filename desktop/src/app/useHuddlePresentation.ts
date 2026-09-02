@@ -14,6 +14,7 @@ import {
   channelMessagesKey,
   channelWindowKey,
 } from "@/features/messages/lib/messageQueryKeys";
+import { safeUnlisten } from "@/shared/lib/safeUnlisten";
 
 type HuddleTranscriptRouteState = {
   phase:
@@ -80,13 +81,14 @@ export function useHuddlePresentation() {
     void listen<HuddleTranscriptRouteState>("huddle-state-changed", (event) =>
       syncRoute(event.payload),
     ).then((cleanup) => {
-      if (cancelled) cleanup();
+      if (cancelled) safeUnlisten(cleanup);
       else unlisten = cleanup;
     });
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      safeUnlisten(unlisten);
+      unlisten = null;
     };
   }, [huddleRoomChannelId, isHuddleRoom]);
 
@@ -368,12 +370,13 @@ export function useHuddlePresentation() {
           console.error("Failed to open huddle in the main app:", error);
         });
     }).then((cleanup) => {
-      if (cancelled) cleanup();
+      if (cancelled) safeUnlisten(cleanup);
       else unlisten = cleanup;
     });
     return () => {
       cancelled = true;
-      unlisten?.();
+      safeUnlisten(unlisten);
+      unlisten = null;
     };
   }, [isHuddleRoom, showHuddleInMainApp]);
 
@@ -429,12 +432,13 @@ export function useHuddlePresentation() {
         void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
       }
     }).then((cleanup) => {
-      if (cancelled) cleanup();
+      if (cancelled) safeUnlisten(cleanup);
       else unlisten = cleanup;
     });
     return () => {
       cancelled = true;
-      unlisten?.();
+      safeUnlisten(unlisten);
+      unlisten = null;
     };
   }, [
     hideHuddleChannel,

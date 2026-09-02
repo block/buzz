@@ -60,6 +60,7 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | Command | Output |
 |---------|--------|
 | `canvas get` | raw markdown string or `null` — NOT a JSON envelope |
+| `canvas notify` | local JSON acknowledgment with `accepted`, `change`, `notificationId`, `projectId`, `revision`, `sourcePath`, and `widgetId` |
 | `social *`, `repos get/list` | raw Nostr event JSON INCLUDING `sig` — different contract than read commands above |
 | `repos protect list` | `{repo_id, protections: [{ref, rules}], unknown_rules, validation_error}` |
 | `upload file` | pretty-printed multi-line `BlobDescriptor`: `{url, sha256, size, type, uploaded}` |
@@ -71,6 +72,29 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `pack validate/inspect` | human-readable text, not JSON |
 
 **Errors** go to stderr as `{"error": "<category>", "message": "<detail>"}`. Exit codes: 0 = success, 1 = input/not-found, 2 = relay/network, 3 = auth, 4 = other, 5 = write conflict (value superseded).
+
+## Project Canvas Updates
+
+`canvas get/set` operate on relay-backed channel Canvas markdown. `canvas notify` instead tells the running local Buzz Desktop that an external project widget package changed.
+
+1. Read the active nest's `CANVASES/index.json`, match the exact community and canonical project coordinate, and edit only that entry's `sourcePath`. Never edit `index.json` or `.runtime/`.
+2. For widget values, edit `data/*.json`, then run `buzz canvas notify --source <sourcePath> --widget <widget-id> --change data`. The live iframe stays mounted. Object renderers may animate with `update(currentElement, nextData, previousData, api)`; function renderers receive a targeted content remount.
+3. For JavaScript, CSS, layout, assets, or manifest changes, run `buzz canvas notify --source <sourcePath> --widget <widget-id> --change presentation`. Buzz validates the package and activates a fresh sandboxed iframe through its last-known-good render gate.
+
+The source must be listed in that nest's index, the widget id must be unique in the package data, and Buzz Desktop must be running. This command is local-only and does not require `BUZZ_PRIVATE_KEY` or publish a relay event. The manual Reload Canvas button remains available.
+
+### Canvas SDK
+
+Package scripts run against a host SDK at `window.buzzCanvas.sdk`, loaded before every package script. Use it instead of bundling fixture rows:
+
+- `sdk.data.query(name, params)` / `sdk.data.liveQuery(name, params, onUpdate)` — one-shot or live reads returning `{status: "loading"|"ready"|"error", data}`. Live queries return a stop function; stop the old one before re-subscribing. Queries: `project.metadata`, `project.channels.list`, `project.reviews.list`, `project.tasks.list`, `project.tasks.get`, `people.lookup` (≤32 pubkeys), `people.search`.
+- `sdk.data.command(name, params)` — `tasks.setStatus` (`{id, status: "open"|"done"|"closed"|"draft"}`), `tasks.assign`/`tasks.unassign` (`{id, assignee?}`, assignee defaults to the viewing user), `dm.send` (`{pubkey, message}`, ≤2000 chars — sends a direct message as the viewing user).
+- `sdk.app.open(target)` — `{type: "channel"|"task"|"review", id}` or `{type: "user", pubkey}`.
+- `sdk.layout.save({dashboard, pan, widgets, sizes})` — persists the user's widget arrangement for one dashboard. Send only the widgets that differ from their `data/*.json` position in `widgets` and from their `data/*.json` size in `sizes` (`{width, height}` per widget id), with `pan: null` when it matches the package default; position and size overrides are independent, and the host replays them as `layouts` on `host.init`. No capability, debounced, and a wholesale replace per dashboard.
+- `sdk.ui.avatar/reviewRow/channelRow` — standard components themed by host `--buzz-*` CSS variables. Give `sdk.ui.avatar` a `pubkey` and the frame loads that person's real picture from the host — any number of them, since the image never travels in an RPC message. `avatarUrl` (a `data:` URL from a people row) still renders, but only a handful fit in one response. Either way a person with no picture falls back to their initials.
+- `sdk.capabilities()` — the granted subset of the manifest capabilities (`project.metadata.read`, `project.channels.read`, `project.reviews.read`, `project.tasks.read`, `project.people.read`, `project.tasks.write`, `app.open`, `app.dm.send`). Render a fallback when a capability is missing; `project.tasks.write`, `app.open`, and `app.dm.send` need a one-time user approval per package revision.
+
+Budgets: ≤16 concurrent live queries, ≤10 commands/minute, ≤3 opens/10s, 64 KiB per message. Violations fail the single request with `error.code === "rate-limited"`; the canvas keeps running. All reads are scoped to the hosting project — widget-supplied parameters cannot widen them.
 
 ## Compact Format
 

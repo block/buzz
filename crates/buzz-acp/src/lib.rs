@@ -5119,6 +5119,33 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_teaches_project_canvas_notifications() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("buzz canvas notify --source"));
+        assert!(prompt.contains("--change data"));
+        assert!(prompt.contains("--change presentation"));
+        assert!(prompt.contains("Never edit `index.json` or anything under `.runtime/`"));
+    }
+
+    #[test]
+    fn shared_base_prompt_documents_the_canvas_sdk_surface() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("window.buzzCanvas.sdk"));
+        assert!(prompt.contains("sdk.data.liveQuery"));
+        assert!(prompt.contains("tasks.setStatus"));
+        assert!(prompt.contains("sdk.capabilities()"));
+        assert!(prompt.contains("project.tasks.write"));
+        assert!(prompt.contains("`app.open`"));
+        assert!(prompt.contains("`dm.send`"));
+        assert!(prompt.contains("`app.dm.send`"));
+        assert!(prompt.contains("rate-limited"));
+        assert!(prompt.contains("sdk.ui.avatar"));
+        assert!(prompt.contains("sdk.layout.save({dashboard, pan, widgets, sizes})"));
+        assert!(prompt.contains("`layouts`"));
+        assert!(prompt.contains("resizing a widget must not add a position entry"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {

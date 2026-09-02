@@ -7,6 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { safeUnlisten } from "@/shared/lib/safeUnlisten";
 import {
   HUDDLE_SHORTCUT_EVENT,
   type HuddleShortcutDetail,
@@ -206,13 +207,14 @@ export function HuddleIndicator({
         setActiveHuddle(null);
       }
     }).then((fn) => {
-      if (cancelled) fn();
+      if (cancelled) safeUnlisten(fn);
       else unlisten = fn;
     });
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      safeUnlisten(unlisten);
+      unlisten = null;
     };
   }, []);
 

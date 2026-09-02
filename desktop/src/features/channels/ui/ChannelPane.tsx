@@ -1,5 +1,4 @@
 import * as React from "react";
-import { LogIn } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
@@ -57,15 +56,18 @@ import {
   shouldUseFocusIdleDrawer,
 } from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
-import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
+import { JoinChannelBanner } from "@/features/channels/ui/JoinChannelBanner";
 import { useSearchHighlightProps } from "@/features/channels/ui/useSearchHighlightProps";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
 import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMessages";
+import {
+  ChannelPaneMainColumn,
+  ChannelPaneMainContent,
+} from "@/features/channels/ui/ChannelPaneMainColumn";
 import { useRoutedMessageEdit } from "@/features/channels/ui/useRoutedMessageEdit";
-import { Button } from "@/shared/ui/button";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
@@ -621,7 +623,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               <ThreadRepliesErrorCard onRetry={onRetryHuddleThreadReplies} />
             </div>
           ) : null}
-          <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col">
+          <ChannelPaneMainColumn hideRightHeader={hasSplitAuxiliaryPane}>
             <MessageTimeline
               ref={messageTimelineRef}
               channelId={activeChannel?.id}
@@ -695,36 +697,11 @@ export const ChannelPane = React.memo(function ChannelPane({
               threadUnreadCounts={threadUnreadCounts}
             />
             {isNonMemberView ? (
-              <div
-                data-testid="join-banner"
-                className="flex items-center gap-3 border-t border-border/80 bg-card/50 px-5 py-3"
-              >
-                <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground">
-                  {activeChannel ? (
-                    <ChannelGlyph
-                      channel={activeChannel}
-                      className="h-4 w-4 shrink-0"
-                    />
-                  ) : null}
-                  <span className="truncate">
-                    Viewing{" "}
-                    <span className="font-medium text-foreground">
-                      #{activeChannel?.name}
-                    </span>
-                  </span>
-                </div>
-                <Button
-                  disabled={isJoining}
-                  onClick={() => {
-                    void onJoinChannel?.();
-                  }}
-                  size="sm"
-                  variant="default"
-                >
-                  <LogIn className="mr-1.5 h-4 w-4" />
-                  {isJoining ? "Joining..." : "Join to participate"}
-                </Button>
-              </div>
+              <JoinChannelBanner
+                channel={activeChannel}
+                isJoining={isJoining}
+                onJoin={onJoinChannel}
+              />
             ) : (
               <div
                 className="pointer-events-none absolute inset-x-0 bottom-0 z-40 isolate before:absolute before:inset-x-0 before:bottom-0 before:-z-10 before:h-24 before:bg-gradient-to-b before:from-transparent before:to-background before:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:-z-10 after:h-12 after:bg-background after:content-['']"
@@ -813,7 +790,8 @@ export const ChannelPane = React.memo(function ChannelPane({
             {canDropInMainColumn && mainComposerMedia.isDragOver ? (
               <DropZoneOverlay className="z-50 rounded-2xl bg-primary/20 backdrop-blur-sm" />
             ) : null}
-          </div>
+          </ChannelPaneMainColumn>
+          <ChannelPaneMainContent />
         </section>
       ) : null}
       {/* Serialize replacements so focus drawers keep one travel direction. */}

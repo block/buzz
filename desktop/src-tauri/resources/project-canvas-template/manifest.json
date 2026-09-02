@@ -1,0 +1,28 @@
+{
+  "format": "buzz-project-canvas",
+  "protocolVersion": 1,
+  "scripts": [
+    "widgets/home.js",
+    "widgets/dev-team.js",
+    "widgets/support.js",
+    "canvas.js"
+  ],
+  "styles": [
+    "styles/base.css",
+    "styles/home.css",
+    "styles/dev-team.css",
+    "styles/support.css",
+    "styles/overlays.css"
+  ],
+  "data": "data/dashboards.json",
+  "capabilities": [
+    "project.metadata.read",
+    "project.channels.read",
+    "project.reviews.read",
+    "project.tasks.read",
+    "project.people.read",
+    "project.tasks.write",
+    "app.open",
+    "app.dm.send"
+  ]
+}

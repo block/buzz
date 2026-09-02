@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  buildUnreadDmPreviews,
   canPreviewUnreadDm,
   MoreUnreadButton,
   preferredUnreadTarget,
@@ -25,6 +26,48 @@ describe("MoreUnreadButton model", () => {
     assert.equal(canPreviewUnreadDm(2, 1), true);
     assert.equal(canPreviewUnreadDm(3, 2), false);
     assert.equal(canPreviewUnreadDm(2, 0), false);
+  });
+
+  it("carries agent identity through to the built preview", () => {
+    const previews = buildUnreadDmPreviews({
+      channels: [
+        { id: "dm-agent", participantPubkeys: ["me", "agent"] },
+        { id: "dm-human", participantPubkeys: ["me", "dana"] },
+        { id: "dm-group", participantPubkeys: ["me", "dana", "alice"] },
+      ],
+      channelLabels: { "dm-agent": "Buzz Agent" },
+      participantsByChannelId: {
+        "dm-agent": [
+          {
+            avatarUrl: null,
+            isAgent: true,
+            label: "buzz",
+            pubkey: "agent",
+          },
+        ],
+        "dm-human": [
+          { avatarUrl: null, isAgent: false, label: "Dana", pubkey: "dana" },
+        ],
+        "dm-group": [
+          { avatarUrl: null, label: "Dana", pubkey: "dana" },
+          { avatarUrl: null, label: "Alice", pubkey: "alice" },
+        ],
+      },
+      unreadChannelIds: ["dm-agent", "dm-human", "dm-group", "channel"],
+    });
+
+    // Group DMs and non-DM channels stay out of the avatar stack.
+    assert.deepEqual(
+      previews.map(({ channelId }) => channelId),
+      ["dm-agent", "dm-human"],
+    );
+    // isAgent drives the squircle avatar shape — dropping it silently
+    // downgrades every agent avatar back to a circle.
+    assert.equal(previews[0].isAgent, true);
+    assert.equal(previews[0].label, "Buzz Agent");
+    assert.equal(previews[0].accessibleLabel, "buzz");
+    assert.equal(previews[1].isAgent, false);
+    assert.equal(previews[1].label, "Dana");
   });
 
   it("caps the stack at three avatars without a numeric overflow chip", () => {

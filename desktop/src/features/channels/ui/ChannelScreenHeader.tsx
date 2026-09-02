@@ -9,6 +9,8 @@ import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDi
 import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { useChannelViewOverride } from "@/features/channels/ui/ChannelViewOverrideContext";
+import { ChannelProjectFeatureBar } from "@/features/projects/ui/ChannelProjectFeatureBar";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -70,6 +72,7 @@ export function ChannelScreenHeader({
   onManageChannel,
   onToggleMembers,
 }: ChannelScreenHeaderProps) {
+  const channelView = useChannelViewOverride();
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
     activeDmHeaderParticipants.length > 1;
@@ -198,7 +201,19 @@ export function ChannelScreenHeader({
           ephemeralDisplay={activeChannelEphemeralDisplay}
         />
       }
+      secondaryNavigation={
+        !channelView && activeChannel ? (
+          <ChannelProjectFeatureBar
+            channel={activeChannel}
+            currentPubkey={currentPubkey}
+            key={activeChannel.id}
+          />
+        ) : null
+      }
       title={activeChannelTitle}
+      titleActive={channelView?.isChannelViewActive}
+      titleNavigation={channelView?.headerNavigation}
+      onTitleClick={channelView?.onSelectChannelView}
       transparentChrome={transparentChrome}
       visibility={activeChannel?.visibility}
     />

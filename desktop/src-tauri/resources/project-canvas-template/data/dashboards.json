@@ -1,0 +1,280 @@
+{
+  "version": 1,
+  "defaultDashboard": "dev",
+  "selectors": {
+    "my-home": "home",
+    "my-dev-team": "dev",
+    "my-support-channel": "support"
+  },
+  "people": {
+    "thom": {
+      "name": "ThomPeteMain",
+      "pubkey": "29ddeb07aec92535a5b38b7ea1d731bc641fd97ffcf59080ab9a2584d3cbe5c6",
+      "color": "#2563eb"
+    },
+    "luis": {
+      "name": "Luis Padron",
+      "pubkey": "b7fab6a57b4a9e504b8b6a404353f557dc0dec86ef112ef6b3cae0ea9f683561",
+      "color": "#059669"
+    },
+    "tho": {
+      "name": "tho",
+      "pubkey": "80c5f18be5aafa62cf6198c6335963ba3306b595288117c8ea2f805fc9bdc94a",
+      "color": "#d97706"
+    },
+    "john": {
+      "name": "John Tennant",
+      "pubkey": "67252b09c31a995daa63aada26569fbc6a3d12f573113f001ce7432f870da820",
+      "color": "#db2777"
+    },
+    "morgan": {
+      "name": "Morgan Martin",
+      "pubkey": "d02a59460cd9333b73730695f0090d54a3bd0fb7840c3e1995a4968eda297047",
+      "color": "#7c3aed"
+    }
+  },
+  "dashboards": {
+    "home": {
+      "tone": "home",
+      "widgets": [
+        {
+          "id": "home-clock",
+          "type": "homeSchedule",
+          "title": "Today at home",
+          "hideHeader": true,
+          "position": { "x": 48, "y": 0 },
+          "size": { "width": 264, "height": 264 },
+          "data": {
+            "background": "assets/home-schedule-house.webp",
+            "gloopie": "assets/gloopies-1.webm",
+            "gloopiePoster": "assets/gloopies-1.png",
+            "updates": [
+              "Sally pickup is earlier than usual, oboe practice cancelled today",
+              "Electrician coming between 10am and 5pm, but promises to let us know"
+            ]
+          }
+        },
+        {
+          "id": "family-locations",
+          "type": "familyLocations",
+          "title": "Family locations",
+          "hideHeader": true,
+          "position": { "x": 336, "y": 0 },
+          "size": { "width": 384, "height": 336 },
+          "data": {
+            "places": ["School", "Cafe", "Library", "Work", "Shops", "Oboe"]
+          }
+        },
+        {
+          "id": "front-yard-camera",
+          "type": "frontYardCamera",
+          "title": "Front yard",
+          "hideHeader": true,
+          "position": { "x": 744, "y": 0 },
+          "size": { "width": 264, "height": 264 },
+          "data": {
+            "image": "assets/front-yard-camera.webp",
+            "caption": "Small delivery arrived at 10:35am"
+          }
+        },
+        {
+          "id": "chores",
+          "type": "choreBoard",
+          "title": "Chore board",
+          "position": { "x": 1032, "y": 0 },
+          "size": { "width": 264, "height": 336 },
+          "data": {
+            "gloopie": "assets/henry-hoover-gloopie.mp4",
+            "groups": [
+              {
+                "member": "Maya",
+                "color": "#e879a9",
+                "chores": ["Water the herbs", "Pack the library books"],
+                "completed": ["Water the herbs"]
+              },
+              {
+                "member": "Jon",
+                "color": "#4faea2",
+                "chores": ["Take bins to the curb", "Book the car service"],
+                "completed": []
+              },
+              {
+                "member": "Ellis",
+                "color": "#7b82d6",
+                "chores": ["Feed the fish", "Put away clean laundry"],
+                "completed": []
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "dev": {
+      "tone": "work",
+      "widgets": [
+        {
+          "id": "active-channels",
+          "type": "activeChannels",
+          "title": "Active channels",
+          "position": { "x": 0, "y": 0 },
+          "size": { "width": 336, "height": 336 },
+          "data": {}
+        },
+        {
+          "id": "reviews",
+          "type": "reviews",
+          "title": "Reviews",
+          "position": { "x": 384, "y": 0 },
+          "size": { "width": 456, "height": 320 },
+          "data": {}
+        },
+        {
+          "id": "tasks",
+          "type": "tasks",
+          "title": "Tasks",
+          "position": { "x": 0, "y": 384 },
+          "size": { "width": 336, "height": 288 },
+          "data": {}
+        },
+        {
+          "id": "time-tracking",
+          "type": "clientTime",
+          "title": "Client time",
+          "position": { "x": 888, "y": 0 },
+          "size": { "width": 360, "height": 320 },
+          "data": {
+            "booked": "30h 45m",
+            "capacity": "40h",
+            "clients": [
+              {
+                "name": "Northstar",
+                "project": "Checkout audit",
+                "time": "14h 30m",
+                "share": 47,
+                "color": "#0ea5e9"
+              },
+              {
+                "name": "Cedar Labs",
+                "project": "Mobile release",
+                "time": "9h 45m",
+                "share": 32,
+                "color": "#14b8a6"
+              },
+              {
+                "name": "Studio Kite",
+                "project": "Design system",
+                "time": "6h 30m",
+                "share": 21,
+                "color": "#8b5cf6"
+              }
+            ]
+          }
+        },
+        {
+          "id": "meetings",
+          "type": "meetings",
+          "title": "Meetings",
+          "position": { "x": 336, "y": 456 },
+          "size": { "width": 552, "height": 216 },
+          "data": {
+            "previous": {
+              "title": "Weekly product review",
+              "time": "Yesterday, 3:00 PM",
+              "duration": "42 min"
+            },
+            "upcoming": [
+              {
+                "day": "Today",
+                "time": "2:30 PM",
+                "duration": "30 min",
+                "title": "Design crit"
+              },
+              {
+                "day": "Tomorrow",
+                "time": "10:00 AM",
+                "duration": "45 min",
+                "title": "Sprint planning"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "support": {
+      "tone": "support",
+      "widgets": [
+        {
+          "id": "release-notes",
+          "type": "releaseNotes",
+          "title": "Latest release",
+          "hideHeader": true,
+          "position": { "x": 0, "y": 0 },
+          "size": { "width": 408, "height": 320 },
+          "data": {
+            "product": "Acorn 2.8",
+            "items": [
+              {
+                "title": "Faster inbox",
+                "detail": "One-click replies now keep the full customer history in view."
+              },
+              {
+                "title": "On-call schedules",
+                "detail": "Set coverage hours and hand off urgent conversations cleanly."
+              },
+              {
+                "title": "Workspace polish",
+                "detail": "A calmer composer with saved views for your busiest queues."
+              }
+            ]
+          }
+        },
+        {
+          "id": "known-issues",
+          "type": "knownIssues",
+          "title": "Known issues",
+          "hideHeader": true,
+          "position": { "x": 456, "y": 0 },
+          "size": { "width": 456, "height": 360 },
+          "data": {
+            "issues": [
+              {
+                "id": "AC-184",
+                "title": "Long invoice exports",
+                "detail": "PDF exports may omit the final page on invoices with 50+ rows.",
+                "status": "Fix rolling out",
+                "tone": "amber"
+              },
+              {
+                "id": "AC-179",
+                "title": "Member list refresh",
+                "detail": "EU workspaces can see a short delay before new teammates appear.",
+                "status": "Monitoring",
+                "tone": "sky"
+              },
+              {
+                "id": "AC-171",
+                "title": "Call audio on Safari",
+                "detail": "Safari may require a second click to resume call audio.",
+                "status": "Workaround shared",
+                "tone": "violet"
+              }
+            ]
+          }
+        },
+        {
+          "id": "bug-reporter",
+          "type": "bugReporter",
+          "title": "Bug reporter",
+          "hideHeader": true,
+          "position": { "x": 960, "y": 24 },
+          "size": { "width": 384, "height": 280 },
+          "data": {
+            "gloopie": "assets/gloopies-22.webm",
+            "gloopiePoster": "assets/gloopies-22.png",
+            "responseTime": "usually responds in 4m"
+          }
+        }
+      ]
+    }
+  }
+}

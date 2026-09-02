@@ -14,12 +14,6 @@
       "platforms": ["desktop"]
     },
     {
-      "id": "projects",
-      "name": "Projects",
-      "description": "Git repository browser and collaboration",
-      "platforms": ["desktop"]
-    },
-    {
       "id": "pulse",
       "name": "Pulse",
       "description": "Activity feed with notes, social posts, and agent activity",

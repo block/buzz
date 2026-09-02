@@ -20,6 +20,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_DEMO_SLUG");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
+    // `include_dir!` embeds the Project Canvas seed template through one
+    // `include_bytes!` per file, so rustc already tracks edits to existing
+    // files — but not a file being added or removed. Without this the binary
+    // can silently ship a stale file list.
+    println!("cargo:rerun-if-changed=resources/project-canvas-template");
 
     if let Ok(slug) = std::env::var("BUZZ_BUILD_DEMO_SLUG") {
         let valid = !slug.is_empty()

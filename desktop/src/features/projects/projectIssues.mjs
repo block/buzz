@@ -277,6 +277,39 @@ export function buildGitIssueTags({
   return tags;
 }
 
+// NIP-34 status kinds. 1633 ("Draft") is surfaced as Triage for issues; see
+// the status reduction above.
+export const ISSUE_STATUS_KIND_BY_LIFECYCLE = {
+  closed: 1632,
+  done: 1631,
+  draft: 1633,
+  open: 1630,
+};
+
+/**
+ * Unsigned template for an issue lifecycle status event. `createdAt` is
+ * bumped past the issue's latest observed activity so the newest-wins status
+ * reduction cannot resurrect a stale state.
+ */
+export function buildProjectIssueStatusEventTemplate({
+  issue,
+  now,
+  repoAddress,
+  repoOwner,
+  status,
+}) {
+  const kind = ISSUE_STATUS_KIND_BY_LIFECYCLE[status];
+  if (!kind) {
+    throw new Error(`Unsupported task status: ${status}`);
+  }
+  return {
+    kind,
+    content: "",
+    createdAt: Math.max(now, issue.updatedAt + 1),
+    tags: buildGitStatusTags({ issueId: issue.id, repoAddress, repoOwner }),
+  };
+}
+
 export function buildGitStatusTags({ issueId, repoAddress, repoOwner }) {
   if (!/^[a-fA-F0-9]{64}$/.test(issueId)) {
     throw new Error("Task ID must be 64 hex characters.");

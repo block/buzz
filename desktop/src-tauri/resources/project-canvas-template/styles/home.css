@@ -1,0 +1,277 @@
+.chore-board {
+  height: 100%;
+  overflow: auto;
+  padding: 8px 12px;
+}
+
+.chore-group {
+  margin: 0 0 9px;
+}
+
+.member-heading {
+  align-items: center;
+  color: #667085;
+  display: flex;
+  font-size: 0.75rem;
+  gap: 6px;
+  margin: 0 0 3px;
+}
+
+.avatar {
+  align-items: center;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  color: #ffffff;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 0.625rem;
+  font-weight: 750;
+  height: 23px;
+  justify-content: center;
+  width: 23px;
+}
+
+.chore-row {
+  align-items: center;
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  font-size: 0.72rem;
+  gap: 7px;
+  min-height: 28px;
+  padding: 2px 4px;
+}
+
+.chore-row:hover {
+  background: #f4f5f7;
+}
+
+.chore-row input {
+  accent-color: #7c3aed;
+  height: 15px;
+  margin: 0;
+  width: 15px;
+}
+
+.completed {
+  color: #8a94a5;
+  text-decoration: line-through;
+}
+
+.home-schedule {
+  height: 100%;
+  overflow: hidden;
+  padding: 12px;
+  position: relative;
+}
+
+.home-background,
+.home-overlay {
+  height: 100%;
+  inset: 0;
+  object-fit: cover;
+  position: absolute;
+  width: 100%;
+}
+
+.home-overlay {
+  background: rgba(28, 32, 42, 0.23);
+}
+
+.speech-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  justify-content: center;
+  list-style: none;
+  margin: 0 0 0 auto;
+  padding: 0;
+  position: relative;
+  width: 82%;
+  z-index: 2;
+}
+
+.speech-bubble {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #ffe2e8;
+  border-radius: 8px;
+  box-shadow: 0 5px 14px rgba(31, 41, 55, 0.12);
+  color: #3b3f49;
+  font-size: 0.72rem;
+  font-weight: 620;
+  line-height: 1.4;
+  padding: 8px 10px;
+}
+
+.camera-widget {
+  background: #18181b;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.camera-image {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.recording {
+  background: rgba(0, 0, 0, 0.64);
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 0.58rem;
+  font-weight: 750;
+  left: 10px;
+  padding: 5px 8px;
+  position: absolute;
+  text-transform: uppercase;
+  top: 10px;
+}
+
+.recording::first-letter {
+  color: #ef4444;
+}
+
+.camera-caption {
+  background: rgba(0, 0, 0, 0.7);
+  bottom: 0;
+  color: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  left: 0;
+  line-height: 1.35;
+  padding: 24px 12px 12px;
+  position: absolute;
+  right: 0;
+}
+
+.family-locations {
+  background: #f5f7fc;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+.place {
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  border-radius: 50%;
+  box-shadow: 0 8px 20px rgba(31, 41, 55, 0.08);
+  display: flex;
+  flex-direction: column;
+  font-size: 0.625rem;
+  font-weight: 700;
+  height: 72px;
+  justify-content: center;
+  position: absolute;
+  width: 72px;
+}
+
+.place-school {
+  background: #d9f8e8;
+  left: 20px;
+  top: 20px;
+}
+.place-cafe {
+  background: #fff0c9;
+  left: 43%;
+  top: 12px;
+}
+.place-library {
+  background: #dceeff;
+  right: 20px;
+  top: 24px;
+}
+.place-work {
+  background: #dce7ff;
+  bottom: 20px;
+  right: 20px;
+}
+.place-shops {
+  background: #f6ddff;
+  bottom: 12px;
+  left: 42%;
+}
+.place-oboe {
+  background: #ffe1e8;
+  bottom: 24px;
+  left: 20px;
+}
+
+.place-home {
+  background: #e7ddff;
+  color: #4c2b78;
+  font-size: 0.875rem;
+  height: 128px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 128px;
+}
+
+.family-member {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 4px 12px rgba(31, 41, 55, 0.13);
+  display: flex;
+  font-size: 0.625rem;
+  font-weight: 700;
+  gap: 5px;
+  padding: 3px 7px 3px 3px;
+  position: absolute;
+  z-index: 4;
+}
+
+.family-member .avatar {
+  background: #7c3aed;
+  height: 20px;
+  width: 20px;
+}
+
+.member-sally {
+  left: 12%;
+  top: 24%;
+}
+.member-you {
+  left: 44%;
+  top: 54%;
+}
+
+.dad-route {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  left: 66%;
+  position: absolute;
+  top: 59%;
+  z-index: 5;
+}
+
+.dad-route .family-member {
+  position: static;
+}
+
+.dad-arrow {
+  color: #2563eb;
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+.chore-board.widget-data-updated {
+  animation: widget-data-update 360ms ease-out;
+}
+
+@keyframes widget-data-update {
+  from {
+    opacity: 0.72;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

@@ -1,0 +1,140 @@
+.dialog-layer {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 100;
+}
+
+.dialog-backdrop {
+  align-items: center;
+  background: rgba(20, 27, 38, 0.46);
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  pointer-events: auto;
+  width: 100%;
+}
+
+.dialog {
+  background: #ffffff;
+  border: 1px solid #d7dce4;
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(20, 27, 38, 0.28);
+  max-width: 460px;
+  padding: 20px;
+  position: relative;
+  width: calc(100% - 32px);
+}
+
+.dialog-title {
+  font-size: 1rem;
+  margin: 0 32px 12px 0;
+}
+
+.dialog-close {
+  background: transparent;
+  border: 0;
+  color: #667085;
+  font-size: 1.4rem;
+  height: 30px;
+  position: absolute;
+  right: 10px;
+  top: 8px;
+  width: 30px;
+}
+
+.meeting-detail {
+  color: #475467;
+  font-size: 0.75rem;
+}
+
+.notes-list {
+  line-height: 1.55;
+  padding-left: 20px;
+}
+
+.recording-screen {
+  align-items: center;
+  background: #18181b;
+  border-radius: 7px;
+  display: flex;
+  height: 220px;
+  justify-content: center;
+}
+
+.play-button {
+  background: rgba(255, 255, 255, 0.13);
+  border: 1px solid rgba(255, 255, 255, 0.36);
+  border-radius: 50%;
+  color: #ffffff;
+  height: 48px;
+  width: 48px;
+}
+
+.recording-time {
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #e7ebf2;
+  }
+
+  .canvas,
+  .canvas.tone-work {
+    background-color: #15181d;
+  }
+
+  .canvas.tone-home {
+    background-color: #241a20;
+  }
+
+  .canvas.tone-support {
+    background-color: #211e17;
+  }
+
+  .widget,
+  .reset-button,
+  .dialog {
+    background: #20242b;
+    border-color: #3a404b;
+  }
+
+  .widget-header,
+  .channel-row,
+  .review-row,
+  .reviews-intro,
+  .time-summary,
+  .client-row,
+  .meeting-previous,
+  .upcoming-row,
+  .release-header,
+  .release-row {
+    border-color: #373d47;
+  }
+
+  .muted,
+  .channel-updates,
+  .capacity-note,
+  .eyebrow {
+    color: #a3adbd;
+  }
+
+  .known-issues {
+    background: #1b1d21;
+  }
+
+  .bug-editor textarea,
+  .small-button {
+    background: #181b20;
+    border-color: #454c58;
+    color: #e7ebf2;
+  }
+
+  .speech-bubble {
+    background: rgba(32, 36, 43, 0.94);
+    border-color: #51363e;
+    color: #edf0f5;
+  }
+}

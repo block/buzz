@@ -4,7 +4,13 @@ import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { KIND_GIT_ISSUE } from "@/shared/constants/kinds";
 import type { Repository as Project } from "./hooks";
-import { buildGitIssueTags } from "./projectIssues.mjs";
+import { useProjectIssueWriteInvalidation } from "./issueAssignments";
+import {
+  buildGitIssueTags,
+  buildProjectIssueStatusEventTemplate,
+  type ProjectIssue,
+  type ProjectIssueLifecycleStatus,
+} from "./projectIssues.mjs";
 import type { ProjectTaskCategory } from "./projectTaskCategories";
 
 type CreateProjectIssueInput = {
@@ -57,5 +63,48 @@ export function useCreateProjectIssueMutation(
         }),
       ]);
     },
+  });
+}
+
+// Same trust rule as PR status changes (allowedActorsForRoot): only the issue
+// author or repo owner are honored by the status reduction, so the event is
+// published as the signed-in identity and simply won't take effect for others.
+export async function updateProjectIssueStatus(
+  project: Project,
+  issue: ProjectIssue,
+  status: ProjectIssueLifecycleStatus,
+): Promise<void> {
+  const event = await signRelayEvent(
+    buildProjectIssueStatusEventTemplate({
+      issue,
+      now: Math.floor(Date.now() / 1_000),
+      repoAddress: project.repoAddress,
+      repoOwner: project.owner,
+      status,
+    }),
+  );
+  await relayClient.publishEvent(
+    event,
+    "Timed out updating task status.",
+    "Failed to update task status.",
+  );
+}
+
+export function useUpdateProjectIssueStatusMutation(
+  project: Project | null | undefined,
+) {
+  const invalidate = useProjectIssueWriteInvalidation(project);
+  return useMutation({
+    mutationFn: ({
+      issue,
+      status,
+    }: {
+      issue: ProjectIssue;
+      status: ProjectIssueLifecycleStatus;
+    }) => {
+      if (!project) throw new Error("No project selected.");
+      return updateProjectIssueStatus(project, issue, status);
+    },
+    onSuccess: invalidate,
   });
 }

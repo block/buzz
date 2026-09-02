@@ -1580,6 +1580,9 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
     match cmd {
         CanvasCmd::Get { channel } => cmd_get_canvas(client, &channel).await,
         CanvasCmd::Set { channel, content } => cmd_set_canvas(client, &channel, &content).await,
+        CanvasCmd::Notify { .. } => {
+            unreachable!("local Canvas notifications are handled before relay setup")
+        }
     }
 }
 

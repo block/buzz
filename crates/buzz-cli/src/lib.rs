@@ -72,7 +72,7 @@ Configuration (flags override env vars):
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
-The 'pack' subcommand runs locally and does not require a relay connection.
+The 'pack' and 'canvas notify' subcommands run locally and do not require a relay connection.
 
 Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=write conflict
 Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
@@ -731,6 +731,25 @@ pub enum CanvasCmd {
         #[arg(long)]
         content: String,
     },
+    /// Notify the local Buzz desktop that a project widget changed
+    Notify {
+        /// Project Canvas source directory (use '.' from inside the package)
+        #[arg(long)]
+        source: std::path::PathBuf,
+        /// Stable widget id from the active dashboard data
+        #[arg(long)]
+        widget: String,
+        /// Whether presentation code or widget data changed
+        #[arg(long, value_enum)]
+        change: CanvasChange,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CanvasChange {
+    Presentation,
+    Data,
 }
 
 #[derive(Subcommand)]
@@ -2028,12 +2047,21 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
+    // Pack and project Canvas notification commands are local-only — no relay
+    // connection or signing identity is involved.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
+    }
+    if let Cmd::Canvas(CanvasCmd::Notify {
+        ref source,
+        ref widget,
+        ref change,
+    }) = cli.command
+    {
+        return commands::project_canvas::cmd_notify(source, widget, change);
     }
 
     // Auth: private key is required for all relay operations.
@@ -2330,7 +2358,7 @@ mod tests {
                 "update"
             ]
         );
-        assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(names(&cmd, "canvas"), vec!["get", "notify", "set"]);
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -2433,7 +2461,7 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
-            ("canvas", 2),
+            ("canvas", 3),
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),

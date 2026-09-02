@@ -78,6 +78,8 @@ buzz messages vote --event <event-id> --direction up
 # Canvas
 buzz canvas get --channel <uuid>
 buzz canvas set --channel <uuid> --content "# Welcome"
+buzz canvas notify --source <project-canvas-dir> --widget <widget-id> --change data
+buzz canvas notify --source <project-canvas-dir> --widget <widget-id> --change presentation
 
 # Agent Memory (NIP-AE)
 buzz mem ls

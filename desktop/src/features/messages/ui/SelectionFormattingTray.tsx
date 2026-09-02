@@ -1,8 +1,10 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
+import type { EditorView } from "@tiptap/pm/view";
 import type { Editor } from "@tiptap/react";
 
 import { cn } from "@/shared/lib/cn";
+import { getMountedView } from "../lib/mountedEditorView";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { getMountedEditorDom } from "./selectionFormattingTrayEditorDom";
 
@@ -26,13 +28,13 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-function getSelectionRect(editor: Editor): DOMRect | null {
+function getSelectionRect(editor: Editor, view: EditorView): DOMRect | null {
   const { from, to } = editor.state.selection;
 
   try {
     const range = document.createRange();
-    const start = editor.view.domAtPos(from);
-    const end = editor.view.domAtPos(to);
+    const start = view.domAtPos(from);
+    const end = view.domAtPos(to);
     range.setStart(start.node, start.offset);
     range.setEnd(end.node, end.offset);
 
@@ -47,19 +49,25 @@ function getSelectionRect(editor: Editor): DOMRect | null {
     // Fall back to the caret coordinates below.
   }
 
-  const startCoords = editor.view.coordsAtPos(from);
-  const endCoords = editor.view.coordsAtPos(to);
-  const left = Math.min(startCoords.left, endCoords.left);
-  const right = Math.max(startCoords.right, endCoords.right);
-  const top = Math.min(startCoords.top, endCoords.top);
-  const bottom = Math.max(startCoords.bottom, endCoords.bottom);
+  try {
+    const startCoords = view.coordsAtPos(from);
+    const endCoords = view.coordsAtPos(to);
+    const left = Math.min(startCoords.left, endCoords.left);
+    const right = Math.max(startCoords.right, endCoords.right);
+    const top = Math.min(startCoords.top, endCoords.top);
+    const bottom = Math.max(startCoords.bottom, endCoords.bottom);
 
-  if (right <= left && bottom <= top) return null;
-  return new DOMRect(left, top, Math.max(1, right - left), bottom - top);
+    if (right <= left && bottom <= top) return null;
+    return new DOMRect(left, top, Math.max(1, right - left), bottom - top);
+  } catch {
+    // The view detached mid-measurement; leave the tray hidden.
+    return null;
+  }
 }
 
 function getTrayPosition(
   editor: Editor,
+  view: EditorView,
   trayWidth: number,
 ): TrayPosition | null {
   const { selection } = editor.state;
@@ -73,7 +81,7 @@ function getTrayPosition(
   );
   if (selectedText.trim().length === 0) return null;
 
-  const rect = getSelectionRect(editor);
+  const rect = getSelectionRect(editor, view);
   if (!rect) return null;
 
   const viewportWidth = window.innerWidth;
@@ -119,6 +127,9 @@ export function SelectionFormattingTray({
   const suppressRightClickUpdatesRef = React.useRef(false);
   const trayRef = React.useRef<HTMLDivElement | null>(null);
   const [trayWidth, setTrayWidth] = React.useState(0);
+  // The view attaches and detaches independently of the editor, so track it as
+  // state rather than reading `editor.view` at wiring time.
+  const [mountedView, setMountedView] = React.useState<EditorView | null>(null);
 
   const cancelScheduledUpdate = React.useCallback(() => {
     if (rafRef.current === null) return;
@@ -138,8 +149,12 @@ export function SelectionFormattingTray({
       setPosition(null);
       return;
     }
-    setPosition(getTrayPosition(editor, trayWidth));
-  }, [disabled, editor, trayWidth]);
+    if (!mountedView) {
+      setPosition(null);
+      return;
+    }
+    setPosition(getTrayPosition(editor, mountedView, trayWidth));
+  }, [disabled, editor, mountedView, trayWidth]);
 
   const scheduleUpdate = React.useCallback(() => {
     if (suppressRightClickUpdatesRef.current) {
@@ -154,10 +169,30 @@ export function SelectionFormattingTray({
     });
   }, [cancelScheduledUpdate, updatePosition]);
 
+  // React can reconnect these effects while the composer subtree is hidden, at
+  // which point `EditorContent` has already torn the view down. Follow tiptap's
+  // mount/unmount events instead of reading the throwing view proxy on demand.
+  React.useEffect(() => {
+    if (!editor) {
+      setMountedView(null);
+      return;
+    }
+
+    const syncView = () => setMountedView(getMountedView(editor));
+    syncView();
+    editor.on("mount", syncView);
+    editor.on("unmount", syncView);
+
+    return () => {
+      editor.off("mount", syncView);
+      editor.off("unmount", syncView);
+    };
+  }, [editor]);
+
   React.useEffect(() => {
     suppressRightClickUpdatesRef.current = false;
 
-    if (!editor) {
+    if (!editor || !mountedView) {
       cancelScheduledUpdate();
       setPosition(null);
       return;
@@ -219,7 +254,7 @@ export function SelectionFormattingTray({
       window.removeEventListener("resize", scheduleUpdate);
       window.removeEventListener("scroll", scheduleUpdate, true);
     };
-  }, [cancelScheduledUpdate, editor, scheduleUpdate]);
+  }, [cancelScheduledUpdate, editor, mountedView, scheduleUpdate]);
 
   React.useLayoutEffect(() => {
     if (!position || !trayRef.current) return;

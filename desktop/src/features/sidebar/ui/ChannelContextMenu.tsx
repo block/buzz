@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   CircleDot,
   Copy,
+  FolderKanban,
   LogOut,
   LoaderCircle,
   Plus,
@@ -22,6 +23,7 @@ import {
 } from "@/features/channels/hooks";
 import { useChannelModerationCapabilities } from "@/features/channels/ui/ChannelManagementModerationActions";
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
+import type { ProjectMoveDestination } from "@/features/sidebar/lib/useProjectMoveDestinations";
 import {
   ContextMenuIconSlot,
   deferMenuAction,
@@ -32,6 +34,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
   ContextMenuItem,
+  ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuSub,
   ContextMenuSubContent,
@@ -43,6 +46,8 @@ function MoveToSectionSubmenu({
   sections,
   assignments,
   onAssignChannel,
+  projectDestinations,
+  onAssignChannelToProject,
   onUnassignChannel,
   onCreateSectionForChannel,
 }: {
@@ -50,10 +55,20 @@ function MoveToSectionSubmenu({
   sections: ChannelSection[];
   assignments: Record<string, string>;
   onAssignChannel: (channelId: string, sectionId: string) => void;
+  projectDestinations: ProjectMoveDestination[];
+  onAssignChannelToProject: (channelId: string, projectAddress: string) => void;
   onUnassignChannel: (channelId: string) => void;
   onCreateSectionForChannel: (channelId: string) => void;
 }) {
   const currentSectionId = assignments[channelId];
+  const projectSectionIds = new Set(
+    projectDestinations.flatMap((destination) =>
+      destination.sectionId ? [destination.sectionId] : [],
+    ),
+  );
+  const ordinarySections = sections.filter(
+    (section) => !projectSectionIds.has(section.id),
+  );
 
   return (
     <ContextMenuSub>
@@ -62,7 +77,41 @@ function MoveToSectionSubmenu({
         <span>Move to section</span>
       </ContextMenuSubTrigger>
       <ContextMenuSubContent>
-        {sections.map((section) => (
+        {projectDestinations.length > 0 ? (
+          <ContextMenuLabel className="text-xs text-muted-foreground">
+            Projects
+          </ContextMenuLabel>
+        ) : null}
+        {projectDestinations.map((destination) => (
+          <ContextMenuItem
+            data-testid={`move-channel-to-project-${destination.projectAddress}`}
+            key={destination.projectAddress}
+            onSelect={() =>
+              deferMenuAction(() =>
+                onAssignChannelToProject(channelId, destination.projectAddress),
+              )
+            }
+          >
+            <ContextMenuIconSlot>
+              {currentSectionId === destination.sectionId &&
+              destination.sectionId ? (
+                <Check className="h-4 w-4" />
+              ) : (
+                <FolderKanban className="h-4 w-4" />
+              )}
+            </ContextMenuIconSlot>
+            <span>{destination.name}</span>
+          </ContextMenuItem>
+        ))}
+        {projectDestinations.length > 0 && ordinarySections.length > 0 ? (
+          <ContextMenuSeparator />
+        ) : null}
+        {projectDestinations.length > 0 && ordinarySections.length > 0 ? (
+          <ContextMenuLabel className="text-xs text-muted-foreground">
+            Sections
+          </ContextMenuLabel>
+        ) : null}
+        {ordinarySections.map((section) => (
           <ContextMenuItem
             key={section.id}
             onSelect={() =>
@@ -79,7 +128,9 @@ function MoveToSectionSubmenu({
             <span>{section.name}</span>
           </ContextMenuItem>
         ))}
-        {sections.length > 0 ? <ContextMenuSeparator /> : null}
+        {projectDestinations.length > 0 || ordinarySections.length > 0 ? (
+          <ContextMenuSeparator />
+        ) : null}
         <ContextMenuItem
           onSelect={() =>
             deferMenuAction(() => onCreateSectionForChannel(channelId))
@@ -145,6 +196,7 @@ export function ChannelContextMenuItems({
   isMuted,
   isStarred,
   sections,
+  projectDestinations,
   assignments,
   onMarkChannelRead,
   onMarkChannelUnread,
@@ -153,6 +205,7 @@ export function ChannelContextMenuItems({
   onStarChannel,
   onUnstarChannel,
   onAssignChannel,
+  onAssignChannelToProject,
   onUnassignChannel,
   onCreateSectionForChannel,
   onDeleteChannel,
@@ -163,6 +216,7 @@ export function ChannelContextMenuItems({
   isMuted?: boolean;
   isStarred?: boolean;
   sections?: ChannelSection[];
+  projectDestinations?: ProjectMoveDestination[];
   assignments?: Record<string, string>;
   onMarkChannelRead?: (
     channelId: string,
@@ -174,6 +228,10 @@ export function ChannelContextMenuItems({
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
   onAssignChannel?: (channelId: string, sectionId: string) => void;
+  onAssignChannelToProject?: (
+    channelId: string,
+    projectAddress: string,
+  ) => void;
   onUnassignChannel?: (channelId: string) => void;
   onCreateSectionForChannel?: (channelId: string) => void;
   onDeleteChannel?: (channel: Channel) => void;
@@ -240,8 +298,10 @@ export function ChannelContextMenuItems({
         <MoveToSectionSubmenu
           channelId={channel.id}
           sections={sections ?? []}
+          projectDestinations={projectDestinations ?? []}
           assignments={assignments ?? {}}
           onAssignChannel={onAssignChannel ?? (() => {})}
+          onAssignChannelToProject={onAssignChannelToProject ?? (() => {})}
           onUnassignChannel={onUnassignChannel ?? (() => {})}
           onCreateSectionForChannel={onCreateSectionForChannel ?? (() => {})}
         />

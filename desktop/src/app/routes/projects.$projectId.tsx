@@ -2,7 +2,6 @@ import * as React from "react";
 import { createFileRoute, useLocation } from "@tanstack/react-router";
 
 import { parseProjectDetailSearch } from "@/features/projects/lib/projectDetailSearch";
-import { usePreviewFeatureWarning } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 const ProjectDetailScreen = React.lazy(async () => {
@@ -16,7 +15,6 @@ export const Route = createFileRoute("/projects/$projectId")({
 });
 
 function ProjectDetailRouteComponent() {
-  usePreviewFeatureWarning("projects");
   const { projectId } = Route.useParams();
   const { commitHash, filePath, pullRequestId, issueId, repositoryId, tab } =
     Route.useSearch();

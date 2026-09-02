@@ -42,6 +42,14 @@ fn nest_skill_contains_safe_mention_workflow() {
 }
 
 #[test]
+fn nest_skill_teaches_local_project_canvas_notifications() {
+    assert!(BUZZ_CLI_SKILL_MD.contains("buzz canvas notify --source <sourcePath>"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("--change data"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("--change presentation"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("does not require `BUZZ_PRIVATE_KEY`"));
+}
+
+#[test]
 fn nest_agents_template_separates_commit_attribution_claims() {
     assert_eq!(AGENTS_MD.matches("## Git Commit Attribution").count(), 1);
     assert!(AGENTS_MD.contains(
