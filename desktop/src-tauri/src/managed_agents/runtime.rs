@@ -388,12 +388,16 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
-/// Proof token for the effort-application outer binding. Zero-size and
-/// `#[must_use]`; makes `let effort = apply_effort_to_spawn_command(…)` a
-/// compile-time requirement — deleting the binding is a compile error because
+/// Proof token for the effort-application outer binding. `#[must_use]`;
+/// makes `let effort = apply_effort_to_spawn_command(…)` a compile-time
+/// requirement — deleting the binding is a compile error because
 /// `spawn_with_effort_proof` consumes it by value.
+///
+/// The private field prevents any crate-local code from constructing
+/// `EffortApplied` directly (same shape as `RecordFieldsApplied(())`), so
+/// the only way to obtain a token is to call `apply_effort_to_spawn_command`.
 #[must_use]
-pub(crate) struct EffortApplied;
+pub(crate) struct EffortApplied(());
 
 /// Apply effort env to an agent spawn command. Called by `spawn_agent_child`
 /// (production) and `effort_cmd_tests` (test seam). Inner-seam: removing
@@ -412,7 +416,7 @@ pub(crate) fn apply_effort_to_spawn_command(
     super::config_bridge::effort::apply_spawn_effort_env(
         cmd, record, runtime, personas, persona_id, global_env, baked_env,
     );
-    EffortApplied
+    EffortApplied(())
 }
 
 /// Spawn the agent command, consuming the `EffortApplied` proof token.

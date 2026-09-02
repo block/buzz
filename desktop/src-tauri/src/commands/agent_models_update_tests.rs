@@ -73,7 +73,7 @@ fn local_record() -> ManagedAgentRecord {
 // Outer-seam proof (compile-error): removing `apply_record_field_updates` from
 // `update_managed_agent` leaves `applied` undefined at `stamp_record_updated_at`
 // — a compile error enforced by the `#[must_use] RecordFieldsApplied` token.
-// `update_managed_agent_writes_effort_via_production_command` below proves the
+// `record_field_updates_persist_effort_to_disk` below proves the
 // disk-persistence contract of `apply_record_field_updates` itself (calls it
 // directly); it does not independently gate the production invocation.
 
@@ -256,9 +256,9 @@ fn effort_clear_sweeps_acp_sentinel_in_env_vars() {
     );
 }
 
-// ── Mock-runtime integration test (disk-persistence contract) ────────────────
+// ── Helper disk-persistence contract ─────────────────────────────────────────
 //
-// This test drives the production function sequence directly in its own body:
+// This test drives the production helper sequence directly in its own body:
 //   load_managed_agents → apply_record_field_updates → stamp_record_updated_at
 //   → save_managed_agents → load-from-disk.
 //
@@ -269,26 +269,62 @@ fn effort_clear_sweeps_acp_sentinel_in_env_vars() {
 //     `effort_level` unchanged on disk — assertion fails (expected
 //     Some("high"), got None).
 //
-// What this test does NOT prove: it does not gate the production invocation
-// inside `update_managed_agent`. That is gated solely by the compile error
-// described in the outer-seam comment above (undefined `applied` token).
+// Outer-seam gate: the compile error that prevents skipping
+// `apply_record_field_updates` inside `update_managed_agent` is described in
+// the outer-seam comment above (undefined `applied` token at the
+// `stamp_record_updated_at` site). This test proves only the helper's own
+// disk-roundtrip contract; it does not independently gate the production
+// invocation.
 
 #[cfg(not(target_os = "windows"))]
 #[test]
-fn update_managed_agent_writes_effort_via_production_command() {
+fn record_field_updates_persist_effort_to_disk() {
     use crate::app_state::build_app_state;
     use crate::managed_agents::{load_managed_agents, save_managed_agents};
 
-    let _path_guard = crate::managed_agents::lock_path_mutex();
+    // A single crate-wide process-env lock covers PATH, HOME, XDG_DATA_HOME,
+    // and all effort env keys — `lock_path_mutex` and `lock_env_mutex` both
+    // delegate to the same `PROCESS_ENV_MUTEX` static.
+    let _env_guard = crate::managed_agents::lock_path_mutex();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
-    let old_home = std::env::var_os("HOME");
-    let old_xdg = std::env::var_os("XDG_DATA_HOME");
-    // SAFETY: guarded by lock_path_mutex (same pattern as catalog_reconcile_tests).
-    std::env::set_var("HOME", &home);
-    std::env::set_var("XDG_DATA_HOME", &home);
+    // RAII guards restore HOME and XDG_DATA_HOME on Drop (even on panic).
+    // Uses OsString so a pre-existing non-Unicode value is restored exactly.
+    struct EnvVarGuard {
+        key: String,
+        prior: Option<std::ffi::OsString>,
+    }
+    impl EnvVarGuard {
+        fn set(key: &str, value: &std::path::Path) -> Self {
+            let prior = std::env::var_os(key);
+            #[allow(deprecated)]
+            // SAFETY: caller holds the crate-wide process-env lock.
+            unsafe {
+                std::env::set_var(key, value)
+            };
+            Self {
+                key: key.to_string(),
+                prior,
+            }
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            #[allow(deprecated)]
+            // SAFETY: caller holds the crate-wide process-env lock.
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var(&self.key, v),
+                    None => std::env::remove_var(&self.key),
+                }
+            }
+        }
+    }
+
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _xdg_guard = EnvVarGuard::set("XDG_DATA_HOME", &home);
 
     let app = tauri::test::mock_builder()
         .manage(build_app_state())
@@ -333,14 +369,5 @@ fn update_managed_agent_writes_effort_via_production_command() {
         Some("high"),
         "apply_record_field_updates + stamp_record_updated_at must write effort_level to disk"
     );
-
-    // Restore env.
-    std::env::remove_var("HOME");
-    std::env::remove_var("XDG_DATA_HOME");
-    if let Some(v) = old_home {
-        std::env::set_var("HOME", v);
-    }
-    if let Some(v) = old_xdg {
-        std::env::set_var("XDG_DATA_HOME", v);
-    }
+    // _home_guard and _xdg_guard restore HOME and XDG_DATA_HOME via Drop.
 }
