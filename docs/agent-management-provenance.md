@@ -23,3 +23,8 @@ Regression gates: `otherSetupAgent.test.mjs`, `useKnownAgentPubkeys.test.mjs`,
 `tests/e2e/cloud-provenance.spec.ts`. Browser evidence is mock-Tauri rendered UI,
 using an already eligible channel member and an existing DM, not a discovery or
 invitation acceptance test. `mentions.spec.ts` retains its marker-label assertions.
+The cloud smoke waits (at most 10 seconds, with per-query status diagnostics) for
+successful identity, local inventory and relay directory reads before opening the
+picker. Both immediate and delayed-directory fixtures exercise the same rendered
+workflow. Each cloud assertion retains its own normal deadline: successful data
+loading must not hide a missing glyph or accessible marker.

@@ -271,8 +271,7 @@ export function ComposerMentionButton({
                       </TooltipTrigger>
                       <TooltipContent>
                         Don't automatically mention {agent.displayName} in this
-                        thread{" "}
-                        <AgentManagementMarker pubkey={agent.pubkey} />
+                        thread <AgentManagementMarker pubkey={agent.pubkey} />
                       </TooltipContent>
                     </Tooltip>
                   ))}
