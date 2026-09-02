@@ -509,6 +509,16 @@ fn build_profile_event(
 
 // ── Managed-agent profile sync ──────────────────────────────────────────────
 
+/// Backoff schedule for profile sync when membership is not yet visible.
+const PROFILE_SYNC_MEMBERSHIP_RETRY_DELAYS_MS: &[u64] = &[200, 350, 500];
+
+/// True when the relay rejected the request because membership is missing.
+fn is_relay_membership_required_error(status: reqwest::StatusCode, message: &str) -> bool {
+    status == reqwest::StatusCode::FORBIDDEN
+        && (message.contains("relay_membership_required")
+            || message.contains("relay member"))
+}
+
 /// Sync a managed agent's kind:0 profile event to the relay using NIP-98 auth.
 ///
 /// The agent signs its own profile event and the NIP-98 HTTP-auth event, so no
@@ -525,7 +535,6 @@ pub async fn sync_managed_agent_profile(
     about: Option<&str>,
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
-    crate::relay_admission::wait_for_rate_limit().await;
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
     let event = build_profile_event(agent_keys, display_name, avatar_url, about, auth_tag)?;
     let event_json = event.as_json();
@@ -533,30 +542,48 @@ pub async fn sync_managed_agent_profile(
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
 
     let url = format!("{}/events", relay_http_base_url(relay_url));
-    let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
-    let mut request = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json");
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let mut last_error = String::from("profile sync failed");
+    for attempt in 0..=PROFILE_SYNC_MEMBERSHIP_RETRY_DELAYS_MS.len() {
+        crate::relay_admission::wait_for_rate_limit().await;
+        let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
-    if !response.status().is_success() {
+        let mut request = state
+            .http_client
+            .post(&url)
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json");
+        if let Some(tag) = auth_tag {
+            request = request.header("x-auth-tag", tag);
+        }
+        let response = request
+            .body(body_bytes.clone())
+            .send()
+            .await
+            .map_err(|e| classify_request_error(&e))?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
         let msg = relay_error_message(response).await;
-        return Err(format!(
-            "Could not sync the agent's profile metadata: {msg}"
-        ));
+        last_error = format!("Could not sync the agent's profile metadata: {msg}");
+
+        if is_relay_membership_required_error(status, &msg)
+            && attempt < PROFILE_SYNC_MEMBERSHIP_RETRY_DELAYS_MS.len()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                PROFILE_SYNC_MEMBERSHIP_RETRY_DELAYS_MS[attempt],
+            ))
+            .await;
+            continue;
+        }
+
+        return Err(last_error);
     }
 
-    Ok(())
+    Err(last_error)
 }
 
 // ── Agent profile query ─────────────────────────────────────────────────────
