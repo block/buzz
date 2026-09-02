@@ -1920,11 +1920,11 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
     .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 
   const commands = await readCommandLog(page);
-  // Exactly one targeted revalidation: the pre-side-effect pass doubles as the
-  // publish-boundary check on the fast path — no deferred upload/preview and
-  // no relay-writing side effect (member agent, no DM expansion, no huddle).
+  // Two targeted revalidations: the pre-side-effect admission pass, then the
+  // publish-boundary pass, which is unconditional — even this fast path (member
+  // agent, no deferred upload/preview, no DM expansion, no huddle) re-runs it.
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
-    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
   );
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
@@ -2032,8 +2032,9 @@ test("targeted revocation before send causes no agent side effects", async ({
     .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
     .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
   const commands = await readCommandLog(page);
+  // Admission pass plus the unconditional publish-boundary pass.
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
-    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
   );
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
@@ -2053,10 +2054,9 @@ test("targeted revocation before send causes no agent side effects", async ({
 test("deferred-upload sends revalidate agent authorization at the publish boundary", async ({
   page,
 }) => {
-  // The immediate send path reuses the pre-side-effect authorization pass, but
-  // a background media upload can hold the publish open for arbitrarily long —
+  // A background media upload can hold the publish open for arbitrarily long —
   // authorization revoked during that window must still strip the p tag. This
-  // pins the second, publish-boundary revalidation on the deferred path.
+  // pins the publish-boundary revalidation on the deferred path.
   await installMockBridge(page, {
     deferredComposerUploads: true,
     uploadDelayMs: 1_500,
@@ -2249,8 +2249,8 @@ test("sends that attach a mentioned agent revalidate at the publish boundary", a
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
     commandCount(baselineCommands, "revalidate_relay_agents") + 2,
   );
-  // The policy already matched, so the second pass was owed to the membership
-  // write alone.
+  // The policy already matched: the attach's membership write was the only
+  // relay round-trip holding the publish open for the revocation to land in.
   expect(commandCount(commands, "update_managed_agent")).toBe(
     commandCount(baselineCommands, "update_managed_agent"),
   );
@@ -2260,8 +2260,8 @@ test("sends that enroll agents into an active huddle revalidate at the publish b
   page,
 }) => {
   // With a huddle live on the channel, the awaited huddle enrollment is a
-  // relay round-trip between the authorization pass and the publish, so the
-  // publish boundary re-validates instead of reusing the earlier pass.
+  // relay round-trip between the authorization pass and the publish; the
+  // publish boundary re-validates rather than trusting the earlier pass.
   await installMockBridge(page, {
     huddle: {
       parentChannelId: GENERAL_CHANNEL_ID,
@@ -2324,12 +2324,13 @@ test("sends that enroll agents into an active huddle revalidate at the publish b
 test("a send held open by a no-write step still revalidates at the publish boundary", async ({
   page,
 }) => {
-  // The three named triggers enumerate the awaited steps known to reach the
-  // relay; the staleness bound covers the ones they cannot name. Here the only
-  // thing separating the authorization pass from the publish is the huddle
-  // sync — which with no active huddle writes nothing and returns
-  // `matched_active_huddle: false`, so no named trigger fires — held open long
-  // enough for a revocation to land. The p tag must still be stripped.
+  // The publish boundary revalidates unconditionally, however brief the gap:
+  // here the only thing separating the authorization pass from the publish is
+  // the huddle sync — which with no active huddle writes nothing to the relay
+  // — and the revocation is released with zero further hold. A revocation
+  // landing in any admission-to-publish gap must strip the p tag; this is the
+  // reviewer's sub-threshold probe of the since-removed elapsed-time bound,
+  // which deliberately accepted this very staleness.
   await installMockBridge(page, {
     // Released on demand below; long enough that it is never waited out.
     syncAgentsToActiveHuddleDelayMs: 45_000,
@@ -2390,10 +2391,9 @@ test("a send held open by a no-write step still revalidates at the publish bound
     window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [pubkey];
   }, ALLOWLIST_RELAY_AGENT_PUBKEY);
 
-  // The send is parked on the held sync, so this only widens a gap that is
-  // already open — it pins the admission-to-publish distance past the
-  // staleness bound on any machine.
-  await page.waitForTimeout(400);
+  // Release immediately — no post-revocation hold. Any conditional reuse of
+  // the admission pass (a trigger enumeration, an elapsed-time bound) would
+  // publish quinn's stale p tag here.
   await expect
     .poll(() =>
       page.evaluate(
@@ -2416,8 +2416,8 @@ test("a send held open by a no-write step still revalidates at the publish bound
   expect(commandCount(commands, "sync_agents_to_active_huddle")).toBe(
     commandCount(baselineCommands, "sync_agents_to_active_huddle") + 1,
   );
-  // The second pass was owed to elapsed time alone: nothing on this leg wrote
-  // relay state, which is what makes it invisible to the named triggers.
+  // Nothing on this leg wrote relay state — the second pass exists only
+  // because the publish boundary is unconditional.
   for (const command of [
     "add_channel_members",
     "attach_managed_agent",

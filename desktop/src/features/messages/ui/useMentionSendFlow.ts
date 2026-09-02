@@ -41,7 +41,6 @@ import {
   type QueuedAgentWake,
   type SendMessageWithMentionFlowInput,
   resolvePreviewTags,
-  shouldRevalidateMentionsAtPublish,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
 import { buildAgentAddressMentionTags } from "@/features/messages/lib/agentAddressMention.mjs";
@@ -381,8 +380,6 @@ export function useMentionSendFlow({
         const admittedMentionPubkeys = uniqueNormalizedPubkeys(
           await mentions.revalidateMentionPubkeys(mentionPubkeys),
         );
-        // Monotonic stamp for the publish-boundary staleness bound below.
-        const admittedAtMs = performance.now();
         if (isSendCancelled()) return restoreComposerAfterFailure();
         if (!isMountedRef.current) return persistPreflightDraft();
         const admittedMentionPubkeySet = new Set(admittedMentionPubkeys);
@@ -413,15 +410,8 @@ export function useMentionSendFlow({
           ...agentMentionPubkeys,
         ]);
         let sendChannelId = draft.capturedChannelId;
-        // The pre-side-effect authorization pass above only stands at the
-        // publish boundary while nothing separates the two. Track whether any
-        // awaited relay round-trip (DM-expansion channel resolution, agent
-        // membership/access-policy writes, huddle enrollment) actually ran in
-        // between — a revocation can land during those waits (#5681).
-        let relaySideEffectsRan = false;
         if (preparedAgentPubkeys.length > 0 && onPrepareSendChannel) {
           sendChannelId = await onPrepareSendChannel(preparedAgentPubkeys);
-          relaySideEffectsRan = true;
           if (isSendCancelled()) return restoreComposerAfterFailure();
           if (!sendChannelId) {
             return restoreComposerAfterFailure();
@@ -439,9 +429,6 @@ export function useMentionSendFlow({
           onPrepareSendChannel ? preparedAgentPubkeys : [],
           [...managedAgentsByPubkey.values()],
         );
-        if (agentReadiness.wroteRelayState) {
-          relaySideEffectsRan = true;
-        }
         // Every wake this send queued: persona creates carried on the draft
         // (enqueued before the non-member prompt could defer us here), then
         // the readiness pass's. Flushed only after the relay accepts the
@@ -471,19 +458,10 @@ export function useMentionSendFlow({
         }
         if (preparedAgentPubkeys.length > 0 && sendChannelId) {
           try {
-            const huddleSync = await invokeTauri<{
-              matched_active_huddle: boolean;
-              added: string[];
-            }>("sync_agents_to_active_huddle", {
+            await invokeTauri("sync_agents_to_active_huddle", {
               channelId: sendChannelId,
               agentPubkeys: preparedAgentPubkeys,
             });
-            if (huddleSync.matched_active_huddle) {
-              // A matched huddle means the sync did relay work (membership
-              // read at minimum, enrollment writes for missing agents); no
-              // active huddle returns before touching the relay.
-              relaySideEffectsRan = true;
-            }
             if (isSendCancelled()) return restoreComposerAfterFailure();
           } catch (error) {
             if (isSendCancelled()) return restoreComposerAfterFailure();
@@ -520,23 +498,12 @@ export function useMentionSendFlow({
           );
           if (!finalOutgoingTags || signal?.aborted || isSendCancelled())
             return;
-          // Mention authorization was already established by the pre-side-effect
-          // pass above. Re-validate at the publish boundary only when something
-          // separated that pass from this publish — a deferred wait (background
-          // media upload, link-preview settlement), an awaited relay side
-          // effect (DM expansion, membership/access-policy writes, huddle
-          // enrollment), or simply enough elapsed time that the earlier answer
-          // is no longer current — since authorization could have been revoked
-          // during the gap. On the remaining immediate path a second pass would
-          // repeat the same relay round-trips with the same inputs.
-          const revalidatedMentionPubkeys = shouldRevalidateMentionsAtPublish({
-            hasDeferredUpload: preparedUpload != null,
-            hasDeferredLinkPreviews: draft.preparedLinkPreviews != null,
-            relaySideEffectsRan,
-            msSinceAdmission: performance.now() - admittedAtMs,
-          })
-            ? await mentions.revalidateMentionPubkeys(mentionPubkeys)
-            : admittedMentionPubkeys;
+          // The pass immediately before signing/publish is always fresh:
+          // mention authorization is re-validated here unconditionally,
+          // whatever did or did not separate it from the admission pass
+          // above (#5681).
+          const revalidatedMentionPubkeys =
+            await mentions.revalidateMentionPubkeys(mentionPubkeys);
           if (signal?.aborted || isSendCancelled()) return;
           const finalTagsWithAgentAddress = [
             ...finalOutgoingTags,

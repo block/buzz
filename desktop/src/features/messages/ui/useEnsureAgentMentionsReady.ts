@@ -16,8 +16,10 @@ export type EnsureAgentMentionsReadyResult = {
   errors: string[];
   pubkeys: string[];
   /**
-   * Whether an awaited relay write ran, which tells the publish boundary that
-   * something separated it from the pre-side-effect authorization pass.
+   * Whether an awaited relay write ran. Informational only: the publish
+   * boundary revalidates mention authorization unconditionally, so nothing
+   * consumes this to decide anything — it stays because the signal is
+   * truthful by construction and unit-pinned.
    */
   wroteRelayState: boolean;
   /**
@@ -111,7 +113,7 @@ export function useEnsureAgentMentionsReady({
               );
           if (wrote) {
             // The access-policy reconciliation hit the relay; a matching
-            // policy reports `wrote: false` and stays on the fast path.
+            // policy reports `wrote: false`.
             wroteRelayState = true;
           }
           if (participants.has(pubkey)) {
