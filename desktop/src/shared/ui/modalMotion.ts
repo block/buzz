@@ -1,3 +1,6 @@
+/** Matches `data-[state=closed]:duration-150` on overlay and content. */
+export const MODAL_CLOSE_DURATION_MS = 150;
+
 export const MODAL_OVERLAY_MOTION_CLASS =
   "transition-none duration-200 ease-out data-[state=closed]:duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 motion-reduce:animate-none";
 

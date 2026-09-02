@@ -35,6 +35,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
+import { scheduleAfterModalClose } from "@/shared/ui/scheduleAfterModalClose";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function AgentsView() {
@@ -45,6 +46,9 @@ export function AgentsView() {
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
+  const cancelCatalogImportHandoffRef = React.useRef<(() => void) | null>(
+    null,
+  );
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const compactActionsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -134,6 +138,12 @@ export function AgentsView() {
         void personas.handleImportSnapshotFile(fileBytes, fileName);
       }
     });
+  }, []);
+
+  React.useEffect(() => {
+    return () => {
+      cancelCatalogImportHandoffRef.current?.();
+    };
   }, []);
 
   return (
@@ -514,7 +524,13 @@ export function AgentsView() {
             personas.clearFeedback("catalog");
           }}
           onImportFile={(fileBytes, fileName) => {
-            void personas.handleImportSnapshotFile(fileBytes, fileName);
+            cancelCatalogImportHandoffRef.current?.();
+            cancelCatalogImportHandoffRef.current = scheduleAfterModalClose(
+              () => {
+                cancelCatalogImportHandoffRef.current = null;
+                void personas.handleImportSnapshotFile(fileBytes, fileName);
+              },
+            );
           }}
           onSelectPersona={async (persona, active) => {
             const addedPersona = await personas.handleSetActive(
