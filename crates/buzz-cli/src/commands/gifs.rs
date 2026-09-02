@@ -80,13 +80,7 @@ fn default_locale() -> String {
     std::env::var("LANG")
         .ok()
         .and_then(|l| {
-            let code: String = l
-                .splitn(2, '.')
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(5)
-                .collect();
+            let code: String = l.split('.').next().unwrap_or("").chars().take(5).collect();
             if code.len() >= 2 {
                 Some(code)
             } else {
@@ -115,7 +109,7 @@ pub(crate) fn parse_gif_descriptor_info(
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
-    if !extensions.iter().any(|&e| e == REQUIRED_EXTENSION) {
+    if !extensions.contains(&REQUIRED_EXTENSION) {
         return Err(CliError::Other(format!(
             "this relay does not support GIF search (missing \"{REQUIRED_EXTENSION}\" in supported_extensions)"
         )));
@@ -472,7 +466,7 @@ mod tests {
         use sha2::{Digest, Sha256};
         let sk = [0xde_u8; 32];
         // What the old pubkey-hash approach would have produced (approximately):
-        let naive_hash = hex::encode(&Sha256::digest(hex::encode(&sk).as_bytes())[..16]);
+        let naive_hash = hex::encode(&Sha256::digest(hex::encode(sk).as_bytes())[..16]);
         let actual = customer_id(&sk, "https://relay.example");
         assert_ne!(
             actual, naive_hash,
