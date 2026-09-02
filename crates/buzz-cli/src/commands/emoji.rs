@@ -308,6 +308,94 @@ async fn cmd_import(
     publish_own_set(client, &final_set).await
 }
 
+/// Scan `content` for `:shortcode:` patterns, mirroring the desktop's
+/// `customEmojiTags.ts` algorithm exactly:
+///
+/// - Pattern: `:([a-z0-9_-]+):` (case-insensitive; canonical lowercase emitted)
+/// - One tag per distinct first-appearing shortcode
+/// - Unknown shortcodes silently ignored
+///
+/// Returns NIP-30 `["emoji", shortcode, url]` tag vectors for every
+/// shortcode that resolves in the workspace palette.  Returns an empty `Vec`
+/// without a relay round-trip if no candidates appear in the content.
+///
+/// Callers must pre-screen with `content.contains(':')` to skip this
+/// function entirely for the common case of plain content.
+pub async fn resolve_emoji_tags_for_content(
+    client: &BuzzClient,
+    content: &str,
+) -> Result<Vec<Vec<String>>, CliError> {
+    let candidates = scan_shortcodes(content);
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Fetch workspace palette (union of all members' kind:30030 sets).
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_EMOJI_SET],
+        "#d": [CUSTOM_EMOJI_SET_D_TAG],
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse emoji set query: {e}")))?;
+    let palette = union_custom_emoji(&events);
+    let url_by_shortcode: std::collections::HashMap<&str, &str> = palette
+        .iter()
+        .map(|e| (e.shortcode.as_str(), e.url.as_str()))
+        .collect();
+
+    let tags: Vec<Vec<String>> = candidates
+        .iter()
+        .filter_map(|sc| {
+            url_by_shortcode
+                .get(sc.as_str())
+                .map(|url| vec!["emoji".to_string(), sc.clone(), url.to_string()])
+        })
+        .collect();
+
+    Ok(tags)
+}
+
+/// Collect candidate shortcodes from `content` without a regex dependency.
+///
+/// Implements `:([a-z0-9_-]+):` (applied case-insensitively with lowercase
+/// normalization) using a hand-rolled single-pass scanner.  Each distinct
+/// shortcode appears exactly once in first-appearance order.
+pub(crate) fn scan_shortcodes(content: &str) -> Vec<String> {
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] != b':' {
+            i += 1;
+            continue;
+        }
+        // Found opening `:`.  Scan forward for valid shortcode chars.
+        let start = i + 1;
+        let mut j = start;
+        while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'-')
+        {
+            j += 1;
+        }
+        // Require at least one char and a closing `:`.
+        if j > start && j < len && bytes[j] == b':' {
+            // SAFETY: `content` is valid UTF-8 and the slice covers only ASCII.
+            let sc = content[start..j].to_lowercase();
+            if seen.insert(sc.clone()) {
+                out.push(sc);
+            }
+            // Advance past the closing `:` so overlapping patterns like `:a::b:`
+            // are handled correctly (`:a:` consumed, next scan starts at `:`).
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 pub async fn dispatch(cmd: crate::EmojiCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::EmojiCmd;
     match cmd {
@@ -385,5 +473,61 @@ mod tests {
         assert_eq!(emojis.len(), 1);
         assert_eq!(emojis[0].shortcode, "zort");
         assert_eq!(emojis[0].url, "https://example.com/zort.png");
+    }
+
+    // ── scan_shortcodes ──────────────────────────────────────────────────────
+
+    #[test]
+    fn scan_finds_basic_shortcode() {
+        assert_eq!(scan_shortcodes(":wave:"), vec!["wave"]);
+    }
+
+    #[test]
+    fn scan_finds_multiple_shortcodes_in_order() {
+        let result = scan_shortcodes(":wave: hello :party_parrot: world :tada:");
+        assert_eq!(result, vec!["wave", "party_parrot", "tada"]);
+    }
+
+    #[test]
+    fn scan_deduplicates_shortcodes() {
+        let result = scan_shortcodes(":wave: :wave: :wave:");
+        assert_eq!(result, vec!["wave"]);
+    }
+
+    #[test]
+    fn scan_normalizes_to_lowercase() {
+        let result = scan_shortcodes(":WAVE: :Wave:");
+        assert_eq!(result, vec!["wave"]);
+    }
+
+    #[test]
+    fn scan_ignores_invalid_chars_in_shortcode() {
+        // Spaces inside are not valid shortcode chars
+        let result = scan_shortcodes(":hello world:");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scan_empty_colons_not_matched() {
+        // "::" has zero chars between — must not match
+        assert!(scan_shortcodes("::").is_empty());
+    }
+
+    #[test]
+    fn scan_no_candidates_in_plain_content() {
+        assert!(scan_shortcodes("Hello world, no emoji here").is_empty());
+    }
+
+    #[test]
+    fn scan_handles_adjacent_shortcodes() {
+        // ":a::b:" — `:a:` consumed, then `:b:` starts at `:`
+        let result = scan_shortcodes(":a::b:");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn scan_allows_hyphens_and_underscores() {
+        let result = scan_shortcodes(":party-parrot: :sweat_blob:");
+        assert_eq!(result, vec!["party-parrot", "sweat_blob"]);
     }
 }
