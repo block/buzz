@@ -70,13 +70,27 @@ typedef PairingSocketFactory =
       required void Function(Object? error) onDisconnected,
     });
 
+typedef CredentialSocketFactory =
+    RelaySocket Function({
+      required String wsUrl,
+      required String? transportUrl,
+      required String? nsec,
+      required void Function(List<dynamic> message) onMessage,
+      required void Function() onConnected,
+      required void Function(Object? error) onDisconnected,
+    });
+
 class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
+  final CredentialSocketFactory _credentialSocketFactory;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
 
-  PairingNotifier({PairingSocketFactory? socketFactory})
-    : _socketFactory = socketFactory ?? _createPairingSocket;
+  PairingNotifier({
+    PairingSocketFactory? socketFactory,
+    CredentialSocketFactory? credentialSocketFactory,
+  }) : _socketFactory = socketFactory ?? _createPairingSocket,
+       _credentialSocketFactory = credentialSocketFactory ?? RelaySocket.new;
 
   static PairingSocket _createPairingSocket({
     required String wsUrl,
@@ -512,6 +526,9 @@ class PairingNotifier extends Notifier<PairingState> {
       // Parse the custom payload.
       final data = jsonDecode(payload) as Map<String, dynamic>;
       final relayUrl = data['relayUrl'] as String?;
+      final lanRelayUrl = normalizeLanRelayUrl(
+        data['lanRelayUrl'] as String? ?? '',
+      );
       final pubkey = data['pubkey'] as String?;
       final nsec = data['nsec'] as String?;
 
@@ -519,11 +536,17 @@ class PairingNotifier extends Notifier<PairingState> {
         throw const FormatException('Missing relayUrl in payload');
       }
 
-      // Validate relay URL to prevent SSRF via private network addresses.
-      _validateRelayUrl(relayUrl);
+      // This payload is processed only after both devices confirmed the SAS
+      // and the transcript hash was verified. Allow a campus/LAN canonical
+      // relay here while keeping unverified legacy pairing codes restricted.
+      _validateRelayUrl(relayUrl, allowPrivateNetwork: true);
 
       // Validate credentials against the relay via NIP-42 WS handshake.
-      await _validateCredentials(relayUrl: relayUrl, nsec: nsec);
+      await _validateCredentials(
+        relayUrl: relayUrl,
+        lanRelayUrl: lanRelayUrl,
+        nsec: nsec,
+      );
 
       // Send complete only after credentials are validated.
       _sendComplete(true);
@@ -532,6 +555,7 @@ class PairingNotifier extends Notifier<PairingState> {
       final community = Community.create(
         name: Community.nameFromUrl(relayUrl),
         relayUrl: relayUrl,
+        lanRelayUrl: lanRelayUrl,
         pubkey: pubkey,
         nsec: nsec,
       );
@@ -630,6 +654,7 @@ class PairingNotifier extends Notifier<PairingState> {
 
       await _validateCredentials(
         relayUrl: community.relayUrl,
+        lanRelayUrl: community.lanRelayUrl,
         nsec: community.nsec,
       );
 
@@ -661,6 +686,7 @@ class PairingNotifier extends Notifier<PairingState> {
 
   Future<void> _validateCredentials({
     required String relayUrl,
+    required String? lanRelayUrl,
     required String? nsec,
   }) async {
     if (nsec == null || nsec.isEmpty) {
@@ -670,18 +696,36 @@ class PairingNotifier extends Notifier<PairingState> {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
-    final socket = RelaySocket(
-      wsUrl: wsUrl,
-      nsec: nsec,
-      onMessage: (_) {},
-      onConnected: () {},
-      onDisconnected: (_) {},
-    );
-    try {
-      await socket.connect().timeout(const Duration(seconds: 8));
-    } finally {
-      await socket.disconnect();
+    final transports = <String?>[
+      if (lanRelayUrl != null && lanRelayUrl != wsUrl) lanRelayUrl,
+      null,
+    ];
+    Object? lastError;
+
+    for (final transportUrl in transports) {
+      Object? connectionError;
+      final socket = _credentialSocketFactory(
+        wsUrl: wsUrl,
+        transportUrl: transportUrl,
+        nsec: nsec,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (error) => connectionError = error,
+      );
+      try {
+        await socket.connect().timeout(const Duration(seconds: 8));
+        if (socket.state == SocketState.connected) return;
+        lastError =
+            connectionError ??
+            StateError('Relay credential validation did not connect');
+      } catch (error) {
+        lastError = error;
+      } finally {
+        await socket.disconnect();
+      }
     }
+
+    throw lastError ?? StateError('No relay transport was available');
   }
 
   Community _parseLegacyInput(String raw) {
@@ -704,16 +748,20 @@ class PairingNotifier extends Notifier<PairingState> {
     }
 
     _validateRelayUrl(relayUrl);
+    final lanRelayUrl = normalizeLanRelayUrl(
+      decoded['lanRelayUrl'] as String? ?? '',
+    );
 
     return Community.create(
       name: Community.nameFromUrl(relayUrl),
       relayUrl: relayUrl,
+      lanRelayUrl: lanRelayUrl,
       pubkey: decoded['pubkey'] as String?,
       nsec: decoded['nsec'] as String?,
     );
   }
 
-  void _validateRelayUrl(String url) {
+  void _validateRelayUrl(String url, {bool allowPrivateNetwork = false}) {
     final uri = Uri.parse(url);
 
     if (!kDebugMode && uri.scheme != 'https') {
@@ -732,7 +780,7 @@ class PairingNotifier extends Notifier<PairingState> {
     }
 
     final ip = Uri.tryParse('http://$host')?.host ?? host;
-    if (_isPrivateHost(ip)) {
+    if (_isPrivateHost(ip) && !allowPrivateNetwork) {
       throw const FormatException(
         'Relay URL cannot target private network addresses',
       );

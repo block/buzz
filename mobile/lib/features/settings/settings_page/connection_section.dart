@@ -8,6 +8,7 @@ class _ConnectionSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final config = ref.watch(relayConfigProvider);
+    final activeCommunity = ref.watch(activeCommunityProvider).value;
     final nsec = config.nsec;
 
     return AppListCard(
@@ -17,6 +18,21 @@ class _ConnectionSection extends ConsumerWidget {
           icon: LucideIcons.server,
           title: 'Connected to',
           subtitle: config.baseUrl,
+        ),
+        AppListRow(
+          icon: LucideIcons.network,
+          title: 'Campus / LAN relay',
+          subtitle: config.lanRelayUrl ?? 'Not configured',
+          trailing: const _RowChevron(),
+          onTap: activeCommunity == null
+              ? null
+              : () => showBuzzDialog<void>(
+                  context: context,
+                  builder: (_) => _LanRelayDialog(
+                    communityId: activeCommunity.id,
+                    initialValue: activeCommunity.lanRelayUrl,
+                  ),
+                ),
         ),
         if (nsec != null && nsec.isNotEmpty) ...[
           _IdentityRow(nsec: nsec),
@@ -30,6 +46,83 @@ class _ConnectionSection extends ConsumerWidget {
             ),
           ),
         ],
+      ],
+    );
+  }
+}
+
+class _LanRelayDialog extends HookConsumerWidget {
+  const _LanRelayDialog({
+    required this.communityId,
+    required this.initialValue,
+  });
+
+  final String communityId;
+  final String? initialValue;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = useTextEditingController(text: initialValue ?? '');
+    final error = useState<String?>(null);
+    final isSaving = useState(false);
+
+    Future<void> save() async {
+      String? normalized;
+      try {
+        normalized = normalizeLanRelayUrl(controller.text);
+      } on FormatException catch (exception) {
+        error.value = exception.message;
+        return;
+      }
+
+      isSaving.value = true;
+      await ref
+          .read(communityListProvider.notifier)
+          .updateLanRelayUrl(communityId, normalized);
+      if (context.mounted) Navigator.of(context).pop();
+    }
+
+    return AlertDialog(
+      title: const Text('Campus / LAN relay'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: controller,
+            enabled: !isSaving.value,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: InputDecoration(
+              labelText: 'Private relay address',
+              hintText: 'ws://10.0.0.8:3000',
+              errorText: error.value,
+            ),
+            onChanged: (_) => error.value = null,
+            onSubmitted: (_) {
+              if (!isSaving.value) unawaited(save());
+            },
+          ),
+          const SizedBox(height: Grid.xs),
+          Text(
+            'Buzz tries this private address first, then falls back to the '
+            'public relay. Leave it empty to disable the fast path.',
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: isSaving.value ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: isSaving.value ? null : () => unawaited(save()),
+          child: const Text('Save'),
+        ),
       ],
     );
   }

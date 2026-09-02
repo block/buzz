@@ -129,7 +129,16 @@ async fn start_pairing_session(
 
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);
-    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
+    let lan_ws_url = state
+        .relay_lan_url_override
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    let probe_url = lan_ws_url.as_deref().unwrap_or(&ws_url);
+    let canonical_pairing_relay_url =
+        resolve_pairing_relay_url(&ws_url, probe_pairing_relay(probe_url).await)?;
+    let pairing_relay_url =
+        pairing_relay_transport_url(&ws_url, &canonical_pairing_relay_url, lan_ws_url.as_deref())?;
     let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
     let mut qr_uri = encode_qr(&qr_payload);
     if mode == PairingMode::RecoverIdentity {
@@ -142,11 +151,14 @@ async fn start_pairing_session(
             .secret_key()
             .to_bech32()
             .map_err(|e| format!("encode nsec: {e}"))?;
-        let payload_json = serde_json::json!({
+        let mut payload_json = serde_json::json!({
             "relayUrl": http_url,
             "pubkey": keys.public_key().to_hex(),
             "nsec": nsec,
         });
+        if let Some(lan_url) = lan_ws_url {
+            payload_json["lanRelayUrl"] = serde_json::Value::String(lan_url);
+        }
         *pairing.payload.lock().map_err(|e| e.to_string())? =
             Some(Zeroizing::new(payload_json.to_string()));
     }
@@ -721,6 +733,29 @@ fn resolve_pairing_relay_url(
         }
         PairingRelay::MainRelay => Ok(main_relay_url.to_string()),
     }
+}
+
+fn pairing_relay_transport_url(
+    main_relay_url: &str,
+    pairing_relay_url: &str,
+    lan_relay_url: Option<&str>,
+) -> Result<String, String> {
+    let Some(lan_relay_url) = lan_relay_url else {
+        return Ok(pairing_relay_url.to_string());
+    };
+    let main = url::Url::parse(main_relay_url)
+        .map_err(|error| format!("invalid main relay URL: {error}"))?;
+    let pairing = url::Url::parse(pairing_relay_url)
+        .map_err(|error| format!("invalid pairing relay URL: {error}"))?;
+    if pairing.origin() != main.origin() {
+        return Ok(pairing_relay_url.to_string());
+    }
+
+    let mut transport = url::Url::parse(lan_relay_url)
+        .map_err(|error| format!("invalid Campus / LAN relay URL: {error}"))?;
+    transport.set_path(pairing.path());
+    transport.set_query(pairing.query());
+    Ok(transport.to_string())
 }
 
 fn pairing_relay_from_nip11(json: &serde_json::Value) -> PairingRelay {
