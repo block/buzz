@@ -465,6 +465,10 @@ pub async fn update_managed_agent(
         })?;
     }
 
+    // Persona/team mutate paths emit this so the Agents UI refreshes; do the
+    // same after instance edits (rename, respond-to, prompt, …).
+    let _ = app.emit("agents-data-changed", ());
+
     Ok(UpdateManagedAgentResponse {
         agent: summary,
         profile_sync_error: profile_sync_error.take(),
