@@ -19,7 +19,6 @@ import { buildEventNotificationTarget } from "@/features/notifications/lib/targe
 import {
   playNotificationSound,
   resolveSlotSound,
-  shouldPlayNotificationSound,
 } from "@/features/notifications/lib/sound";
 import { useNotificationSenderName } from "@/features/notifications/useNotificationSenderName";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -85,6 +84,7 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
+      void playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
       void sendDesktopNotification({
         title,
         body,
@@ -94,9 +94,6 @@ export function useAppShellDesktopNotifications({
         }),
       }).then((didSend) => {
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
-          playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
-        }
         void requestDockBounce();
       });
     },
@@ -128,6 +125,9 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
+      void playNotificationSound(
+        resolveSlotSound(notificationSettings, "thread_reply"),
+      );
       void sendDesktopNotification({
         title,
         body,
@@ -137,11 +137,6 @@ export function useAppShellDesktopNotifications({
         }),
       }).then((didSend) => {
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
-          playNotificationSound(
-            resolveSlotSound(notificationSettings, "thread_reply"),
-          );
-        }
         void requestDockBounce();
       });
     },

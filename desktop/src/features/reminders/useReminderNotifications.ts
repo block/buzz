@@ -105,12 +105,12 @@ export function useReminderNotifications(
           )
         : `${due.length} reminders are due`;
 
+    void playNotificationSound(resolveSlotSound(current, "needs_action"));
     void sendDesktopNotification({
       title: formatNotificationTitle({ prefix: "Reminder due", channelLabel }),
       body,
     }).then((didSend) => {
       if (!didSend) return;
-      playNotificationSound(resolveSlotSound(current, "needs_action"));
       void requestDockBounce();
     });
   });
