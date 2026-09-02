@@ -476,6 +476,190 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("community switch does not copy channel-sections into the other community (#7207)", async ({
+    page,
+  }) => {
+    // Full issue timeline: organize sidebar sections on Bravo (B), switch to
+    // Alpha (A), and prove B's section layout never lands in A's scoped store
+    // or sidebar. Mirrors https://github.com/block/buzz/issues/7207.
+    const sectionsKey = (relayUrl: string) => {
+      const normalized = relayUrl.trim().replace(/\/+$/, "").toLowerCase();
+      return `buzz-channel-sections.v1:${OWNER_PUBKEY}:${encodeURIComponent(normalized)}`;
+    };
+    const keyA = sectionsKey(COMMUNITY_A.relayUrl);
+    const keyB = sectionsKey(COMMUNITY_B.relayUrl);
+    const sectionName = "Only On Bravo";
+
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_B.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+
+    // Organize on B via the production sidebar context-menu seam.
+    await page.getByTestId("channel-engineering").click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Move to section" }).hover();
+    await page.getByRole("menuitem", { name: "New section..." }).click();
+    const createDialog = page.getByRole("dialog", { name: "Create section" });
+    await expect(createDialog).toBeVisible();
+    await createDialog.getByPlaceholder("Section name").fill(sectionName);
+    await createDialog.getByRole("button", { name: "Create" }).click();
+    await expect(createDialog).toHaveCount(0);
+    await expect(page.getByText(sectionName)).toBeVisible();
+
+    const storeOnB = await page.evaluate((key) => {
+      const raw = window.localStorage.getItem(key);
+      return raw
+        ? (JSON.parse(raw) as {
+            sections: Array<{ id: string; name: string }>;
+            assignments: Record<string, string>;
+          })
+        : null;
+    }, keyB);
+    expect(storeOnB).not.toBeNull();
+    expect(
+      storeOnB?.sections.some((section) => section.name === sectionName),
+    ).toBe(true);
+    expect(Object.keys(storeOnB?.assignments ?? {}).length).toBeGreaterThan(0);
+    const bChannelIds = Object.keys(storeOnB?.assignments ?? {});
+    const bSectionIds = (storeOnB?.sections ?? []).map((section) => section.id);
+
+    // Snapshot publish log length before the switch so we only inspect
+    // kind:30078 events signed after A becomes active.
+    const publishLogOffset = await page.evaluate(() => {
+      const payloads =
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
+              command: string;
+              payload: unknown;
+            }>;
+          }
+        ).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [];
+      return payloads.length;
+    });
+
+    // Switch to A — no further edits. The prior community's assignment map
+    // must not be written into A's scoped key or published as A's layout.
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_A.id);
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+    // Give debounce / bootstrap a beat; pollution would land within 2s.
+    await page.waitForTimeout(2500);
+
+    const afterSwitch = await page.evaluate(
+      ({ keyA: aKey, keyB: bKey, offset, bannedSectionIds }) => {
+        const parse = (raw: string | null) =>
+          raw
+            ? (JSON.parse(raw) as {
+                sections: Array<{ id: string; name: string }>;
+                assignments: Record<string, string>;
+              })
+            : null;
+        type PayloadEntry = {
+          command: string;
+          payload: {
+            kind?: number;
+            content?: string;
+            tags?: string[][];
+          } | null;
+        };
+        const payloads =
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_PAYLOADS__?: PayloadEntry[];
+            }
+          ).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [];
+        const publishedChannelSections = payloads
+          .slice(offset)
+          .filter((entry) => {
+            if (entry.command !== "sign_event") return false;
+            const event = entry.payload;
+            if (event?.kind !== 30078) return false;
+            return event.tags?.some(
+              (tag) => tag[0] === "d" && tag[1] === "channel-sections",
+            );
+          })
+          .map((entry) => {
+            try {
+              return JSON.parse(String(entry.payload?.content ?? "")) as {
+                sections?: Array<{ id: string }>;
+                assignments?: Record<string, string>;
+              };
+            } catch {
+              return null;
+            }
+          })
+          .filter((payload): payload is NonNullable<typeof payload> =>
+            Boolean(payload),
+          );
+        return {
+          a: parse(window.localStorage.getItem(aKey)),
+          b: parse(window.localStorage.getItem(bKey)),
+          publishedChannelSections,
+          // Mock communities share channel UUIDs; the durable leak signal is
+          // B's section objects (or assignments pointing at them) appearing
+          // in an event signed after A became active.
+          leakedSectionIds: publishedChannelSections.flatMap((payload) =>
+            (payload.sections ?? [])
+              .map((section) => section.id)
+              .filter((id) => bannedSectionIds.includes(id)),
+          ),
+          leakedAssignmentTargets: publishedChannelSections.flatMap((payload) =>
+            Object.values(payload.assignments ?? {}).filter((sectionId) =>
+              bannedSectionIds.includes(sectionId),
+            ),
+          ),
+        };
+      },
+      {
+        keyA,
+        keyB,
+        offset: publishLogOffset,
+        bannedSectionIds: bSectionIds,
+      },
+    );
+
+    // B's organized layout remains intact on B.
+    expect(
+      afterSwitch.b?.sections.some((section) => section.name === sectionName),
+    ).toBe(true);
+
+    // A must not receive B's section objects or B's assignment map.
+    for (const sectionId of bSectionIds) {
+      expect(
+        afterSwitch.a?.sections.some((section) => section.id === sectionId),
+      ).toBeFalsy();
+    }
+    for (const channelId of bChannelIds) {
+      // Shared mock channel UUIDs may exist on both communities; the smoking
+      // gun is B's section id being referenced from A's store.
+      const assignedSection = afterSwitch.a?.assignments?.[channelId];
+      if (assignedSection) {
+        expect(bSectionIds).not.toContain(assignedSection);
+      }
+    }
+    // Issue expected #4: any kind:30078 channel-sections event signed after
+    // the switch to A must not carry B's section layout. (Mock nip44 is
+    // plaintext, so content is inspectable.)
+    expect(afterSwitch.leakedSectionIds).toEqual([]);
+    expect(afterSwitch.leakedAssignmentTargets).toEqual([]);
+    await expect(page.getByText(sectionName)).toHaveCount(0);
+  });
+
   test("community switch cancels a send after its link preview settles", async ({
     page,
   }) => {
