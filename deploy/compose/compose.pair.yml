@@ -1,0 +1,29 @@
+# Device-pairing sidecar (NIP-AB) overlay. Included automatically by run.sh
+# when BUZZ_COMPOSE_TLS=true (opt out with BUZZ_COMPOSE_PAIRING=false).
+# Pairing requires the Caddy overlay: the phone connects over wss:// and the
+# Caddyfile routes /pair to this service.
+services:
+  relay:
+    environment:
+      # Advertised in the relay's NIP-11 document so clients connect here
+      # directly instead of guessing the legacy <relay>/pair path.
+      BUZZ_PAIRING_RELAY_URL: wss://${BUZZ_DOMAIN:?set BUZZ_DOMAIN}/pair
+
+  pair-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    # The image ENTRYPOINT is buzz-relay; entrypoint (not command) is required
+    # to run the sidecar binary instead.
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    # TCP connect probe over /dev/tcp because the runtime image has bash but
+    # no curl/wget/socat (same approach as the relay healthcheck).
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - buzz-net
