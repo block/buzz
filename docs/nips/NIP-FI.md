@@ -286,10 +286,12 @@ A disconnect call causes the relay to:
    pubkey, synchronously.
 
 The deny set is held **in relay memory only** — no durable storage, no schema
-changes.  A relay restart MAY forget active deny entries.  The residual exposure
-after a restart is bounded by the remaining assertion TTL
-(`max(0, min(exp, iat + maximum_assertion_age) - now)`), which is finite by
-the assertion contract.  [FI-TRACE-DENY-SET]
+changes.  A relay restart MAY forget active deny entries.  If the issuer stops
+issuing assertions and re-push completes before any expired-entry reconnection
+attempt, the residual exposure after a restart is bounded by
+`max(0, min(exp, iat + maximum_assertion_age) - now)`.  If the issuer continues
+issuing or re-push does not complete in time, that formula does not apply and
+access may continue beyond it.  [FI-TRACE-DENY-SET]
 
 The relay MUST bound the deny set size.  Implementations MUST evict only
 expired entries; when the set is at capacity and all entries are still active,
@@ -433,16 +435,21 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   // the signed claim is the sole authority and is not repeated in the body.
   assert target_k == request_body_pubkey or DENY(authorization_denied)
 
-  // 7. Atomically reserve jti — final admission step, immediately before side effects.
-  // The reservation is keyed by (iss, jti) and held until the command's
-  // effective expiry: min(exp, iat + maximum_command_age).  This step MUST
-  // be the last mutation before disconnect side effects; performing it before
-  // steps 5 or 6 would burn the signed command identity on failed-authorization
-  // or mismatched-body requests, violating the fail-closed contract.
+  // 7. Atomically reserve jti and insert deny entry — single all-or-nothing
+  // admission mutation, after all pure authorization checks and before any
+  // session close.  Combining both mutations here ensures a capacity failure
+  // leaves neither behind: the jti is not burned, and the caller may safely
+  // retry the same signed command.  Performing the jti reservation alone
+  // (without the deny-entry insertion) would burn the command identity on a
+  // capacity failure, making the new 503 contract unimplementable.
   effective_expiry := min(claims.exp, claims.iat + policy.maximum_command_age)
-  AtomicReserveJti(claims.iss, claims.jti, effective_expiry) or DENY(authorization_denied)
+  AtomicReserveJtiAndDenyEntry(
+      iss=claims.iss, jti=claims.jti, effective_expiry=effective_expiry,
+      target_pubkey=target_k, until=until
+  ) or DENY(authorization_denied)  // replay: jti already reserved
+    or REJECT(503)                 // capacity: deny set full; neither mutation applied
 
-  return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub), until=until)
+  return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub))
 ```
 
 Any failure at any step is fail-closed: no side effects occur and the relay
@@ -462,15 +469,17 @@ Content-Type: application/json
 ```
 
 The relay calls `VerifyCommandJwt` passing the request method, path, and
-body `pubkey` field; any failure denies per the rejection table.  On success,
-the relay inserts a deny entry for `(iss, target_pubkey)` with expiry
-`CommandResult.until`, then closes all live connections whose proven `k` equals
-`CommandResult.target_pubkey`.  The `until` expiry is taken exclusively
-from the signed command JWT claim; the request body carries no `until` field.
-An unknown or unprovable pubkey is not an
-error; the relay responds `200` with `{"disconnected": true}`.  An `until` value
-in the past is not an error; sessions are closed and the deny entry expires
-immediately.
+body `pubkey` field; any failure denies per the rejection table.  `VerifyCommandJwt`
+performs all pure authorization checks and then, as its single atomic admission
+mutation (step 7), simultaneously reserves the `(iss, jti)` replay identity and
+inserts the deny entry — both or neither.  A capacity failure at that step rejects
+`503`; neither the jti nor the deny entry is recorded, and the caller may safely
+retry the same signed command.  On success, the relay closes all live connections
+whose proven `k` equals `CommandResult.target_pubkey`.  The `until` expiry is taken
+exclusively from the signed command JWT claim; the request body carries no `until`
+field.  An unknown or unprovable pubkey is not an error; the relay responds `200`
+with `{"disconnected": true}`.  An `until` value in the past is not an error;
+sessions are closed and the deny entry expires immediately.
 
 ### Response
 
