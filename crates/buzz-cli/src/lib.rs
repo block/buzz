@@ -1316,6 +1316,15 @@ pub enum ProjectsCmd {
         #[arg(long)]
         owner: Option<String>,
     },
+    /// Read the relay-authoritative Project state
+    State {
+        /// Project slug
+        slug: String,
+        /// Project owner pubkey (64-char hex). Defaults to the current identity
+        /// or its NIP-OA owner when configured.
+        #[arg(long)]
+        owner: Option<String>,
+    },
     /// List projects
     List {
         /// Owner pubkey (64-char hex). Defaults to the current identity.
@@ -2087,7 +2096,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
-        Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
+        Cmd::Projects(sub) => commands::projects::dispatch(sub, &client, &cli.format).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
@@ -2404,6 +2413,7 @@ mod tests {
                 "get",
                 "list",
                 "remove-repo",
+                "state",
                 "update"
             ]
         );
@@ -2444,7 +2454,7 @@ mod tests {
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
-            ("projects", 8),
+            ("projects", 9),
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
@@ -2532,6 +2542,15 @@ mod tests {
             "Release team",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn projects_state_command_parses() {
+        let owner = "a".repeat(64);
+        assert!(
+            Cli::try_parse_from(["buzz", "projects", "state", "platform", "--owner", &owner,])
+                .is_ok()
+        );
     }
 
     /// Multiple independent fields must be accepted in the same invocation.

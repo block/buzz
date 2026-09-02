@@ -1100,6 +1100,104 @@ fn count_e_tags(event: &Event) -> usize {
         .count()
 }
 
+/// Parse a Project coordinate from a NIP-09 `a` target.
+///
+/// Other target kinds return `None` and continue through generic deletion.
+/// Once the kind segment names a Project, malformed coordinates are rejected
+/// rather than falling through to the non-atomic generic side effect.
+fn project_deletion_coordinate(event: &Event) -> Result<Option<(Vec<u8>, String)>, IngestError> {
+    let Some(value) = event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.first().is_some_and(|part| part == "a") && parts.len() >= 2)
+            .then(|| parts[1].as_str())
+    }) else {
+        return Ok(None);
+    };
+    let mut parts = value.splitn(3, ':');
+    let Some(kind) = parts.next() else {
+        return Ok(None);
+    };
+    if kind != KIND_PROJECT.to_string() {
+        return Ok(None);
+    }
+    let owner = parts.next().unwrap_or_default();
+    let d_tag = parts.next().unwrap_or_default();
+    let canonical_owner = owner.len() == 64
+        && owner
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+    let owner = canonical_owner
+        .then(|| hex::decode(owner).ok())
+        .flatten()
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or_else(|| {
+            IngestError::Rejected("invalid: malformed Project deletion coordinate".into())
+        })?;
+    if d_tag.is_empty() || d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
+        return Err(IngestError::Rejected(
+            "invalid: malformed Project deletion coordinate".into(),
+        ));
+    }
+    Ok(Some((owner, d_tag.to_string())))
+}
+
+struct ProjectDeletionTarget {
+    owner: Vec<u8>,
+    d_tag: String,
+    expected_identity_event_id: Option<Vec<u8>>,
+}
+
+/// Resolve either NIP-09 target form into the Project coordinate transaction.
+///
+/// An `a` target deletes the coordinate. An `e` target retains regular NIP-09
+/// exact-event semantics: it only affects Project state while that identity is
+/// still the live event for the coordinate.
+async fn project_deletion_target(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<Option<ProjectDeletionTarget>, IngestError> {
+    if let Some((owner, d_tag)) = project_deletion_coordinate(event)? {
+        return Ok(Some(ProjectDeletionTarget {
+            owner,
+            d_tag,
+            expected_identity_event_id: None,
+        }));
+    }
+    let Some(target_hex) = event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.first().is_some_and(|part| part == "e") && parts.len() >= 2)
+            .then(|| parts[1].as_str())
+    }) else {
+        return Ok(None);
+    };
+    let Ok(target_id) = hex::decode(target_hex) else {
+        return Ok(None);
+    };
+    if target_id.len() != 32 {
+        return Ok(None);
+    }
+    let Some(target) = state
+        .db
+        .get_event_by_id_including_deleted(tenant.community(), &target_id)
+        .await
+        .map_err(|error| IngestError::Internal(format!("error: {error}")))?
+    else {
+        return Ok(None);
+    };
+    if event_kind_u32(&target.event) != KIND_PROJECT {
+        return Ok(None);
+    }
+    let d_tag = buzz_db::event::extract_d_tag(&target.event)
+        .filter(|value| !value.is_empty() && value.len() <= buzz_db::event::D_TAG_MAX_LEN)
+        .ok_or_else(|| IngestError::Internal("error: stored Project has invalid d tag".into()))?;
+    Ok(Some(ProjectDeletionTarget {
+        owner: target.event.pubkey.to_bytes().to_vec(),
+        d_tag,
+        expected_identity_event_id: Some(target.event.id.as_bytes().to_vec()),
+    }))
+}
+
 /// Extract the effective author of a stored event (handles workflow-generated and
 /// legacy relay-signed attributed events).
 pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::PublicKey) -> Vec<u8> {
@@ -2708,6 +2806,11 @@ async fn ingest_event_inner(
             )));
         }
     }
+    let project_deletion = if kind_u32 == KIND_DELETION {
+        project_deletion_target(tenant, state, &event).await?
+    } else {
+        None
+    };
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
         validate_edit_ownership(tenant.community(), &event, state)
@@ -3130,7 +3233,51 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let project_lifecycle_coordinate = if kind_u32 == KIND_PROJECT {
+        Some((
+            event.pubkey.to_bytes().to_vec(),
+            buzz_db::event::extract_d_tag(&event).unwrap_or_default(),
+        ))
+    } else {
+        project_deletion
+            .as_ref()
+            .map(|target| (target.owner.clone(), target.d_tag.clone()))
+    };
+    let project_lifecycle = if kind_u32 == KIND_PROJECT {
+        Some(
+            state
+                .db
+                .apply_project_identity_event(tenant.community(), &event)
+                .await
+                .map_err(|error| match error {
+                    buzz_db::DbError::InvalidData(message) => {
+                        IngestError::Rejected(format!("invalid: {message}"))
+                    }
+                    other => IngestError::Internal(format!("error: {other}")),
+                })?,
+        )
+    } else if let Some(target) = project_deletion.as_ref() {
+        Some(
+            state
+                .db
+                .apply_project_deletion_event(
+                    tenant.community(),
+                    &event,
+                    &target.owner,
+                    &target.d_tag,
+                    target.expected_identity_event_id.as_deref(),
+                )
+                .await
+                .map_err(|error| IngestError::Internal(format!("error: {error}")))?,
+        )
+    } else {
+        None
+    };
+    let project_lifecycle_handled = project_lifecycle.is_some();
+    let (stored_event, was_inserted) = if let Some(result) = project_lifecycle {
+        let was_inserted = result.was_inserted();
+        (result.event, was_inserted)
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -3190,6 +3337,16 @@ async fn ingest_event_inner(
     };
 
     if !was_inserted {
+        if let Some((owner, d_tag)) = project_lifecycle_coordinate.as_ref() {
+            if let Err(error) =
+                super::project_state_projection::publish_project_state_for_coordinate(
+                    tenant, state, owner, d_tag,
+                )
+                .await
+            {
+                warn!(%error, "Project State projection repair failed after duplicate lifecycle event");
+            }
+        }
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -3197,7 +3354,7 @@ async fn ingest_event_inner(
         });
     }
 
-    if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+    if !project_lifecycle_handled && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await
@@ -3264,6 +3421,16 @@ async fn ingest_event_inner(
         threaded_visibility.clone(),
     )
     .await;
+
+    if let Some((owner, d_tag)) = project_lifecycle_coordinate.as_ref() {
+        if let Err(error) = super::project_state_projection::publish_project_state_for_coordinate(
+            tenant, state, owner, d_tag,
+        )
+        .await
+        {
+            warn!(%error, "Project State projection failed after lifecycle event");
+        }
+    }
 
     info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 
@@ -5304,6 +5471,40 @@ mod postgres_tests {
         // keyed by (pubkey, kind, d), so one signer can never overwrite another's
         // project. No relay-side permission check exists or is needed.
         assert!(is_parameterized_replaceable(KIND_PROJECT));
+    }
+
+    #[test]
+    fn project_deletion_coordinate_is_strict_and_preserves_colons_in_d_tag() {
+        let owner = "ab".repeat(32);
+        let coordinate = format!("30621:{owner}:team:platform");
+        let event = make_event_with_tags(KIND_DELETION, "", &[&["a", &coordinate]]);
+        assert_eq!(
+            project_deletion_coordinate(&event).unwrap(),
+            Some((hex::decode(owner).unwrap(), "team:platform".into()))
+        );
+    }
+
+    #[test]
+    fn malformed_project_deletion_never_falls_through_to_generic_side_effects() {
+        for coordinate in [
+            "30621:abcd:project".to_string(),
+            format!("30621:{}:", "ab".repeat(32)),
+            format!("30621:{}:project", "AB".repeat(32)),
+        ] {
+            let event = make_event_with_tags(KIND_DELETION, "", &[&["a", &coordinate]]);
+            assert!(matches!(
+                project_deletion_coordinate(&event),
+                Err(IngestError::Rejected(message))
+                    if message.contains("malformed Project deletion coordinate")
+            ));
+        }
+    }
+
+    #[test]
+    fn non_project_deletion_keeps_generic_routing() {
+        let coordinate = format!("30617:{}:repo", "ab".repeat(32));
+        let event = make_event_with_tags(KIND_DELETION, "", &[&["a", &coordinate]]);
+        assert_eq!(project_deletion_coordinate(&event).unwrap(), None);
     }
 
     /// Drive every case in the shared NIP-MP fixture file against

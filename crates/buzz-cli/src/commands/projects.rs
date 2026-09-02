@@ -16,15 +16,17 @@
 //!   - Deletion durability against later arrival (watermark follow-up) is
 //!     not in scope.
 
-use buzz_core::kind::KIND_PROJECT;
+use buzz_core::kind::{KIND_PROJECT, KIND_PROJECT_STATE};
+use buzz_core::project_state::validate_project_state_projection;
 use buzz_sdk::{
     build_delete_addressable, build_project, build_project_with_tags, ProjectMemberCoord,
     PROJECT_D_MAX_LEN,
 };
 use nostr::{Event, EventBuilder, PublicKey, Tag, Timestamp};
+use sha2::{Digest, Sha256};
 
 use crate::agent_management::{build_project_channel, CreateProjectChannelDraft};
-use crate::client::BuzzClient;
+use crate::client::{normalize_events, BuzzClient};
 use crate::commands::parse_write_response;
 use crate::commands::project_channel::{
     repo_id_from_project_slug, require_repo_channel_binding, truncate_repo_name,
@@ -481,6 +483,115 @@ pub async fn cmd_get(client: &BuzzClient, slug: &str, owner: Option<&str>) -> Re
     Ok(())
 }
 
+fn project_owner(client: &BuzzClient, owner: Option<&str>) -> Result<String, CliError> {
+    let owner = owner
+        .map(str::to_owned)
+        .or_else(|| client.auth_tag_owner_hex())
+        .unwrap_or_else(|| client.keys().public_key().to_hex());
+    crate::validate::validate_hex64(&owner)?;
+    PublicKey::parse(&owner)
+        .map(|key| key.to_hex())
+        .map_err(|error| CliError::Usage(format!("invalid Project owner: {error}")))
+}
+
+fn project_coordinate(owner: &str, slug: &str) -> Result<String, CliError> {
+    validate_project_slug(slug)?;
+    Ok(format!("{KIND_PROJECT}:{owner}:{slug}"))
+}
+
+fn parse_project_state(
+    event: Event,
+    relay_pubkey: &str,
+    coordinate: &str,
+) -> Result<Event, CliError> {
+    let relay_pubkey = PublicKey::parse(relay_pubkey)
+        .map_err(|error| CliError::Other(format!("relay self pubkey is invalid: {error}")))?;
+    validate_project_state_projection(&event, &relay_pubkey, coordinate)
+        .map_err(|error| CliError::Other(format!("Project State is invalid: {error}")))?;
+    Ok(event)
+}
+
+async fn fetch_project_state(
+    client: &BuzzClient,
+    slug: &str,
+    owner: Option<&str>,
+) -> Result<Event, CliError> {
+    let owner = project_owner(client, owner)?;
+    let coordinate = project_coordinate(&owner, slug)?;
+    let relay_info: serde_json::Value = serde_json::from_str(&client.get_public("/").await?)
+        .map_err(|error| CliError::Other(format!("relay info is invalid: {error}")))?;
+    let relay_pubkey = relay_info
+        .get("self")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CliError::Other("relay info is missing its self pubkey".into()))?;
+    crate::validate::validate_hex64(relay_pubkey)
+        .map_err(|_| CliError::Other("relay self pubkey is invalid".into()))?;
+    let relay_pubkey = PublicKey::parse(relay_pubkey)
+        .map_err(|error| CliError::Other(format!("relay self pubkey is invalid: {error}")))?
+        .to_hex();
+    let projection_d = hex::encode(Sha256::digest(coordinate.as_bytes()));
+    let events = client
+        .query_paginated(
+            serde_json::json!({
+                "kinds": [KIND_PROJECT_STATE],
+                "authors": [relay_pubkey],
+                "#d": [projection_d],
+                "#a": [coordinate],
+            }),
+            2,
+        )
+        .await?;
+    if events.len() > 1 {
+        return Err(CliError::Other(
+            "relay returned multiple current Project State events".into(),
+        ));
+    }
+    let event = events
+        .into_iter()
+        .next()
+        .ok_or_else(|| CliError::NotFound(format!("Project State for {slug:?} not found")))?;
+    let event: Event = serde_json::from_value(event)
+        .map_err(|error| CliError::Other(format!("Project State event is invalid: {error}")))?;
+    parse_project_state(event, &relay_pubkey, &coordinate)
+}
+
+fn format_project_state(event: &Event, format: &crate::OutputFormat) -> Result<String, CliError> {
+    let normalized = normalize_events(&[serde_json::to_value(event)
+        .map_err(|error| CliError::Other(format!("Project State encoding failed: {error}")))?]);
+    match format {
+        crate::OutputFormat::Json => Ok(normalized),
+        crate::OutputFormat::Compact => {
+            let events: Vec<serde_json::Value> =
+                serde_json::from_str(&normalized).map_err(|error| {
+                    CliError::Other(format!("Project State encoding failed: {error}"))
+                })?;
+            let compact: Vec<serde_json::Value> = events
+                .iter()
+                .map(|event| {
+                    serde_json::json!({
+                        "id": event.get("id").cloned().unwrap_or_default(),
+                        "content": event.get("content").cloned().unwrap_or_default(),
+                        "created_at": event.get("created_at").cloned().unwrap_or_default(),
+                    })
+                })
+                .collect();
+            serde_json::to_string(&compact)
+                .map_err(|error| CliError::Other(format!("Project State encoding failed: {error}")))
+        }
+    }
+}
+
+async fn cmd_state(
+    client: &BuzzClient,
+    slug: &str,
+    owner: Option<&str>,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
+    let event = fetch_project_state(client, slug, owner).await?;
+    println!("{}", format_project_state(&event, format)?);
+    Ok(())
+}
+
 /// `buzz projects list`
 pub async fn cmd_list(
     client: &BuzzClient,
@@ -798,7 +909,11 @@ fn validate_visibility(vis: &str) -> Result<(), CliError> {
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
-pub async fn dispatch(cmd: crate::ProjectsCmd, client: &BuzzClient) -> Result<(), CliError> {
+pub async fn dispatch(
+    cmd: crate::ProjectsCmd,
+    client: &BuzzClient,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
     use crate::ProjectsCmd;
     match cmd {
         ProjectsCmd::Create {
@@ -821,6 +936,9 @@ pub async fn dispatch(cmd: crate::ProjectsCmd, client: &BuzzClient) -> Result<()
             .await
         }
         ProjectsCmd::Get { slug, owner } => cmd_get(client, &slug, owner.as_deref()).await,
+        ProjectsCmd::State { slug, owner } => {
+            cmd_state(client, &slug, owner.as_deref(), format).await
+        }
         ProjectsCmd::List { owner, limit } => cmd_list(client, owner.as_deref(), limit).await,
         ProjectsCmd::AddRepo { slug, repo } => cmd_add_repo(client, &slug, &repo).await,
         ProjectsCmd::AddChannel {
@@ -877,9 +995,103 @@ pub async fn dispatch(cmd: crate::ProjectsCmd, client: &BuzzClient) -> Result<()
 #[cfg(test)]
 mod tests {
     use buzz_sdk::{validate_project_envelope, PROJECT_MEMBER_CAP};
-    use nostr::Tag;
+    use nostr::{Keys, Kind, Tag};
 
     use super::*;
+
+    fn project_state_event(keys: &Keys, coordinate: &str, revision: &str, content: &str) -> Event {
+        let projection_d = hex::encode(Sha256::digest(coordinate.as_bytes()));
+        EventBuilder::new(Kind::Custom(KIND_PROJECT_STATE as u16), content)
+            .tags([
+                Tag::parse(["d", &projection_d]).expect("d tag"),
+                Tag::parse(["a", coordinate]).expect("a tag"),
+                Tag::parse(["rev", revision]).expect("rev tag"),
+                Tag::parse(["e", &"1".repeat(64), "", "identity"]).expect("identity tag"),
+                Tag::parse(["e", &"2".repeat(64), "", "change"]).expect("change tag"),
+            ])
+            .sign_with_keys(keys)
+            .expect("state event")
+    }
+
+    #[test]
+    fn project_state_requires_relay_signature_coordinate_revision_and_strict_body() {
+        let relay = Keys::generate();
+        let owner = "a".repeat(64);
+        let coordinate = format!("30621:{owner}:platform");
+        let content = r#"{"v":1,"deleted":false,"project_tags":[["d","platform"]]}"#;
+        let event = project_state_event(&relay, &coordinate, "7", content);
+        parse_project_state(event.clone(), &relay.public_key().to_hex(), &coordinate)
+            .expect("valid state");
+
+        let impostor = Keys::generate();
+        assert!(parse_project_state(
+            project_state_event(&impostor, &coordinate, "7", content),
+            &relay.public_key().to_hex(),
+            &coordinate,
+        )
+        .is_err());
+        assert!(parse_project_state(
+            event,
+            &relay.public_key().to_hex(),
+            &format!("30621:{owner}:other"),
+        )
+        .is_err());
+        assert!(parse_project_state(
+            project_state_event(&relay, &coordinate, "07", content),
+            &relay.public_key().to_hex(),
+            &coordinate,
+        )
+        .is_err());
+        assert!(parse_project_state(
+            project_state_event(
+                &relay,
+                &coordinate,
+                "7",
+                r#"{"v":1,"deleted":false,"project_tags":[],"future":true}"#,
+            ),
+            &relay.public_key().to_hex(),
+            &coordinate,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn project_state_output_honors_global_format() {
+        let relay = Keys::generate();
+        let coordinate = format!("30621:{}:platform", "a".repeat(64));
+        let content = r#"{"v":1,"deleted":false,"project_tags":[["d","platform"]]}"#;
+        let event = project_state_event(&relay, &coordinate, "7", content);
+
+        let json: Vec<serde_json::Value> = serde_json::from_str(
+            &format_project_state(&event, &crate::OutputFormat::Json).expect("json output"),
+        )
+        .expect("JSON array");
+        assert_eq!(json.len(), 1);
+        let object = json[0].as_object().expect("event object");
+        assert_eq!(object.len(), 7);
+        for field in [
+            "id",
+            "pubkey",
+            "kind",
+            "content",
+            "created_at",
+            "tags",
+            "sig",
+        ] {
+            assert!(object.contains_key(field), "missing {field}");
+        }
+
+        let compact: Vec<serde_json::Value> = serde_json::from_str(
+            &format_project_state(&event, &crate::OutputFormat::Compact).expect("compact output"),
+        )
+        .expect("compact array");
+        assert_eq!(compact.len(), 1);
+        let compact = compact[0].as_object().expect("compact event object");
+        assert_eq!(compact.len(), 3);
+        assert_eq!(compact.get("id"), object.get("id"));
+        assert_eq!(compact.get("content"), object.get("content"));
+        assert_eq!(compact.get("created_at"), object.get("created_at"));
+    }
 
     async fn run_default_repo_create_race(
         winning_channel: &str,

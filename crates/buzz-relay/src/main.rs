@@ -466,6 +466,16 @@ async fn main() -> anyhow::Result<()> {
     );
     let state = Arc::new(app_state);
 
+    // Project lifecycle events commit independently of their relay-signed read model.
+    // Start best-effort repair immediately without making listener availability
+    // depend on it, then retry a bounded batch periodically.
+    let project_state_projection_cancel = CancellationToken::new();
+    let mut project_state_projection_task =
+        buzz_relay::handlers::project_state_projection::spawn_project_state_projection_reconciler(
+            Arc::clone(&state),
+            project_state_projection_cancel.clone(),
+        );
+
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the
     // relay behaves byte-identically to a build without the mesh. When
@@ -1150,6 +1160,18 @@ async fn main() -> anyhow::Result<()> {
 
     serve(router, health_router, Arc::clone(&state)).await?;
     state.community_revalidator_cancel.cancel();
+    project_state_projection_cancel.cancel();
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        &mut project_state_projection_task,
+    )
+    .await
+    .is_err()
+    {
+        project_state_projection_task.abort();
+        let _ = project_state_projection_task.await;
+        tracing::warn!("Project State projection reconciler did not stop within the drain window");
+    }
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
     // exit. Uses a CancellationToken so it works regardless of how many

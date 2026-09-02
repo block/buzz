@@ -2159,6 +2159,15 @@ async fn handle_leave_request(
 // handle_reaction() removed — kind:7 reaction dedup and DB writes are now
 // handled inline in ingest_event() before storage (see ingest.rs step 20a).
 
+fn reject_atomic_project_deletion_side_effect(kind: u32) -> anyhow::Result<()> {
+    if kind == buzz_core::kind::KIND_PROJECT {
+        return Err(anyhow::anyhow!(
+            "Project deletion bypassed the atomic lifecycle handler"
+        ));
+    }
+    Ok(())
+}
+
 /// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
 /// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
 async fn handle_a_tag_deletion(
@@ -2180,6 +2189,9 @@ async fn handle_a_tag_deletion(
     let kind_num: u32 = parts[0]
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
+    // Project deletion must never reach generic post-storage side effects: its
+    // event and relational tombstone commit together in the ingest pipeline.
+    reject_atomic_project_deletion_side_effect(kind_num)?;
     let pubkey_hex = parts[1];
     let d_tag = parts[2];
     let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
@@ -3683,6 +3695,21 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_deletion_side_effect_backstop_rejects_non_atomic_routing() {
+        let error = reject_atomic_project_deletion_side_effect(buzz_core::kind::KIND_PROJECT)
+            .expect_err("Project deletion must stay in the atomic lifecycle path");
+
+        assert_eq!(
+            error.to_string(),
+            "Project deletion bypassed the atomic lifecycle handler"
+        );
+        assert!(reject_atomic_project_deletion_side_effect(
+            buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT
+        )
+        .is_ok());
+    }
 
     #[test]
     fn group_members_snapshot_keeps_members_past_one_thousand() {
