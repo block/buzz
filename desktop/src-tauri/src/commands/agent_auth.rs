@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::managed_agents::{
     default_agent_workdir, known_acp_runtime_exact, normalize_agent_args, resolve_command,
+    AuthStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +76,46 @@ fn discover_acp_auth_methods_blocking(runtime_id: &str) -> Result<AcpAuthMethods
 
     serde_json::from_slice::<AcpAuthMethodsResult>(&output.stdout)
         .map_err(|error| format!("failed to parse auth methods JSON: {error}"))
+}
+
+/// Probe authentication by creating an ACP session and listing its models.
+///
+/// GitHub Copilot CLI has no non-interactive status command. Its ACP
+/// `session/new` path returns models only when the stored account is usable.
+/// Only forced catalog discovery runs this process; cheap discovery reuses the
+/// in-process auth cache until the next forced refresh. The probe sends no
+/// prompt.
+pub(crate) fn probe_acp_runtime_auth(runtime_id: &str) -> AuthStatus {
+    match run_buzz_acp_auth_command(runtime_id, ["models", "--json"]) {
+        Ok(output) if output.status.success() => AuthStatus::LoggedIn,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            match crate::managed_agents::readiness::cli_probe::classify_probe_output(
+                stderr.as_bytes(),
+                false,
+            ) {
+                crate::managed_agents::readiness::cli_probe::ProbeOutcome::LoggedIn => {
+                    AuthStatus::LoggedIn
+                }
+                crate::managed_agents::readiness::cli_probe::ProbeOutcome::LoggedOut => {
+                    AuthStatus::LoggedOut
+                }
+                crate::managed_agents::readiness::cli_probe::ProbeOutcome::ConfigInvalid {
+                    stderr_excerpt,
+                } => AuthStatus::ConfigInvalid {
+                    diagnostic: stderr_excerpt,
+                },
+            }
+        }
+        Err(error) => {
+            tracing::debug!(
+                runtime_id,
+                error = %error,
+                "ACP runtime auth probe could not start"
+            );
+            AuthStatus::Unknown
+        }
+    }
 }
 
 fn connect_acp_runtime_blocking(

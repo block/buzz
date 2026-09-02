@@ -25,7 +25,7 @@ const CATALOG = [
     can_auto_install: false,
     underlying_cli_path: null,
     node_required: false,
-    auth_status: { status: "not_applicable" },
+    auth_status: { status: "logged_in" },
   },
   {
     id: "claude",
@@ -78,6 +78,26 @@ const CATALOG = [
     node_required: false,
     auth_status: { status: "not_applicable" },
     source: "preset",
+  },
+  {
+    id: "copilot",
+    label: "GitHub Copilot CLI",
+    avatar_url: "",
+    availability: "available",
+    command: "copilot",
+    binary_path: "/usr/local/bin/copilot",
+    default_args: ["--acp"],
+    mcp_command: null,
+    install_hint:
+      "Buzz uses GitHub Copilot CLI's built-in ACP server directly.",
+    install_instructions_url:
+      "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli",
+    can_auto_install: false,
+    requires_external_cli: true,
+    underlying_cli_path: "/usr/local/bin/copilot",
+    node_required: false,
+    auth_status: { status: "logged_in" },
+    source: "builtin",
   },
   {
     id: "omp",
@@ -163,7 +183,7 @@ test("after: consolidated harnesses panel + catalog dialog", async ({
   // 3. Ready entry detail (Ready state, no install action). Ready entries
   // sit in the "Installed" accordion, collapsed by default — expand it.
   await page.getByTestId("harness-catalog-section-installed").click();
-  await page.getByTestId("harness-catalog-list-item-claude").click();
+  await page.getByTestId("harness-catalog-list-item-copilot").click();
   await page.waitForTimeout(300);
   await page.getByTestId("harness-catalog-dialog").screenshot({
     path: `${SHOTS}/after-catalog-ready-detail.png`,

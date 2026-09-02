@@ -85,7 +85,7 @@ impl KnownAcpRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::super::known_acp_runtime_exact;
+    use super::super::{auth_status_cache, known_acp_runtime_exact};
 
     #[test]
     fn vendor_metadata_distinguishes_cli_and_adapter_guidance() {
@@ -122,5 +122,19 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+
+        let copilot = known_acp_runtime_exact("copilot").unwrap();
+        assert_eq!(copilot.commands, &["copilot"]);
+        assert_eq!(
+            copilot.avatar_url,
+            "https://avatars.githubusercontent.com/u/9919?s=200&v=4"
+        );
+        assert!(copilot.adapter_install_commands.is_empty());
+        assert!(copilot.cli_install_hint.contains("built-in ACP server"));
+        assert!(copilot
+            .cli_install_instructions_url
+            .contains("docs.github.com"));
+        assert!(copilot.supports_acp_model_switching);
+        assert!(auth_status_cache::runtime_is_probeable(copilot));
     }
 }

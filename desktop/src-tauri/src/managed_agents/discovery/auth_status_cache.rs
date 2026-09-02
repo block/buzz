@@ -39,6 +39,10 @@ pub(super) fn get(runtime_id: &str) -> AuthStatus {
         .unwrap_or(AuthStatus::Unknown)
 }
 
+pub(super) fn runtime_is_probeable(runtime: &super::KnownAcpRuntime) -> bool {
+    runtime.id == "copilot" || runtime.auth_probe_args.is_some()
+}
+
 #[cfg(test)]
 pub(crate) fn len() -> usize {
     cache().lock().map(|g| g.len()).unwrap_or(0)
@@ -62,6 +66,11 @@ pub(super) fn resolve_auth_statuses(partials: &mut [super::PartialEntry], force:
                 if partial.entry.availability != AcpAvailabilityStatus::Available {
                     return None;
                 }
+                if partial.runtime.id == "copilot" {
+                    let handle =
+                        std::thread::spawn(|| crate::commands::probe_acp_runtime_auth("copilot"));
+                    return Some((idx, handle));
+                }
                 let probe_args = partial.runtime.auth_probe_args?;
                 // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
                 let binary_path = super::resolve_command(probe_args[0])?;
@@ -84,7 +93,7 @@ pub(super) fn resolve_auth_statuses(partials: &mut [super::PartialEntry], force:
     } else {
         for partial in partials.iter_mut() {
             if partial.entry.availability != AcpAvailabilityStatus::Available
-                || partial.runtime.auth_probe_args.is_none()
+                || !runtime_is_probeable(partial.runtime)
             {
                 continue;
             }

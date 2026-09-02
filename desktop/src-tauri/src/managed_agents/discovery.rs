@@ -31,6 +31,7 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const COPILOT_CLI_AVATAR_URL: &str = "https://avatars.githubusercontent.com/u/9919?s=200&v=4";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 fn common_binary_paths() -> &'static [PathBuf] {
@@ -185,6 +186,39 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "copilot",
+        label: "GitHub Copilot CLI",
+        commands: &["copilot"],
+        aliases: &["github-copilot", "gh-copilot"],
+        avatar_url: COPILOT_CLI_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("copilot"),
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Install GitHub Copilot CLI, then sign in with your GitHub account. Buzz uses its built-in ACP server directly.",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.copilot/config.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `copilot login` to authenticate."),
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -451,6 +485,7 @@ pub fn try_record_agent_command(
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "copilot" | "github-copilot" | "gh-copilot" => Some(vec!["--acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -458,11 +493,21 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
-    let normalized = agent_args
+    let mut normalized = agent_args
         .into_iter()
         .map(|arg| arg.trim().to_string())
         .filter(|arg| !arg.is_empty())
         .collect::<Vec<_>>();
+
+    if matches!(
+        normalize_command_identity(command).as_str(),
+        "copilot" | "github-copilot" | "gh-copilot"
+    ) {
+        if !normalized.iter().any(|arg| arg == "--acp") {
+            normalized.insert(0, "--acp".to_string());
+        }
+        return normalized;
+    }
 
     let Some(default_args) = default_agent_args(command) else {
         return normalized;
@@ -1242,7 +1287,7 @@ pub fn discover_acp_runtimes_from(
         if partial.entry.auth_status == AuthStatus::Unknown {
             partial.entry.auth_status = if partial.entry.availability
                 == AcpAvailabilityStatus::Available
-                && partial.runtime.auth_probe_args.is_none()
+                && !auth_status_cache::runtime_is_probeable(partial.runtime)
             {
                 AuthStatus::NotApplicable
             } else {
