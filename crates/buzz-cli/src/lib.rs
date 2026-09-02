@@ -1365,6 +1365,24 @@ pub enum ProjectsCmd {
         #[arg(long)]
         template: Option<String>,
     },
+    /// Atomically add or remove related channels at the current Project revision
+    #[command(
+        name = "change-related-channels",
+        group = clap::ArgGroup::new("related-channel-mutation").required(true).multiple(true)
+    )]
+    ChangeRelatedChannels {
+        /// Project slug
+        slug: String,
+        /// Project owner pubkey (64-character lowercase hex)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Related channel UUID to add (repeatable)
+        #[arg(long = "add", group = "related-channel-mutation")]
+        add: Vec<Uuid>,
+        /// Related channel UUID to remove (repeatable)
+        #[arg(long = "remove", group = "related-channel-mutation")]
+        remove: Vec<Uuid>,
+    },
     /// Remove one or more member repositories from a project
     #[command(name = "remove-repo")]
     RemoveRepo {
@@ -2408,6 +2426,7 @@ mod tests {
             vec![
                 "add-channel",
                 "add-repo",
+                "change-related-channels",
                 "create",
                 "delete",
                 "get",
@@ -2454,7 +2473,7 @@ mod tests {
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
-            ("projects", 9),
+            ("projects", 10),
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
@@ -2550,6 +2569,19 @@ mod tests {
         assert!(
             Cli::try_parse_from(["buzz", "projects", "state", "platform", "--owner", &owner,])
                 .is_ok()
+        );
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "projects",
+            "change-related-channels",
+            "platform",
+            "--add",
+            "11111111-1111-4111-8111-111111111111",
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["buzz", "projects", "change-related-channels", "platform",])
+                .is_err()
         );
     }
 

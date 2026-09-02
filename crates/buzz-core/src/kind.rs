@@ -630,6 +630,11 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// authority over any member: push policy reads the repository's own
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
+/// Actor-signed transactional change command for collaborative Project state.
+///
+/// Version 1 changes only add or remove related channels. See
+/// `docs/nips/NIP-PC.md`.
+pub const KIND_PROJECT_CHANGE: u32 = 47010;
 /// Relay-signed addressable effective-state projection for a Project.
 ///
 /// The owner-signed [`KIND_PROJECT`] remains the Project identity and recovery
@@ -769,6 +774,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
     KIND_PROJECT,
+    KIND_PROJECT_CHANGE,
     KIND_PROJECT_STATE,
 ];
 
@@ -829,6 +835,7 @@ pub const fn is_command_kind(kind: u32) -> bool {
             | KIND_WORKFLOW_TRIGGER
             | KIND_APPROVAL_GRANT
             | KIND_APPROVAL_DENY
+            | KIND_PROJECT_CHANGE
     )
 }
 
@@ -871,6 +878,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 303
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT_STATE)); // 30623 ∈ 30000–39999
+const _: () = assert!(is_command_kind(KIND_PROJECT_CHANGE));
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 const _: () = assert!(is_relay_only_kind(KIND_PROJECT_STATE));
@@ -925,6 +933,9 @@ mod tests {
 
     #[test]
     fn project_collaboration_kinds_have_distinct_routing() {
+        assert!(is_command_kind(KIND_PROJECT_CHANGE));
+        assert!(!is_relay_only_kind(KIND_PROJECT_CHANGE));
+        assert!(!is_parameterized_replaceable(KIND_PROJECT_CHANGE));
         assert!(is_parameterized_replaceable(KIND_PROJECT_STATE));
         assert!(is_relay_only_kind(KIND_PROJECT_STATE));
         assert!(!is_command_kind(KIND_PROJECT_STATE));

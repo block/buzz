@@ -19,11 +19,12 @@
 use buzz_core::kind::{KIND_PROJECT, KIND_PROJECT_STATE};
 use buzz_core::project_state::validate_project_state_projection;
 use buzz_sdk::{
-    build_delete_addressable, build_project, build_project_with_tags, ProjectMemberCoord,
-    PROJECT_D_MAX_LEN,
+    build_delete_addressable, build_project, build_project_related_channel_change,
+    build_project_with_tags, ProjectMemberCoord, PROJECT_D_MAX_LEN,
 };
 use nostr::{Event, EventBuilder, PublicKey, Tag, Timestamp};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::agent_management::{build_project_channel, CreateProjectChannelDraft};
 use crate::client::{normalize_events, BuzzClient};
@@ -503,19 +504,19 @@ fn parse_project_state(
     event: Event,
     relay_pubkey: &str,
     coordinate: &str,
-) -> Result<Event, CliError> {
+) -> Result<(Event, u64), CliError> {
     let relay_pubkey = PublicKey::parse(relay_pubkey)
         .map_err(|error| CliError::Other(format!("relay self pubkey is invalid: {error}")))?;
-    validate_project_state_projection(&event, &relay_pubkey, coordinate)
+    let revision = validate_project_state_projection(&event, &relay_pubkey, coordinate)
         .map_err(|error| CliError::Other(format!("Project State is invalid: {error}")))?;
-    Ok(event)
+    Ok((event, revision))
 }
 
 async fn fetch_project_state(
     client: &BuzzClient,
     slug: &str,
     owner: Option<&str>,
-) -> Result<Event, CliError> {
+) -> Result<(Event, u64), CliError> {
     let owner = project_owner(client, owner)?;
     let coordinate = project_coordinate(&owner, slug)?;
     let relay_info: serde_json::Value = serde_json::from_str(&client.get_public("/").await?)
@@ -587,9 +588,54 @@ async fn cmd_state(
     owner: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
-    let event = fetch_project_state(client, slug, owner).await?;
+    let (event, _) = fetch_project_state(client, slug, owner).await?;
     println!("{}", format_project_state(&event, format)?);
     Ok(())
+}
+
+async fn cmd_change_related_channels(
+    client: &BuzzClient,
+    slug: &str,
+    owner: Option<&str>,
+    add: &[Uuid],
+    remove: &[Uuid],
+) -> Result<(), CliError> {
+    let owner = project_owner(client, owner)?;
+    let coordinate = project_coordinate(&owner, slug)?;
+    let (_, revision) = fetch_project_state(client, slug, Some(&owner)).await?;
+    let event = client.sign_event(
+        build_project_related_channel_change(&coordinate, revision, add, remove)
+            .map_err(|error| CliError::Usage(error.to_string()))?,
+    )?;
+    let raw = map_project_change_submit(client.submit_event(event).await)?;
+    let response: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| CliError::Other(format!("relay response is invalid: {error}")))?;
+    if !response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        let message = response
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Project change was rejected");
+        return if message.starts_with("conflict:") {
+            Err(CliError::Conflict(message.into()))
+        } else {
+            Err(CliError::Other(format!("relay rejected event: {message}")))
+        };
+    }
+    println!("{}", crate::client::normalize_write_response(&raw));
+    Ok(())
+}
+
+fn map_project_change_submit(result: Result<String, CliError>) -> Result<String, CliError> {
+    match result {
+        Err(CliError::Relay { status: 400, body }) if body.starts_with("conflict:") => {
+            Err(CliError::Conflict(body))
+        }
+        result => result,
+    }
 }
 
 /// `buzz projects list`
@@ -960,6 +1006,12 @@ pub async fn dispatch(
             )
             .await
         }
+        ProjectsCmd::ChangeRelatedChannels {
+            slug,
+            owner,
+            add,
+            remove,
+        } => cmd_change_related_channels(client, &slug, owner.as_deref(), &add, &remove).await,
         ProjectsCmd::RemoveRepo { slug, repo } => cmd_remove_repo(client, &slug, &repo).await,
         ProjectsCmd::Update {
             slug,
@@ -1758,6 +1810,16 @@ mod tests {
         let keys = nostr::Keys::generate();
         crate::client::BuzzClient::new("http://127.0.0.1:9".into(), keys, None, None)
             .expect("client construction")
+    }
+
+    #[test]
+    fn project_change_conflict_uses_the_cli_conflict_exit_path() {
+        let error = map_project_change_submit(Err(CliError::Relay {
+            status: 400,
+            body: "conflict: Project revision is 9".into(),
+        }))
+        .expect_err("conflict response must remain distinguishable");
+        assert!(matches!(error, CliError::Conflict(_)));
     }
 
     /// Creating without --repo or --channel must fail locally; the default

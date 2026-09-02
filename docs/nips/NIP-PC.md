@@ -1,18 +1,42 @@
 NIP-PC
 ======
 
-Relay-Authoritative Project State
----------------------------------
+Collaborative Project State
+---------------------------
 
 `draft` `optional` `relay`
 
-**Depends on**: NIP-01 (basic event format and addressable events), NIP-09 (event deletion), and [NIP-MP](NIP-MP.md) (owner-signed Project identity)
+**Depends on**: NIP-01 (basic event format and addressable events), NIP-09 (event deletion), NIP-29 (home-channel roles), and [NIP-MP](NIP-MP.md) (owner-signed Project identity)
 
 ## Abstract
 
-This NIP defines a relay-authoritative read model for NIP-MP Projects. The owner-signed `kind:30621` remains the portable Project identity. A relay materializes accepted identity replacements and deletions into relational state, then publishes that state as a relay-signed addressable `kind:30623` Project State event.
+This NIP defines collaborative related-channel membership and a relay-authoritative read model for NIP-MP Projects. The owner-signed `kind:30621` remains the portable Project identity. An authorized actor submits a transactional `kind:47010` change, and the relay publishes effective state as a relay-signed addressable `kind:30623` Project State event.
 
-The projection gives clients one signed event to read, while the relational row remains authoritative if publication or fan-out fails. This version does not widen the owner-only replacement authority of `kind:30621`.
+The projection gives clients one signed event to read, while the relational row remains authoritative if publication or fan-out fails. This version does not widen the owner-only replacement authority of `kind:30621`; collaborators mutate only related-channel membership through `kind:47010`.
+
+## Project Change Command
+
+`kind:47010` is a global command requiring `repos:write` and a global authentication token:
+
+```jsonc
+{
+  "kind": 47010,
+  "pubkey": "<actor-pubkey-hex>",
+  "tags": [
+    ["a", "30621:<owner-pubkey-hex>:<project-d>"],
+    ["expected-revision", "7"]
+  ],
+  "content": "{\"v\":1,\"patch\":{\"related_channels\":{\"add\":[\"11111111-1111-4111-8111-111111111111\"],\"remove\":[]}}}"
+}
+```
+
+The command contains exactly those two tags. `expected-revision` is a canonical integer in `1..=9223372036854775807`. The version-1 JSON shape is strict: unknown fields are rejected; `add` and `remove` are required, non-overlapping sets of canonical UUIDs; both may contain at most 64 entries; and the patch must not be empty. Adding the home channel or an already-related channel, removing an absent channel, or producing more than 64 related channels is invalid.
+
+The Project owner is always authorized. A different signer is authorized only while they are an active `owner` or `admin` of the Project's current, active home channel. Removed members and archived or deleted channels grant no authority. Projects without a home channel therefore remain owner-managed. Delegation and channel `created_by` do not confer Project authority.
+
+The relay serializes each command by Project coordinate, checks the expected revision, and atomically stores the immutable command event, applies the complete patch, and advances the revision. Two distinct commands against one revision cannot both commit.
+
+Replaying the exact accepted event is idempotent, including when its event row has been soft-deleted. This guarantee is bounded by the relay's ordinary event timestamp-drift window: after that window a client re-reads `kind:30623` and signs a fresh command against the current revision.
 
 ## Project Coordinate
 
@@ -28,13 +52,13 @@ The coordinate selects state only inside the host-bound community. A relay MUST 
 
 ## Authoritative State
 
-The authoritative row is keyed by `(community, Project owner, Project d)` and carries a monotonic signed-64-bit revision, deletion state, the current owner identity event id, the last lifecycle event id, and the effective Project document.
+The authoritative row is keyed by `(community, Project owner, Project d)` and carries a monotonic signed-64-bit revision, deletion state, the current owner identity event id, the last change or lifecycle event id, and the effective Project document.
 
-The first accepted owner-signed `kind:30621` materializes revision `1`. Each accepted newer owner identity, deletion, or recreation increments the revision. Revisions never reset, including after deletion and recreation. A duplicate or superseded event does not advance the revision, and overflow rejects the lifecycle mutation.
+The first accepted owner-signed `kind:30621` materializes revision `1`. Each accepted Project change, newer owner identity, deletion, or recreation increments the revision. Revisions never reset, including after deletion and recreation. A duplicate or superseded event does not advance the revision, and overflow rejects the mutation.
 
-An accepted newer owner-signed `kind:30621` is a full recovery snapshot. It replaces the effective NIP-MP fields and extension tags with those carried by that owner event. An accepted owner-authorized NIP-09 deletion advances the row to a deleted tombstone. It does not delete member repositories or referenced channels. A later valid owner-signed `kind:30621` recreates the Project at the next revision.
+An accepted newer owner-signed `kind:30621` replaces owner-controlled NIP-MP fields and extension tags while preserving collaboratively added related channels. Related channels present in the new identity are unioned with relational membership; the new home channel is excluded from that union, and a result over 64 channels is rejected. An accepted owner-authorized NIP-09 deletion advances the row to a deleted tombstone. It does not delete member repositories or referenced channels. A later valid owner-signed `kind:30621` recreates the Project at the next revision.
 
-Identity replacement or deletion and its relational lifecycle update MUST commit atomically.
+Commands, identity replacement, and deletion each commit atomically with their relational update.
 
 ## Project State Event
 
@@ -49,7 +73,7 @@ Identity replacement or deletion and its relational lifecycle update MUST commit
     ["a", "30621:<owner-pubkey-hex>:<project-d>"],
     ["rev", "8"],
     ["e", "<current-kind-30621-event-id>", "", "identity"],
-    ["e", "<last-lifecycle-event-id>", "", "change"]
+    ["e", "<last-change-or-lifecycle-event-id>", "", "change"]
   ],
   "content": "{\"v\":1,\"deleted\":false,\"project_tags\":[[\"d\",\"<project-d>\"]]}"
 }
@@ -57,7 +81,7 @@ Identity replacement or deletion and its relational lifecycle update MUST commit
 
 The address `d` is the lowercase SHA-256 hex digest of the UTF-8 Project coordinate. Hashing keeps the projection key fixed at 64 bytes even when the Project's own `d` approaches its 1024-byte bound. The `a` tag carries the unhashed coordinate. The `rev` tag is a canonical base-10 integer in `1..=9223372036854775807`: digits only, no sign, and no leading zero.
 
-The `identity` event id names the current owner-signed `kind:30621`. The `change` marker names the identity or deletion event that produced the revision. On initial materialization and owner recovery, both references may name the same identity event.
+The `identity` event id names the current owner-signed `kind:30621`. The `change` marker names the command, identity, or deletion event that produced the revision. On initial materialization and owner recovery, both references may name the same identity event.
 
 For a live Project, `project_tags` is the complete effective NIP-MP-compatible tag set. It includes exactly one Project-slug `d` tag. Known set-valued fields are emitted in deterministic lexical order, while preserved unknown extension tags retain their byte values and relative order. Transport-only `auth` tags are not Project metadata.
 

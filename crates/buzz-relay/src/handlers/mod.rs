@@ -26,6 +26,7 @@ pub mod moderation_commands;
 pub mod moderation_notices;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
+mod project_change;
 /// Relay signing and durable repair for NIP-PC Project State projections.
 pub mod project_state_projection;
 #[allow(dead_code, missing_docs)]

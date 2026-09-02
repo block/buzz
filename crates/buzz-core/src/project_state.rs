@@ -113,7 +113,7 @@ struct ProjectionBody {
     project_tags: Vec<Vec<String>>,
 }
 
-/// Validate a relay-authored Project State event.
+/// Validate a relay-authored Project State event and return its CAS revision.
 ///
 /// This checks the event signature and advertised relay author, the requested
 /// Project coordinate, a canonical positive revision, and the strict version-1
@@ -123,7 +123,7 @@ pub fn validate_project_state_projection(
     event: &Event,
     relay_pubkey: &PublicKey,
     coordinate: &str,
-) -> Result<(), ProjectStateError> {
+) -> Result<u64, ProjectStateError> {
     parse_project_coordinate(coordinate)?;
     event
         .verify()
@@ -166,6 +166,9 @@ pub fn validate_project_state_projection(
             "projection revision is not canonical".into(),
         ));
     }
+    let revision = revision
+        .parse::<u64>()
+        .map_err(|error| ProjectStateError(format!("invalid projection revision: {error}")))?;
     let body: ProjectionBody = serde_json::from_str(&event.content)
         .map_err(|error| ProjectStateError(format!("invalid projection JSON: {error}")))?;
     if body.v != 1 {
@@ -173,7 +176,7 @@ pub fn validate_project_state_projection(
             "projection JSON is not supported version 1".into(),
         ));
     }
-    Ok(())
+    Ok(revision)
 }
 
 fn canonical_positive_i64(value: &str) -> bool {
@@ -488,7 +491,7 @@ mod tests {
         let event = signed_projection(&relay, &template);
         assert_eq!(
             validate_project_state_projection(&event, &relay.public_key(), &coordinate),
-            Ok(())
+            Ok(7)
         );
 
         let mut reordered = template.clone();
@@ -499,7 +502,7 @@ mod tests {
                 &relay.public_key(),
                 &coordinate,
             ),
-            Ok(())
+            Ok(7)
         );
 
         let impostor = Keys::generate();

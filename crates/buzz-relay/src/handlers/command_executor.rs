@@ -70,6 +70,7 @@ pub async fn handle_command(
         KIND_WORKFLOW_TRIGGER => handle_workflow_trigger(tenant, state, &event, &auth).await,
         KIND_APPROVAL_GRANT => handle_approval_grant(tenant, state, &event, &auth).await,
         KIND_APPROVAL_DENY => handle_approval_deny(tenant, state, &event, &auth).await,
+        KIND_PROJECT_CHANGE => super::project_change::handle(tenant, state, &event).await,
         _ => Err(IngestError::Rejected(format!(
             "unknown command kind: {kind}"
         ))),
