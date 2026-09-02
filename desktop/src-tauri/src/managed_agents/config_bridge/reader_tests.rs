@@ -59,7 +59,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         max_rounds_env_var: None,
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
-        auth_probe_args: None,
+        auth_probe_args: None, auth_token_env_vars: &[],
     }
 }
 
@@ -652,7 +652,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
-        auth_probe_args: None,
+        auth_probe_args: None, auth_token_env_vars: &[],
     }
 }
 

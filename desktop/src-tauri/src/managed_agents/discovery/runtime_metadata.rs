@@ -64,6 +64,9 @@ pub(crate) struct KnownAcpRuntime {
     /// CLI args for probing authentication status. `args[0]` is the binary name;
     /// the remainder are the subcommand. `None` for runtimes with no login step.
     pub auth_probe_args: Option<&'static [&'static str]>,
+    /// Env vars that, when set non-empty, prove the *spawned* runtime can auth.
+    /// Checked before `auth_probe_args` so a sibling CLI cannot false-negative.
+    pub auth_token_env_vars: &'static [&'static str],
 }
 
 impl KnownAcpRuntime {

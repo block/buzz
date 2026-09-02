@@ -9,6 +9,7 @@ use crate::managed_agents::{
     HarnessSource,
 };
 mod auth_status_cache;
+mod auth_token;
 mod bounded_command;
 mod login_shell;
 mod presets;
@@ -27,7 +28,6 @@ pub(crate) use presets::{
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
-
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
@@ -117,7 +117,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_rounds_env_var: None,
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
-        auth_probe_args: None,
+        auth_probe_args: None, auth_token_env_vars: &[],
     },
     KnownAcpRuntime {
         id: "claude",
@@ -150,7 +150,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_rounds_env_var: None,
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
-        auth_probe_args: Some(&["claude", "auth", "status"]),
+        auth_probe_args: Some(&["claude", "auth", "status"]), auth_token_env_vars: &["CLAUDE_CODE_OAUTH_TOKEN"],
     },
     KnownAcpRuntime {
         id: "codex",
@@ -184,7 +184,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
-        auth_probe_args: Some(&["codex", "login", "status"]),
+        auth_probe_args: Some(&["codex", "login", "status"]), auth_token_env_vars: &[],
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -217,7 +217,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
-        auth_probe_args: None,
+        auth_probe_args: None, auth_token_env_vars: &[],
     },
 ];
 
