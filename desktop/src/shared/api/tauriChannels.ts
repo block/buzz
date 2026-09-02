@@ -87,7 +87,7 @@ export function fromRawChannel(channel: RawChannel): Channel {
     lastMessageAt: channel.last_message_at,
     archivedAt: channel.archived_at,
     participants: channel.participants,
-    participantPubkeys: channel.participant_pubkeys,
+    participantPubkeys: channel.participant_pubkeys ?? [],
     isMember: channel.is_member ?? true,
     ttlSeconds: channel.ttl_seconds,
     ttlDeadline: channel.ttl_deadline,
