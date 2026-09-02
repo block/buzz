@@ -26,8 +26,25 @@ use crate::state::{
     CommunityDisconnectReason,
 };
 
-/// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
-const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default NIP-42 AUTH window. Override with `BUZZ_NIP42_AUTH_TIMEOUT_SECS`
+/// (clamped 5–60). Tailscale / self-host Desktop clients can miss 5s.
+const AUTH_TIMEOUT_DEFAULT_SECS: u64 = 5;
+const AUTH_TIMEOUT_MIN_SECS: u64 = 5;
+const AUTH_TIMEOUT_MAX_SECS: u64 = 60;
+
+fn parse_nip42_auth_timeout_secs(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(AUTH_TIMEOUT_DEFAULT_SECS)
+        .clamp(AUTH_TIMEOUT_MIN_SECS, AUTH_TIMEOUT_MAX_SECS)
+}
+
+fn nip42_auth_timeout() -> Duration {
+    Duration::from_secs(parse_nip42_auth_timeout_secs(
+        std::env::var("BUZZ_NIP42_AUTH_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    ))
+}
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
@@ -249,11 +266,12 @@ async fn handle_active_connection(
         heartbeat_cancel,
     ));
 
+    let auth_timeout = nip42_auth_timeout();
     let auth_timeout_conn = Arc::clone(&conn);
     let auth_timeout_cancel = cancel.clone();
     let auth_timeout_task = tokio::spawn(async move {
         tokio::select! {
-            _ = tokio::time::sleep(AUTH_TIMEOUT) => {
+            _ = tokio::time::sleep(auth_timeout) => {
                 let authenticated = matches!(
                     *auth_timeout_conn.auth_state.read().await,
                     AuthState::Authenticated(_)
@@ -261,7 +279,7 @@ async fn handle_active_connection(
                 if !authenticated {
                     warn!(
                         conn_id = %auth_timeout_conn.conn_id,
-                        timeout_secs = AUTH_TIMEOUT.as_secs(),
+                        timeout_secs = auth_timeout.as_secs(),
                         "NIP-42 auth timeout — closing connection"
                     );
                     metrics::counter!("buzz_ws_auth_timeouts_total").increment(1);
@@ -1134,5 +1152,14 @@ pub(crate) mod tests {
             matches!(state.messages[1], WsMessage::Close(None)),
             "ordinary cancellation retains the bare Close after the reason frame"
         );
+    }
+
+    #[test]
+    fn nip42_auth_timeout_defaults_and_clamps() {
+        assert_eq!(super::parse_nip42_auth_timeout_secs(None), 5);
+        assert_eq!(super::parse_nip42_auth_timeout_secs(Some("15")), 15);
+        assert_eq!(super::parse_nip42_auth_timeout_secs(Some("1")), 5);
+        assert_eq!(super::parse_nip42_auth_timeout_secs(Some("90")), 60);
+        assert_eq!(super::parse_nip42_auth_timeout_secs(Some("nope")), 5);
     }
 }
