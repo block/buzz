@@ -222,6 +222,11 @@ buzz messages thread --channel "$CHANNEL_ID" --event "$REPLY_ID" | jq .
 buzz messages thread \
   --link "buzz://message?channel=$CHANNEL_ID&id=$REPLY_ID&thread=$EVENT_ID" | jq .
 
+# messages wait — returns the next matching reply immediately, or null on timeout
+SINCE=$(date +%s)
+buzz messages wait --channel "$CHANNEL_ID" --event "$EVENT_ID" \
+  --author "<REPLY_AUTHOR_PUBKEY>" --since "$SINCE" --timeout 5 | jq .
+
 # messages search
 buzz messages search --query "Hello" | jq .
 buzz messages search --query "CLI test" --limit 5 | jq .
@@ -571,6 +576,7 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 6 | `messages thread` | ☐ | |
 | 7 | `messages search` | ☐ | With limit |
 | 8 | `messages vote` | ☐ | Up and down |
+| 8a | `messages wait` | ☐ | WebSocket reply and null timeout |
 | 9 | `channels list` | ☐ | With visibility, member |
 | 10 | `channels get` | ☐ | |
 | 11 | `channels create` | ☐ | Stream and forum |

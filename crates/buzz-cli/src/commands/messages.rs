@@ -1,5 +1,6 @@
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
@@ -461,6 +462,68 @@ pub async fn cmd_get_thread(
     });
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
+    Ok(())
+}
+
+fn build_wait_reply_filter(
+    channel_id: &str,
+    root_event_id: &str,
+    author_hex: &str,
+    since: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [9, 40002],
+        "#h": [channel_id],
+        "#e": [root_event_id],
+        "authors": [author_hex],
+        "since": since,
+    })
+}
+
+fn format_wait_event(
+    event: nostr::Event,
+    format: &crate::OutputFormat,
+) -> Result<String, CliError> {
+    let raw = serde_json::to_value(event)
+        .map_err(|error| CliError::Other(format!("failed to serialize event: {error}")))?;
+    let normalized = normalize_events(&[raw]);
+    let formatted = format_events(&normalized, format);
+    let mut events: Vec<serde_json::Value> = serde_json::from_str(&formatted)
+        .map_err(|error| CliError::Other(format!("failed to format event: {error}")))?;
+    let event = events
+        .pop()
+        .ok_or_else(|| CliError::Other("relay returned an empty event".into()))?;
+
+    serde_json::to_string(&event)
+        .map_err(|error| CliError::Other(format!("failed to encode event output: {error}")))
+}
+
+pub async fn cmd_wait_for_reply(
+    client: &BuzzClient,
+    channel_id: &str,
+    root_event_id: &str,
+    author: &str,
+    since: i64,
+    timeout_seconds: u64,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    validate_hex64(root_event_id)?;
+    if since < 0 {
+        return Err(CliError::Usage("--since must be zero or greater".into()));
+    }
+    let author_hex = PublicKey::parse(author)
+        .map_err(|_| CliError::Usage(format!("invalid --author pubkey: {author}")))?
+        .to_hex();
+    let filter = build_wait_reply_filter(channel_id, root_event_id, &author_hex, since);
+
+    match client
+        .wait_for_event(&filter, Duration::from_secs(timeout_seconds))
+        .await?
+    {
+        Some(event) => println!("{}", format_wait_event(event, format)?),
+        None => println!("null"),
+    }
     Ok(())
 }
 
@@ -1031,6 +1094,13 @@ pub async fn dispatch(
             )
             .await
         }
+        MessagesCmd::Wait {
+            channel,
+            event,
+            author,
+            since,
+            timeout,
+        } => cmd_wait_for_reply(client, &channel, &event, &author, since, timeout, format).await,
         MessagesCmd::Search {
             query,
             author,
@@ -1056,16 +1126,16 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        build_wait_reply_filter, channel_id_from_event, cmd_get_thread, event_mention_pubkeys,
+        find_root_from_tags, format_events, format_wait_event, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
-    use nostr::Keys;
+    use nostr::{EventBuilder, Keys, Kind};
     use serde_json::json;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1103,6 +1173,35 @@ mod tests {
                 "created_at": 1_787_754_972_u64,
             })
         );
+    }
+
+    #[test]
+    fn wait_reply_filter_is_scoped_to_thread_author_and_time() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let filter = build_wait_reply_filter(channel, ID_A, PK_VALID_A, 1_777_777_777);
+
+        assert_eq!(filter["kinds"], json!([9, 40002]));
+        assert_eq!(filter["#h"], json!([channel]));
+        assert_eq!(filter["#e"], json!([ID_A]));
+        assert_eq!(filter["authors"], json!([PK_VALID_A]));
+        assert_eq!(filter["since"], json!(1_777_777_777));
+    }
+
+    #[test]
+    fn wait_reply_uses_the_message_compact_contract() {
+        let event = EventBuilder::new(Kind::Custom(9), "live reply")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+
+        let output: serde_json::Value =
+            serde_json::from_str(&format_wait_event(event, &crate::OutputFormat::Compact).unwrap())
+                .unwrap();
+
+        assert_eq!(output["content"], "live reply");
+        assert!(output.get("id").is_some());
+        assert!(output.get("created_at").is_some());
+        assert!(output.get("pubkey").is_none());
+        assert!(output.get("kind").is_none());
     }
 
     #[tokio::test]
