@@ -13,6 +13,7 @@ mod queue;
 mod relay;
 mod scope;
 mod setup_mode;
+mod ssh_auth_sock;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -2963,11 +2964,19 @@ async fn tokio_main() -> Result<()> {
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
-                let has_codex = config.has_generated_codex_config;
+                let generated_codex_config = config.generated_codex_config.clone();
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        generated_codex_config.as_deref(),
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -4951,13 +4960,21 @@ fn recover_panicked_agent(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
-    let has_codex = config.has_generated_codex_config;
+    let generated_codex_config = config.generated_codex_config.clone();
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            generated_codex_config.as_deref(),
+            i,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -5179,7 +5196,7 @@ fn spawn_respawn_task(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
-    let has_codex = config.has_generated_codex_config;
+    let generated_codex_config = config.generated_codex_config.clone();
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -5191,7 +5208,15 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            generated_codex_config.as_deref(),
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -5234,7 +5259,7 @@ struct PoolStartup {
     command: String,
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
-    has_generated_codex_config: bool,
+    generated_codex_config: Option<String>,
     model: Option<String>,
     effort_level: Option<String>,
     observer: Option<observer::ObserverHandle>,
@@ -5247,7 +5272,7 @@ impl PoolStartup {
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
-            has_generated_codex_config: config.has_generated_codex_config,
+            generated_codex_config: config.generated_codex_config.clone(),
             model: config.model.clone(),
             effort_level: config.effort_level.clone(),
             observer,
@@ -5267,7 +5292,7 @@ async fn initialize_agent_pool(
             &startup.command,
             &startup.args,
             &startup.extra_env,
-            startup.has_generated_codex_config,
+            startup.generated_codex_config.as_deref(),
         )
         .await;
         match spawn_result {
@@ -5370,11 +5395,11 @@ async fn spawn_and_init(
     command: &str,
     args: &[String],
     extra_env: &[(String, String)],
-    has_generated_codex_config: bool,
+    generated_codex_config: Option<&str>,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
+    let mut acp = AcpClient::spawn(command, args, extra_env, generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
@@ -5405,7 +5430,7 @@ async fn spawn_and_init(
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
     let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
-    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
+    AcpClient::spawn(&agent.agent_command, &agent_args, &[], None).await
 }
 
 fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -5531,14 +5556,14 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
-    let mut client =
-        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: failed to spawn agent: {e}");
-                std::process::exit(1);
-            }
-        };
+    let mut client = match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], None).await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to spawn agent: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Initialize + session/new under a timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).
@@ -8857,7 +8882,7 @@ mod build_mcp_servers_tests {
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
-            has_generated_codex_config: false,
+            generated_codex_config: None,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
@@ -9082,7 +9107,7 @@ mod error_outcome_emission_tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
-            has_generated_codex_config: false,
+            generated_codex_config: None,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
@@ -9115,7 +9140,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            acp: AcpClient::spawn("cat", &[], &[], None)
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),

@@ -6466,7 +6466,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], None)
             .await
             .expect("spawn lifecycle ACP script");
         let mut agent = OwnedAgent {
@@ -6565,7 +6565,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], None)
             .await
             .expect("spawn channel lifecycle ACP script");
         let channel_id = Uuid::new_v4();
@@ -6744,7 +6744,7 @@ while IFS= read -r line; do
   count=$((count + 1))
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], None)
             .await
             .expect("spawn wire-capture ACP");
         let mut agent = OwnedAgent {
@@ -6898,7 +6898,7 @@ done"#
 printf '%s\n' "$line" > '{quoted_capture}'
 printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], None)
             .await
             .expect("spawn wire-capture ACP");
         let mut agent = OwnedAgent {
@@ -8124,7 +8124,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "bash",
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
-            false,
+            None,
         )
         .await
         .expect("failed to spawn test agent");
@@ -8185,7 +8185,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "bash",
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
-            false,
+            None,
         )
         .await
         .expect("failed to spawn test agent");
@@ -9301,7 +9301,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
   printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], None)
             .await
             .expect("spawn wire-capture ACP");
         let agent = OwnedAgent {
@@ -9733,7 +9733,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], None)
             .await
             .expect("spawn effort ACP script")
     }
@@ -9904,7 +9904,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configO
 IFS= read -r _effort
 exit 0"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], None)
             .await
             .expect("spawn transport-exit ACP script");
         let mut agent = effort_agent(acp, Some("high"));
@@ -9993,7 +9993,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], None)
             .await
             .expect("spawn switch ACP script")
     }
@@ -10437,7 +10437,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], None)
             .await
             .expect("spawn switch ACP script")
     }
