@@ -1,49 +1,50 @@
-import { Plus } from "lucide-react";
+import { Link2, Plus } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
-import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import type { Project } from "@/features/projects/hooks";
 import { useAddProjectChannelMutation } from "@/features/projects/useAddProjectChannel";
+import { useCanManageProjectChannels } from "@/features/projects/useCanManageProjectChannels";
+import { useSetProjectRelatedChannelMutation } from "@/features/projects/useProjectRelatedChannels";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
+import type { Channel } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
+import { LinkProjectChannelDialog } from "./LinkProjectChannelDialog";
 
 export function ProjectChannelManagement({
+  channels,
   identityPubkey,
   project,
+  relatedChannelIds,
 }: {
+  channels: Channel[];
   identityPubkey?: string;
   project: Project;
+  relatedChannelIds: readonly string[];
 }) {
   const { goChannel } = useAppNavigation();
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [linkOpen, setLinkOpen] = React.useState(false);
   const createMutation = useAddProjectChannelMutation();
-  const ownerProfileQuery = useUsersBatchQuery([project.owner], {
-    enabled: Boolean(identityPubkey),
+  const linkMutation = useSetProjectRelatedChannelMutation(project);
+  const { canCreate, canManage, ownerControlAgentPubkey } =
+    useCanManageProjectChannels(project, channels, identityPubkey);
+  const relatedIds = new Set(relatedChannelIds.map((id) => id.toLowerCase()));
+  const normalizedHomeChannelId = project.projectChannelId?.toLowerCase();
+  const eligibleChannels = channels.filter((channel) => {
+    const channelId = channel.id.toLowerCase();
+    return (
+      channel.archivedAt === null &&
+      channel.isMember &&
+      channelId !== normalizedHomeChannelId &&
+      !relatedIds.has(channelId)
+    );
   });
-  const projectOwnerProfile =
-    ownerProfileQuery.data?.profiles[project.owner.toLowerCase()];
-  const projectOwnerIsManaged = useIsManagedAgent(project.owner) === true;
-  const viewerIsProjectOwner =
-    identityPubkey?.toLowerCase() === project.owner.toLowerCase();
-  const viewerOwnsProjectAgent = ownsAuthorAgent(
-    projectOwnerProfile,
-    identityPubkey,
-  );
-  const canEdit =
-    !project.legacy &&
-    (viewerIsProjectOwner || projectOwnerIsManaged || viewerOwnsProjectAgent);
-  const ownerControlAgentPubkey =
-    viewerOwnsProjectAgent && !projectOwnerIsManaged && !viewerIsProjectOwner
-      ? project.owner
-      : undefined;
 
   return (
     <>
-      {canEdit ? (
+      {canCreate ? (
         <CreateChannelDialog
           channelKind={createOpen ? "stream" : null}
           description="Add another stream to this project. A template can keep the same canvas and agents."
@@ -62,15 +63,47 @@ export function ProjectChannelManagement({
           title="Create a project channel"
         />
       ) : null}
+      {canManage ? (
+        <LinkProjectChannelDialog
+          channels={eligibleChannels}
+          isPending={linkMutation.isPending}
+          onLink={async (channelId) => {
+            await linkMutation.mutateAsync({ channelId, linked: true });
+            const linked = channels.find((channel) => channel.id === channelId);
+            toast.success(
+              linked ? `Channel "#${linked.name}" linked.` : "Channel linked.",
+            );
+          }}
+          onOpenChange={setLinkOpen}
+          open={linkOpen}
+          projectName={project.name}
+        />
+      ) : null}
+      {canManage ? (
+        <Button
+          aria-label="Link existing channel"
+          className="h-6 w-6 shrink-0 rounded-md text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+          data-testid="link-project-channel"
+          onClick={() => setLinkOpen(true)}
+          size="icon"
+          title="Link existing channel"
+          type="button"
+          variant="ghost"
+        >
+          <Link2 className="h-4 w-4" />
+        </Button>
+      ) : null}
       <Button
-        aria-label="Add channel"
+        aria-label="Create channel"
         className="h-6 w-6 shrink-0 rounded-md text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         data-testid="add-project-channel"
-        disabled={!canEdit}
+        disabled={!canCreate}
         onClick={() => setCreateOpen(true)}
         size="icon"
         title={
-          canEdit ? "Add channel" : "Only the project owner can add channels"
+          canCreate
+            ? "Create channel"
+            : "Only the project owner can create channels"
         }
         type="button"
         variant="ghost"

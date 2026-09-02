@@ -363,13 +363,16 @@ export function eventToExplicitProject(
     rawVisibility === "unlisted" ? ("unlisted" as const) : ("listed" as const);
   const channel = getTag(event, "buzz-channel");
   const projectChannelId =
-    channel && isValidProjectChannelId(channel) ? channel : null;
+    channel && isValidProjectChannelId(channel) ? channel.toLowerCase() : null;
   const relatedChannelIds = [
     ...new Set(
-      getAllTags(event, PROJECT_RELATED_CHANNEL_TAG).filter(
-        (channelId) =>
-          isValidProjectChannelId(channelId) && channelId !== projectChannelId,
-      ),
+      getAllTags(event, PROJECT_RELATED_CHANNEL_TAG).flatMap((channelId) => {
+        if (!isValidProjectChannelId(channelId)) return [];
+        const normalizedChannelId = channelId.toLowerCase();
+        return normalizedChannelId === projectChannelId
+          ? []
+          : [normalizedChannelId];
+      }),
     ),
   ].slice(0, MAX_PROJECT_RELATED_CHANNELS);
   return {

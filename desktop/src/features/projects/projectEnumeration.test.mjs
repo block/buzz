@@ -6,6 +6,7 @@ import {
   buildProjectHomeFromFetcher,
   buildProjectsFromFetcher,
 } from "./projectEnumeration.ts";
+import { projectRelatedChannelSnapshotD } from "./projectRelatedChannelSnapshot.ts";
 
 function relayEvent(id, createdAt) {
   return {
@@ -63,6 +64,7 @@ test("buildProjectHomeFromFetcher scopes startup lookup to the active channel", 
     ],
   };
   const calls = [];
+  const snapshotCalls = [];
   const fetchExhaustively = async (kinds, extraFilter) => {
     calls.push({ kinds, extraFilter });
     if (kinds.includes(30621)) return [projectEvent];
@@ -73,7 +75,13 @@ test("buildProjectHomeFromFetcher scopes startup lookup to the active channel", 
   const project = await buildProjectHomeFromFetcher(
     fetchExhaustively,
     channelId,
-    { viewerPubkey: owner },
+    {
+      fetchRelatedChannelSnapshots: async (addresses) => {
+        snapshotCalls.push(addresses);
+        return [];
+      },
+      viewerPubkey: owner,
+    },
   );
 
   assert.equal(project?.projectChannelId, channelId);
@@ -89,6 +97,217 @@ test("buildProjectHomeFromFetcher scopes startup lookup to the active channel", 
     kinds: [5],
     extraFilter: { "#a": [`30621:${owner}:relay`, repositoryAddress] },
   });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(snapshotCalls, [[`30621:${owner}:relay`]]);
+});
+
+test("buildProjectsFromFetcher overlays a matching relay snapshot", async () => {
+  const owner = "a".repeat(64);
+  const projectAddress = `30621:${owner}:relay`;
+  const homeId = "11111111-1111-4111-8111-111111111111";
+  const relatedId = "22222222-2222-4222-8222-222222222222";
+  const projectEvent = {
+    id: "1".repeat(64),
+    kind: 30621,
+    pubkey: owner,
+    created_at: 200,
+    content: "",
+    tags: [
+      ["d", "relay"],
+      ["name", "Relay"],
+      ["buzz-channel", homeId],
+    ],
+  };
+  assert.equal(
+    await projectRelatedChannelSnapshotD(projectAddress),
+    "85aa287457e4ad0ba0a5f9fbc9a3c3b643a388d1115b4342c7e4f934d602d995",
+  );
+  const snapshot = {
+    id: "2".repeat(64),
+    kind: 30623,
+    pubkey: owner,
+    created_at: 201,
+    content: "",
+    tags: [
+      ["d", await projectRelatedChannelSnapshotD(projectAddress)],
+      ["a", projectAddress],
+      ["c", relatedId],
+    ],
+  };
+  const snapshotFilters = [];
+  const projects = await buildProjectsFromFetcher(
+    async (kinds) => {
+      if (kinds.includes(30621)) return [projectEvent];
+      return [];
+    },
+    {
+      fetchRelatedChannelSnapshots: async (addresses) => {
+        snapshotFilters.push(addresses);
+        return [snapshot];
+      },
+      viewerPubkey: owner,
+    },
+  );
+
+  assert.deepEqual(projects[0].relatedChannelIds, [relatedId]);
+  assert.deepEqual(snapshotFilters, [[projectAddress]]);
+});
+
+test("buildProjectsFromFetcher fails closed for an invalid snapshot without retrying", async () => {
+  const owner = "a".repeat(64);
+  const projectAddress = `30621:${owner}:relay`;
+  const legacyChannelId = "22222222-2222-4222-8222-222222222222";
+  const projectEvent = {
+    id: "1".repeat(64),
+    kind: 30621,
+    pubkey: owner,
+    created_at: 200,
+    content: "",
+    tags: [
+      ["d", "relay"],
+      ["name", "Relay"],
+      ["buzz-related-channel", legacyChannelId],
+    ],
+  };
+  const invalidSnapshot = {
+    id: "2".repeat(64),
+    kind: 30623,
+    pubkey: owner,
+    created_at: 201,
+    content: "",
+    tags: [
+      ["d", await projectRelatedChannelSnapshotD(projectAddress)],
+      ["a", projectAddress],
+      ["c", "33333333-3333-4333-8333-333333333333", "unexpected"],
+    ],
+  };
+  let snapshotFetches = 0;
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(message);
+  try {
+    const projects = await buildProjectsFromFetcher(
+      async (kinds) => {
+        if (kinds.includes(30621)) return [projectEvent];
+        return [];
+      },
+      {
+        fetchRelatedChannelSnapshots: async () => {
+          snapshotFetches += 1;
+          return [invalidSnapshot];
+        },
+        viewerPubkey: owner,
+      },
+    );
+    assert.deepEqual(projects[0].relatedChannelIds, []);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(snapshotFetches, 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /snapshot.*invalid/i);
+});
+
+test("snapshot reads stay within bounded Project chunks", async () => {
+  const owner = "a".repeat(64);
+  const projectEvents = Array.from({ length: 101 }, (_, index) => ({
+    id: (index + 1).toString(16).padStart(64, "0"),
+    kind: 30621,
+    pubkey: owner,
+    created_at: 200 + index,
+    content: "",
+    tags: [
+      ["d", `project-${index}`],
+      ["name", `Project ${index}`],
+    ],
+  }));
+  const snapshotsByAddress = new Map(
+    await Promise.all(
+      projectEvents.map(async (event) => {
+        const projectAddress = `30621:${owner}:${event.tags[0][1]}`;
+        return [
+          projectAddress,
+          {
+            id: `f${event.id.slice(1)}`,
+            kind: 30623,
+            pubkey: "b".repeat(64),
+            created_at: event.created_at + 1,
+            content: "",
+            tags: [
+              ["d", await projectRelatedChannelSnapshotD(projectAddress)],
+              ["a", projectAddress],
+            ],
+          },
+        ];
+      }),
+    ),
+  );
+  const snapshotCalls = [];
+  await buildProjectsFromFetcher(
+    async (kinds) => (kinds.includes(30621) ? projectEvents : []),
+    {
+      fetchRelatedChannelSnapshots: async (addresses) => {
+        snapshotCalls.push(addresses);
+        return addresses.map((address) => snapshotsByAddress.get(address));
+      },
+      viewerPubkey: owner,
+    },
+  );
+
+  assert.deepEqual(
+    snapshotCalls.map((addresses) => addresses.length),
+    [100, 1],
+  );
+});
+
+test("buildProjectsFromFetcher accepts a canonical bounded snapshot", async () => {
+  const owner = "a".repeat(64);
+  const projectAddress = `30621:${owner}:relay`;
+  const homeId = "11111111-1111-4111-8111-111111111111";
+  const channelIds = Array.from({ length: 64 }, (_, index) => {
+    const suffix = (index + 1).toString(16).padStart(12, "0");
+    return `22222222-2222-4222-8222-${suffix}`;
+  });
+  const projectEvent = {
+    id: "1".repeat(64),
+    kind: 30621,
+    pubkey: owner,
+    created_at: 200,
+    content: "",
+    tags: [
+      ["d", "relay"],
+      ["name", "Relay"],
+      ["buzz-channel", homeId.toUpperCase()],
+      ["buzz-related-channel", homeId],
+    ],
+  };
+  const snapshot = {
+    id: "2".repeat(64),
+    kind: 30623,
+    pubkey: owner,
+    created_at: 201,
+    content: "",
+    tags: [
+      ["d", await projectRelatedChannelSnapshotD(projectAddress)],
+      ["a", projectAddress],
+      ...channelIds.map((channelId) => ["c", channelId]),
+    ],
+  };
+
+  const projects = await buildProjectsFromFetcher(
+    async (kinds) => {
+      if (kinds.includes(30621)) return [projectEvent];
+      return [];
+    },
+    {
+      fetchRelatedChannelSnapshots: async () => [snapshot],
+      viewerPubkey: owner,
+    },
+  );
+
+  assert.equal(projects[0].projectChannelId, homeId);
+  assert.equal(projects[0].relatedChannelIds.length, 64);
+  assert.deepEqual(projects[0].relatedChannelIds, channelIds);
 });
 
 test("enumerateProjectEvents drains a tied boundary second before advancing", async () => {

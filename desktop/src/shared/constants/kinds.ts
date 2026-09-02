@@ -70,6 +70,9 @@ export const KIND_REPO_ANNOUNCEMENT = 30617;
 export const KIND_REPO_STATE = 30618;
 // NIP-MP: project grouping above NIP-34 repositories.
 export const KIND_PROJECT_ANNOUNCEMENT = 30621;
+// Actor-signed, relay-authorized Project related-channel command.
+export const KIND_PROJECT_RELATED_CHANNEL = 47010;
+export const KIND_PROJECT_RELATED_CHANNEL_SNAPSHOT = 30623;
 export const KIND_GIT_PATCH = 1617;
 export const KIND_GIT_PULL_REQUEST = 1618;
 export const KIND_GIT_PR_UPDATE = 1619;

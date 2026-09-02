@@ -258,7 +258,7 @@ test("top-level project lists show metadata and overflow actions", async ({
 
 test("creating a project opens its channel conversation", async ({ page }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page);
+  await installMockBridge(page, { relaySelf: "f".repeat(64) });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
   await openCreateProjectDialog(page);
@@ -344,6 +344,74 @@ test("creating a project opens its channel conversation", async ({ page }) => {
     page.getByTestId("project-home-context-channel"),
   ).not.toContainText("people in this channel");
   const channelSection = page.getByTestId("project-home-context-channel");
+  await channelSection.hover();
+  const snapshotQueriesBeforeLink = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__?.filter((filter) =>
+        filter.kinds?.includes(30623),
+      ).length ?? 0,
+  );
+  await page.getByTestId("link-project-channel").click();
+  await expect(page.getByTestId("link-project-channel-dialog")).toBeVisible();
+  await page
+    .getByTestId("link-project-channel-select")
+    .selectOption({ label: "#engineering" });
+  await page.getByTestId("link-project-channel-submit").click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__?.filter((filter) =>
+            filter.kinds?.includes(30623),
+          ).length ?? 0,
+      ),
+    )
+    .toBeGreaterThan(snapshotQueriesBeforeLink);
+  const snapshotQueriesBeforeUnlink = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__?.filter((filter) =>
+        filter.kinds?.includes(30623),
+      ).length ?? 0,
+  );
+  const linkedEngineering = page.getByTestId(
+    "project-home-context-channel-engineering",
+  );
+  await expect(linkedEngineering).toBeVisible();
+  await linkedEngineering.hover();
+  await linkedEngineering
+    .getByRole("button", { name: "More options for #engineering" })
+    .click();
+  await page
+    .getByTestId("unlink-project-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9")
+    .click();
+  await expect(linkedEngineering).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__?.filter((filter) =>
+            filter.kinds?.includes(30623),
+          ).length ?? 0,
+      ),
+    )
+    .toBeGreaterThan(snapshotQueriesBeforeUnlink);
+  const relatedChannelCommands = await page.evaluate(() =>
+    (window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ ?? [])
+      .filter((event) => event.kind === 47010)
+      .map((event) => event.tags),
+  );
+  expect(relatedChannelCommands).toHaveLength(2);
+  expect(
+    relatedChannelCommands.map((tags) => tags.map((tag) => tag[0])),
+  ).toEqual([
+    ["a", "op", "d"],
+    ["a", "op", "d"],
+  ]);
+  expect(
+    relatedChannelCommands.map(
+      (tags) => tags.find((tag) => tag[0] === "op")?.[1],
+    ),
+  ).toEqual(["add", "remove"]);
   const channelSectionToggle = channelSection.getByRole("button", {
     name: "Channels",
     exact: true,

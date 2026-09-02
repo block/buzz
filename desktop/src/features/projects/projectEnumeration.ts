@@ -3,17 +3,20 @@ import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_DELETION,
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_RELATED_CHANNEL_SNAPSHOT,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 import { absorbStandaloneProjectRepositories } from "./lib/projectCollection";
 import { findProjectHomeByChannelId } from "./lib/projectHomeSelection";
 import { buildProjectReadModels, type Project } from "./projectModels";
+import { parseProjectRelatedChannelSnapshot } from "./projectRelatedChannelSnapshot";
 
 const PROJECT_ENUMERATION_PAGE_SIZE = 500;
 
 // Relays commonly cap filter tag-value lists; chunk `#a` scoping well below
 // any such cap.
 const TOMBSTONE_COORDINATE_CHUNK_SIZE = 100;
+const RELATED_CHANNEL_COORDINATE_CHUNK_SIZE = 100;
 
 /** Additional server-side scoping merged into every enumeration page. */
 export type ProjectEventExtraFilter = {
@@ -31,6 +34,11 @@ type ProjectEventFilter = ProjectEventExtraFilter & {
 export type FetchProjectEventsExhaustively = (
   kinds: number[],
   extraFilter?: ProjectEventExtraFilter,
+) => Promise<RelayEvent[]>;
+
+/** One bounded relay read for the current snapshots of these Projects. */
+export type FetchProjectRelatedChannelSnapshots = (
+  projectAddresses: string[],
 ) => Promise<RelayEvent[]>;
 
 type FetchProjectEventPage = (
@@ -161,6 +169,88 @@ async function fetchScopedDeletionEvents(
   return pages.flat();
 }
 
+async function fetchRelatedChannelSnapshots(
+  fetchSnapshotPage: FetchProjectRelatedChannelSnapshots,
+  projectAddresses: string[],
+): Promise<RelayEvent[]> {
+  const pages: RelayEvent[][] = [];
+  for (
+    let index = 0;
+    index < projectAddresses.length;
+    index += RELATED_CHANNEL_COORDINATE_CHUNK_SIZE
+  ) {
+    pages.push(
+      await fetchSnapshotPage(
+        projectAddresses.slice(
+          index,
+          index + RELATED_CHANNEL_COORDINATE_CHUNK_SIZE,
+        ),
+      ),
+    );
+  }
+  return pages.flat();
+}
+
+function snapshotsByProjectAddress(
+  snapshots: RelayEvent[],
+): Map<string, RelayEvent[]> {
+  const grouped = new Map<string, RelayEvent[]>();
+  for (const snapshot of snapshots) {
+    if (snapshot.kind !== KIND_PROJECT_RELATED_CHANNEL_SNAPSHOT) continue;
+    for (const tag of snapshot.tags) {
+      if (tag[0] !== "a" || !tag[1]) continue;
+      const matches = grouped.get(tag[1]) ?? [];
+      matches.push(snapshot);
+      grouped.set(tag[1], matches);
+    }
+  }
+  return grouped;
+}
+
+async function overlayRelatedChannels(
+  projects: Project[],
+  snapshots: RelayEvent[],
+): Promise<Project[]> {
+  const initialSnapshotsByAddress = snapshotsByProjectAddress(snapshots);
+  const resolved = new Map<string, string[]>();
+  const invalidSnapshots = new Set<string>();
+
+  for (const project of projects) {
+    if (project.legacy) continue;
+    const matches = initialSnapshotsByAddress.get(project.projectAddress) ?? [];
+    if (matches.length === 0) continue;
+    const relatedChannelIds =
+      matches.length === 1
+        ? await parseProjectRelatedChannelSnapshot(
+            matches[0],
+            project.projectAddress,
+          )
+        : null;
+    if (relatedChannelIds) {
+      resolved.set(project.projectAddress, relatedChannelIds);
+    } else {
+      invalidSnapshots.add(project.projectAddress);
+      console.warn(
+        `[projects] Ignoring legacy related-channel tags because the relay snapshot for ${project.projectAddress} is invalid.`,
+      );
+    }
+  }
+
+  return projects.map((project) => {
+    const relatedChannelIds = resolved.get(project.projectAddress);
+    if (!relatedChannelIds && !invalidSnapshots.has(project.projectAddress)) {
+      return project;
+    }
+    const normalizedHomeChannelId = project.projectChannelId?.toLowerCase();
+    return {
+      ...project,
+      relatedChannelIds: (relatedChannelIds ?? []).filter(
+        (channelId) => channelId !== normalizedHomeChannelId,
+      ),
+    };
+  });
+}
+
 /**
  * Core fetch-and-build logic for `fetchProjects`, extracted for testability.
  *
@@ -174,6 +264,7 @@ async function fetchScopedDeletionEvents(
 export async function buildProjectsFromFetcher(
   fetchExhaustively: FetchProjectEventsExhaustively,
   options: {
+    fetchRelatedChannelSnapshots?: FetchProjectRelatedChannelSnapshots;
     relayOrigin?: string | null;
     hiddenAddresses?: ReadonlySet<string>;
     viewerPubkey?: string | null;
@@ -204,7 +295,7 @@ export async function buildProjectsFromFetcher(
     );
   }
 
-  return absorbStandaloneProjectRepositories(
+  const projects = absorbStandaloneProjectRepositories(
     buildProjectReadModels({
       projectEvents,
       repositoryEvents,
@@ -214,6 +305,17 @@ export async function buildProjectsFromFetcher(
       viewerPubkey: options.viewerPubkey,
     }),
   ).sort((a, b) => b.createdAt - a.createdAt);
+  const projectAddresses = projects
+    .filter((project) => !project.legacy)
+    .map((project) => project.projectAddress);
+  if (projectAddresses.length === 0) return projects;
+  if (!options.fetchRelatedChannelSnapshots) return projects;
+
+  const snapshots = await fetchRelatedChannelSnapshots(
+    options.fetchRelatedChannelSnapshots,
+    projectAddresses,
+  );
+  return overlayRelatedChannels(projects, snapshots);
 }
 
 /**
@@ -224,20 +326,20 @@ export async function buildProjectHomeFromFetcher(
   fetchExhaustively: FetchProjectEventsExhaustively,
   channelId: string,
   options: {
+    fetchRelatedChannelSnapshots?: FetchProjectRelatedChannelSnapshots;
     relayOrigin?: string | null;
     hiddenAddresses?: ReadonlySet<string>;
     viewerPubkey?: string | null;
   } = {},
 ): Promise<Project | null> {
-  const projects = await buildProjectsFromFetcher(
-    (kinds, extraFilter) =>
-      fetchExhaustively(
-        kinds,
-        kinds.includes(KIND_DELETION)
-          ? extraFilter
-          : { ...extraFilter, "#buzz-channel": [channelId] },
-      ),
-    options,
-  );
+  const projects = await buildProjectsFromFetcher((kinds, extraFilter) => {
+    const needsChannelScope = !kinds.includes(KIND_DELETION);
+    return fetchExhaustively(
+      kinds,
+      needsChannelScope
+        ? { ...extraFilter, "#buzz-channel": [channelId] }
+        : extraFilter,
+    );
+  }, options);
   return findProjectHomeByChannelId(channelId, projects);
 }

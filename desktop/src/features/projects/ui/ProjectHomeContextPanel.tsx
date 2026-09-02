@@ -6,9 +6,11 @@ import {
   GitCommitHorizontal,
   GitPullRequest,
   Hash,
+  Unlink,
   Users,
 } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
 import { presentContextCount } from "@/features/projects/lib/projectHomeSummary";
 import type { ProjectHomeWorkspaceSheetTab } from "@/features/projects/lib/projectHomeWorkspaceSheet";
@@ -21,11 +23,15 @@ import {
   type Project,
 } from "@/features/projects/hooks";
 import { ProjectChannelIcon } from "@/features/projects/ui/ProjectChannelIcon";
+import { useCanManageProjectChannels } from "@/features/projects/useCanManageProjectChannels";
+import { useSetProjectRelatedChannelMutation } from "@/features/projects/useProjectRelatedChannels";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { Button } from "@/shared/ui/button";
+import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { ProjectChannelManagement } from "./ProjectChannelManagement";
+import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import { ProjectRepositoryManagement } from "./ProjectRepositoryManagement";
 import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
 
@@ -151,29 +157,71 @@ function ContextNavButton({
 
 function ChannelContextRow({
   channel,
+  channelId,
   onClick,
+  onUnlink,
   projectHome,
   testId,
 }: {
-  channel: Channel;
+  channel: Channel | null;
+  channelId: string;
   onClick?: () => void;
+  onUnlink?: () => void;
   projectHome?: boolean;
   testId: string;
 }) {
   const Icon = projectHome ? ProjectChannelIcon : Hash;
-  if (onClick) {
+  const label =
+    channel?.name ?? `Unavailable channel (${channelId.slice(0, 8)}…)`;
+  if (onClick && channel) {
     return (
-      <ContextNavButton icon={<Icon />} onClick={onClick} testId={testId}>
-        {channel.name}
-      </ContextNavButton>
+      <div
+        className="group/channel-row flex min-w-0 items-center"
+        data-testid={testId}
+      >
+        <ContextNavButton icon={<Icon />} onClick={onClick}>
+          {label}
+        </ContextNavButton>
+        {onUnlink ? (
+          <span className="-ml-9 opacity-0 transition-opacity group-hover/channel-row:opacity-100 group-focus-within/channel-row:opacity-100">
+            <ProjectListRowMenu label={`More options for #${label}`}>
+              <DropdownMenuItem
+                data-testid={`unlink-project-channel-${channelId}`}
+                onSelect={onUnlink}
+              >
+                <Unlink />
+                Remove from Project
+              </DropdownMenuItem>
+            </ProjectListRowMenu>
+          </span>
+        ) : null}
+      </div>
     );
   }
   return (
     <div
-      className={`${PROJECT_HOME_SIDEBAR_ROW_CLASS} pointer-events-none flex items-center`}
+      className="group/channel-row flex min-w-0 items-center"
       data-testid={testId}
     >
-      <ContextRowContent icon={<Icon />}>{channel.name}</ContextRowContent>
+      <div
+        className={`${PROJECT_HOME_SIDEBAR_ROW_CLASS} pointer-events-none flex min-w-0 items-center`}
+        title={channel ? undefined : channelId}
+      >
+        <ContextRowContent icon={<Icon />}>{label}</ContextRowContent>
+      </div>
+      {onUnlink ? (
+        <span className="-ml-9 opacity-0 transition-opacity group-hover/channel-row:opacity-100 group-focus-within/channel-row:opacity-100">
+          <ProjectListRowMenu label={`More options for #${label}`}>
+            <DropdownMenuItem
+              data-testid={`unlink-project-channel-${channelId}`}
+              onSelect={onUnlink}
+            >
+              <Unlink />
+              Remove from Project
+            </DropdownMenuItem>
+          </ProjectListRowMenu>
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -203,6 +251,13 @@ export function ProjectHomeContextPanel({
   project: Project;
   projects: Project[];
 }) {
+  const setRelatedChannelMutation =
+    useSetProjectRelatedChannelMutation(project);
+  const { canManage } = useCanManageProjectChannels(
+    project,
+    channels,
+    identityPubkey,
+  );
   const firstRepository = project.repositories[0] ?? null;
   const addRepositoryTitle = firstRepository
     ? undefined
@@ -237,14 +292,16 @@ export function ProjectHomeContextPanel({
   const channelsById = new Map(
     channels.map((candidate) => [candidate.id, candidate]),
   );
-  const boundChannels = listProjectBoundChannels(project).flatMap((binding) => {
-    const boundChannel = channelsById.get(binding.channelId);
-    if (!boundChannel) return [];
-    return [{ ...binding, channel: boundChannel }];
-  });
+  const boundChannels = listProjectBoundChannels(project).map((binding) => ({
+    ...binding,
+    channel: channelsById.get(binding.channelId) ?? null,
+  }));
+  const visibleBoundChannels = boundChannels.filter(
+    (binding) => binding.channel || canManage,
+  );
   const listedChannels =
-    boundChannels.length > 0
-      ? boundChannels
+    visibleBoundChannels.length > 0
+      ? visibleBoundChannels
       : channel
         ? [
             {
@@ -325,8 +382,10 @@ export function ProjectHomeContextPanel({
         collapsible
         headerAction={
           <ProjectChannelManagement
+            channels={channels}
             identityPubkey={identityPubkey}
             project={project}
+            relatedChannelIds={project.relatedChannelIds}
           />
         }
         testId="project-home-context-channel"
@@ -338,17 +397,45 @@ export function ProjectHomeContextPanel({
             return (
               <ChannelContextRow
                 channel={binding.channel}
-                key={`${binding.role}:${binding.channel.id}`}
+                channelId={binding.channelId}
+                key={`${binding.role}:${binding.channelId}`}
                 onClick={
-                  isHome || !onOpenChannel
+                  isHome || !binding.channel || !onOpenChannel
                     ? undefined
-                    : () => onOpenChannel(binding.channel.id)
+                    : () => onOpenChannel(binding.channelId)
+                }
+                onUnlink={
+                  !isHome &&
+                  canManage &&
+                  project.relatedChannelIds.includes(binding.channelId)
+                    ? () => {
+                        void setRelatedChannelMutation
+                          .mutateAsync({
+                            channelId: binding.channelId,
+                            linked: false,
+                          })
+                          .then(() => {
+                            toast.success(
+                              binding.channel
+                                ? `Channel "#${binding.channel.name}" removed.`
+                                : "Channel removed from Project.",
+                            );
+                          })
+                          .catch((error: unknown) => {
+                            toast.error(
+                              error instanceof Error
+                                ? error.message
+                                : "Could not remove the channel.",
+                            );
+                          });
+                      }
+                    : undefined
                 }
                 projectHome={isHome}
                 testId={
                   isHome
                     ? "project-home-context-home-channel"
-                    : `project-home-context-channel-${binding.channel.name}`
+                    : `project-home-context-channel-${binding.channel?.name ?? binding.channelId}`
                 }
               />
             );

@@ -68,6 +68,8 @@ import {
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_PERSONA,
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_RELATED_CHANNEL,
+  KIND_PROJECT_RELATED_CHANNEL_SNAPSHOT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -76,6 +78,7 @@ import {
   KIND_TEAM_CATALOG,
   KIND_USER_STATUS,
 } from "@/shared/constants/kinds";
+import { projectRelatedChannelSnapshotD } from "@/features/projects/projectRelatedChannelSnapshot";
 import type {
   RawAcpAuthMethodsResult,
   RawConnectAcpRuntimeResult,
@@ -6065,6 +6068,8 @@ const MOCK_PROJECT_SUBJECTS = [
 
 const MOCK_PROJECT_KINDS = new Set<number>([
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_RELATED_CHANNEL,
+  KIND_PROJECT_RELATED_CHANNEL_SNAPSHOT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_GIT_PATCH,
@@ -6279,10 +6284,79 @@ function isMockProjectScopedEvent(event: RelayEvent): boolean {
   const hasRepoAddressTag = event.tags.some(
     (tag) => tag[0] === "a" && (tag[1] ?? "").startsWith("30617:"),
   );
+  const hasProjectAddressTag = event.tags.some(
+    (tag) => tag[0] === "a" && (tag[1] ?? "").startsWith("30621:"),
+  );
   return (
-    (event.kind === KIND_REPO_ANNOUNCEMENT || hasRepoAddressTag) &&
+    (event.kind === KIND_REPO_ANNOUNCEMENT ||
+      hasRepoAddressTag ||
+      hasProjectAddressTag) &&
     (event.kind === 1 || MOCK_PROJECT_KINDS.has(event.kind))
   );
+}
+
+function mockProjectCoordinate(event: RelayEvent): string | null {
+  const dtag = event.tags.find((tag) => tag[0] === "d")?.[1];
+  return dtag ? `${event.kind}:${event.pubkey.toLowerCase()}:${dtag}` : null;
+}
+
+async function updateMockProjectRelatedChannelSnapshot(
+  command: RelayEvent,
+): Promise<void> {
+  const projectAddress = command.tags.find((tag) => tag[0] === "a")?.[1];
+  if (!projectAddress) return;
+  const store = getMockProjectEventStore();
+  const project = store
+    .filter(
+      (candidate) =>
+        candidate.kind === KIND_PROJECT_ANNOUNCEMENT &&
+        mockProjectCoordinate(candidate) === projectAddress,
+    )
+    .sort((left, right) => right.created_at - left.created_at)[0];
+  if (!project) return;
+
+  const relatedChannelIds = new Set<string>();
+  for (const tag of project.tags) {
+    if (tag[0] === "buzz-related-channel" && tag[1]) {
+      relatedChannelIds.add(tag[1].toLowerCase());
+    }
+  }
+  for (const event of store) {
+    if (
+      event.kind !== KIND_PROJECT_RELATED_CHANNEL ||
+      !event.tags.some((tag) => tag[0] === "a" && tag[1] === projectAddress)
+    ) {
+      continue;
+    }
+    const channelId = event.tags.find((tag) => tag[0] === "d")?.[1];
+    const operation = event.tags.find((tag) => tag[0] === "op")?.[1];
+    if (!channelId || !operation) continue;
+    const normalizedChannelId = channelId.toLowerCase();
+    if (operation === "add") relatedChannelIds.add(normalizedChannelId);
+    if (operation === "remove") relatedChannelIds.delete(normalizedChannelId);
+  }
+
+  const tags = [
+    ["d", await projectRelatedChannelSnapshotD(projectAddress)],
+    ["a", projectAddress],
+    ...[...relatedChannelIds]
+      .sort((left, right) => left.localeCompare(right))
+      .map((channelId) => ["c", channelId]),
+  ];
+  const relayPubkey = getConfig()?.mock?.relaySelf ?? project.pubkey;
+  const snapshot = createMockEvent(
+    KIND_PROJECT_RELATED_CHANNEL_SNAPSHOT,
+    "",
+    tags,
+    relayPubkey,
+  );
+  const existingIndex = store.findIndex(
+    (event) =>
+      event.kind === KIND_PROJECT_RELATED_CHANNEL_SNAPSHOT &&
+      event.tags.some((tag) => tag[0] === "a" && tag[1] === projectAddress),
+  );
+  if (existingIndex >= 0) store.splice(existingIndex, 1);
+  store.push(snapshot);
 }
 
 function filterMockProjectEvents(filter: MockFilter): RelayEvent[] {
@@ -10654,7 +10728,7 @@ async function sendToRealSocket(args: {
   }
 }
 
-function sendToMockSocket(args: {
+async function sendToMockSocket(args: {
   id: number;
   message?: {
     type: "Text" | "Close";
@@ -11116,6 +11190,9 @@ function sendToMockSocket(args: {
         return;
       }
       getMockProjectEventStore().push(event);
+      if (event.kind === KIND_PROJECT_RELATED_CHANNEL) {
+        await updateMockProjectRelatedChannelSnapshot(event);
+      }
       const acceptedProjectEvents =
         window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ ?? [];
       acceptedProjectEvents.push({
