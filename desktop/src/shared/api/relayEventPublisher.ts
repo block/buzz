@@ -1,6 +1,7 @@
 import type { RelayEvent } from "@/shared/api/types";
 import type { PendingEvent } from "@/shared/api/relayClientShared";
 import { waitForRateLimit } from "@/shared/api/relayRateLimitGate";
+import { isOversizedFrameError } from "@/shared/api/relayFrameLimit";
 import { PUBLISH_TIMEOUT_MS } from "@/shared/api/relayClientTimings";
 
 type PublishSession = {
@@ -51,6 +52,13 @@ export async function publishSessionEvent(
         // Expected socket recovery must not reject the operation being retried.
         session.pendingEvents.delete(event.id);
         const sendError = session.recoverSocketFailure(error, sendErrorMessage);
+        // Oversized frames are permanently rejected — never reconnect-retry.
+        if (isOversizedFrameError(sendError)) {
+          window.clearTimeout(timeout);
+          session.pendingEvents.delete(event.id);
+          reject(sendError);
+          return;
+        }
         session.pendingEvents.set(event.id, pendingEvent);
         let retryGeneration: number | null = null;
 
