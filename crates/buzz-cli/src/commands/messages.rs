@@ -705,10 +705,22 @@ pub async fn cmd_send_message(
             // 45003) do not accept emoji_tags, so resolving early would pay
             // the relay query and immediately discard the result.
             // The fetch is skipped entirely when content has no `:`, keeping
-            // plain sends at zero extra RTTs.
+            // plain sends at zero extra RTTs.  Palette resolution is
+            // decorative enrichment — a fetch or parse failure must not block
+            // delivery of a valid message; on error, degrade to no emoji tags
+            // and log a diagnostic to stderr.
             let emoji_tags = if final_content.contains(':') {
-                crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content)
-                    .await?
+                match crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content)
+                    .await
+                {
+                    Ok(tags) => tags,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: emoji palette fetch failed ({e}); sending without emoji tags"
+                        );
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -1800,6 +1812,80 @@ mod tests {
         assert!(
             emoji_tags.is_empty(),
             "no-colon content must produce no emoji tags, got: {emoji_tags:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_succeeds_when_palette_query_errors() {
+        // Palette enrichment is decorative — a 500 from the `/query` endpoint
+        // must not abort delivery; the message must still be sent with zero
+        // emoji tags, and a diagnostic must be emitted to stderr.
+
+        // Fake relay: `/query` returns 500, `/events` accepts and captures.
+        let captured_event: StdArc<std::sync::Mutex<Option<CapturedEvent>>> =
+            StdArc::new(std::sync::Mutex::new(None));
+        let cap = captured_event.clone();
+        let app = AxumRouter::new()
+            .route(
+                "/query",
+                axum_post(|_headers: AxumHeaderMap, _req: AxumBytes| async move {
+                    (
+                        AxumStatusCode::INTERNAL_SERVER_ERROR,
+                        [("content-type", "application/json")],
+                        r#"{"error":"unavailable"}"#,
+                    )
+                }),
+            )
+            .route(
+                "/events",
+                axum_post(move |_headers: AxumHeaderMap, body: AxumBytes| {
+                    let cap = cap.clone();
+                    async move {
+                        let body_str = String::from_utf8_lossy(&body).to_string();
+                        *cap.lock().unwrap() = Some(CapturedEvent { body: body_str });
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake0001","accepted":true}"#,
+                        )
+                    }
+                }),
+            );
+
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url = format!("http://{addr}");
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        // Must not return Err — a palette failure is a soft warning.
+        cmd_send_message(&client, send_params(":wave: message with emoji candidate"))
+            .await
+            .expect("send must succeed even when palette query returns 500");
+
+        // Submitted event must have zero emoji tags (fallback to empty).
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        let tags: Vec<Vec<String>> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .collect();
+        let emoji_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("emoji"))
+            .collect();
+        assert!(
+            emoji_tags.is_empty(),
+            "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
         );
     }
 }

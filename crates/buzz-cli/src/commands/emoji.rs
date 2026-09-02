@@ -16,10 +16,19 @@ struct EmojiEntry {
 }
 
 /// Parse `["emoji", shortcode, url]` tags from one event into entries.
+///
+/// Mirrors desktop `customEmojiFromTags` (`desktop/src/shared/api/customEmoji.ts`):
+/// - Shortcode is normalized to lowercase (relay stores original case; scanner
+///   always lowercases, so an upper-case stored key would never resolve without
+///   this step).
+/// - Entries with a missing or empty URL are skipped.
+/// - Within one event the first occurrence of a normalized shortcode wins;
+///   later duplicates are dropped.
 fn emoji_tags_of(event: &serde_json::Value) -> Vec<EmojiEntry> {
     let Some(tags) = event.get("tags").and_then(|v| v.as_array()) else {
         return vec![];
     };
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for tag in tags {
         let Some(parts) = tag.as_array() else {
@@ -28,16 +37,26 @@ fn emoji_tags_of(event: &serde_json::Value) -> Vec<EmojiEntry> {
         if parts.first().and_then(|v| v.as_str()) != Some("emoji") {
             continue;
         }
-        let (Some(shortcode), Some(url)) = (
+        let (Some(raw_shortcode), Some(url)) = (
             parts.get(1).and_then(|v| v.as_str()),
             parts.get(2).and_then(|v| v.as_str()),
         ) else {
             continue;
         };
-        out.push(EmojiEntry {
-            shortcode: shortcode.to_string(),
-            url: url.to_string(),
-        });
+        // Skip entries with empty URL — they are malformed and would silently
+        // produce tags without a resolvable image.
+        if url.is_empty() {
+            continue;
+        }
+        // Normalize to lowercase so palette lookups match scan_shortcodes output.
+        let shortcode = raw_shortcode.to_lowercase();
+        // First occurrence within this event wins; later duplicates are dropped.
+        if seen.insert(shortcode.clone()) {
+            out.push(EmojiEntry {
+                shortcode,
+                url: url.to_string(),
+            });
+        }
     }
     out
 }
@@ -476,6 +495,63 @@ mod tests {
     }
 
     // ── scan_shortcodes ──────────────────────────────────────────────────────
+
+    // ── emoji_tags_of — normalization and dedup ──────────────────────────────
+
+    #[test]
+    fn emoji_tags_of_normalizes_uppercase_shortcode_to_lowercase() {
+        // Relay stores the original case; scanner always lowercases; so a
+        // stored "WAVE" must map to "wave" for resolution to work.
+        let event = serde_json::json!({
+            "created_at": 100,
+            "tags": [
+                ["emoji", "WAVE", "https://example.com/wave.png"],
+                ["emoji", "SweatBlob", "https://example.com/sweatblob.gif"],
+            ]
+        });
+        let entries = emoji_tags_of(&event);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].shortcode, "wave");
+        assert_eq!(entries[1].shortcode, "sweatblob");
+    }
+
+    #[test]
+    fn emoji_tags_of_skips_empty_url() {
+        // An entry with a missing or empty URL is malformed; it must be
+        // dropped so palette lookups never return an unusable image URL.
+        let event = serde_json::json!({
+            "created_at": 100,
+            "tags": [
+                ["emoji", "good", "https://example.com/good.png"],
+                ["emoji", "bad", ""],
+                ["emoji", "alsobad"],  // missing url field entirely
+            ]
+        });
+        let entries = emoji_tags_of(&event);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].shortcode, "good");
+    }
+
+    #[test]
+    fn emoji_tags_of_first_occurrence_wins_within_event() {
+        // Within one event the first occurrence of a (normalized) shortcode
+        // wins; a later duplicate tag for the same shortcode is dropped.
+        let event = serde_json::json!({
+            "created_at": 100,
+            "tags": [
+                ["emoji", "wave", "https://example.com/wave-first.png"],
+                ["emoji", "wave", "https://example.com/wave-second.png"],
+                ["emoji", "WAVE", "https://example.com/wave-uppercase.png"],
+            ]
+        });
+        let entries = emoji_tags_of(&event);
+        assert_eq!(
+            entries.len(),
+            1,
+            "all three normalize to 'wave'; only first kept"
+        );
+        assert_eq!(entries[0].url, "https://example.com/wave-first.png");
+    }
 
     #[test]
     fn scan_finds_basic_shortcode() {
