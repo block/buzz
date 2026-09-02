@@ -1202,7 +1202,7 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
 -- coverage. Deployment-global by design: describes replication topology,
 -- never tenant data.
 
-CREATE TABLE replica_heartbeat (
+CREATE TABLE IF NOT EXISTS replica_heartbeat (
     id    smallint PRIMARY KEY CHECK (id = 1),
     epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
     token bigint   NOT NULL DEFAULT 0
@@ -1210,10 +1210,11 @@ CREATE TABLE replica_heartbeat (
     vacuum_truncate = false
 );
 
-INSERT INTO replica_heartbeat (id) VALUES (1);
+INSERT INTO replica_heartbeat (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
-    ('replica_heartbeat', 'single-row replication freshness token; describes deployment topology, never tenant data');
+    ('replica_heartbeat', 'single-row replication freshness token; describes deployment topology, never tenant data')
+ON CONFLICT (table_name) DO NOTHING;
 
 -- ── Whole-community deletion control plane (migration 0029) ─────────────────
 CREATE TABLE community_deletion_requests (

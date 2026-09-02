@@ -38,6 +38,7 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
     with_exclusive_schema_destruction_lock(pool, |mut conn| async move {
         let outcome = async {
             reject_legacy_nip_rs_cardinality_ambiguity(&mut conn).await?;
+            refresh_replica_heartbeat_migration_checksum(&mut conn).await?;
             MIGRATOR.run_to(target, &mut conn).await?;
             Ok(())
         }
@@ -49,6 +50,7 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
+    refresh_replica_heartbeat_migration_checksum(conn).await?;
     MIGRATOR.run(&mut *conn).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
     // `created_at` floor trigger from migration 0021 — correctly shaped — on
@@ -116,6 +118,72 @@ where
 /// enforcement. A populated database still on 0001-0006 must not let 0007
 /// irreversibly purge duplicate-tag history. Fail before sqlx starts its
 /// migration transaction so an operator can inspect and repair those rows.
+
+/// Migration 0026 originally used non-idempotent DDL. After Postgres failover
+/// during the migration transaction, the `replica_heartbeat` table can exist
+/// while `_sqlx_migrations` has no version-26 row — every boot re-runs 0026 and
+/// crash-loops on `CREATE TABLE`. The SQL is now idempotent; refresh the stored
+/// checksum on brownfield relays so sqlx accepts the updated file.
+async fn refresh_replica_heartbeat_migration_checksum(conn: &mut PgConnection) -> Result<()> {
+    const VERSION: i64 = 26;
+    let migrations_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
+            .fetch_one(&mut *conn)
+            .await?;
+    if migrations_table.is_none() {
+        return Ok(());
+    }
+
+    let embedded = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == VERSION)
+        .ok_or_else(|| {
+            crate::DbError::InvalidData(format!("embedded migration {VERSION} missing"))
+        })?;
+
+    let stored: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = $1 AND success")
+            .bind(VERSION)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+    let Some(stored) = stored else {
+        return Ok(());
+    };
+
+    if stored == embedded.checksum.as_ref() {
+        return Ok(());
+    }
+
+    let table_ready: bool = sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM replica_heartbeat WHERE id = 1\
+         ) AND EXISTS (\
+             SELECT 1 FROM _operator_global_tables WHERE table_name = 'replica_heartbeat'\
+         )",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    if !table_ready {
+        return Err(crate::DbError::InvalidData(format!(
+            "migration {VERSION} checksum drifted but replica_heartbeat is incomplete — manual repair required"
+        )));
+    }
+
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = $2 AND success")
+        .bind(embedded.checksum.as_ref())
+        .bind(VERSION)
+        .execute(&mut *conn)
+        .await?;
+
+    tracing::info!(
+        version = VERSION,
+        "refreshed _sqlx_migrations checksum after idempotent replica_heartbeat rewrite"
+    );
+    Ok(())
+}
+
 async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> Result<()> {
     let migrations_table: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
@@ -1064,10 +1132,11 @@ mod postgres_tests {
         // the routing proof.
         assert_eq!(migrations[25].version, 26);
         let heartbeat = migrations[25].sql.as_str();
-        assert!(heartbeat.contains("CREATE TABLE replica_heartbeat"));
+        assert!(heartbeat.contains("CREATE TABLE IF NOT EXISTS replica_heartbeat"));
         assert!(heartbeat.contains("CHECK (id = 1)"));
         assert!(heartbeat.contains("epoch"));
-        assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
+        assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1) ON CONFLICT (id) DO NOTHING"));
+        assert!(heartbeat.contains("ON CONFLICT (table_name) DO NOTHING"));
         assert!(heartbeat.contains("_operator_global_tables"));
 
         // Channel-id lookup index (0027): serves tenant-independent channel lookups.
