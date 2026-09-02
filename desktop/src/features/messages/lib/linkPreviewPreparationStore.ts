@@ -116,11 +116,19 @@ async function buildSnapshot(
   onMetadataReady: (tag: string[]) => void,
 ): Promise<string[] | null> {
   const metadataLoad = loadLinkPreviewMetadata(candidate.href);
-  const cancelMetadata = () => metadataLoad.cancel();
+  let settleAbortedMetadata: (() => void) | null = null;
+  const abortedMetadata = new Promise<null>((resolve) => {
+    settleAbortedMetadata = () => resolve(null);
+  });
+  const cancelMetadata = () => {
+    metadataLoad.cancel();
+    settleAbortedMetadata?.();
+  };
   signal.addEventListener("abort", cancelMetadata, { once: true });
+  if (signal.aborted) cancelMetadata();
   let metadata: LinkPreviewMetadata | null;
   try {
-    metadata = await metadataLoad.promise;
+    metadata = await Promise.race([metadataLoad.promise, abortedMetadata]);
   } catch {
     return null;
   } finally {

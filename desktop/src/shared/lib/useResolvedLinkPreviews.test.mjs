@@ -6,6 +6,7 @@ import { JSDOM } from "jsdom";
 import {
   __linkPreviewMetadataTest,
   fetchBuzzEntityMetadata,
+  loadLinkPreviewMetadata,
   isBuzzEntityPreview,
   resetLinkPreviewMetadataCache,
   resolveLinkPreview,
@@ -31,6 +32,16 @@ function metadata(overrides = {}) {
     imageRetryAfterMs: null,
     ...overrides,
   };
+}
+
+function deferred() {
+  let reject;
+  let resolve;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    reject = rejectPromise;
+    resolve = resolvePromise;
+  });
+  return { promise, reject, resolve };
 }
 
 test("pending external metadata reserves the image treatment", () => {
@@ -972,6 +983,69 @@ test("hook clears a re-entered negative even when the shared cache holds an in-f
     composer.unmount();
     messageList.unmount();
     cleanup();
+    ipcHandlers.clear();
+  }
+});
+
+test("preparation abort releases only its own shared metadata lease", async () => {
+  const { prepareLinkPreview, resetLinkPreviewPreparations } = await import(
+    "../../features/messages/lib/linkPreviewPreparationStore.ts"
+  );
+
+  resetLinkPreviewMetadataCache();
+  resetLinkPreviewPreparations();
+  ipcHandlers.clear();
+
+  const href = "https://example.com/shared-pending";
+  let fetchRequest;
+  const cancelledRequestIds = [];
+  ipcHandlers.set("fetch_link_preview_metadata", (args) => {
+    const request = deferred();
+    fetchRequest = { ...args, ...request };
+    return request.promise;
+  });
+  ipcHandlers.set("cancel_link_preview_metadata", ({ requestId }) => {
+    cancelledRequestIds.push(requestId);
+    return Promise.resolve();
+  });
+  ipcHandlers.set("release_link_preview_metadata", () => Promise.resolve());
+
+  try {
+    const composerLoad = loadLinkPreviewMetadata(href);
+    const preparation = prepareLinkPreview({ ...hookPreview, href });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(fetchRequest, "shared metadata reached the native fetch seam");
+
+    resetLinkPreviewPreparations();
+    assert.equal(await preparation, null);
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    assert.deepEqual(
+      cancelledRequestIds,
+      [],
+      "preparation listener plus finally must not release the composer lease",
+    );
+
+    fetchRequest.resolve(metadata());
+    assert.deepEqual(await composerLoad.promise, metadata());
+
+    const finalHref = `${href}/final`;
+    const finalLoad = loadLinkPreviewMetadata(finalHref);
+    await new Promise((resolve) => setImmediate(resolve));
+    const finalRequest = fetchRequest;
+    const finalRejection = assert.rejects(finalLoad.promise);
+    finalLoad.cancel();
+    finalLoad.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    assert.deepEqual(
+      cancelledRequestIds,
+      [finalRequest.requestId],
+      "one final consumer release permits native abort",
+    );
+    finalRequest.reject(new Error("cancelled by test native seam"));
+    await finalRejection;
+  } finally {
+    resetLinkPreviewPreparations();
+    resetLinkPreviewMetadataCache();
     ipcHandlers.clear();
   }
 });

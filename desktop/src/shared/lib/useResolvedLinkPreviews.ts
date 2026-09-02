@@ -229,6 +229,15 @@ function createMetadataLoader({
     );
   };
 
+  const createRelease = (key: string, pending: PendingMetadataLoad) => {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      release(key, pending);
+    };
+  };
+
   const abortOrphanedLoads = (exceptKey: string) => {
     for (const [key, cached] of cache) {
       if (
@@ -251,7 +260,7 @@ function createMetadataLoader({
       cached.orphanTimer = null;
       cached.consumers += 1;
       return {
-        cancel: () => release(key, cached),
+        cancel: createRelease(key, cached),
         promise: cached.promise,
       };
     }
@@ -304,7 +313,7 @@ function createMetadataLoader({
       });
     cache.set(key, pending);
     return {
-      cancel: () => release(key, pending),
+      cancel: createRelease(key, pending),
       promise: pending.promise,
     };
   };
