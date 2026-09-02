@@ -32,7 +32,7 @@ use std::{
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::{human_floor::HumanFloor, local_barge_in};
+use super::{human_floor::HumanFloor, local_barge_in, speech_profile::AsrBackend};
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
@@ -102,6 +102,24 @@ impl SttPipeline {
         human_floor: HumanFloor,
         output_device: Option<String>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
+        Self::new_with_backend(
+            model_dir,
+            AsrBackend::Parakeet,
+            ptt_active,
+            manual_mic_unmuted,
+            human_floor,
+            output_device,
+        )
+    }
+
+    pub fn new_with_backend(
+        model_dir: PathBuf,
+        backend: AsrBackend,
+        ptt_active: Option<Arc<AtomicBool>>,
+        manual_mic_unmuted: Option<Arc<AtomicBool>>,
+        human_floor: HumanFloor,
+        output_device: Option<String>,
+    ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<SttAudioInput>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -114,6 +132,7 @@ impl SttPipeline {
             .spawn(move || {
                 stt_worker(
                     model_dir,
+                    backend,
                     audio_rx,
                     text_tx,
                     shutdown_worker,
@@ -440,9 +459,105 @@ fn run_stt_receive_loop(
     }
 }
 
+enum ActiveRecognizer {
+    Parakeet(sherpa_onnx::OfflineRecognizer),
+    Kroko(sherpa_onnx::OnlineRecognizer),
+}
+
+impl ActiveRecognizer {
+    fn decode(&self, speech_buf: &[f32]) -> String {
+        match self {
+            Self::Parakeet(recognizer) => decode_speech(recognizer, speech_buf),
+            Self::Kroko(recognizer) => decode_kroko(recognizer, speech_buf),
+        }
+    }
+}
+
+fn create_recognizer(model_dir: &std::path::Path, backend: AsrBackend) -> Option<ActiveRecognizer> {
+    match backend {
+        AsrBackend::Parakeet => create_parakeet(model_dir).map(ActiveRecognizer::Parakeet),
+        AsrBackend::Kroko => create_kroko(model_dir).map(ActiveRecognizer::Kroko),
+    }
+}
+
+fn create_parakeet(model_dir: &std::path::Path) -> Option<sherpa_onnx::OfflineRecognizer> {
+    use sherpa_onnx::OfflineRecognizerConfig;
+    let tokens_path = model_dir.join("tokens.txt");
+    let model_path = model_dir.join("model.int8.onnx");
+    if !tokens_path.exists() || !model_path.exists() {
+        eprintln!(
+            "buzz-desktop: STT model not found at {} — STT disabled",
+            model_dir.display()
+        );
+        return None;
+    }
+    let mut cfg = OfflineRecognizerConfig::default();
+    cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
+    cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
+    cfg.model_config.num_threads = stt_num_threads();
+    cfg.model_config.debug = false;
+    match sherpa_onnx::OfflineRecognizer::create(&cfg) {
+        Some(r) => Some(r),
+        None => {
+            eprintln!("buzz-desktop: OfflineRecognizer::create returned None — STT disabled");
+            None
+        }
+    }
+}
+
+fn create_kroko(model_dir: &std::path::Path) -> Option<sherpa_onnx::OnlineRecognizer> {
+    use sherpa_onnx::OnlineRecognizerConfig;
+    eprintln!("buzz-desktop: Loading Kroko...");
+    let encoder = model_dir.join("encoder.onnx");
+    let decoder = model_dir.join("decoder.onnx");
+    let joiner = model_dir.join("joiner.onnx");
+    let tokens = model_dir.join("tokens.txt");
+    if !encoder.exists() || !decoder.exists() || !joiner.exists() || !tokens.exists() {
+        eprintln!(
+            "buzz-desktop: Kroko model not found at {} — German ASR unavailable",
+            model_dir.display()
+        );
+        return None;
+    }
+    let mut cfg = OnlineRecognizerConfig::default();
+    cfg.model_config.transducer.encoder = Some(encoder.to_string_lossy().into_owned());
+    cfg.model_config.transducer.decoder = Some(decoder.to_string_lossy().into_owned());
+    cfg.model_config.transducer.joiner = Some(joiner.to_string_lossy().into_owned());
+    cfg.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
+    cfg.model_config.num_threads = stt_num_threads();
+    cfg.model_config.debug = false;
+    cfg.decoding_method = Some("greedy_search".into());
+    match sherpa_onnx::OnlineRecognizer::create(&cfg) {
+        Some(r) => {
+            eprintln!("buzz-desktop: Kroko ready");
+            Some(r)
+        }
+        None => {
+            eprintln!(
+                "buzz-desktop: Kroko OnlineRecognizer::create returned None — German ASR unavailable"
+            );
+            None
+        }
+    }
+}
+
+fn decode_kroko(recognizer: &sherpa_onnx::OnlineRecognizer, speech_buf: &[f32]) -> String {
+    let stream = recognizer.create_stream();
+    stream.accept_waveform(16_000, speech_buf);
+    stream.input_finished();
+    while recognizer.is_ready(&stream) {
+        recognizer.decode(&stream);
+    }
+    recognizer
+        .get_result(&stream)
+        .map(|r| r.text.trim().to_string())
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stt_worker(
     model_dir: PathBuf,
+    backend: AsrBackend,
     audio_rx: Receiver<SttAudioInput>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
@@ -452,37 +567,9 @@ fn stt_worker(
     output_device: Option<String>,
 ) {
     // ── 1. Initialise sherpa-onnx recognizer ─────────────────────────────────
-    //
-    // Parakeet TDT-CTC 110M ships as a single `model.int8.onnx` (CTC head) plus
-    // `tokens.txt`. sherpa-onnx infers the model family from which inner config
-    // has a `model` path set, so we don't need to set `model_type` explicitly.
-    // (See rust-api-examples/parakeet_tdt_ctc_simulate_streaming_microphone.rs
-    // in k2-fsa/sherpa-onnx.)
-    use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
-
-    let tokens_path = model_dir.join("tokens.txt");
-    let model_path = model_dir.join("model.int8.onnx");
-    if !tokens_path.exists() || !model_path.exists() {
-        eprintln!(
-            "buzz-desktop: STT model not found at {} — STT disabled",
-            model_dir.display()
-        );
-        drain_until_shutdown(audio_rx, &shutdown);
-        return;
-    }
-
-    let mut cfg = OfflineRecognizerConfig::default();
-    cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
-    cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
-    cfg.model_config.num_threads = stt_num_threads();
-    // Explicit — defaults are not part of the API contract, and noisy debug
-    // logging in release builds would be expensive on every VAD chunk.
-    cfg.model_config.debug = false;
-
-    let recognizer = match OfflineRecognizer::create(&cfg) {
+    let recognizer = match create_recognizer(&model_dir, backend) {
         Some(r) => r,
         None => {
-            eprintln!("buzz-desktop: OfflineRecognizer::create returned None — STT disabled");
             drain_until_shutdown(audio_rx, &shutdown);
             return;
         }
@@ -584,7 +671,7 @@ fn process_stt_input(
     stream: &mut SttStreamState,
     pcm_bytes: &[u8],
     speculative_enabled: bool,
-    recognizer: &sherpa_onnx::OfflineRecognizer,
+    recognizer: &ActiveRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
     ptt_active: Option<&Arc<AtomicBool>>,
     manual_mic_unmuted: Option<&Arc<AtomicBool>>,
@@ -664,7 +751,7 @@ fn process_16k_samples(
     endpoint: &mut VadEndpoint,
     flush_frames: usize,
     speculative: (bool, &mut Option<(String, usize)>),
-    recognizer: &sherpa_onnx::OfflineRecognizer,
+    recognizer: &ActiveRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
     ptt_active: Option<&Arc<AtomicBool>>,
     manual_mic_unmuted: Option<&Arc<AtomicBool>>,
@@ -725,7 +812,7 @@ fn process_16k_samples(
                     && has_enough_voiced_audio(endpoint.voiced_frames)
                 {
                     speculative.replace((
-                        decode_speech(recognizer, &endpoint.speech_buf),
+                        recognizer.decode(&endpoint.speech_buf),
                         endpoint.voiced_frames,
                     ));
                 }
@@ -774,7 +861,7 @@ fn process_16k_samples(
 fn flush_to_stt(
     speech_buf: &[f32],
     voiced_frames: usize,
-    recognizer: &sherpa_onnx::OfflineRecognizer,
+    recognizer: &ActiveRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
 ) {
     if speech_buf.is_empty() {
@@ -786,7 +873,7 @@ fn flush_to_stt(
         );
         return;
     }
-    send_transcript(decode_speech(recognizer, speech_buf), text_tx);
+    send_transcript(recognizer.decode(speech_buf), text_tx);
 }
 
 /// Run the Parakeet decode on a speech buffer and return the trimmed text.
