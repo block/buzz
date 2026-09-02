@@ -2,23 +2,30 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  isManagedAgentActive,
+  isManagedAgentLive,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
-import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type {
+  Channel,
+  ManagedAgent,
+  PresenceStatus,
+  RelayAgent,
+} from "@/shared/api/types";
 
 export function useAgentLifecycleActions({
   channels,
   managedAgent,
+  presenceStatus,
   relayAgents,
   startManagedAgent,
   stopManagedAgent,
 }: {
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
+  presenceStatus?: PresenceStatus | null;
   relayAgents: readonly RelayAgent[] | undefined;
   startManagedAgent: (pubkey: string) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
@@ -27,7 +34,7 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
-      if (isManagedAgentActive(managedAgent)) {
+      if (isManagedAgentLive(managedAgent, presenceStatus)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
           channels: channels ?? [],
@@ -58,6 +65,7 @@ export function useAgentLifecycleActions({
   }, [
     channels,
     managedAgent,
+    presenceStatus,
     relayAgents,
     startManagedAgent,
     stopManagedAgent,
