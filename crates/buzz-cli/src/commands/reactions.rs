@@ -53,10 +53,15 @@ pub async fn cmd_remove_reaction(
         .as_array()
         .ok_or_else(|| CliError::Other("reactions query response is not an array".into()))?;
 
-    // Find the reaction event matching the emoji
+    // Find the reaction event matching the emoji. Custom-emoji reactions store
+    // `:shortcode:` while callers often pass the bare shortcode.
     let reaction_event_id = arr
         .iter()
-        .find(|ev| ev.get("content").and_then(|c| c.as_str()) == Some(emoji))
+        .find(|ev| {
+            ev.get("content")
+                .and_then(|c| c.as_str())
+                .is_some_and(|content| buzz_sdk::reaction_content_matches(content, emoji))
+        })
         .and_then(|ev| ev.get("id").and_then(|id| id.as_str()))
         .ok_or_else(|| {
             CliError::Other(format!(
