@@ -680,16 +680,6 @@ pub async fn cmd_send_message(
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
-    // Scan final_content for `:shortcode:` patterns and attach NIP-30 emoji
-    // tags for any that resolve in the workspace palette.  The palette fetch
-    // (one relay query) is skipped entirely when the content has no candidate
-    // `:…:` sequence, keeping normal message sends at zero extra RTTs.
-    let emoji_tags = if final_content.contains(':') {
-        crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content).await?
-    } else {
-        Vec::new()
-    };
-
     let builder = match p.kind {
         Some(45001) => {
             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
@@ -708,16 +698,31 @@ pub async fn cmd_send_message(
             )
             .map_err(|e| CliError::Other(format!("build_forum_comment failed: {e}")))?
         }
-        None | Some(9) => buzz_sdk::build_message(
-            channel_uuid,
-            &final_content,
-            thread_ref.as_ref(),
-            &mention_refs,
-            p.broadcast,
-            &media_tags,
-            &emoji_tags,
-        )
-        .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?,
+        None | Some(9) => {
+            // Scan final_content for `:shortcode:` patterns and attach NIP-30
+            // emoji tags for any that resolve in the workspace palette.
+            // Palette resolution is scoped to kind 9: forum builders (45001,
+            // 45003) do not accept emoji_tags, so resolving early would pay
+            // the relay query and immediately discard the result.
+            // The fetch is skipped entirely when content has no `:`, keeping
+            // plain sends at zero extra RTTs.
+            let emoji_tags = if final_content.contains(':') {
+                crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content)
+                    .await?
+            } else {
+                Vec::new()
+            };
+            buzz_sdk::build_message(
+                channel_uuid,
+                &final_content,
+                thread_ref.as_ref(),
+                &mention_refs,
+                p.broadcast,
+                &media_tags,
+                &emoji_tags,
+            )
+            .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?
+        }
         Some(k) => {
             return Err(CliError::Usage(format!(
                 "--kind {k} is not supported (use 9, 45001, or 45003)"
