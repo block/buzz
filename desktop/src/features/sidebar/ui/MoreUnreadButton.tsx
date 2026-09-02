@@ -1,6 +1,6 @@
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
+import { UnreadPill } from "@/shared/ui/UnreadPill";
 
 export type UnreadDmPreview = {
   accessibleLabel: string;
@@ -35,7 +35,7 @@ export function unreadDmAccessibleLabel({
   targetChannelId?: string;
 }) {
   const direction = position === "top" ? "above" : "below";
-  const resolvedLabel = label ?? unreadCountLabel(count);
+  const resolvedLabel = label ?? `${count} unread`;
   const targetPreview = dmPreviews.find(
     ({ channelId }) => channelId === targetChannelId,
   );
@@ -78,7 +78,7 @@ export function MoreUnreadButton({
   const positionClassName =
     position === "top" ? topChromeInset.top : bottomClassName;
   const visibleDmPreviews = visibleUnreadDmPreviews(dmPreviews);
-  const resolvedLabel = label ?? unreadCountLabel(count);
+  const resolvedLabel = label ?? `${count} unread`;
   const accessibleLabel = unreadDmAccessibleLabel({
     count,
     dmPreviews,
