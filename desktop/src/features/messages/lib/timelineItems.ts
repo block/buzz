@@ -119,8 +119,8 @@ function membershipChangesCanGroup(
  * its contents, but not its identity or the virtual list's existing key suffix.
  *
  * Compatible membership activities stay together while they are contiguous.
- * Self-joins and additions from one administrator each form their own summary;
- * a self-join immediately followed by that member leaving becomes a single
+ * Arrival cohorts are actor-neutral even when self-joins and additions mix, but
+ * a self-join immediately followed by that member leaving remains a single
  * lifecycle summary. Each adjacent event must fall within the one-hour activity
  * window, so uninterrupted activity can extend beyond an hour overall.
  */

@@ -103,7 +103,7 @@ function buildGroupedMembershipPayload(
     actor: string;
     target: string;
   }>;
-  const targets = membershipArrivals.map(({ target }) => target);
+  const targets = [...new Set(membershipArrivals.map(({ target }) => target))];
   return {
     arrivals: membershipArrivals,
     type: "members_arrived",
@@ -462,6 +462,28 @@ function describeGroupedArrivals({
   const isSameAdderGroup = arrivals.every(
     ({ actor, target }) => actor === sharedActor && actor !== target,
   );
+  const additionalTargets = payload.targets.slice(1);
+
+  if (payload.targets.length === 1) {
+    if (isSameAdderGroup) {
+      return {
+        title: membershipTitle,
+        action: (
+          <>
+            {addedByActionPrefix(isTargetCurrentUser)}{" "}
+            <ProfileName pubkey={sharedActor} underlineOnHover>
+              {resolveInlineDisplayLabel(sharedActor, currentPubkey, profiles)}
+            </ProfileName>
+          </>
+        ),
+      };
+    }
+
+    return {
+      title: membershipTitle,
+      action: "joined the channel",
+    };
+  }
 
   if (isSameAdderGroup) {
     return {
@@ -478,7 +500,7 @@ function describeGroupedArrivals({
             currentPubkey={currentPubkey}
             personaLookup={personaLookup}
             profiles={profiles}
-            targets={payload.targets.slice(1)}
+            targets={additionalTargets}
           />
         </>
       ),
@@ -495,7 +517,7 @@ function describeGroupedArrivals({
           currentPubkey={currentPubkey}
           personaLookup={personaLookup}
           profiles={profiles}
-          targets={payload.targets.slice(1)}
+          targets={additionalTargets}
         />
       </>
     ),
