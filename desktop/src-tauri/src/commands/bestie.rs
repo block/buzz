@@ -6,10 +6,10 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         bestie_assignment::{
-            assignment_matches, clear_assignment, get_assignment, replace_assignment,
-            BestieAssignment,
+            assignment_matches, clear_assignment, get_assignment,
+            recover_pending_assignment_cleanup, replace_assignment, BestieAssignment,
         },
-        load_managed_agents,
+        load_managed_agents, managed_agents_base_dir,
         retention::{active_retention_scope, open_retention_db, RetentionScope},
         BackendKind, ManagedAgentRecord,
     },
@@ -64,6 +64,14 @@ fn require_eligible_local_agent(
     Ok(())
 }
 
+fn recover_pending_cleanup(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
+    recover_pending_assignment_cleanup(&managed_agents_base_dir(app)?, |pending_pubkey| {
+        records
+            .iter()
+            .any(|record| record.pubkey.eq_ignore_ascii_case(pending_pubkey))
+    })
+}
+
 #[tauri::command]
 pub fn get_bestie_assignment(
     expected_relay_url: Option<String>,
@@ -77,6 +85,12 @@ pub fn get_bestie_assignment(
         expected_relay_url.as_deref(),
         expected_signer_pubkey.as_deref(),
     )?;
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let records = load_managed_agents(&app)?;
+    recover_pending_cleanup(&app, &records)?;
     let conn = open_retention_db(&scope.db_path)?;
     get_assignment(&conn)
 }
@@ -101,6 +115,7 @@ pub fn assign_bestie(
         .lock()
         .map_err(|error| error.to_string())?;
     let records = load_managed_agents(&app)?;
+    recover_pending_cleanup(&app, &records)?;
     require_eligible_local_agent(&records, &pubkey)?;
     let mut conn = open_retention_db(&scope.db_path)?;
     replace_assignment(&mut conn, &pubkey)
@@ -119,6 +134,12 @@ pub fn clear_bestie_assignment(
         expected_relay_url.as_deref(),
         expected_signer_pubkey.as_deref(),
     )?;
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let records = load_managed_agents(&app)?;
+    recover_pending_cleanup(&app, &records)?;
     let mut conn = open_retention_db(&scope.db_path)?;
     clear_assignment(&mut conn)
 }
@@ -142,10 +163,11 @@ pub async fn resolve_bestie_conversation(
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        let records = load_managed_agents(&app)?;
+        recover_pending_cleanup(&app, &records)?;
         let conn = open_retention_db(&scope.db_path)?;
         let assignment = get_assignment(&conn)?
             .ok_or_else(|| "choose an agent before opening Bestie".to_string())?;
-        let records = load_managed_agents(&app)?;
         require_eligible_local_agent(&records, &assignment.agent_pubkey)?;
         assignment
     };

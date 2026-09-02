@@ -6,11 +6,12 @@ use super::managed_agent_definition::validate_create_definition;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        bestie_assignment::with_agent_assignments_cleared, build_managed_agent_summary,
-        current_instance_id, ensure_persona_is_active, find_managed_agent_mut, load_managed_agents,
-        load_personas, load_teams, managed_agent_avatar_url, managed_agents_base_dir,
-        normalize_agent_args, resolve_provider_binary, save_managed_agents,
-        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        bestie_assignment::{recover_pending_assignment_cleanup, with_agent_assignments_cleared},
+        build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
+        find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
+        managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
+        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+        stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
         ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
@@ -1088,6 +1089,20 @@ pub async fn stop_managed_agent(
 
 // Async so the blocking body (disk reads/writes, process termination, keyring
 // delete, nest regeneration) runs off the main UI thread via spawn_blocking.
+fn run_managed_agent_deletion<T>(
+    base_dir: &std::path::Path,
+    pubkey: &str,
+    records: &mut Vec<ManagedAgentRecord>,
+    delete: impl FnOnce(&mut Vec<ManagedAgentRecord>) -> Result<T, String>,
+) -> Result<T, String> {
+    recover_pending_assignment_cleanup(base_dir, |pending_pubkey| {
+        records
+            .iter()
+            .any(|record| record.pubkey.eq_ignore_ascii_case(pending_pubkey))
+    })?;
+    with_agent_assignments_cleared(base_dir, pubkey, || delete(records))
+}
+
 #[tauri::command]
 pub async fn delete_managed_agent(
     pubkey: String,
@@ -1103,6 +1118,12 @@ pub async fn delete_managed_agent(
                 .lock()
                 .map_err(|error| error.to_string())?;
             let mut records = load_managed_agents(&app)?;
+            let base_dir = managed_agents_base_dir(&app)?;
+            recover_pending_assignment_cleanup(&base_dir, |pending_pubkey| {
+                records
+                    .iter()
+                    .any(|record| record.pubkey.eq_ignore_ascii_case(pending_pubkey))
+            })?;
             let mut runtimes = state
                 .managed_agent_processes
                 .lock()
@@ -1139,13 +1160,13 @@ pub async fn delete_managed_agent(
             if !records.iter().any(|record| record.pubkey == pubkey) {
                 return Err(format!("agent {pubkey} not found"));
             }
-            with_agent_assignments_cleared(&managed_agents_base_dir(&app)?, &pubkey, || {
+            run_managed_agent_deletion(&base_dir, &pubkey, &mut records, |records| {
                 if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
                     stop_managed_agent_process(&app, record, &mut runtimes)?;
                 }
                 state.clear_agent_session_caches(&pubkey);
                 records.retain(|record| record.pubkey != pubkey);
-                save_managed_agents(&app, &records)
+                save_managed_agents(&app, records)
             })?;
             crate::managed_agents::delete_agent_key(&pubkey);
             // Tombstone after confirmed removal (inside lock; every published

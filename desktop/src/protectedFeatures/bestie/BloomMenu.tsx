@@ -11,6 +11,7 @@ import * as React from "react";
 
 type Direction = "top" | "bottom";
 type Anchor = "start" | "center" | "end";
+type OpenChangeOptions = { restoreFocus?: boolean };
 
 type BloomContextValue = {
   anchor: Anchor;
@@ -18,7 +19,7 @@ type BloomContextValue = {
   contentRef: React.RefObject<HTMLDivElement | null>;
   direction: Direction;
   open: boolean;
-  setOpen: (open: boolean) => void;
+  setOpen: (open: boolean, options?: OpenChangeOptions) => void;
   triggerRef: React.RefObject<HTMLButtonElement | null>;
 };
 
@@ -47,6 +48,19 @@ function Root({
   const contentRef = React.useRef<HTMLDivElement>(null);
   const contentId = React.useId();
   const previousOpenRef = React.useRef(open);
+  const restoreFocusOnCloseRef = React.useRef(true);
+
+  const setOpen = React.useCallback(
+    (nextOpen: boolean, options?: OpenChangeOptions) => {
+      if (nextOpen) {
+        restoreFocusOnCloseRef.current = true;
+      } else {
+        restoreFocusOnCloseRef.current = options?.restoreFocus ?? true;
+      }
+      onOpenChange(nextOpen);
+    },
+    [onOpenChange],
+  );
 
   React.useEffect(() => {
     const wasOpen = previousOpenRef.current;
@@ -62,7 +76,7 @@ function Root({
           "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href]",
         );
         (preferredTarget ?? fallbackTarget ?? contentRef.current)?.focus();
-      } else {
+      } else if (restoreFocusOnCloseRef.current) {
         triggerRef.current?.focus();
       }
     });
@@ -77,13 +91,13 @@ function Root({
         !triggerRef.current?.contains(target) &&
         !contentRef.current?.contains(target)
       ) {
-        onOpenChange(false);
+        setOpen(false, { restoreFocus: false });
       }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      onOpenChange(false);
+      setOpen(false);
     };
     document.addEventListener("mousedown", closeOnOutsidePress);
     document.addEventListener("touchstart", closeOnOutsidePress);
@@ -93,7 +107,7 @@ function Root({
       document.removeEventListener("touchstart", closeOnOutsidePress);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [onOpenChange, open]);
+  }, [open, setOpen]);
 
   const value = React.useMemo(
     () => ({
@@ -102,10 +116,10 @@ function Root({
       contentRef,
       direction,
       open,
-      setOpen: onOpenChange,
+      setOpen,
       triggerRef,
     }),
-    [anchor, contentId, direction, onOpenChange, open],
+    [anchor, contentId, direction, open, setOpen],
   );
 
   return (

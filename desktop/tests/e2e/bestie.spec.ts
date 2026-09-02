@@ -203,6 +203,13 @@ test("assigns from an agent profile, reopens, drags, and offers the message acti
   await expect(keyboardOpenedPopover).toHaveCount(0);
   await expect(floatingTrigger).toBeFocused();
 
+  await floatingTrigger.click();
+  await expect(page.getByTestId("bestie-composer")).toBeFocused();
+  const outsideDestination = page.getByTestId("open-agents-view");
+  await outsideDestination.click();
+  await expect(page.getByTestId("bestie-bloom-content")).toHaveCount(0);
+  await expect(outsideDestination).toBeFocused();
+
   await sidebarBestie.click();
   await expect(page).toHaveURL(/\/channels\//);
   await expect(

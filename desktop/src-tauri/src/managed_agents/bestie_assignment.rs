@@ -7,9 +7,11 @@ use std::{
 };
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use super::retention::open_retention_db;
+use super::{retention::open_retention_db, storage::atomic_write_json_restricted};
+
+const RECOVERY_JOURNAL_FILE: &str = "bestie-assignment-recovery.json";
 
 /// The one durable Bestie designation in a retention scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -88,10 +90,81 @@ pub fn assignment_matches(conn: &Connection, agent_pubkey: &str) -> Result<bool,
     Ok(get_assignment(conn)?.is_some_and(|assignment| assignment.agent_pubkey == normalized))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ScopedAssignment {
     agent_pubkey: String,
     path: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct AssignmentRecoveryJournal {
+    assignments: Vec<ScopedAssignment>,
+    version: u8,
+}
+
+fn recovery_journal_path(base_dir: &Path) -> PathBuf {
+    base_dir.join(RECOVERY_JOURNAL_FILE)
+}
+
+fn persist_recovery_journal(
+    base_dir: &Path,
+    assignments: &[ScopedAssignment],
+) -> Result<(), String> {
+    fs::create_dir_all(base_dir)
+        .map_err(|error| format!("failed to create agents directory: {error}"))?;
+    let payload = serde_json::to_vec_pretty(&AssignmentRecoveryJournal {
+        assignments: assignments.to_vec(),
+        version: 1,
+    })
+    .map_err(|error| format!("failed to serialize Bestie recovery journal: {error}"))?;
+    atomic_write_json_restricted(&recovery_journal_path(base_dir), &payload)
+        .map_err(|error| format!("failed to persist Bestie recovery journal: {error}"))
+}
+
+fn load_recovery_journal(base_dir: &Path) -> Result<Option<AssignmentRecoveryJournal>, String> {
+    let path = recovery_journal_path(base_dir);
+    let payload = match fs::read(&path) {
+        Ok(payload) => payload,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to read Bestie recovery journal {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    let journal: AssignmentRecoveryJournal = serde_json::from_slice(&payload)
+        .map_err(|error| format!("failed to parse Bestie recovery journal: {error}"))?;
+    if journal.version != 1 {
+        return Err(format!(
+            "unsupported Bestie recovery journal version {}",
+            journal.version
+        ));
+    }
+    let retention_dir = base_dir.join("retention");
+    for assignment in &journal.assignments {
+        if assignment.path.parent() != Some(retention_dir.as_path())
+            || assignment.path.extension().and_then(|value| value.to_str()) != Some("db")
+        {
+            return Err(format!(
+                "Bestie recovery journal contains an invalid retention path: {}",
+                assignment.path.display()
+            ));
+        }
+    }
+    Ok(Some(journal))
+}
+
+fn remove_recovery_journal(base_dir: &Path) -> Result<(), String> {
+    let path = recovery_journal_path(base_dir);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to remove Bestie recovery journal {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 fn retention_db_paths(base_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -161,13 +234,14 @@ fn clear_scope(assignment: &ScopedAssignment) -> Result<(), String> {
     Ok(())
 }
 
-fn restore_assignments(assignments: &[ScopedAssignment]) -> Result<(), String> {
+fn apply_to_assignments(
+    assignments: &[ScopedAssignment],
+    mut apply: impl FnMut(&ScopedAssignment) -> Result<(), String>,
+    action: &str,
+) -> Result<(), String> {
     let mut failures = Vec::new();
     for assignment in assignments {
-        let result = open_retention_db(&assignment.path).and_then(|mut conn| {
-            replace_assignment(&mut conn, &assignment.agent_pubkey).map(|_| ())
-        });
-        if let Err(error) = result {
+        if let Err(error) = apply(assignment) {
             failures.push(format!("{}: {error}", assignment.path.display()));
         }
     }
@@ -175,27 +249,110 @@ fn restore_assignments(assignments: &[ScopedAssignment]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "failed to restore bestie assignments: {}",
+            "failed to {action} Bestie assignments: {}",
             failures.join("; ")
         ))
     }
+}
+
+fn restore_scope(assignment: &ScopedAssignment) -> Result<(), String> {
+    let mut conn = open_retention_db(&assignment.path)?;
+    replace_assignment(&mut conn, &assignment.agent_pubkey).map(|_| ())
+}
+
+fn restore_assignments(assignments: &[ScopedAssignment]) -> Result<(), String> {
+    apply_to_assignments(assignments, restore_scope, "restore")
+}
+
+/// Replay a durable interrupted-deletion journal.
+///
+/// The managed-agent store is authoritative for which side of the operation
+/// committed: a retained agent gets its exact pre-delete assignments restored;
+/// an absent agent gets those exact assignments cleared. The journal is only
+/// removed after every scope reaches that deterministic state.
+pub fn recover_pending_assignment_cleanup(
+    base_dir: &Path,
+    agent_exists: impl FnOnce(&str) -> bool,
+) -> Result<(), String> {
+    let Some(journal) = load_recovery_journal(base_dir)? else {
+        return Ok(());
+    };
+    let agent_pubkey = journal
+        .assignments
+        .first()
+        .map(|assignment| assignment.agent_pubkey.as_str())
+        .ok_or_else(|| "Bestie recovery journal contains no assignments".to_string())?;
+    if journal
+        .assignments
+        .iter()
+        .any(|assignment| assignment.agent_pubkey != agent_pubkey)
+    {
+        return Err("Bestie recovery journal contains multiple agents".to_string());
+    }
+    if agent_exists(agent_pubkey) {
+        restore_assignments(&journal.assignments)?;
+    } else {
+        apply_to_assignments(&journal.assignments, clear_scope, "clear")?;
+    }
+    remove_recovery_journal(base_dir)
 }
 
 fn clear_scoped_assignments(
     assignments: &[ScopedAssignment],
     mut clear: impl FnMut(&ScopedAssignment) -> Result<(), String>,
 ) -> Result<(), String> {
-    let mut cleared = Vec::new();
     for assignment in assignments {
-        if let Err(error) = clear(assignment) {
-            return match restore_assignments(&cleared) {
-                Ok(()) => Err(error),
-                Err(restore_error) => Err(format!("{error}; {restore_error}")),
-            };
-        }
-        cleared.push(assignment.clone());
+        clear(assignment)?;
     }
     Ok(())
+}
+
+fn rollback_with_journal<T>(
+    base_dir: &Path,
+    assignments: &[ScopedAssignment],
+    error: String,
+    restore: impl FnMut(&ScopedAssignment) -> Result<(), String>,
+) -> Result<T, String> {
+    match apply_to_assignments(assignments, restore, "restore") {
+        Ok(()) => match remove_recovery_journal(base_dir) {
+            Ok(()) => Err(error),
+            Err(journal_error) => Err(format!("{error}; {journal_error}")),
+        },
+        Err(restore_error) => Err(format!("{error}; {restore_error}")),
+    }
+}
+
+fn with_agent_assignments_cleared_using<T>(
+    base_dir: &Path,
+    agent_pubkey: &str,
+    delete: impl FnOnce() -> Result<T, String>,
+    clear: impl FnMut(&ScopedAssignment) -> Result<(), String>,
+    mut restore: impl FnMut(&ScopedAssignment) -> Result<(), String>,
+) -> Result<T, String> {
+    if load_recovery_journal(base_dir)?.is_some() {
+        return Err("pending Bestie assignment recovery must complete before deletion".to_string());
+    }
+    let assignments = matching_assignments(base_dir, agent_pubkey)?;
+    if assignments.is_empty() {
+        return delete();
+    }
+    persist_recovery_journal(base_dir, &assignments)?;
+    if let Err(error) = clear_scoped_assignments(&assignments, clear) {
+        return rollback_with_journal(base_dir, &assignments, error, &mut restore);
+    }
+    match delete() {
+        Ok(value) => {
+            if let Err(error) = remove_recovery_journal(base_dir) {
+                // The authoritative managed-agent write already committed.
+                // Keep the journal as a durable cleanup record; launch/command
+                // recovery will observe the absent agent, re-clear these exact
+                // scopes idempotently, and retry journal removal.
+                eprintln!("buzz-desktop: {error}; cleanup will retry");
+            }
+            Ok(value)
+        }
+        Err(error) => rollback_with_journal(base_dir, &assignments, error, &mut restore),
+    }
 }
 
 /// Run agent deletion work with this agent's community-scoped Bestie
@@ -210,15 +367,7 @@ pub fn with_agent_assignments_cleared<T>(
     agent_pubkey: &str,
     delete: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let assignments = matching_assignments(base_dir, agent_pubkey)?;
-    clear_scoped_assignments(&assignments, clear_scope)?;
-    match delete() {
-        Ok(value) => Ok(value),
-        Err(error) => match restore_assignments(&assignments) {
-            Ok(()) => Err(error),
-            Err(restore_error) => Err(format!("{error}; {restore_error}")),
-        },
-    }
+    with_agent_assignments_cleared_using(base_dir, agent_pubkey, delete, clear_scope, restore_scope)
 }
 
 #[cfg(test)]
@@ -329,15 +478,19 @@ mod tests {
             .unwrap_or_else(|error| panic!("assign {name}: {error}"));
         }
 
-        let assignments = matching_assignments(dir.path(), &agent)
-            .unwrap_or_else(|error| panic!("snapshot assignments: {error}"));
-        let result = clear_scoped_assignments(&assignments, |assignment| {
-            if assignment.path.ends_with("second.db") {
-                Err("injected later retention DB failure".to_string())
-            } else {
-                clear_scope(assignment)
-            }
-        });
+        let result = with_agent_assignments_cleared_using(
+            dir.path(),
+            &agent,
+            || Ok(()),
+            |assignment| {
+                if assignment.path.ends_with("second.db") {
+                    Err("injected later retention DB failure".to_string())
+                } else {
+                    clear_scope(assignment)
+                }
+            },
+            restore_scope,
+        );
 
         assert!(result.is_err());
         for name in ["first.db", "second.db"] {
@@ -381,5 +534,62 @@ mod tests {
     #[test]
     fn save_failure_after_cleanup_restores_assignment() {
         assert_later_deletion_failure_restores_assignment("injected save failure");
+    }
+
+    #[test]
+    fn failed_rollback_leaves_a_durable_journal_that_repairs_on_restart() {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"));
+        let retention_dir = dir.path().join("retention");
+        fs::create_dir_all(&retention_dir)
+            .unwrap_or_else(|error| panic!("create retention dir: {error}"));
+        let agent = "a".repeat(64);
+        let first_path = retention_dir.join("first.db");
+        let second_path = retention_dir.join("second.db");
+        for path in [&first_path, &second_path] {
+            replace_assignment(
+                &mut open_retention_db(path)
+                    .unwrap_or_else(|error| panic!("open {}: {error}", path.display())),
+                &agent,
+            )
+            .unwrap_or_else(|error| panic!("assign {}: {error}", path.display()));
+        }
+
+        let result = with_agent_assignments_cleared_using(
+            dir.path(),
+            &agent,
+            || Err::<(), _>("injected managed-agent save failure".to_string()),
+            clear_scope,
+            |assignment| {
+                if assignment.path == second_path {
+                    Err("injected restore failure".to_string())
+                } else {
+                    restore_scope(assignment)
+                }
+            },
+        );
+
+        assert!(result
+            .as_ref()
+            .is_err_and(|error| error.contains("injected restore failure")));
+        assert!(recovery_journal_path(dir.path()).exists());
+        assert!(!assignment_matches(
+            &open_retention_db(&second_path)
+                .unwrap_or_else(|error| panic!("reopen second scope: {error}")),
+            &agent,
+        )
+        .unwrap_or_else(|error| panic!("read torn scope: {error}")));
+
+        recover_pending_assignment_cleanup(dir.path(), |pubkey| pubkey == agent)
+            .unwrap_or_else(|error| panic!("replay durable recovery: {error}"));
+
+        for path in [&first_path, &second_path] {
+            assert!(assignment_matches(
+                &open_retention_db(path)
+                    .unwrap_or_else(|error| panic!("reopen {}: {error}", path.display())),
+                &agent,
+            )
+            .unwrap_or_else(|error| panic!("read repaired {}: {error}", path.display())));
+        }
+        assert!(!recovery_journal_path(dir.path()).exists());
     }
 }
