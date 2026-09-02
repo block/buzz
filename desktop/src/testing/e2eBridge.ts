@@ -12289,6 +12289,8 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "mesh_installed_models":
         return mockMeshState.models;
+      case "mesh_feature_enabled":
+        return true;
       case "mesh_model_catalog":
         return {
           gpuName: "Mock Apple GPU",

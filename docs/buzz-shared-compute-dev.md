@@ -61,6 +61,18 @@ stop printing build progress.
 Using plain `just dev` is not sufficient: the Compute UI and embedded MeshLLM
 runtime are behind the `mesh-llm` feature.
 
+### Official packages and the Settings → Compute card
+
+Release/canary packaging only passes `--features mesh-llm` on macOS today
+(see `.github/workflows/release.yml` and the Linux/Windows canary jobs). Official
+`.deb` / AppImage / Windows installers therefore compile the stub backend:
+Share Compute commands return a build-unavailable error, and Settings → Compute
+shows an explanatory empty state instead of a dead-end toggle (`#3841`).
+
+To exercise Share Compute locally on any OS, use `just mesh=1 dev` (or otherwise
+build the desktop with `--features mesh-llm`). The `mesh_feature_enabled` Tauri
+command reports whether the running binary includes the feature.
+
 ## 2. Share this machine
 
 1. Open **Settings**.
