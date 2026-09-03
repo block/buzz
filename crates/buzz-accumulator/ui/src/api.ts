@@ -6,6 +6,9 @@ export type Selection = {
   /** Thread anchors: each event id selects itself + all descendant replies. */
   threads: string[];
   kinds: number[];
+  /** Exact-match [name, value] tag predicates against the event's own tags.
+   * Same-name pairs OR; distinct names AND. Tags narrow — never scope. */
+  tags: [string, string][];
   /** Selection's own window (who × what × when). A pinned `until_exclusive`
    * freezes the selection; open ends mean live ("and whatever comes next"). */
   since?: number;
@@ -184,6 +187,7 @@ function normalizeSelection(s: Partial<Selection> | undefined): Selection {
     authors: s?.authors ?? [],
     threads: s?.threads ?? [],
     kinds: s?.kinds ?? [],
+    tags: s?.tags ?? [],
     since: s?.since,
     until_exclusive: s?.until_exclusive,
   };

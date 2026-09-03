@@ -20,6 +20,13 @@ them:
   from the mirror's reply linkage (`parent` column, NIP-10 `e` tags) at
   materialization time, so a live thread selection keeps picking up new
   replies.
+  `tags` holds exact-match `[name, value]` pairs checked against the event's
+  **own tag list**, verbatim and case-sensitive — no prose parsing. Pairs
+  sharing a name **OR** together; distinct names **AND** together (NIP-01
+  filter semantics). Tags only **narrow**: they never grant scope, so a
+  selection still needs at least one channel, author, or thread. The
+  predicate is applied inside the one signal query, so preview, the events
+  browser, and fold plans always agree on what matches.
 - **Fold** — name + selection + model + instructions: a **factory for
   artifacts**. Each run computes `artifact' = fold(artifact, new_signals)`.
   A frozen selection makes the fold run until its set is covered, then it is
@@ -110,7 +117,7 @@ so any non-loopback bind must add authentication first.
 | `POST /folds/{name}/run` | `{since?, until_exclusive?, order?}` → runs the model, appends one artifact version. **Spends money.** |
 | `GET /folds/{name}/artifacts` | The version chain (summaries). |
 | `GET /folds/{name}/artifacts/{version}` | One full artifact with provenance. |
-| `POST /folds/{name}/artifacts/{version}/publish` | `{channel, allow_cross_channel?}` → posts the artifact into the channel as a message. Guarded: refuses unless the artifact's chain has only ever read that channel, unless crossed deliberately. |
+| `POST /folds/{name}/artifacts/{version}/publish` | `{channel, allow_cross_channel?, tags?}` → posts the artifact into the channel as a message. Guarded: refuses unless the artifact's chain has only ever read that channel, unless crossed deliberately. `tags` = extra `[name, value]` pairs stamped on the message verbatim (namespace them, e.g. `["acc.recipe", "weekly-digest"]`); protocol names `h`/`e`/`p`/`auth` are refused. A downstream fold selects the published artifact back by `channel + tags` — the machine-readable recipe edge. |
 
 `since` / `until_exclusive` on preview/preflight/run are a **clamp**: the
 selection's own window is authoritative and the clamp can only narrow it.

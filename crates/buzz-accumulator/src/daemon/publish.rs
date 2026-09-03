@@ -12,12 +12,14 @@ const PUBLISH_TIMEOUT_SECS: u64 = 30;
 
 /// Publishes one message to a channel as the daemon identity.
 pub trait Publisher: Send + Sync {
-    /// Publish `content` as a kind-9 message in `channel` (a channel UUID);
-    /// resolves to the accepted event id.
+    /// Publish `content` as a kind-9 message in `channel` (a channel UUID),
+    /// carrying the extra `[name, value]` tags verbatim; resolves to the
+    /// accepted event id. Callers validate tag shape and reserved names.
     fn publish<'a>(
         &'a self,
         channel: &'a str,
         content: &'a str,
+        tags: &'a [(String, String)],
     ) -> BoxFuture<'a, Result<String, String>>;
 }
 
@@ -38,12 +40,21 @@ impl Publisher for RelayPublisher {
         &'a self,
         channel: &'a str,
         content: &'a str,
+        tags: &'a [(String, String)],
     ) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let channel = uuid::Uuid::parse_str(channel)
                 .map_err(|e| format!("channel is not a UUID: {e}"))?;
+            let extra: Vec<Tag> = tags
+                .iter()
+                .map(|(name, value)| {
+                    Tag::parse([name.as_str(), value.as_str()])
+                        .map_err(|e| format!("tag [{name:?}, {value:?}]: {e}"))
+                })
+                .collect::<Result<_, _>>()?;
             let event = buzz_sdk::build_message(channel, content, None, &[], false, &[])
                 .map_err(|e| format!("building message: {e}"))?
+                .tags(extra)
                 .sign_with_keys(&self.keys)
                 .map_err(|e| format!("signing message: {e}"))?;
             let ok = buzz_ws_client::publish_event(

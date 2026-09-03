@@ -449,7 +449,17 @@ struct PublishBody {
     /// target channel; set this to cross that line deliberately.
     #[serde(default)]
     allow_cross_channel: bool,
+    /// Extra `[name, value]` tags stamped on the published message verbatim
+    /// (namespaced by the caller, e.g. `["acc.recipe", "weekly-digest"]`), so
+    /// a downstream fold can select it back by exact tag match.
+    #[serde(default)]
+    tags: Vec<(String, String)>,
 }
+
+/// Tag names a publish may not carry: each is protocol-load-bearing on the
+/// relay (channel scope, threading, notification fan-out, ownership auth),
+/// so stamping one would spoof that machinery rather than label the artifact.
+const RESERVED_PUBLISH_TAG_NAMES: &[&str] = &["h", "e", "p", "auth"];
 
 /// Publishes an artifact version into a channel as an ordinary message —
 /// the composition verb. The mirror's live tail picks the message back up,
@@ -465,6 +475,21 @@ async fn publish_artifact(
             format!("artifact not found: {name} v{version}"),
         )
     })?;
+    crate::selection::validate_tag_pairs(&body.tags)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    if let Some((name, _)) = body
+        .tags
+        .iter()
+        .find(|(name, _)| RESERVED_PUBLISH_TAG_NAMES.contains(&name.as_str()))
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "tag name {name:?} is reserved (protocol tags {RESERVED_PUBLISH_TAG_NAMES:?} \
+                 cannot be stamped on a publish)"
+            ),
+        ));
+    }
     let channel = body.channel.trim().to_lowercase();
     // Taint guard: the chain-union `channels` is what this artifact has ever
     // read. Publishing into a channel it didn't come from can leak another
@@ -489,7 +514,7 @@ async fn publish_artifact(
     );
     let event_id = s
         .publisher
-        .publish(&channel, &content)
+        .publish(&channel, &content, &body.tags)
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
     Ok(Json(json!({
@@ -516,22 +541,27 @@ mod tests {
         }
     }
 
+    /// One recorded publish: (channel, content, tags).
+    type PublishCall = (String, String, Vec<(String, String)>);
+
     /// Records publishes instead of touching a relay.
     #[derive(Default)]
     struct FakePublisher {
-        calls: std::sync::Mutex<Vec<(String, String)>>,
+        calls: std::sync::Mutex<Vec<PublishCall>>,
     }
     impl Publisher for FakePublisher {
         fn publish<'a>(
             &'a self,
             channel: &'a str,
             content: &'a str,
+            tags: &'a [(String, String)],
         ) -> futures_util::future::BoxFuture<'a, Result<String, String>> {
             Box::pin(async move {
-                self.calls
-                    .lock()
-                    .expect("lock")
-                    .push((channel.to_string(), content.to_string()));
+                self.calls.lock().expect("lock").push((
+                    channel.to_string(),
+                    content.to_string(),
+                    tags.to_vec(),
+                ));
                 Ok("e".repeat(64))
             })
         }
@@ -850,6 +880,66 @@ mod tests {
         assert!(calls[0].1.starts_with("the digest\n\n— fold weekly v1"));
         assert!(calls[0].1.contains("2 event(s)"));
         assert!(calls[0].1.contains("haiku"));
+    }
+
+    #[tokio::test]
+    async fn publish_stamps_caller_tags_but_refuses_reserved_names() {
+        let fake = Arc::new(FakePublisher::default());
+        let state = test_state_with(fake.clone()).await;
+        state
+            .store
+            .insert_artifact(&artifact(&[CHANNEL]))
+            .await
+            .expect("seed artifact");
+        let app = router(state);
+        // Namespaced tags pass through to the publisher verbatim.
+        let resp = app
+            .clone()
+            .oneshot(publish_req(json!({
+                "channel": CHANNEL,
+                "tags": [["acc.recipe", "weekly-digest"], ["acc.interval", "2026-W36"]],
+            })))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        {
+            let calls = fake.calls.lock().expect("lock");
+            assert_eq!(
+                calls[0].2,
+                vec![
+                    ("acc.recipe".to_string(), "weekly-digest".to_string()),
+                    ("acc.interval".to_string(), "2026-W36".to_string()),
+                ]
+            );
+        }
+        // Protocol tag names are refused before any relay contact.
+        for reserved in RESERVED_PUBLISH_TAG_NAMES {
+            let resp = app
+                .clone()
+                .oneshot(publish_req(json!({
+                    "channel": CHANNEL,
+                    "tags": [[reserved, "x"]],
+                })))
+                .await
+                .expect("resp");
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let v = body_json(resp).await;
+            assert!(v["error"].as_str().expect("error").contains("reserved"));
+        }
+        // Shape rules apply to publish tags too (empty value here).
+        let resp = app
+            .oneshot(publish_req(json!({
+                "channel": CHANNEL,
+                "tags": [["acc.recipe", ""]],
+            })))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            fake.calls.lock().expect("lock").len(),
+            1,
+            "only the valid publish ran"
+        );
     }
 
     #[tokio::test]

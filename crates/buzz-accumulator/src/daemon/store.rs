@@ -724,6 +724,30 @@ fn signal_query(
         sep.push_bind(k as i64);
     }
     qb.push(")");
+    // Tag predicates: exact `[name, value]` matches against the event's own
+    // tag list, read straight from the stored raw JSON so the predicate can
+    // never drift from what the relay delivered. Same-name values OR inside
+    // one EXISTS; distinct names AND as separate EXISTS clauses (NIP-01
+    // filter semantics).
+    if !selection.tags.is_empty() {
+        let mut by_name: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+        for (name, value) in &selection.tags {
+            by_name.entry(name).or_default().push(value);
+        }
+        for (name, values) in by_name {
+            qb.push(
+                " AND EXISTS (SELECT 1 FROM json_each(events.raw, '$.tags') AS jt \
+                 WHERE json_extract(jt.value, '$[0]') = ",
+            );
+            qb.push_bind(name);
+            qb.push(" AND json_extract(jt.value, '$[1]') IN (");
+            let mut sep = qb.separated(", ");
+            for v in values {
+                sep.push_bind(v);
+            }
+            qb.push("))");
+        }
+    }
     qb
 }
 
@@ -811,6 +835,115 @@ mod tests {
             channels: channels.iter().map(|s| s.to_string()).collect(),
             ..Selection::default()
         }
+    }
+
+    /// An event whose raw JSON carries the given Nostr tag pairs.
+    fn tagged(id: &str, channel: &str, ts: i64, tags: &[(&str, &str)]) -> StoredEvent {
+        let tag_rows: Vec<Vec<&str>> = tags.iter().map(|(n, v)| vec![*n, *v]).collect();
+        StoredEvent {
+            raw: serde_json::json!({ "tags": tag_rows }).to_string(),
+            ..ev(id, Some(channel), 9, ts)
+        }
+    }
+
+    fn tag_selection(channel: &str, tags: &[(&str, &str)]) -> Selection {
+        Selection {
+            tags: tags
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+            ..selection(&[channel])
+        }
+    }
+
+    #[tokio::test]
+    async fn tag_predicates_match_exactly_or_within_a_name_and_across_names() {
+        let store = Store::open(":memory:").await.expect("open");
+        store
+            .upsert_events(&[
+                tagged(
+                    "1",
+                    "cha",
+                    100,
+                    &[("acc.recipe", "weekly"), ("acc.interval", "2026-W36")],
+                ),
+                tagged("2", "cha", 101, &[("acc.recipe", "daily")]),
+                ev("3", Some("cha"), 9, 102), // raw `{}`: no tags key at all
+            ])
+            .await
+            .expect("insert");
+        let ids = |signals: Vec<crate::Signal>| -> Vec<String> {
+            signals.into_iter().map(|s| s.id).collect()
+        };
+
+        // Exact match narrows to the tagged event only.
+        let got = store
+            .query_signals(&tag_selection("cha", &[("acc.recipe", "weekly")]), 0, 200)
+            .await
+            .expect("query");
+        assert_eq!(ids(got), vec![full_id("1")]);
+
+        // Same-name pairs OR together.
+        let got = store
+            .query_signals(
+                &tag_selection("cha", &[("acc.recipe", "weekly"), ("acc.recipe", "daily")]),
+                0,
+                200,
+            )
+            .await
+            .expect("query");
+        assert_eq!(ids(got), vec![full_id("1"), full_id("2")]);
+
+        // Distinct names AND together: only event 1 carries both.
+        let got = store
+            .query_signals(
+                &tag_selection(
+                    "cha",
+                    &[("acc.recipe", "weekly"), ("acc.interval", "2026-W36")],
+                ),
+                0,
+                200,
+            )
+            .await
+            .expect("query");
+        assert_eq!(ids(got), vec![full_id("1")]);
+        let got = store
+            .query_signals(
+                &tag_selection(
+                    "cha",
+                    &[("acc.recipe", "daily"), ("acc.interval", "2026-W36")],
+                ),
+                0,
+                200,
+            )
+            .await
+            .expect("query");
+        assert!(got.is_empty(), "no event carries both");
+
+        // Values are case-sensitive; no predicate ⇒ everything still matches.
+        let got = store
+            .query_signals(&tag_selection("cha", &[("acc.recipe", "Weekly")]), 0, 200)
+            .await
+            .expect("query");
+        assert!(got.is_empty());
+        let got = store
+            .query_signals(&selection(&["cha"]), 0, 200)
+            .await
+            .expect("query");
+        assert_eq!(got.len(), 3);
+
+        // The pager applies the same predicate (preview/events/fold agree).
+        let page = store
+            .page_signals(
+                &tag_selection("cha", &[("acc.recipe", "weekly")]),
+                0,
+                200,
+                None,
+                10,
+            )
+            .await
+            .expect("page");
+        assert_eq!(ids(page), vec![full_id("1")]);
     }
 
     #[tokio::test]

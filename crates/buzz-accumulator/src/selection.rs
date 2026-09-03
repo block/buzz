@@ -35,6 +35,13 @@ pub struct Selection {
     /// Event kinds; empty means [`DEFAULT_SIGNAL_KINDS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<u32>,
+    /// Tag predicates: exact-match `[name, value]` pairs against the event's
+    /// own tag list, verbatim and case-sensitive. Pairs sharing a name OR
+    /// together; distinct names AND together (NIP-01 filter semantics). Tags
+    /// only NARROW — they never grant scope, so a selection still needs at
+    /// least one channel, author, or thread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<(String, String)>,
     /// Window start (unix seconds, inclusive). `None` = beginning of time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
@@ -66,6 +73,10 @@ impl Selection {
         self.threads.dedup();
         self.kinds.sort_unstable();
         self.kinds.dedup();
+        // Tag pairs stay verbatim (values are case-sensitive by contract);
+        // sorting + deduping still makes equal predicates serialize identically.
+        self.tags.sort();
+        self.tags.dedup();
         if self.channels.is_empty() && self.authors.is_empty() && self.threads.is_empty() {
             return Err(Error::InvalidSpec(
                 "selection must name at least one channel, author, or thread".into(),
@@ -91,6 +102,7 @@ impl Selection {
                 "kind {k} is outside the event-kind range"
             )));
         }
+        validate_tag_pairs(&self.tags)?;
         if let (Some(s), Some(u)) = (self.since, self.until_exclusive) {
             if s >= u {
                 return Err(Error::InvalidSpec(format!(
@@ -137,6 +149,40 @@ impl Selection {
             .min(clamp_until_exclusive.unwrap_or(i64::MAX));
         (since, until)
     }
+}
+
+/// Most tag pairs one predicate (or one publish) may carry.
+pub const MAX_TAG_PAIRS: usize = 16;
+/// Longest tag name accepted.
+pub const MAX_TAG_NAME_LEN: usize = 64;
+/// Longest tag value accepted.
+pub const MAX_TAG_VALUE_LEN: usize = 256;
+
+/// Shape rules shared by selection predicates and publish tags: bounded
+/// count, non-empty name without whitespace, non-empty bounded value.
+pub fn validate_tag_pairs(tags: &[(String, String)]) -> Result<(), Error> {
+    if tags.len() > MAX_TAG_PAIRS {
+        return Err(Error::InvalidSpec(format!(
+            "at most {MAX_TAG_PAIRS} tag pairs are supported, got {}",
+            tags.len()
+        )));
+    }
+    for (name, value) in tags {
+        if name.is_empty()
+            || name.len() > MAX_TAG_NAME_LEN
+            || name.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(Error::InvalidSpec(format!(
+                "tag name {name:?} must be 1..={MAX_TAG_NAME_LEN} chars with no whitespace"
+            )));
+        }
+        if value.is_empty() || value.len() > MAX_TAG_VALUE_LEN {
+            return Err(Error::InvalidSpec(format!(
+                "tag value for {name:?} must be 1..={MAX_TAG_VALUE_LEN} chars"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Lowercase hyphenated UUID: 8-4-4-4-12 hex digits.
@@ -298,6 +344,74 @@ mod tests {
             ..Selection::default()
         };
         assert!(bad.canonicalize().is_err());
+    }
+
+    #[test]
+    fn tag_predicates_canonicalize_but_stay_case_sensitive() {
+        let mut s = Selection {
+            tags: vec![
+                ("acc.recipe".into(), "Weekly".into()),
+                ("acc.recipe".into(), "Weekly".into()),
+                ("acc.interval".into(), "2026-W36".into()),
+            ],
+            ..channels(&[CH_A])
+        };
+        s.canonicalize().expect("valid");
+        // Sorted + deduped, values verbatim — "Weekly" is NOT lowercased.
+        assert_eq!(
+            s.tags,
+            vec![
+                ("acc.interval".to_string(), "2026-W36".to_string()),
+                ("acc.recipe".to_string(), "Weekly".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tags_never_grant_scope_and_bad_shapes_are_rejected() {
+        // Tags alone are not a scope.
+        let mut s = Selection {
+            tags: vec![("t".into(), "x".into())],
+            ..Selection::default()
+        };
+        assert!(s.canonicalize().is_err());
+        // Empty / whitespace names, empty values, and oversize are rejected.
+        for tags in [
+            vec![(String::new(), "x".into())],
+            vec![("a b".into(), "x".into())],
+            vec![("t".into(), String::new())],
+            vec![("t".into(), "v".repeat(MAX_TAG_VALUE_LEN + 1))],
+        ] {
+            let mut s = Selection {
+                tags,
+                ..channels(&[CH_A])
+            };
+            assert!(s.canonicalize().is_err());
+        }
+        let mut s = Selection {
+            tags: (0..=MAX_TAG_PAIRS)
+                .map(|i| ("t".to_string(), format!("v{i}")))
+                .collect(),
+            ..channels(&[CH_A])
+        };
+        assert!(s.canonicalize().is_err(), "pair cap enforced");
+    }
+
+    #[test]
+    fn selection_json_without_tags_still_loads_and_compares_equal() {
+        // Specs saved before the tags clause must keep loading and stay
+        // cache-compatible with a tag-less selection.
+        let legacy = format!(r#"{{"channels":["{CH_A}"]}}"#);
+        let loaded: Selection = serde_json::from_str(&legacy).expect("deserialize");
+        assert_eq!(loaded, channels(&[CH_A]));
+        let out = serde_json::to_string(&loaded).expect("serialize");
+        assert!(!out.contains("tags"), "empty tags must not serialize");
+        // The wire shape round-trips as Nostr-style pairs.
+        let tagged: Selection = serde_json::from_str(&format!(
+            r#"{{"channels":["{CH_A}"],"tags":[["acc.recipe","weekly"]]}}"#
+        ))
+        .expect("deserialize");
+        assert_eq!(tagged.tags, vec![("acc.recipe".into(), "weekly".into())]);
     }
 
     #[test]
