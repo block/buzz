@@ -16,6 +16,13 @@ const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
 // classifier keys on. Extracted to a const so a test can pin that contract.
 const MALFORMED_RESPONSE_MESSAGE: &str = "relay returned malformed response: not valid JSON";
 
+// Reverse proxies commonly render 413 responses as HTML. Classify the status
+// before HTML interception so an oversized upload is reported as a size error,
+// never as a VPN or captive-portal failure. The response body is deliberately
+// excluded because proxy-generated HTML must not surface in the UI.
+const PAYLOAD_TOO_LARGE_MESSAGE: &str =
+    "relay rejected request: file is too large (413 Payload Too Large)";
+
 // Per-request deadline for the `POST /query` HTTP bridge, covering both the
 // header exchange and full body consumption. The shared `http_client` sets no
 // client-level timeout — deliberately, because it is also used for long-running
@@ -199,14 +206,23 @@ fn classify_body_timeout(e: &reqwest::Error) -> Option<String> {
 /// Detect responses that were intercepted by a captive portal or auth proxy.
 ///
 /// Returns `Some(msg)` when the response clearly did not come from the relay:
+/// - HTTP 413 from the relay edge or another reverse proxy
 /// - Cloudflare Access redirect (final URL on `*.cloudflareaccess.com`)
 /// - Any other HTML response (proxy login page, captive portal, etc.)
 ///
-/// Pure function: takes the already-extracted host and content-type strings so
-/// it can be unit-tested without constructing a real `reqwest::Response`.
-fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option<String> {
+/// Pure function: takes the already-extracted status, host, and content-type so
+/// the classification matrix can also be unit-tested directly.
+fn classify_intercepted_response(
+    status: reqwest::StatusCode,
+    final_host: &str,
+    content_type: &str,
+) -> Option<String> {
     let host = final_host.to_lowercase();
     let ct = content_type.to_lowercase();
+
+    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        return Some(PAYLOAD_TOO_LARGE_MESSAGE.to_string());
+    }
 
     // Cloudflare Access intercepts requests and redirects to its own domain.
     // Label-boundary check prevents `notcloudflareaccess.com.evil.example` from
@@ -249,7 +265,8 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
         .unwrap_or("")
         .to_string();
 
-    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+    if let Some(msg) = classify_intercepted_response(response.status(), &final_host, &content_type)
+    {
         return Err(msg);
     }
 
@@ -294,7 +311,7 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
         .unwrap_or("")
         .to_string();
 
-    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+    if let Some(msg) = classify_intercepted_response(status, &final_host, &content_type) {
         return msg;
     }
 

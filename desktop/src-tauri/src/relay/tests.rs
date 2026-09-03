@@ -4,6 +4,7 @@
 use super::{
     build_profile_event, classify_intercepted_response, effective_agent_relay_url,
     extract_retry_in_hint, parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
+    PAYLOAD_TOO_LARGE_MESSAGE,
 };
 use serde::Deserialize;
 
@@ -194,7 +195,11 @@ fn loopback_wss_localhost_preserves_authority() {
 
 #[test]
 fn intercepted_cloudflare_host_returns_some() {
-    let result = classify_intercepted_response("sqprod.cloudflareaccess.com", "text/html");
+    let result = classify_intercepted_response(
+        reqwest::StatusCode::FORBIDDEN,
+        "sqprod.cloudflareaccess.com",
+        "text/html",
+    );
     assert!(result.is_some());
     let msg = result.unwrap();
     assert!(
@@ -207,7 +212,11 @@ fn intercepted_cloudflare_host_returns_some() {
 #[test]
 fn intercepted_cloudflare_apex_host_returns_some() {
     // The apex domain itself should also match.
-    let result = classify_intercepted_response("cloudflareaccess.com", "application/json");
+    let result = classify_intercepted_response(
+        reqwest::StatusCode::FORBIDDEN,
+        "cloudflareaccess.com",
+        "application/json",
+    );
     assert!(result.is_some());
     let msg = result.unwrap();
     assert!(msg.starts_with("relay unreachable:"));
@@ -216,8 +225,11 @@ fn intercepted_cloudflare_apex_host_returns_some() {
 
 #[test]
 fn intercepted_non_cloudflare_html_returns_some() {
-    let result =
-        classify_intercepted_response("proxy.corporate.example", "text/html; charset=utf-8");
+    let result = classify_intercepted_response(
+        reqwest::StatusCode::OK,
+        "proxy.corporate.example",
+        "text/html; charset=utf-8",
+    );
     assert!(result.is_some());
     let msg = result.unwrap();
     assert!(msg.starts_with("relay unreachable:"));
@@ -225,14 +237,19 @@ fn intercepted_non_cloudflare_html_returns_some() {
 
 #[test]
 fn normal_relay_json_returns_none() {
-    let result = classify_intercepted_response("relay.myapp.example.com", "application/json");
+    let result = classify_intercepted_response(
+        reqwest::StatusCode::OK,
+        "relay.myapp.example.com",
+        "application/json",
+    );
     assert!(result.is_none());
 }
 
 #[test]
 fn content_type_case_insensitive() {
     // Uppercase content-type must still be detected.
-    let result = classify_intercepted_response("proxy.example.com", "TEXT/HTML");
+    let result =
+        classify_intercepted_response(reqwest::StatusCode::OK, "proxy.example.com", "TEXT/HTML");
     assert!(result.is_some());
     assert!(result.unwrap().starts_with("relay unreachable:"));
 }
@@ -241,12 +258,113 @@ fn content_type_case_insensitive() {
 fn evil_suffix_does_not_match_cloudflare() {
     // A host whose suffix happens to contain the Cloudflare string but is
     // not actually a subdomain must NOT match.
-    let result =
-        classify_intercepted_response("notcloudflareaccess.com.evil.example", "application/json");
+    let result = classify_intercepted_response(
+        reqwest::StatusCode::OK,
+        "notcloudflareaccess.com.evil.example",
+        "application/json",
+    );
     assert!(
         result.is_none(),
         "false suffix match should not trigger Cloudflare branch"
     );
+}
+
+/// Serve one complete HTTP response and return a client response whose final
+/// URL retains `host`. Tests below feed that response through the production
+/// `relay_error_message` seam rather than testing only the pure classifier.
+async fn loopback_response(
+    host: &str,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> reqwest::Response {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    reqwest::Client::builder()
+        .no_proxy()
+        .resolve(host, addr)
+        .build()
+        .unwrap()
+        .get(format!("http://{host}:{}/", addr.port()))
+        .send()
+        .await
+        .expect("loopback response must be received")
+}
+
+#[tokio::test]
+async fn response_classification_matrix_binds_the_production_seam() {
+    struct Case {
+        label: &'static str,
+        host: &'static str,
+        status: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = [
+        Case {
+            label: "413 HTML is a size error and hides the proxy body",
+            host: "relay.example.test",
+            status: "413 Payload Too Large",
+            content_type: "text/html",
+            body: "<html><body>nginx internal 413 page</body></html>",
+            expected: PAYLOAD_TOO_LARGE_MESSAGE,
+        },
+        Case {
+            label: "generic HTML remains a network interception",
+            host: "relay.example.test",
+            status: "502 Bad Gateway",
+            content_type: "text/html; charset=utf-8",
+            body: "<html><body>Sign in to the network</body></html>",
+            expected:
+                "relay unreachable: relay returned an unexpected HTML page (VPN or proxy sign-in?)",
+        },
+        Case {
+            label: "Cloudflare Access host remains a network interception",
+            host: "login.cloudflareaccess.com",
+            status: "403 Forbidden",
+            content_type: "application/json",
+            body: r#"{"error":"access denied"}"#,
+            expected: "relay unreachable: network sign-in required (Cloudflare Access / VPN) — re-authenticate and reconnect",
+        },
+        Case {
+            label: "normal JSON remains a structured relay error",
+            host: "relay.example.test",
+            status: "400 Bad Request",
+            content_type: "application/json",
+            body: r#"{"message":"invalid payload"}"#,
+            expected: "relay returned 400 Bad Request: invalid payload",
+        },
+    ];
+
+    for case in cases {
+        let response =
+            loopback_response(case.host, case.status, case.content_type, case.body).await;
+        let message = super::relay_error_message(response).await;
+
+        assert_eq!(message, case.expected, "{}", case.label);
+        assert!(
+            !message.contains(case.body),
+            "{}: raw response body must not leak",
+            case.label
+        );
+    }
 }
 
 // classify_request_error requires a real reqwest::Error (not publicly
