@@ -17,27 +17,15 @@ export function sidebarOverflowUnreadLabel(count: number) {
   return `${count} unread`;
 }
 
-export function countOffscreenUnreadMessages(
-  offscreenChannelIds: readonly string[],
-  unreadChannelCounts: ReadonlyMap<string, number>,
-) {
-  return offscreenChannelIds.reduce(
-    (total, channelId) => total + (unreadChannelCounts.get(channelId) ?? 1),
-    0,
-  );
-}
-
 export function useSidebarUnreadOverflow({
   highPriorityUnreadChannelIds,
   previewActivityChannelIds,
   scrollRef,
-  unreadChannelCounts,
   unreadChannelIds,
 }: {
   highPriorityUnreadChannelIds: ReadonlySet<string>;
   previewActivityChannelIds: ReadonlySet<string>;
   scrollRef: ScrollRef;
-  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
 }) {
   const messageChannelIds = React.useMemo(
@@ -51,14 +39,6 @@ export function useSidebarUnreadOverflow({
 
   return {
     ...messageOverflow,
-    unreadAboveCount: countOffscreenUnreadMessages(
-      messageOverflow.unreadAboveChannelIds,
-      unreadChannelCounts,
-    ),
-    unreadBelowCount: countOffscreenUnreadMessages(
-      messageOverflow.unreadBelowChannelIds,
-      unreadChannelCounts,
-    ),
     unreadMessageBelowChannelIds: messageOverflow.unreadBelowChannelIds,
     hasHighPriorityAbove: hasHighPriorityOverflow(
       messageOverflow.unreadAboveChannelIds,

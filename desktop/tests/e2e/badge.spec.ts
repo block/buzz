@@ -298,7 +298,7 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
   });
 });
 
-test("offscreen top-level unread shows the secondary sidebar arrow", async ({
+test("offscreen unread counts destinations and promotes without incrementing", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 360 });
@@ -365,7 +365,9 @@ test("offscreen top-level unread shows the secondary sidebar arrow", async ({
     },
   );
 
-  await expect(activityArrow).toContainText("2 unread");
+  // A second message in the same destination promotes the pill but does not
+  // increase the number of places awaiting review.
+  await expect(activityArrow).toContainText("1 unread");
   await expect(activityArrow).toHaveClass(/bg-primary/);
   await waitForAnimations(page);
   await page.screenshot({
