@@ -124,6 +124,12 @@ class AgentActivitySheet extends HookConsumerWidget {
                       child: _EmptyState(
                         connection: connection,
                         errorMessage: observerState.errorMessage,
+                        onRetry:
+                            connection == ObserverConnectionState.error
+                            ? () => ref
+                                  .read(observerRelayProvider.notifier)
+                                  .retry()
+                            : null,
                       ),
                     )
                   : ListView.builder(
@@ -150,8 +156,9 @@ class AgentActivitySheet extends HookConsumerWidget {
 class _EmptyState extends StatelessWidget {
   final ObserverConnectionState connection;
   final String? errorMessage;
+  final VoidCallback? onRetry;
 
-  const _EmptyState({required this.connection, this.errorMessage});
+  const _EmptyState({required this.connection, this.errorMessage, this.onRetry});
 
   @override
   Widget build(BuildContext context) {
@@ -169,6 +176,14 @@ class _EmptyState extends StatelessWidget {
               ),
               textAlign: TextAlign.center,
             ),
+            if (onRetry != null) ...[
+              const SizedBox(height: Grid.xxs),
+              FilledButton.tonalIcon(
+                onPressed: onRetry,
+                icon: const Icon(LucideIcons.rotateCcw, size: 16),
+                label: const Text('Try again'),
+              ),
+            ],
           ],
         ),
       );
