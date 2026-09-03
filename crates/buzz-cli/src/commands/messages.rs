@@ -993,7 +993,11 @@ pub async fn dispatch(
             )
             .await
         }
-        MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::Edit { event, content } => {
+            // Allow '-' to read content from stdin, matching Send behavior.
+            let content = read_or_stdin(&content)?;
+            cmd_edit_message(client, &event, &content).await
+        }
         MessagesCmd::Delete {
             event,
             action_id,
