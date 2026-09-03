@@ -560,6 +560,68 @@ pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
     None
 }
 
+const MAX_CANVAS_CONTENT_BYTES: usize = 64 * 1024;
+
+/// Validate the immutable wire boundary for the channel's canonical Canvas.
+fn validate_canvas_event(event: &Event) -> Result<(), IngestError> {
+    if event.content.trim().is_empty() {
+        return Err(IngestError::Rejected(
+            "invalid: Canvas content must not be blank".to_string(),
+        ));
+    }
+    if event.content.len() > MAX_CANVAS_CONTENT_BYTES {
+        return Err(IngestError::Rejected(format!(
+            "invalid: Canvas content exceeds maximum size of {MAX_CANVAS_CONTENT_BYTES} bytes (got {})",
+            event.content.len()
+        )));
+    }
+
+    let channel_tags: Vec<&str> = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.len() >= 2 && parts[0] == "h").then_some(parts[1].as_str())
+        })
+        .collect();
+    if channel_tags.len() != 1 {
+        return Err(IngestError::Rejected(
+            "invalid: Canvas events must include exactly one h tag".to_string(),
+        ));
+    }
+    Uuid::parse_str(channel_tags[0]).map_err(|_| {
+        IngestError::Rejected("invalid: Canvas h tag must contain a channel UUID".to_string())
+    })?;
+    Ok(())
+}
+
+fn authorize_canvas_role(role: Option<&str>) -> Result<(), IngestError> {
+    if matches!(role, Some("owner" | "admin")) {
+        return Ok(());
+    }
+    Err(IngestError::AuthFailed(
+        "restricted: only channel owners or admins may update the Canvas".to_string(),
+    ))
+}
+
+async fn authorize_canvas_write(
+    tenant: &TenantContext,
+    state: &AppState,
+    channel_id: Uuid,
+    author_pubkey: &[u8],
+) -> Result<(), IngestError> {
+    let role = state
+        .db
+        .get_member_role(tenant.community(), channel_id, author_pubkey)
+        .await
+        .map_err(|error| {
+            IngestError::Internal(format!(
+                "error: internal error checking Canvas author role: {error}"
+            ))
+        })?;
+    authorize_canvas_role(role.as_deref())
+}
+
 /// Result of resolving a reaction's target channel.
 pub(crate) enum ReactionChannelResult {
     Channel(Uuid),
@@ -2463,6 +2525,10 @@ async fn ingest_event_inner(
         extract_channel_id(&event)
     };
 
+    if kind_u32 == KIND_CANVAS {
+        validate_canvas_event(&event)?;
+    }
+
     if is_global_only_kind(kind_u32) {
         channel_id = None;
     }
@@ -2563,6 +2629,15 @@ async fn ingest_event_inner(
             );
             auth_result.map_err(IngestError::Rejected)?;
         }
+    }
+
+    if kind_u32 == KIND_CANVAS {
+        let ch_id = channel_id.ok_or_else(|| {
+            IngestError::Rejected(
+                "invalid: Canvas events must include exactly one h tag".to_string(),
+            )
+        })?;
+        authorize_canvas_write(tenant, state, ch_id, &pubkey_bytes).await?;
     }
 
     // Handled directly — these mutate relay_members and do NOT get stored.
@@ -3300,6 +3375,75 @@ mod postgres_tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    fn canvas_event(content: impl Into<String>, tags: Vec<nostr::Tag>) -> Event {
+        EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), content.into())
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign Canvas event")
+    }
+
+    #[test]
+    fn canvas_validation_accepts_one_channel_and_nonblank_content() {
+        let channel = Uuid::new_v4().to_string();
+        let event = canvas_event(
+            "# Business Canvas\n\nApproved context",
+            vec![nostr::Tag::parse(["h", &channel]).expect("h tag")],
+        );
+        assert!(validate_canvas_event(&event).is_ok());
+    }
+
+    #[test]
+    fn canvas_validation_rejects_blank_oversize_and_malformed_scope() {
+        let channel = Uuid::new_v4().to_string();
+        let other_channel = Uuid::new_v4().to_string();
+        let one_h = vec![nostr::Tag::parse(["h", &channel]).expect("h tag")];
+
+        assert!(matches!(
+            validate_canvas_event(&canvas_event("  \n", one_h.clone())),
+            Err(IngestError::Rejected(message)) if message.contains("must not be blank")
+        ));
+        assert!(matches!(
+            validate_canvas_event(&canvas_event(
+                "x".repeat(MAX_CANVAS_CONTENT_BYTES + 1),
+                one_h
+            )),
+            Err(IngestError::Rejected(message)) if message.contains("exceeds maximum size")
+        ));
+        assert!(matches!(
+            validate_canvas_event(&canvas_event("content", Vec::new())),
+            Err(IngestError::Rejected(message)) if message.contains("exactly one h tag")
+        ));
+        assert!(matches!(
+            validate_canvas_event(&canvas_event(
+                "content",
+                vec![
+                    nostr::Tag::parse(["h", &channel]).expect("first h tag"),
+                    nostr::Tag::parse(["h", &other_channel]).expect("second h tag"),
+                ]
+            )),
+            Err(IngestError::Rejected(message)) if message.contains("exactly one h tag")
+        ));
+        assert!(matches!(
+            validate_canvas_event(&canvas_event(
+                "content",
+                vec![nostr::Tag::parse(["h", "not-a-uuid"]).expect("invalid h tag")]
+            )),
+            Err(IngestError::Rejected(message)) if message.contains("channel UUID")
+        ));
+    }
+
+    #[test]
+    fn canvas_authorization_allows_only_channel_managers() {
+        assert!(authorize_canvas_role(Some("owner")).is_ok());
+        assert!(authorize_canvas_role(Some("admin")).is_ok());
+        for role in [Some("member"), Some("bot"), Some("guest"), None] {
+            assert!(matches!(
+                authorize_canvas_role(role),
+                Err(IngestError::AuthFailed(message)) if message.contains("owners or admins")
+            ));
+        }
+    }
 
     #[test]
     fn missing_huddle_backing_channel_is_a_client_rejection() {
