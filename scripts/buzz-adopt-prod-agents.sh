@@ -34,6 +34,17 @@
 #     the post-reset empty-dev-keyring state) with the crash-safe
 #     marker-before-delete ordering already shipped. The plaintext file exists
 #     only until that first boot consumes it.
+#   - It does NOT copy baked build-time agent defaults. The prod DMG bakes a
+#     provider and default env vars at compile time via `option_env!` in
+#     `build.rs` (driven by `BUZZ_BUILD_BUZZ_AGENT_PROVIDER` and
+#     `BUZZ_BUILD_AGENT_ENV`). These are compiled into the binary, not stored in
+#     app-data — there is no file here to copy. Dev parity means setting those
+#     env vars when invoking the dev build:
+#       export BUZZ_BUILD_BUZZ_AGENT_PROVIDER="databricks_v2"
+#       export BUZZ_BUILD_AGENT_ENV=$'DATABRICKS_HOST=...\nDATABRICKS_MODEL=...'
+#       just production
+#     Do NOT add these to .env — `set dotenv-load := true` in the Justfile
+#     would bake them into every recipe in that checkout, including test runs.
 #
 # FLAGS
 #   --dry-run   Print every action; write nothing.
