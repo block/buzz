@@ -363,7 +363,6 @@ export class HuddlePresenceTracker {
       session.departedAdmissions.clear();
       session.compactedRosterRevisionFloor = null;
     }
-    if (generation !== null) session.generation = generation;
 
     const next: AdmissionState = {
       present: event.kind === KIND_HUDDLE_PARTICIPANT_JOINED,
@@ -398,6 +397,7 @@ export class HuddlePresenceTracker {
       session.departedAdmissions.clear();
       session.compactedRosterRevisionFloor = null;
     }
+    if (generation !== null) session.generation = generation;
 
     if (
       !next.present &&

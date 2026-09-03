@@ -325,6 +325,36 @@ test("preserves reordered admissions in one explicit generation", () => {
   assert.deepEqual(tracker.snapshot(), new Set([BOB, CHARLIE]));
 });
 
+test("clears legacy admissions on the first explicit generation", () => {
+  const tracker = new HuddlePresenceTracker(RELAY);
+  tracker.apply(event({ id: "1", kind: 48100 }));
+  tracker.apply(
+    participantEvent({
+      id: "2",
+      kind: 48101,
+      admissionId: "legacy-bob",
+      rosterRevision: 20,
+      createdAt: 2,
+    }),
+  );
+
+  assert.equal(
+    tracker.apply(
+      participantEvent({
+        id: "3",
+        kind: 48101,
+        admissionId: "generated-charlie",
+        rosterRevision: 1,
+        generation: "7",
+        tags: [["p", CHARLIE]],
+        createdAt: 3,
+      }),
+    ),
+    true,
+  );
+  assert.deepEqual(tracker.snapshot(), new Set([CHARLIE]));
+});
+
 test("rejects lifecycle events after liveness advances the generation", () => {
   const tracker = new HuddlePresenceTracker(RELAY);
   tracker.apply(event({ id: "1", kind: 48100 }));
