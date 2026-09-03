@@ -1,0 +1,18 @@
+[package]
+name = "buzz-client-consumer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+buzz-client = { path = "../../crates/buzz-client" }
+nostr = "0.44"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+axum = "0.8"
+serde_json = "1"
+
+# Keep this verification consumer outside Buzz's workspace feature and
+# dev-dependency unification, like a separate repository.
+[workspace]

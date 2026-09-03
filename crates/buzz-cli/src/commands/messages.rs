@@ -8,6 +8,7 @@ use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
+#[cfg(test)]
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
 };
@@ -121,6 +122,7 @@ async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid,
     channel_id_from_event(event_id, &event)
 }
 
+#[cfg(test)]
 fn resolve_names_to_pubkeys(
     names: &[String],
     name_to_pubkeys: &std::collections::HashMap<String, Vec<String>>,
@@ -157,6 +159,7 @@ fn resolve_names_to_pubkeys(
 /// Returns both the current member set and uniquely name-resolved pubkeys.
 /// Lookup failures are fatal when mention processing is requested: publishing
 /// visible mention text without its intended `p` tag is worse than not sending.
+#[cfg(test)]
 async fn resolve_content_mentions(
     client: &BuzzClient,
     channel_id: &str,
@@ -228,6 +231,7 @@ async fn resolve_content_mentions(
     Ok((member_pubkeys, resolved))
 }
 
+#[cfg(test)]
 fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliError> {
     let mut normalized = Vec::new();
     for value in values {
@@ -246,6 +250,7 @@ fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliErro
     Ok(normalized)
 }
 
+#[cfg(test)]
 fn merge_message_mentions(
     explicit: &[String],
     uri_pubkeys: &[String],
@@ -269,6 +274,7 @@ fn merge_message_mentions(
     Ok(mentions)
 }
 
+#[cfg(test)]
 fn missing_members(mentions: &[String], members: &[String]) -> Vec<String> {
     let members: std::collections::HashSet<&str> = members.iter().map(String::as_str).collect();
     mentions
@@ -278,6 +284,7 @@ fn missing_members(mentions: &[String], members: &[String]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn event_mention_pubkeys(event: &nostr::Event) -> Vec<String> {
     event
         .tags
@@ -293,6 +300,7 @@ fn event_mention_pubkeys(event: &nostr::Event) -> Vec<String> {
 
 /// Fetch raw events for `filter` via the relay's `/query` endpoint.
 /// Returns `None` on any I/O or parse failure.
+#[cfg(test)]
 async fn fetch_events(
     client: &BuzzClient,
     filter: &serde_json::Value,
@@ -303,6 +311,7 @@ async fn fetch_events(
 }
 
 /// Extract member pubkeys (the `p` tag values) from a single 39002 event.
+#[cfg(test)]
 async fn fetch_member_pubkeys(
     client: &BuzzClient,
     filter: &serde_json::Value,
@@ -316,6 +325,7 @@ async fn fetch_member_pubkeys(
 /// Filters and canonicalizes via `nostr::PublicKey::from_hex` — matching
 /// MCP's typed-Nostr behavior so both surfaces accept exactly the same
 /// pubkeys. Pure helper, split out for testing.
+#[cfg(test)]
 fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
     let Some(tags) = event.get("tags").and_then(|t| t.as_array()) else {
         return vec![];
@@ -608,6 +618,8 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+#[cfg(test)]
+#[expect(dead_code, reason = "retained only for legacy compatibility fixtures")]
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -755,6 +767,99 @@ pub async fn cmd_send_message(
     }
     println!("{output}");
     Ok(())
+}
+
+async fn cmd_send_message_reusable(
+    client: &buzz_client::BuzzClient,
+    mut p: SendMessageParams,
+) -> Result<(), CliError> {
+    p.content = read_or_stdin(&p.content)?;
+    validate_content_size(&p.content)?;
+    let channel_id = parse_uuid(&p.channel_id)?;
+    let reply_to = p.reply_to.as_deref().map(parse_event_id).transpose()?;
+    let kind = match p.kind {
+        None | Some(9) => buzz_client::MessageKind::Stream,
+        Some(45001) => buzz_client::MessageKind::ForumPost,
+        Some(45003) => {
+            if reply_to.is_none() {
+                return Err(CliError::Usage(
+                    "--reply-to is required for forum comments (kind 45003)".into(),
+                ));
+            }
+            buzz_client::MessageKind::ForumComment
+        }
+        Some(kind) => {
+            return Err(CliError::Usage(format!(
+                "--kind {kind} is not supported (use 9, 45001, or 45003)"
+            )));
+        }
+    };
+    let mentions = p
+        .mentions
+        .iter()
+        .map(|value| {
+            PublicKey::parse(value.trim())
+                .map_err(|_| CliError::Usage(format!("invalid --mention pubkey: {value}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut attachments = Vec::new();
+    for path in &p.files {
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| CliError::Other(format!("cannot access {path}: {error}")))?;
+        if !metadata.is_file() {
+            return Err(CliError::Usage(format!("{path} is not a file")));
+        }
+        let bytes = std::fs::read(path)
+            .map_err(|error| CliError::Other(format!("failed to read {path}: {error}")))?;
+        let mime_type = infer::get(&bytes)
+            .map(|kind| kind.mime_type().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        attachments.push(buzz_client::MessageAttachment {
+            bytes: bytes.into(),
+            mime_type,
+        });
+    }
+    let result = client
+        .send_message(buzz_client::SendMessageRequest {
+            channel_id,
+            content: p.content,
+            kind,
+            reply_to,
+            broadcast: p.broadcast,
+            attachments,
+            mentions,
+        })
+        .await
+        .map_err(crate::client_adapter::map_client_error)?;
+    let mention_pubkeys: Vec<String> = result
+        .mention_pubkeys
+        .iter()
+        .map(PublicKey::to_hex)
+        .collect();
+    match result.delivery {
+        buzz_client::DeliveryOutcome::Accepted(delivery) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event_id": delivery.event_id.to_hex(),
+                    "accepted": true,
+                    "message": delivery.relay_message,
+                    "mention_pubkeys": mention_pubkeys,
+                })
+            );
+            Ok(())
+        }
+        buzz_client::DeliveryOutcome::Rejected(delivery) => Err(CliError::Relay {
+            status: delivery.status,
+            body: delivery.reason,
+        }),
+        buzz_client::DeliveryOutcome::Unknown(delivery) => Err(CliError::DeliveryUnknown(format!(
+            "stored event (kind {}) outcome unknown after all attempts: {} (event {})",
+            p.kind.unwrap_or(9),
+            delivery.reason,
+            delivery.event_id.to_hex()
+        ))),
+    }
 }
 
 pub struct SendDiffParams {
@@ -930,10 +1035,9 @@ pub async fn cmd_vote_on_post(
     Ok(())
 }
 
-pub async fn dispatch(
+pub async fn dispatch_reusable(
     cmd: crate::MessagesCmd,
-    client: &BuzzClient,
-    format: &crate::OutputFormat,
+    client: &buzz_client::BuzzClient,
 ) -> Result<(), CliError> {
     use crate::MessagesCmd;
     match cmd {
@@ -946,7 +1050,7 @@ pub async fn dispatch(
             files,
             mentions,
         } => {
-            cmd_send_message(
+            cmd_send_message_reusable(
                 client,
                 SendMessageParams {
                     channel_id: channel,
@@ -960,6 +1064,22 @@ pub async fn dispatch(
             )
             .await
         }
+        _ => Err(CliError::Other(
+            "only messages send is routed through the reusable client".into(),
+        )),
+    }
+}
+
+pub async fn dispatch(
+    cmd: crate::MessagesCmd,
+    client: &BuzzClient,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
+    use crate::MessagesCmd;
+    match cmd {
+        MessagesCmd::Send { .. } => Err(CliError::Other(
+            "messages send must be routed before legacy client construction".into(),
+        )),
         MessagesCmd::SendDiff {
             channel,
             diff,

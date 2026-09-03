@@ -345,7 +345,7 @@ desktop-e2e-pre-push: _ensure-migrations
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: check test-unit buzz-client-consumer-check desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 
@@ -369,6 +369,7 @@ test-unit:
         cargo test -p buzz-auth --doc
         cargo nextest run -p buzz-voice --lib
         cargo nextest run -p buzz-cli
+        cargo nextest run -p buzz-client
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
         # They guard the embedded-migrator invariant (the complete checked-in
         # additive migration set; legacy cutover/backfill remains an operator
@@ -438,6 +439,10 @@ test-unit:
     else
         ./scripts/run-tests.sh unit
     fi
+
+# Compile the client exactly as an independent repository would consume it.
+buzz-client-consumer-check:
+    cargo test --manifest-path examples/buzz-client-consumer/Cargo.toml
 
 # Run integration tests only (starts services if needed)
 test-integration:
