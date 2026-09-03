@@ -425,8 +425,9 @@ impl AcpClient {
         // ensures subprocesses (MCP servers, tool processes) are cleaned up
         // rather than orphaned to init.
         //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
+        // Falls back to start_kill() (direct child only) when the platform
+        // has no tree-kill or the child has been polled to completion
+        // (id() returns None).
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
@@ -2328,9 +2329,37 @@ fn kill_process_group(pid: u32) -> bool {
     killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
 }
 
-/// Fallback for non-Unix: process-group kill not available.
-/// Returns `false` so the caller falls back to `child.start_kill()`.
-#[cfg(not(unix))]
+/// Kill an entire process tree on Windows via `taskkill /T /F`.
+///
+/// `start_kill()` alone is not equivalent here. Rust runs a `.cmd`/`.bat`
+/// shim (how npm installs `claude-code-acp`, `hermes-acp` and friends)
+/// through an intermediate `cmd.exe`, so killing the direct child reaps the
+/// wrapper and leaves the real agent — and its MCP servers — running. On a
+/// timeout/respawn loop each cycle then strands another live agent for the
+/// life of the session.
+///
+/// `/T` covers the tree the way `killpg` does on Unix, keeping teardown
+/// symmetric across platforms. `CREATE_NO_WINDOW` matches
+/// [`configure_no_window`] so cleanup never flashes a console at a GUI user.
+/// Mirrors `taskkill_tree` in the desktop crate, which solved the same
+/// problem for managed-agent teardown.
+#[cfg(windows)]
+fn kill_process_group(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Fallback for platforms that are neither Unix nor Windows: process-group
+/// kill not available. Returns `false` so the caller falls back to
+/// `child.start_kill()`.
+#[cfg(not(any(unix, windows)))]
 fn kill_process_group(_pid: u32) -> bool {
     false
 }
