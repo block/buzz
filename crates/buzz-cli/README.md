@@ -108,7 +108,12 @@ buzz channels list | jq '.[].name'
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
-stored rules in `validation_error` so an owner can remove and repair them.
+stored rules in `validation_error` so an owner can remove and repair them. Repo
+metadata updates include a `buzz-expected-revision` tag for the announcement the
+CLI read. A Buzz-aware relay rejects a stale update as a conflict (exit code 5),
+while tagless standard NIP-34 writers retain the normal replaceable-event
+last-write-wins behavior. Deploy the relay support before the updated CLI so the
+tag cannot be ignored during a mixed-version rollout.
 
 ## Commands
 

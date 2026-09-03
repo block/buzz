@@ -544,18 +544,14 @@ impl Db {
         .await
     }
 
-    /// Atomically replace a NIP-33 parameterized replaceable event.
-    ///
-    /// Replacement keys on `(kind, pubkey, d_tag)` across channels. The
-    /// highest timestamp wins; same-second ties use the lowest event ID.
-    #[datastore_span(name = "replace_parameterized_event", system = "postgresql")]
-    pub async fn replace_parameterized_event(
+    async fn replace_parameterized_event_with_precondition_inner(
         &self,
         community_id: CommunityId,
         event: &nostr::Event,
         d_tag: &str,
         channel_id: Option<Uuid>,
-    ) -> Result<(StoredEvent, bool)> {
+        precondition: ParameterizedReplacePrecondition<'_>,
+    ) -> Result<ParameterizedReplaceResult> {
         let (mut tx, transaction_timer) = observability::begin_transaction(
             &self.pool,
             TransactionOperation::ReplaceParameterizedEvent,
@@ -570,18 +566,69 @@ impl Db {
                         event,
                         d_tag,
                         channel_id,
-                        ParameterizedReplacePrecondition::Unconditional,
+                        precondition,
                     )
                     .await?;
-                let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
-                if was_inserted {
+                if result.status == ParameterizedReplaceStatus::Inserted {
                     tx.commit().await?;
                 } else {
                     tx.rollback().await?;
                 }
-                Ok((result.event, was_inserted))
+                Ok(result)
             })
             .await
+    }
+
+    /// Atomically replace a NIP-33 event using an explicit revision precondition.
+    ///
+    /// The coordinate advisory lock, exact-replay check, revision comparison,
+    /// and latest-wins comparison all execute inside one transaction. Inserted
+    /// heads commit; every no-op or conflict status rolls back.
+    #[datastore_span(
+        name = "replace_parameterized_event_with_precondition",
+        system = "postgresql"
+    )]
+    pub async fn replace_parameterized_event_with_precondition(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        d_tag: &str,
+        channel_id: Option<Uuid>,
+        precondition: ParameterizedReplacePrecondition<'_>,
+    ) -> Result<ParameterizedReplaceResult> {
+        self.replace_parameterized_event_with_precondition_inner(
+            community_id,
+            event,
+            d_tag,
+            channel_id,
+            precondition,
+        )
+        .await
+    }
+
+    /// Atomically replace a NIP-33 parameterized replaceable event.
+    ///
+    /// Replacement keys on `(kind, pubkey, d_tag)` across channels. The
+    /// highest timestamp wins; same-second ties use the lowest event ID.
+    #[datastore_span(name = "replace_parameterized_event", system = "postgresql")]
+    pub async fn replace_parameterized_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        d_tag: &str,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        let result = self
+            .replace_parameterized_event_with_precondition_inner(
+                community_id,
+                event,
+                d_tag,
+                channel_id,
+                ParameterizedReplacePrecondition::Unconditional,
+            )
+            .await?;
+        let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
+        Ok((result.event, was_inserted))
     }
 }
 
@@ -1201,6 +1248,146 @@ mod postgres_tests {
             replaceable::ParameterizedReplaceStatus::RevisionMissing
         );
         tx.rollback().await.expect("roll back missing revision tx");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn conditional_parameterized_replacement_allows_one_concurrent_writer_and_replay() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("repository-cas-{}", Uuid::new_v4().simple());
+        let base = Timestamp::now().as_secs();
+        let event = |content: &str, timestamp: u64| {
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16),
+                content,
+            )
+            .tags(vec![Tag::parse(["d", d_tag.as_str()]).expect("d tag")])
+            .custom_created_at(Timestamp::from(timestamp))
+            .sign_with_keys(&keys)
+            .expect("sign repository announcement")
+        };
+        let old = event("old", base);
+        let first = event("first", base + 1);
+        let second = event("second", base + 2);
+
+        assert!(
+            db.replace_parameterized_event(community, &old, &d_tag, None)
+                .await
+                .expect("insert repository head")
+                .1
+        );
+
+        let expected_first = old.id.as_bytes().to_vec();
+        let expected_second = expected_first.clone();
+        let first_write = db.replace_parameterized_event_with_precondition(
+            community,
+            &first,
+            &d_tag,
+            None,
+            replaceable::ParameterizedReplacePrecondition::ExpectedRevision(&expected_first),
+        );
+        let second_write = db.replace_parameterized_event_with_precondition(
+            community,
+            &second,
+            &d_tag,
+            None,
+            replaceable::ParameterizedReplacePrecondition::ExpectedRevision(&expected_second),
+        );
+        let (first_result, second_result) = tokio::join!(first_write, second_write);
+        let first_result = first_result.expect("first conditional write");
+        let second_result = second_result.expect("second conditional write");
+        let statuses = [first_result.status, second_result.status];
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == replaceable::ParameterizedReplaceStatus::Inserted)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| {
+                    **status == replaceable::ParameterizedReplaceStatus::RevisionMismatch
+                })
+                .count(),
+            1
+        );
+
+        let winner = if first_result.status == replaceable::ParameterizedReplaceStatus::Inserted {
+            &first
+        } else {
+            &second
+        };
+        let replay = db
+            .replace_parameterized_event_with_precondition(
+                community,
+                winner,
+                &d_tag,
+                None,
+                replaceable::ParameterizedReplacePrecondition::ExpectedRevision(
+                    old.id.as_bytes().as_slice(),
+                ),
+            )
+            .await
+            .expect("replay winning repository update");
+        assert_eq!(
+            replay.status,
+            replaceable::ParameterizedReplaceStatus::Duplicate
+        );
+
+        let replay_only = db
+            .replace_parameterized_event_with_precondition(
+                community,
+                winner,
+                &d_tag,
+                None,
+                replaceable::ParameterizedReplacePrecondition::ExactReplayOnly,
+            )
+            .await
+            .expect("exact replay-only repository update");
+        assert_eq!(
+            replay_only.status,
+            replaceable::ParameterizedReplaceStatus::Duplicate
+        );
+
+        let distinct = event("distinct", base + 3);
+        let replay_miss = db
+            .replace_parameterized_event_with_precondition(
+                community,
+                &distinct,
+                &d_tag,
+                None,
+                replaceable::ParameterizedReplacePrecondition::ExactReplayOnly,
+            )
+            .await
+            .expect("reject distinct replay-only repository update");
+        assert_eq!(
+            replay_miss.status,
+            replaceable::ParameterizedReplaceStatus::ReplayOnlyMiss
+        );
+
+        let stale = event("stale", base);
+        let stale_result = db
+            .replace_parameterized_event_with_precondition(
+                community,
+                &stale,
+                &d_tag,
+                None,
+                replaceable::ParameterizedReplacePrecondition::ExpectedRevision(
+                    winner.id.as_bytes().as_slice(),
+                ),
+            )
+            .await
+            .expect("evaluate matching but superseded repository update");
+        assert_eq!(
+            stale_result.status,
+            replaceable::ParameterizedReplaceStatus::Superseded
+        );
     }
 
     #[tokio::test]
