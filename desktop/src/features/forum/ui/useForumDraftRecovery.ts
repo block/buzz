@@ -8,7 +8,7 @@ import {
   subscribeToStore,
 } from "@/features/messages/lib/useDrafts";
 
-export type ForumDraftSnapshot = {
+type ForumDraftSnapshot = {
   content: string;
   pendingImeta: ImetaMedia[];
   mentionRefs: DraftMentionRef[];
