@@ -4036,8 +4036,7 @@ test("system agent activity avatar stack is decorative", async ({ page }) => {
 
   const joinedRow = page
     .getByTestId("system-message-row")
-    .filter({ hasText: "mira" })
-    .filter({ hasText: "joined the channel" });
+    .filter({ has: page.getByText("mira", { exact: true }) });
   const avatarStack = joinedRow.getByTestId("system-message-avatar-stack");
   await expect(avatarStack.getByTestId("system-message-avatar")).toHaveCount(1);
   await expect(avatarStack.locator("button")).toHaveCount(0);
@@ -4148,8 +4147,7 @@ test("system member-joined rows render the joined person as a plain profile name
 
   const joinedRow = page
     .getByTestId("system-message-row")
-    .filter({ hasText: "bob" })
-    .filter({ hasText: "joined the channel" });
+    .filter({ has: page.getByText("bob", { exact: true }) });
   const joinedPersonName = joinedRow.getByText("bob", { exact: true });
 
   await expect(joinedPersonName).toBeVisible();
