@@ -175,6 +175,22 @@ export function useMentions(
   const mentionChannelId = isAgentMentionChannelType(options?.channelType)
     ? channelId
     : null;
+  const channelMemberAgentPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (members ?? [])
+          .filter((member) => {
+            const pubkey = normalizePubkey(member.pubkey);
+            return (
+              member.isAgent === true ||
+              member.role === "bot" ||
+              profiles?.[pubkey]?.isAgent === true
+            );
+          })
+          .map((member) => normalizePubkey(member.pubkey)),
+      ),
+    [members, profiles],
+  );
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
@@ -183,12 +199,14 @@ export function useMentions(
           ? { type: "channel", channelId: mentionChannelId }
           : { type: "managed-only" },
         managedAgentPubkeys,
+        channelMemberAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
       }),
     [
       currentPubkey,
       managedAgentPubkeys,
+      channelMemberAgentPubkeys,
       mentionChannelId,
       relayAgentsQuery.data,
       sharedChannelIds,
@@ -683,6 +701,7 @@ export function useMentions(
     eligibilityScope: mentionChannelId
       ? { type: "channel", channelId: mentionChannelId }
       : { type: "managed-only" },
+    channelMemberAgentPubkeys,
     sharedChannelIds,
     refetchManagedAgents: managedAgentsQuery.refetch,
   });

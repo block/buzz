@@ -77,18 +77,26 @@ export function getMentionableAgentPubkeys({
   currentPubkey,
   eligibilityScope,
   managedAgentPubkeys,
+  channelMemberAgentPubkeys = [],
   relayAgents,
   sharedChannelIds,
 }: {
   currentPubkey?: string | null;
   eligibilityScope: AgentEligibilityScope;
   managedAgentPubkeys: Iterable<string>;
+  channelMemberAgentPubkeys?: Iterable<string>;
   relayAgents: readonly RelayAgent[] | undefined;
   sharedChannelIds: ReadonlySet<string>;
 }) {
   const pubkeys = new Set(
     [...managedAgentPubkeys].map((pubkey) => normalizePubkey(pubkey)),
   );
+
+  if (eligibilityScope.type === "channel") {
+    for (const pubkey of channelMemberAgentPubkeys) {
+      pubkeys.add(normalizePubkey(pubkey));
+    }
+  }
 
   for (const agent of relayAgents ?? []) {
     const isAllowed =

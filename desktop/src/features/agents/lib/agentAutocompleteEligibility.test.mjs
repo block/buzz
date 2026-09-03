@@ -231,6 +231,38 @@ test("getMentionableAgentPubkeys: scopes channel composers and fails closed with
   );
 });
 
+test("getMentionableAgentPubkeys: admits signed bot members only in their channel composer", () => {
+  const base = {
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: [PUB_A],
+    channelMemberAgentPubkeys: [PUB_C.toUpperCase()],
+    relayAgents: [],
+    sharedChannelIds: new Set(["general"]),
+  };
+
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "channel", channelId: "general" },
+    }),
+    new Set([PUB_A, PUB_C]),
+  );
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "community" },
+    }),
+    new Set([PUB_A]),
+  );
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "managed-only" },
+    }),
+    new Set([PUB_A]),
+  );
+});
+
 test("autocomplete helper extraction preserves safe filtering and labels", () => {
   assert.equal(isAgentMentionChannelType("stream"), true);
   assert.equal(isAgentMentionChannelType("forum"), true);
