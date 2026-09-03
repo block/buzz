@@ -4797,7 +4797,7 @@ void main() {
       expect(
         sentContent,
         'Keep this draft\n'
-        '![audio](https://relay.example/media/voice-note.mp4)',
+        '[voice-note-test.mp4](https://relay.example/media/voice-note.mp4)',
       );
       expect(
         sentMediaTags.single,

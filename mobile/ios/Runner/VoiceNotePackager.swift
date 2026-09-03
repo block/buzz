@@ -264,58 +264,102 @@ enum VoiceNotePackager {
         exportSession.metadata = []
         exportSession.metadataItemFilter = nil
         let completionQueue = DispatchQueue(label: "xyz.block.buzz.voice-note-export")
-        var completed = false
-        func complete(_ block: () -> Void) {
-            dispatchPrecondition(condition: .onQueue(completionQueue))
-            guard !completed else { return }
-            completed = true
-            try? FileManager.default.removeItem(at: videoURL)
-            block()
-        }
+        let completion = VoiceNoteExportCompletion(
+            outputURL: outputURL,
+            videoURL: videoURL
+        )
         completionQueue.asyncAfter(deadline: .now() + exportTimeout) {
-            guard !completed else { return }
-            exportSession.cancelExport()
-            complete {
-                try? FileManager.default.removeItem(at: outputURL)
-                result(
-                    FlutterError(
-                        code: "transcode_failed",
-                        message: "Voice note packaging timed out.",
-                        details: nil
+            completion.timeout(
+                cancel: exportSession.cancelExport,
+                deliver: {
+                    result(
+                        FlutterError(
+                            code: "transcode_failed",
+                            message: "Voice note packaging timed out.",
+                            details: nil
+                        )
                     )
-                )
-            }
+                }
+            )
         }
         exportSession.exportAsynchronously {
             completionQueue.async {
-                complete {
-                    switch exportSession.status {
-                    case .completed:
-                        do {
-                            try MP4Canonicalizer.neutralizeSampleDependencyBoxes(at: outputURL)
-                            result(outputURL.path)
-                        } catch {
-                            try? FileManager.default.removeItem(at: outputURL)
+                completion.exportDidFinish(
+                    succeeded: exportSession.status == .completed,
+                    deliver: {
+                        switch exportSession.status {
+                        case .completed:
+                            do {
+                                try MP4Canonicalizer.neutralizeSampleDependencyBoxes(at: outputURL)
+                                result(outputURL.path)
+                            } catch {
+                                try? FileManager.default.removeItem(at: outputURL)
+                                result(
+                                    FlutterError(
+                                        code: "transcode_failed",
+                                        message: "Unable to canonicalize voice note.",
+                                        details: error.localizedDescription
+                                    )
+                                )
+                            }
+                        default:
                             result(
                                 FlutterError(
                                     code: "transcode_failed",
-                                    message: "Unable to canonicalize voice note.",
-                                    details: error.localizedDescription
+                                    message: "Voice note packaging failed.",
+                                    details: exportSession.error?.localizedDescription
                                 )
                             )
                         }
-                    default:
-                        try? FileManager.default.removeItem(at: outputURL)
-                        result(
-                            FlutterError(
-                                code: "transcode_failed",
-                                message: "Voice note packaging failed.",
-                                details: exportSession.error?.localizedDescription
-                            )
-                        )
                     }
-                }
+                )
             }
         }
+    }
+}
+
+/// Separates one-shot Flutter result delivery from asynchronous export cleanup.
+///
+/// `cancelExport()` does not synchronously join AVFoundation's exporter. A late
+/// terminal callback must therefore remove an output recreated after timeout,
+/// even though the timeout already delivered the Flutter result.
+final class VoiceNoteExportCompletion {
+    private let outputURL: URL
+    private let videoURL: URL
+    private let fileManager: FileManager
+    private var delivered = false
+
+    init(
+        outputURL: URL,
+        videoURL: URL,
+        fileManager: FileManager = .default
+    ) {
+        self.outputURL = outputURL
+        self.videoURL = videoURL
+        self.fileManager = fileManager
+    }
+
+    func timeout(cancel: () -> Void, deliver: () -> Void) {
+        guard !delivered else { return }
+        delivered = true
+        cancel()
+        remove(videoURL)
+        remove(outputURL)
+        deliver()
+    }
+
+    func exportDidFinish(succeeded: Bool, deliver: () -> Void) {
+        remove(videoURL)
+        guard !delivered else {
+            remove(outputURL)
+            return
+        }
+        delivered = true
+        if !succeeded { remove(outputURL) }
+        deliver()
+    }
+
+    private func remove(_ url: URL) {
+        try? fileManager.removeItem(at: url)
     }
 }

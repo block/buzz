@@ -219,14 +219,14 @@ class BlobDescriptor {
   ];
 
   String toMarkdownImage() {
-    if (type.startsWith('audio/')) return '![audio]($url)';
-    if (_isPackagedVoiceNote(type, filename)) return '![audio]($url)';
-    if (type.startsWith('video/')) return '![video]($url)';
-    if (type.startsWith('image/')) return '![image]($url)';
     final label = (filename ?? 'file').replaceAllMapped(
       RegExp(r'[\\\[\]]'),
       (match) => '\\${match[0]}',
     );
+    if (type.startsWith('audio/')) return '![audio]($url)';
+    if (_isPackagedVoiceNote(type, filename)) return '[$label]($url)';
+    if (type.startsWith('video/')) return '![video]($url)';
+    if (type.startsWith('image/')) return '![image]($url)';
     return '[$label]($url)';
   }
 }

@@ -279,6 +279,7 @@ class VoiceNotePlaybackState {
     this.duration = Duration.zero,
     this.isPlaying = false,
     this.isLoading = false,
+    this.canCancelLoading = false,
     this.hasError = false,
   });
 
@@ -286,6 +287,7 @@ class VoiceNotePlaybackState {
   final Duration duration;
   final bool isPlaying;
   final bool isLoading;
+  final bool canCancelLoading;
   final bool hasError;
 
   VoiceNotePlaybackState copyWith({
@@ -293,12 +295,14 @@ class VoiceNotePlaybackState {
     Duration? duration,
     bool? isPlaying,
     bool? isLoading,
+    bool canCancelLoading = false,
     bool? hasError,
   }) => VoiceNotePlaybackState(
     position: position ?? this.position,
     duration: duration ?? this.duration,
     isPlaying: isPlaying ?? this.isPlaying,
     isLoading: isLoading ?? this.isLoading,
+    canCancelLoading: canCancelLoading,
     hasError: hasError ?? this.hasError,
   );
 }
@@ -464,12 +468,14 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           unawaited(_stopAndRewindCompletedPlayback());
           return;
         }
+        final isBackendLoading =
+            playerState.processingState == audio.ProcessingState.loading ||
+            playerState.processingState == audio.ProcessingState.buffering;
         _update(
           _state.copyWith(
             isPlaying: playerState.playing,
-            isLoading:
-                playerState.processingState == audio.ProcessingState.loading ||
-                playerState.processingState == audio.ProcessingState.buffering,
+            isLoading: isBackendLoading,
+            canCancelLoading: isBackendLoading && _toggleOperation != null,
           ),
         );
       }),
@@ -672,9 +678,14 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
     required Duration fallbackDuration,
     required int sourceGeneration,
     int? playbackOperationGeneration,
+    bool canCancelLoading = false,
   }) async {
     _update(
-      VoiceNotePlaybackState(duration: fallbackDuration, isLoading: true),
+      VoiceNotePlaybackState(
+        duration: fallbackDuration,
+        isLoading: true,
+        canCancelLoading: canCancelLoading,
+      ),
     );
     try {
       final duration = await load();
@@ -766,6 +777,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
             fallbackDuration: remote.fallbackDuration,
             sourceGeneration: sourceGeneration,
             playbackOperationGeneration: playbackOperationGeneration,
+            canCancelLoading: true,
           );
           if (playbackOperationGeneration != _playbackOperationGeneration ||
               sourceGeneration != _sourceGeneration ||
@@ -778,6 +790,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
             fallbackDuration: remote.fallbackDuration,
             sourceGeneration: sourceGeneration,
             playbackOperationGeneration: playbackOperationGeneration,
+            canCancelLoading: true,
           );
           if (playbackOperationGeneration != _playbackOperationGeneration ||
               sourceGeneration != _sourceGeneration ||

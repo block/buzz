@@ -1223,6 +1223,23 @@ void main() {
   });
 
   group('uploadVoiceNote', () {
+    test('keeps ordinary audio attachments on inline audio markdown', () {
+      const descriptor = BlobDescriptor(
+        url: 'https://relay.example/media/meeting.m4a',
+        sha256:
+            '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        size: 3,
+        type: 'audio/mp4',
+        uploaded: 1,
+        filename: 'meeting.m4a',
+      );
+
+      expect(
+        descriptor.toMarkdownImage(),
+        '![audio](https://relay.example/media/meeting.m4a)',
+      );
+    });
+
     test(
       'removes generated Android package when fast-start rewrite fails',
       () async {
@@ -1335,7 +1352,10 @@ void main() {
         expect(descriptor.filename, 'voice-note-test.mp4');
         expect(descriptor.duration, 3.0);
         expect(descriptor.toImetaTag(), contains('duration 3.0'));
-        expect(descriptor.toMarkdownImage(), '![audio](${descriptor.url})');
+        expect(
+          descriptor.toMarkdownImage(),
+          '[voice-note-test.mp4](${descriptor.url})',
+        );
         expect(await packaged.exists(), isFalse);
       } finally {
         await sourceDirectory.delete(recursive: true);

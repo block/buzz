@@ -114,14 +114,19 @@ class VoiceNoteAttachment extends HookConsumerWidget {
         ? Radii.dialog + Grid.quarter - Grid.twelve
         : Radii.md;
 
-    final onPlaybackPressed = state.hasError && !isRemote
+    final canCancelLoading = state.isLoading && state.canCancelLoading;
+    final onPlaybackPressed = state.isLoading && !canCancelLoading
+        ? null
+        : state.hasError && !isRemote
         ? null
         : () {
             unawaited(HapticFeedback.selectionClick());
             unawaited(player.toggle());
           };
     final playbackControlLabel = state.isLoading
-        ? 'Cancel voice note loading'
+        ? canCancelLoading
+              ? 'Cancel voice note loading'
+              : 'Loading voice note'
         : state.hasError && isRemote
         ? 'Retry voice note'
         : state.isPlaying

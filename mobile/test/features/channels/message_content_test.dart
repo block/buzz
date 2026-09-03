@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -5,6 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
+import 'package:http/http.dart' as http;
+import 'package:just_audio/just_audio.dart' as audio;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
@@ -102,7 +106,7 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
 class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   VoiceNotePlaybackState get state =>
-      const VoiceNotePlaybackState(isLoading: true);
+      const VoiceNotePlaybackState(isLoading: true, canCancelLoading: true);
 
   @override
   Future<void> loadRemote(
@@ -118,6 +122,54 @@ class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
   @override
   Future<void> toggle() async {
     toggleCount += 1;
+  }
+}
+
+class _HeldAudioPlayerBackend implements VoiceNoteAudioPlayerBackend {
+  final positions = const Stream<Duration>.empty();
+  final durations = const Stream<Duration?>.empty();
+  final states = const Stream<audio.PlayerState>.empty();
+  final pathLoad = Completer<Duration?>();
+
+  @override
+  Stream<Duration> get positionStream => positions;
+
+  @override
+  Stream<Duration?> get durationStream => durations;
+
+  @override
+  Stream<audio.PlayerState> get playerStateStream => states;
+
+  @override
+  bool get playing => false;
+
+  @override
+  Future<Duration?> setFilePath(String path) => pathLoad.future;
+
+  @override
+  Future<Duration?> setUrl(String url, {Map<String, String>? headers}) async =>
+      null;
+
+  @override
+  Future<void> play() async {}
+
+  @override
+  Future<void> pause() async {}
+
+  @override
+  Future<void> seek(Duration position) async {}
+
+  @override
+  Future<void> setSpeed(double speed) async {}
+
+  @override
+  Future<void> dispose() async {}
+}
+
+class _NoopHttpClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    throw UnsupportedError('Local playback must not issue HTTP requests');
   }
 }
 
@@ -1064,6 +1116,53 @@ void main() {
         expect(player.toggleCount, 1);
       });
 
+      testWidgets(
+        'local preview loading is non-actionable while remote loading cancels',
+        (tester) async {
+          final backend = _HeldAudioPlayerBackend();
+          final player = DeviceVoiceNotePlayerController(
+            coordinator: VoiceNotePlaybackCoordinator(),
+            client: _NoopHttpClient(),
+            player: backend,
+          );
+          addTearDown(() {
+            if (!backend.pathLoad.isCompleted) backend.pathLoad.complete(null);
+          });
+
+          await tester.pumpWidget(
+            _testable(
+              const VoiceNoteAttachment.local(
+                path: '/tmp/local-voice-note.m4a',
+                duration: Duration(seconds: 3),
+                waveform: [],
+              ),
+              overrides: [
+                voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              ],
+            ),
+          );
+          await tester.pump();
+
+          expect(backend.pathLoad.isCompleted, isFalse);
+
+          final control = find.bySemanticsLabel('Loading voice note');
+          final controlSemantics = tester.getSemantics(control);
+          expect(control, findsOneWidget);
+          expect(
+            controlSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+            isFalse,
+          );
+          expect(
+            find.bySemanticsLabel('Cancel voice note loading'),
+            findsNothing,
+          );
+          await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
+          await tester.pump();
+          expect(player.state.canCancelLoading, isFalse);
+          expect(backend.pathLoad.isCompleted, isFalse);
+        },
+      );
+
       testWidgets('offers an accessible retry after a voice note fails', (
         tester,
       ) async {
@@ -1105,6 +1204,58 @@ void main() {
         expect(player.toggleCount, 1);
         expect(find.byTooltip('Pause voice note'), findsOneWidget);
         expect(find.text('Voice note unavailable'), findsNothing);
+      });
+
+      testWidgets('renders desktop packaged voice-note links as audio cards', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/desktop-voice-note.mp4';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '[voice-note-desktop.mp4]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-desktop.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(
+                _FakeVoiceNotePlayer.new,
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-attachment:$url')),
+          findsOneWidget,
+        );
+        expect(find.text('voice-note-desktop.mp4'), findsNothing);
+      });
+
+      testWidgets('keeps audio-looking links without imeta as ordinary links', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/not-an-attachment.mp4';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '[recording.mp4]($url)')),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-attachment:$url')),
+          findsNothing,
+        );
+        expect(find.text('recording.mp4'), findsOneWidget);
       });
 
       testWidgets('renders an audio imeta attachment as a voice note card', (

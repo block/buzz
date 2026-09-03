@@ -273,6 +273,7 @@ class MessageContent extends HookConsumerWidget {
           ref,
           linkText,
           url,
+          imetaByUrl[url],
           linkStyle,
           style,
           resolvedChannelTap,
@@ -356,6 +357,7 @@ class MessageContent extends HookConsumerWidget {
     WidgetRef ref,
     InlineSpan linkText,
     String url,
+    ImetaEntry? imeta,
     TextStyle linkStyle,
     TextStyle? fallbackStyle,
     void Function(String channelId) resolvedChannelTap,
@@ -370,6 +372,10 @@ class MessageContent extends HookConsumerWidget {
     });
 
     final baseStyle = fallbackStyle ?? linkStyle;
+    if (imeta != null &&
+        classifyMediaUrl(url, imeta: imeta) == MessageMediaKind.audio) {
+      return _buildMedia(context, url, imeta);
+    }
     final uri = Uri.tryParse(url);
     final buzzLink = uri?.scheme == 'buzz'
         ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
