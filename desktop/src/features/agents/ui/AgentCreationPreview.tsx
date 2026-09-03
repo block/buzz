@@ -924,13 +924,13 @@ export function AgentCreationPreview({
                   }
                   className={isCompact ? "h-16 w-16" : "h-36 w-36"}
                   clipTestId={`${testIdPrefix}-mask`}
-                  cornerRadius={(isCompact ? 64 : 144) * 0.3}
                   cutout={
                     isCompact
                       ? { cx: 58, cy: 58, r: 16.5 }
                       : { cx: 123, cy: 123, r: 24 }
                   }
                   maskMode={isCompact ? "radial" : "clip-path"}
+                  shape="squircle"
                   size={isCompact ? 64 : 144}
                 >
                   {emojiAvatarPreview ? (

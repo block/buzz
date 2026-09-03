@@ -99,9 +99,10 @@ export function ProfileAvatarWithStatus({
       }
       badgeBox={badgeBox}
       className={cn("inline-flex", className)}
-      cornerRadius={shape === "squircle" ? size * 0.3 : undefined}
+      clipTestId={testId ? `${testId}-mask` : undefined}
       curve={STATUS_DOT_MASK_CURVE}
       cutout={cutout}
+      shape={shape}
       size={size}
     >
       <ProfileAvatar

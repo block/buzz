@@ -76,7 +76,9 @@ async function measureThreadSummaryGeometry(summaryRow: Locator) {
     const summarySurface = summaryButton.querySelector<HTMLElement>(
       '[data-testid="message-thread-summary-surface"]',
     );
-    const firstAvatar = firstParticipant?.firstElementChild;
+    const firstAvatar = firstParticipant?.querySelector<HTMLElement>(
+      '[data-testid^="message-thread-summary-avatar-"]',
+    );
 
     if (
       !summaryWrapper ||
@@ -2884,8 +2886,10 @@ test("opens a single-level thread panel with inline expansion", async ({
         .getByTestId("message-thread-summary-participant")
         .first()
         .evaluate((wrapper) => {
-          const avatar = wrapper.firstElementChild;
-          if (!(avatar instanceof HTMLElement)) return "missing";
+          const avatar = wrapper.querySelector<HTMLElement>(
+            '[data-testid^="message-thread-summary-avatar-"]',
+          );
+          if (!avatar) return "missing";
           const rect = avatar.getBoundingClientRect();
           return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
         }),
@@ -3067,6 +3071,11 @@ test("opens a single-level thread panel with inline expansion", async ({
         ),
     )
     .toBe("1,2");
+  const stackedAvatarMask = rootSummaryRow.getByTestId(
+    "message-thread-summary-stack-mask-0",
+  );
+  await expect(stackedAvatarMask).toHaveCSS("mask-image", /radial-gradient/);
+  await expect(stackedAvatarMask).not.toHaveCSS("mask-image", "none");
 
   await expectThreadReplyUnobscured(nestedReplyRow);
 
