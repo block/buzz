@@ -542,6 +542,46 @@ admission procedure.
 > **Non-normative examples of surfaces that may appear in a protected set:**
 > HTTP API bridge, invite redemption, media storage, git smart-HTTP.
 
+### Git smart-HTTP NIP-98 credential-helper exemption
+
+Git smart-HTTP endpoints (`info/refs`, `git-upload-pack`, and
+`git-receive-pack`) use the git credential-helper proof pattern. The
+credential helper signs a single NIP-98 event at credential-fetch time against
+the repository-root URL with method `GET`, and Git reuses that event across the
+session. For these endpoints, the NIP-98 event is exempt from method binding,
+endpoint-URL binding, and the `payload` tag requirement. This exemption applies
+to all three requirements on all three endpoints, including both POST
+endpoints; it is not a payload-only exemption.
+
+This exemption is required by Git's credential protocol. The credential helper
+receives only credential metadata and never sees request bodies
+(`crates/git-credential-nostr/src/lib.rs:98-132`), so a body hash cannot exist
+in the signed event. This limitation is architectural to Git's credential
+protocol.
+
+The NIP-FI assertion and pairing requirement is unchanged and applies per
+request on every one of these endpoints. Each request MUST still carry and
+pass a verified NIP-FI assertion, satisfy `nostr_pubkey` == the NIP-98 event
+pubkey, and pass the deny-map check. These requirements are not satisfied by a
+prior request or by reuse of the NIP-98 event. The offboarding guarantee is
+therefore fully intact on Git: an offboarded key is denied on its next request.
+
+The following compensating controls are REQUIRED for this proof pattern:
+
+1. NIP-FI assertion verification MUST run on every request.
+2. The reused proof's signature and timestamp MUST be re-verified on every
+   request.
+3. The proof timestamp MUST remain within a `±60s` window for every request.
+4. Production deployments MUST use TLS.
+5. The NIP-98 event MUST bind to the repository-root URL. This binding is
+   repo-scoped, not endpoint-scoped or service-scoped.
+6. Git endpoint routing MUST separate clone endpoints from push endpoints.
+7. Every push MUST pass pre-receive hook push authorization.
+
+This exemption applies solely to the Git credential-helper proof pattern on
+these three endpoints. It is not a precedent for any other surface. A client
+change that enables per-request signing supersedes this exemption.
+
 ### Request format
 
 Each protected HTTP request MUST present both of the following:
