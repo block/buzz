@@ -382,6 +382,9 @@ export class HuddlePresenceTracker {
       session.latestRosterRevision !== null &&
       content.rosterRevision < session.latestRosterRevision &&
       isAfterLatestRosterEvent &&
+      (generation === null ||
+        session.generation === null ||
+        generation !== session.generation) &&
       (session.compactedRosterRevisionFloor === null ||
         content.rosterRevision > session.compactedRosterRevisionFloor)
     ) {

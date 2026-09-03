@@ -294,6 +294,37 @@ test("accepts lower revisions from a new relay room generation", () => {
   assert.equal(hydrated.has(CHARLIE), true);
 });
 
+test("preserves reordered admissions in one explicit generation", () => {
+  const tracker = new HuddlePresenceTracker(RELAY);
+  tracker.apply(event({ id: "1", kind: 48100 }));
+  tracker.apply(
+    participantEvent({
+      id: "2",
+      kind: 48101,
+      admissionId: "charlie",
+      rosterRevision: 2,
+      generation: "7",
+      tags: [["p", CHARLIE]],
+      createdAt: 2,
+    }),
+  );
+
+  assert.equal(
+    tracker.apply(
+      participantEvent({
+        id: "3",
+        kind: 48101,
+        admissionId: "bob",
+        rosterRevision: 1,
+        generation: "7",
+        createdAt: 3,
+      }),
+    ),
+    true,
+  );
+  assert.deepEqual(tracker.snapshot(), new Set([BOB, CHARLIE]));
+});
+
 test("rejects lifecycle events after liveness advances the generation", () => {
   const tracker = new HuddlePresenceTracker(RELAY);
   tracker.apply(event({ id: "1", kind: 48100 }));
