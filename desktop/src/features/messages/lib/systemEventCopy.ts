@@ -27,10 +27,8 @@ export function addedByActionPrefix(isCurrentUser: boolean): string {
  * Generic add caption when the timeline should state that someone was added
  * without attributing the action to a single actor.
  */
-export function addedToChannelActionPrefix(isCurrentUser: boolean): string {
-  return isCurrentUser
-    ? "were added to the channel"
-    : "was added to the channel";
+export function addedActionPrefix(isCurrentUser: boolean): string {
+  return isCurrentUser ? "were added" : "was added";
 }
 
 /**

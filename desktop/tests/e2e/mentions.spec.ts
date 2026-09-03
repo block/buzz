@@ -68,7 +68,7 @@ const JOIN_COLLAPSE_SPLIT_TEXTS = [
   "Gandalf added by you",
 ];
 const JOIN_COLLAPSE_GROUPED_TEXT =
-  "Elrond was added to the channel along with Legolas, Gimli, and Gandalf";
+  "Elrond was added along with Legolas, Gimli, and Gandalf";
 const JOIN_COLLAPSE_CAPTURE_WIDTH = 560;
 const JOIN_COLLAPSE_CAPTURE_HEIGHT = 260;
 const JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING = 24;

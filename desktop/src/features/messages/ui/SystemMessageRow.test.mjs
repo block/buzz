@@ -104,16 +104,52 @@ test("grouped duplicate arrival targets render one unique added member", async (
   });
 
   const row = screen.getByTestId("system-message-row");
-  assert.equal(
-    normalizeText(row.textContent ?? ""),
-    "Elrond was added to the channel",
-  );
+  assert.equal(normalizeText(row.textContent ?? ""), "Elrond was added");
   assert.equal(
     screen
       .getByTestId("system-message-avatar-stack")
       .getAttribute("aria-label"),
     "1 channel member",
   );
+});
+
+test("grouped duplicate arrival targets keep viewer grammar truthful", async () => {
+  const { screen } = await import("@testing-library/react");
+  const viewer = "10".repeat(32);
+  const firstActor = "11".repeat(32);
+  const secondActor = "12".repeat(32);
+  const groupedMessages = [
+    systemMessage({
+      actor: firstActor,
+      createdAt: 1,
+      id: "a",
+      target: viewer,
+    }),
+    systemMessage({
+      actor: secondActor,
+      createdAt: 2,
+      id: "b",
+      target: viewer,
+    }),
+  ];
+
+  await renderSystemMessageRow({
+    currentPubkey: viewer,
+    groupedMessages,
+    profiles: {
+      [viewer]: {
+        avatarUrl: null,
+        displayName: "Viewer",
+        isAgent: false,
+        name: null,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+    },
+  });
+
+  const row = screen.getByTestId("system-message-row");
+  assert.equal(normalizeText(row.textContent ?? ""), "You were added");
 });
 
 test("grouped mixed additions render mechanism-truthful copy", async () => {
@@ -172,8 +208,72 @@ test("grouped mixed additions render mechanism-truthful copy", async () => {
   const row = screen.getByTestId("system-message-row");
   assert.equal(
     normalizeText(row.textContent ?? ""),
-    "Elrond was added to the channel along with Legolas, Gimli, and Gandalf",
+    "Elrond was added along with Legolas, Gimli, and Gandalf",
   );
+});
+
+test("grouped self-joins render joined copy", async () => {
+  const { screen } = await import("@testing-library/react");
+  const elrond = "11".repeat(32);
+  const legolas = "12".repeat(32);
+  const groupedMessages = [
+    systemMessage({ actor: elrond, createdAt: 1, id: "a", target: elrond }),
+    systemMessage({ actor: legolas, createdAt: 2, id: "b", target: legolas }),
+  ];
+
+  await renderSystemMessageRow({
+    groupedMessages,
+    profiles: {
+      [elrond]: {
+        avatarUrl: null,
+        displayName: "Elrond",
+        isAgent: false,
+        name: null,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+      [legolas]: {
+        avatarUrl: null,
+        displayName: "Legolas",
+        isAgent: false,
+        name: null,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+    },
+  });
+
+  const row = screen.getByTestId("system-message-row");
+  assert.equal(
+    normalizeText(row.textContent ?? ""),
+    "Elrond joined along with Legolas",
+  );
+});
+
+test("grouped duplicate self-joins render singular joined copy", async () => {
+  const { screen } = await import("@testing-library/react");
+  const elrond = "11".repeat(32);
+  const groupedMessages = [
+    systemMessage({ actor: elrond, createdAt: 1, id: "a", target: elrond }),
+    systemMessage({ actor: elrond, createdAt: 2, id: "b", target: elrond }),
+  ];
+
+  await renderSystemMessageRow({
+    groupedMessages,
+    profiles: {
+      [elrond]: {
+        avatarUrl: null,
+        displayName: "Elrond",
+        isAgent: false,
+        name: null,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+    },
+  });
+
+  const row = screen.getByTestId("system-message-row");
+  assert.equal(normalizeText(row.textContent ?? ""), "Elrond joined");
 });
 
 test("grouped self-joins plus additions render neutral arrival copy", async () => {
@@ -212,6 +312,6 @@ test("grouped self-joins plus additions render neutral arrival copy", async () =
   const row = screen.getByTestId("system-message-row");
   assert.equal(
     normalizeText(row.textContent ?? ""),
-    "Elrond arrived in the channel along with Legolas",
+    "Elrond arrived along with Legolas",
   );
 });
