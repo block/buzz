@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { QueryClient } from "@tanstack/react-query";
 
 import {
   fetchUserStatusLookup,
+  readCurrentUserStatusLookup,
   USER_STATUS_AUTHOR_CHUNK_SIZE,
 } from "./hooks.ts";
 
@@ -45,6 +47,33 @@ test("does not let a pending history result replace a newer live status", async 
 
   assert.equal(lookup[pubkey]?.text, "Live");
   assert.equal(lookup[pubkey]?.eventId, "live");
+});
+
+test("seeds overlapping status lookups with the newest cached version", () => {
+  const pubkey = "a".repeat(64);
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(["user-status", pubkey, "newer"], {
+    [pubkey]: {
+      text: "Newer",
+      emoji: "",
+      updatedAt: 2,
+      eventId: "newer",
+    },
+  });
+  queryClient.setQueryData(["user-status", pubkey, "older"], {
+    [pubkey]: {
+      text: "Older",
+      emoji: "",
+      updatedAt: 1,
+      eventId: "older",
+    },
+  });
+
+  const lookup = readCurrentUserStatusLookup(queryClient, [pubkey]);
+
+  assert.equal(lookup[pubkey]?.text, "Newer");
+  assert.equal(lookup[pubkey]?.eventId, "newer");
+  queryClient.clear();
 });
 
 test("fetches every current status when the author set exceeds one relay page", async () => {

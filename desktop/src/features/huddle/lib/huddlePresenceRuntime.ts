@@ -493,6 +493,10 @@ export function startHuddlePresenceRuntime(
         if (!bufferedEventIds.has(event.id)) continue;
         const sessionId = huddleSessionId(event);
         if (!sessionId) continue;
+        const parentChannelId = huddleParentChannelId(event);
+        if (parentChannelId) {
+          sessionParentChannelIds.set(sessionId, parentChannelId);
+        }
         if (event.kind === KIND_HUDDLE_ENDED) {
           nextActiveSessionGenerations.delete(sessionId);
         } else if (event.kind === KIND_HUDDLE_PARTICIPANT_JOINED) {

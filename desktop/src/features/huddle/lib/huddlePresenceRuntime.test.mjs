@@ -1047,6 +1047,103 @@ test("stale liveness removes unchanged requested sessions and preserves new ones
   dispose();
 });
 
+test("retains parent routing for sessions accepted from hydration overlap", async () => {
+  let liveHandler;
+  let livenessTimer;
+  let resolveHydrationLiveness;
+  let livenessRequests = 0;
+  const livenessFilters = [];
+  const snapshots = [];
+  const history = [
+    event({
+      id: "start-a",
+      kind: 48100,
+      session: "room-a",
+      tags: [["h", "general"]],
+      createdAt: 1,
+    }),
+    participantEvent({
+      id: "join-a",
+      kind: 48101,
+      session: "room-a",
+      admissionId: "admission-a",
+      rosterRevision: 1,
+      generation: "1",
+      tags: [
+        ["h", "general"],
+        ["p", BOB],
+      ],
+      createdAt: 2,
+    }),
+  ];
+  const dispose = startHuddlePresenceRuntime({
+    relaySelfPubkey: RELAY,
+    channelIds: ["design", "general"],
+    subscribeLive: async (_filter, handler) => {
+      liveHandler = handler;
+      return () => {};
+    },
+    fetchEvents: async (filter) => {
+      if (!filter.kinds?.includes(48104)) return history;
+      livenessRequests += 1;
+      livenessFilters.push(filter);
+      if (livenessRequests === 1) {
+        return new Promise((resolve) => {
+          resolveHydrationLiveness = resolve;
+        });
+      }
+      return filter["#d"].map((session) => livenessEvent(session));
+    },
+    subscribeToReconnects: () => () => {},
+    onPresence: (participants) => snapshots.push(new Set(participants)),
+    setLivenessTimer: (callback) => {
+      livenessTimer = callback;
+      return callback;
+    },
+    clearLivenessTimer: () => {
+      livenessTimer = undefined;
+    },
+  });
+  await settle();
+
+  liveHandler(
+    event({
+      id: "start-b",
+      kind: 48100,
+      pubkey: CAROL,
+      session: "room-b",
+      tags: [["h", "design"]],
+      createdAt: 3,
+    }),
+  );
+  liveHandler(
+    participantEvent({
+      id: "join-b",
+      kind: 48101,
+      session: "room-b",
+      admissionId: "admission-b",
+      rosterRevision: 1,
+      generation: "1",
+      tags: [
+        ["h", "design"],
+        ["p", CAROL],
+      ],
+      createdAt: 4,
+    }),
+  );
+  resolveHydrationLiveness([livenessEvent("room-a")]);
+  await settle();
+  assert.equal(snapshots.at(-1).has(CAROL), true);
+
+  livenessTimer();
+  await settle();
+  assert.equal(livenessRequests, 2);
+  assert.deepEqual(livenessFilters[1]["#h"], ["general", "design"]);
+  assert.deepEqual(livenessFilters[1]["#d"], ["room-a", "room-b"]);
+  assert.equal(snapshots.at(-1).has(CAROL), true);
+  dispose();
+});
+
 test("bounds parent-routed liveness requests while preserving every session", async () => {
   const channels = Array.from(
     { length: 257 },

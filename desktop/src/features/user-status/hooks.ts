@@ -272,6 +272,32 @@ export async function fetchUserStatusLookup(
   return lookup;
 }
 
+export function readCurrentUserStatusLookup(
+  queryClient: Pick<QueryClient, "getQueriesData">,
+  pubkeys: string[],
+): UserStatusLookup {
+  const normalizedPubkeys = normalizePubkeys(pubkeys);
+  const currentLookup: UserStatusLookup = {};
+  for (const [queryKey, lookup] of queryClient.getQueriesData<UserStatusLookup>(
+    {
+      queryKey: ["user-status"],
+    },
+  )) {
+    if (!lookup) continue;
+    for (const pubkey of normalizedPubkeys) {
+      if (!queryKey.slice(1).includes(pubkey)) continue;
+      const candidate = lookup[pubkey];
+      if (candidate === undefined) continue;
+      if (candidate === null) {
+        currentLookup[pubkey] ??= null;
+        continue;
+      }
+      currentLookup[pubkey] = newerUserStatus(currentLookup[pubkey], candidate);
+    }
+  }
+  return currentLookup;
+}
+
 export function useUserStatusQuery(
   pubkeys: string[],
   preservePreviousData = false,
@@ -291,26 +317,7 @@ export function useUserStatusQuery(
       fetchUserStatusLookup(
         normalizedPubkeys,
         (filter) => relayClient.fetchEvents(filter),
-        () => {
-          const currentLookup: UserStatusLookup = {};
-          for (const [
-            queryKey,
-            lookup,
-          ] of queryClient.getQueriesData<UserStatusLookup>({
-            queryKey: ["user-status"],
-          })) {
-            if (!lookup) continue;
-            for (const pubkey of normalizedPubkeys) {
-              if (
-                queryKey.slice(1).includes(pubkey) &&
-                lookup[pubkey] !== undefined
-              ) {
-                currentLookup[pubkey] = lookup[pubkey];
-              }
-            }
-          }
-          return currentLookup;
-        },
+        () => readCurrentUserStatusLookup(queryClient, normalizedPubkeys),
       ),
     ...(preservePreviousData
       ? {
