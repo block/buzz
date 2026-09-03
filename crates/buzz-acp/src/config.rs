@@ -808,9 +808,23 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 /// startup budget (see block/buzz#3355). Skip that unrelated global startup
 /// by default; an operator or persona can still opt back in by setting the
 /// variable explicitly.
+///
+/// Claude: a Buzz-managed Claude agent otherwise inherits the operator's
+/// claude.ai account connectors (Gmail, Drive, HubSpot, ClickUp, etc.) into
+/// the agent's tool surface — connectors the operator wired up for their own
+/// use, now reachable from a shared community agent. Default those off so the
+/// connector surface is opt-in, mirroring the Hermes isolation above.
+/// `ENABLE_CLAUDEAI_MCP_SERVERS` is honored by Claude Code from v2.1.63
+/// (older builds ignore the unknown variable); it governs the claude.ai
+/// *connector* path only, not file-configured MCP servers (`.mcp.json` /
+/// user-scope `mcpServers`). An operator or persona re-enables connectors by
+/// setting the variable explicitly.
 pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
     match normalize_agent_command_identity(command).as_str() {
         "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+        "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+            &[("ENABLE_CLAUDEAI_MCP_SERVERS", "false")]
+        }
         _ => &[],
     }
 }
@@ -1755,10 +1769,36 @@ mod tests {
                 "unexpected env defaults for {command}"
             );
         }
-        for command in ["goose", "codex-acp", "claude-agent-acp", "buzz-agent", ""] {
+        for command in ["goose", "codex-acp", "buzz-agent", ""] {
             assert!(
                 default_agent_env(command).is_empty(),
-                "non-Hermes command must have no env defaults: {command}"
+                "non-Hermes command must have no Hermes env defaults: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_agent_env_recognizes_claude_identities() {
+        for command in [
+            "claude-agent-acp",
+            "claude-code-acp",
+            "claude-code",
+            "claudecode",
+            "Claude Code",
+            "/usr/local/bin/claude-code-acp",
+            r"C:\Users\test\AppData\Roaming\npm\claude-code-acp.cmd",
+        ] {
+            assert_eq!(
+                default_agent_env(command),
+                &[("ENABLE_CLAUDEAI_MCP_SERVERS", "false")],
+                "unexpected env defaults for {command}"
+            );
+        }
+        for command in ["goose", "codex-acp", "hermes-acp", "buzz-agent", ""] {
+            assert_ne!(
+                default_agent_env(command),
+                &[("ENABLE_CLAUDEAI_MCP_SERVERS", "false")],
+                "non-Claude command must not get Claude env defaults: {command}"
             );
         }
     }
