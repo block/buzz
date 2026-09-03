@@ -2734,6 +2734,24 @@ pub async fn run_prompt_task(
     // own block. Per-section blocks let the observer size trimmer elide a
     // section body in place while every `[Header]` line survives at the head
     // of its own leaf — so the "Prompt context" panel counts every section.
+    // Out-of-band author facts for the agent (ACP `_meta`): the harness already
+    // authenticated these events; agents (e.g. policy-enforcing ACP servers)
+    // must not have to parse `From:` lines out of prompt text to learn who is
+    // asking. Events only — heartbeats carry no author.
+    let prompt_meta: Option<serde_json::Value> = batch.as_ref().map(|b| {
+        let events: Vec<serde_json::Value> = b
+            .events
+            .iter()
+            .map(|be| {
+                serde_json::json!({
+                    "id": be.event.id.to_hex(),
+                    "authorPubkey": be.event.pubkey.to_hex(),
+                })
+            })
+            .collect();
+        serde_json::json!({ "buzz": { "channelId": b.channel_id, "events": events } })
+    });
+
     let prompt_blocks: Vec<&str> = match slash_command {
         Some(ref cmd) => std::iter::once(cmd.as_str())
             .chain(prompt_sections.iter().map(String::as_str))
@@ -2787,6 +2805,7 @@ pub async fn run_prompt_task(
                 result = agent.acp.session_prompt_blocks_with_idle_timeout(
                     &session_id,
                     &prompt_blocks,
+                    prompt_meta.clone(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -2798,6 +2817,7 @@ pub async fn run_prompt_task(
                 result = agent.acp.session_prompt_blocks_with_idle_timeout(
                     &session_id,
                     &prompt_blocks,
+                    prompt_meta.clone(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
