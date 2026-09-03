@@ -55,6 +55,8 @@ const PAGE_BACK_CLASS =
 const MODAL_PRIMARY_ACTION_CLASS = `${ONBOARDING_PRIMARY_CTA_CLASS} !text-[rgb(var(--buzz-hosted-community-modal-action-fg))]`;
 const MODAL_BACK_ACTION_CLASS =
   "h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15";
+/** Hosted Builderlab OAuth can hang forever on TLS/network failures (#2484). */
+const BUILDERLAB_SIGN_IN_TIMEOUT_MS = 45_000;
 
 type HostedCommunityOnboardingProps = {
   onBack: () => void;
@@ -135,18 +137,35 @@ export function HostedCommunityOnboarding({
     const attempt = ++loginAttempt.current;
     setAction("Signing in…");
     setError(null);
-    void startBuilderlabLogin()
+    let timeoutId = 0;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = window.setTimeout(() => {
+        reject(
+          new Error(
+            "Builderlab sign-in timed out. Retry, or go back and connect to an existing / self-hosted relay.",
+          ),
+        );
+      }, BUILDERLAB_SIGN_IN_TIMEOUT_MS);
+    });
+    void Promise.race([startBuilderlabLogin(), timeout])
       .then(async (nextAuth) => {
+        window.clearTimeout(timeoutId);
         if (loginAttempt.current !== attempt) return;
         setAuth(nextAuth);
         await loadAccount();
       })
       .catch((cause) => {
+        window.clearTimeout(timeoutId);
         if (loginAttempt.current !== attempt) return;
+        // Invalidate any late success from the still-running native login.
+        loginAttempt.current += 1;
         setError(cause instanceof Error ? cause.message : String(cause));
+        void cancelBuilderlabLogin().catch(() => {
+          // Best-effort cleanup when the browser flow never returns.
+        });
       })
       .finally(() => {
-        if (loginAttempt.current === attempt) setAction(null);
+        setAction((current) => (current === "Signing in…" ? null : current));
       });
   };
 
@@ -496,18 +515,30 @@ export function HostedCommunityOnboarding({
                   Waiting for your browser…
                 </Button>
               ) : (
-                <Button
-                  className={`mt-6 ${MODAL_PRIMARY_ACTION_CLASS}`}
-                  onClick={signIn}
-                >
-                  Sign in to continue
-                </Button>
+                <div className="mt-6 flex w-full flex-col items-stretch gap-2">
+                  <Button
+                    className={MODAL_PRIMARY_ACTION_CLASS}
+                    onClick={signIn}
+                  >
+                    {error ? "Retry sign in" : "Sign in to continue"}
+                  </Button>
+                  {error ? (
+                    <Button
+                      className={MODAL_BACK_ACTION_CLASS}
+                      onClick={cancelSignInAndGoBack}
+                      variant="ghost"
+                    >
+                      Back — use another relay
+                    </Button>
+                  ) : null}
+                </div>
               )}
               {/* Quiet breadcrumb: Buzz itself is open source; this hosted
                     relay is the one account-backed piece of the flow. */}
               <p className="mt-6 w-full border-t border-foreground/10 pt-4 text-xs leading-5 text-foreground/45">
                 Buzz is open source. Builderlab hosts the relay for this
-                account.
+                account. If hosted setup fails, go back and connect to a
+                self-hosted or existing relay instead.
               </p>
             </>
           ) : !identity ? (

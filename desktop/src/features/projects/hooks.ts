@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { projectCommentKindAndChannelTags } from "./projectCommentPublish";
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
@@ -318,6 +319,10 @@ async function createProjectPullRequestComment({
     throw new Error("A review commit is required for review comments.");
   }
 
+  const { kind, channelTags } = projectCommentKindAndChannelTags(
+    project,
+    mentionPubkeys,
+  );
   const recipients = new Set([
     project.owner.toLowerCase(),
     pullRequest.author.toLowerCase(),
@@ -325,6 +330,7 @@ async function createProjectPullRequestComment({
     ...mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
   ]);
   const tags = [
+    ...channelTags,
     ["e", pullRequest.id, "", "root"],
     ["a", project.repoAddress],
     ...[...recipients].map((recipient) => ["p", recipient]),
@@ -347,7 +353,7 @@ async function createProjectPullRequestComment({
   ];
 
   const event = await signRelayEvent({
-    kind: KIND_TEXT_NOTE,
+    kind,
     content: body,
     ...(decision
       ? {
@@ -385,6 +391,10 @@ async function createProjectIssueComment({
     throw new Error("Comment cannot be empty.");
   }
 
+  const { kind, channelTags } = projectCommentKindAndChannelTags(
+    project,
+    mentionPubkeys,
+  );
   const recipients = new Set([
     project.owner.toLowerCase(),
     issue.author.toLowerCase(),
@@ -392,6 +402,7 @@ async function createProjectIssueComment({
     ...mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
   ]);
   const tags = [
+    ...channelTags,
     ["e", issue.id, "", "root"],
     ["a", project.repoAddress],
     ...[...recipients].map((recipient) => ["p", recipient]),
@@ -400,7 +411,7 @@ async function createProjectIssueComment({
   const identity = await getIdentity();
 
   const event = await signRelayEvent({
-    kind: KIND_TEXT_NOTE,
+    kind,
     content: body,
     createdAt: nextProjectIssueCommentCreatedAt(
       issue,
