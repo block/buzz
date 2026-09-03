@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod fleet;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -37,6 +38,7 @@ use config::{
     MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
+use fleet::FleetPool;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
@@ -2789,6 +2791,7 @@ async fn tokio_main() -> Result<()> {
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
+        dm_autopublish: config.dm_autopublish,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
         agent_keys: config.keys.clone(),
@@ -2967,6 +2970,40 @@ async fn tokio_main() -> Result<()> {
         })
         .collect();
 
+    // Host-wide live-session cap (`--fleet-slots`). Acquired by the dispatcher
+    // right before a turn that will create a session; released when that
+    // session is closed, or by the kernel when this process dies.
+    let mut fleet: Option<FleetPool> = if config.fleet_slots > 0 {
+        let pool =
+            FleetPool::new(&config.fleet_slot_dir, config.fleet_slots).with_context(|| {
+                format!(
+                    "cannot prepare fleet slot dir {}",
+                    config.fleet_slot_dir.display()
+                )
+            })?;
+        tracing::info!(
+            slots = pool.slots(),
+            dir = %pool.dir().display(),
+            "fleet session cap enabled"
+        );
+        Some(pool)
+    } else {
+        None
+    };
+
+    // Session-level idle housekeeping (see `reap_idle_sessions`). Always
+    // ticks so sessions invalidated on a live adapter get their
+    // `session/close`; the idle bound itself is opt-in.
+    let session_idle_close_bound = Duration::from_secs(config.session_idle_close_secs);
+    let mut session_reaper = {
+        let interval = if session_idle_close_bound.is_zero() {
+            Duration::from_secs(30)
+        } else {
+            session_idle_close_bound.min(Duration::from_secs(30))
+        };
+        tokio::time::interval_at(tokio::time::Instant::now() + interval, interval)
+    };
+
     //
     // Branches 1 & 2 both need to borrow `pool`, but they access different
     // fields (result_rx vs join_set). We use `rx_and_join_set()` to split the
@@ -3015,33 +3052,55 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
+        // On-demand agents: when every started agent is busy and channels are
+        // waiting, fill surplus slots now rather than on the next 30s
+        // maintenance tick. Baseline slots keep their maintenance cadence.
+        if pool_ready && config.min_agents < config.agents {
+            let wanted = on_demand_fill(
+                &pool,
+                &queue,
+                &crash_history,
+                fleet.as_ref().is_some_and(FleetPool::is_waiting),
+            );
+            if wanted > 0 {
+                refill_slots(
+                    &pool,
+                    &mut crash_history,
+                    &config,
+                    &respawn_tx,
+                    &mut respawn_tasks,
+                    observer.clone(),
+                    false,
+                    wanted,
+                );
+            }
+        }
+
         if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
 
             // Slot refill: spawn background tasks for empty slots whose
             // circuit breaker allows it. spawn_and_init runs off the main
-            // loop so it never blocks event processing.
-            for (idx, slot) in crash_history.iter_mut().enumerate() {
-                if pool.slot_alive(idx) || slot.respawn_in_flight {
-                    continue;
-                }
-                if !slot.can_refill() {
-                    continue;
-                }
-                slot.respawn_in_flight = true;
-                tracing::info!(agent = idx, "slot refill: spawning background respawn");
-                let cmd = config.agent_command.clone();
-                let args = config.agent_args.clone();
-                let env = config.persona_env_vars.clone();
-                let has_codex = config.has_generated_codex_config;
-                let observer = observer.clone();
-                let guard = RespawnGuard::new(idx, respawn_tx.clone());
-                respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
-                    guard.send(result);
-                });
-            }
+            // loop so it never blocks event processing. Slots at or above
+            // `min_agents` are on-demand and refill only while queued
+            // channels outnumber idle agents.
+            let wanted = on_demand_fill(
+                &pool,
+                &queue,
+                &crash_history,
+                fleet.as_ref().is_some_and(FleetPool::is_waiting),
+            );
+            refill_slots(
+                &pool,
+                &mut crash_history,
+                &config,
+                &respawn_tx,
+                &mut respawn_tasks,
+                observer.clone(),
+                true,
+                wanted,
+            );
 
             // Flush requeued batches whose retry_after has expired. Without
             // this, a batch requeued during crash recovery can sit idle
@@ -3050,7 +3109,7 @@ async fn tokio_main() -> Result<()> {
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
                 for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet)
                 {
                     typing_channels.insert(scope, thread_tags);
                 }
@@ -3102,7 +3161,7 @@ async fn tokio_main() -> Result<()> {
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
             for (scope, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet)
             {
                 typing_channels.insert(scope, thread_tags);
             }
@@ -3541,7 +3600,7 @@ async fn tokio_main() -> Result<()> {
                             );
                             if pool_ready {
                                 for (scope, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet)
                                 {
                                     typing_channels.insert(scope, thread_tags);
                                 }
@@ -3576,6 +3635,26 @@ async fn tokio_main() -> Result<()> {
                             "inactivity bound reached — exiting gracefully"
                         );
                         let _ = shutdown_tx.send(());
+                    }
+                    None
+                }
+                _ = session_reaper.tick() => {
+                    let _ = result_rx; // end split borrow before touching pool
+                    if pool_ready {
+                        let summary = reap_idle_sessions(
+                            &mut pool,
+                            tokio::time::Instant::now(),
+                            session_idle_close_bound,
+                            config.min_agents as usize,
+                        )
+                        .await;
+                        if summary.sessions_closed > 0 || summary.agents_released > 0 {
+                            tracing::info!(
+                                sessions_closed = summary.sessions_closed,
+                                agents_released = summary.agents_released,
+                                "session_reaper"
+                            );
+                        }
                     }
                     None
                 }
@@ -3641,12 +3720,12 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (scope, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet)
                         {
                             typing_channels.insert(scope, thread_tags);
                         }
                     } else if pool.any_idle() {
-                        dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+                        dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight, &mut fleet);
                     } else {
                         tracing::debug!("heartbeat_skipped_busy");
                     }
@@ -3743,7 +3822,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet)
                 {
                     typing_channels.insert(scope, thread_tags);
                 }
@@ -3768,7 +3847,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet)
                 {
                     typing_channels.insert(scope, thread_tags);
                 }
@@ -3922,7 +4001,7 @@ async fn tokio_main() -> Result<()> {
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
                 for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet)
                 {
                     typing_channels.insert(scope, thread_tags);
                 }
@@ -3949,9 +4028,13 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (scope, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
+                        for (scope, thread_tags) in dispatch_pending(
+                            &mut pool,
+                            &mut queue,
+                            &ctx,
+                            &mut last_activity,
+                            &mut fleet,
+                        ) {
                             typing_channels.insert(scope, thread_tags);
                         }
                     }
@@ -4340,6 +4423,7 @@ fn dispatch_pending(
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
     last_activity: &mut tokio::time::Instant,
+    fleet: &mut Option<FleetPool>,
 ) -> Vec<(scope::SessionScope, ThreadTags)> {
     // Keyed by the exact session scope, not the channel: two threads dispatching
     // concurrently in one channel get distinct typing entries so completing one
@@ -4351,6 +4435,11 @@ fn dispatch_pending(
     // releasing requeues them so the next dispatch (when the owner returns)
     // reuses that exact session instead of forking a duplicate.
     let mut held: Vec<FlushBatch> = Vec::new();
+    // Batches parked because the fleet has no free session slot. They stay
+    // in-flight for the length of this pass so `flush_next` moves on to scopes
+    // that already hold a session, then go back to the queue front untouched
+    // (no retry accounting — nothing failed).
+    let mut fleet_parked: Vec<FlushBatch> = Vec::new();
     loop {
         let batch = match queue.flush_next() {
             Some(b) => b,
@@ -4379,6 +4468,19 @@ fn dispatch_pending(
         // thread's provider session so a temporarily busy worker cannot cause
         // another to open a duplicate session for the same thread.
         let affinity_hit = pool.has_session_for(&scope);
+        // A turn without a session on any idle agent will create one, which
+        // needs a fleet slot. Only reach for the fleet when an agent is
+        // actually free, so pool exhaustion never churns a slot.
+        let fleet_slot = match fleet.as_mut() {
+            Some(fleet) if !affinity_hit && pool.any_idle() => match fleet.try_acquire() {
+                Some(slot) => Some(slot),
+                None => {
+                    fleet_parked.push(batch);
+                    continue;
+                }
+            },
+            _ => None,
+        };
         let mut agent = match pool.try_claim(Some(&scope)) {
             Some(a) => a,
             None => {
@@ -4389,7 +4491,15 @@ fn dispatch_pending(
                 break;
             }
         };
-        tracing::debug!(agent = agent.index, channel = %channel_id, scope = %scope.telemetry_label(), affinity_hit, "agent_claimed");
+        tracing::debug!(
+            agent = agent.index,
+            channel = %channel_id,
+            scope = %scope.telemetry_label(),
+            affinity_hit,
+            fleet_slot = fleet_slot.as_ref().map(|slot| slot.index()),
+            "agent_claimed"
+        );
+        agent.state.pending_slot = fleet_slot;
 
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
@@ -4460,8 +4570,13 @@ fn dispatch_pending(
         queue.requeue_preserve_timestamps(batch);
         queue.mark_complete(scope);
     }
+    let parked = fleet_parked.len();
+    for batch in fleet_parked {
+        park_batch(queue, batch);
+    }
     tracing::debug!(
         dispatched = dispatched_channels.len(),
+        fleet_parked = parked,
         queue_depth = queue.pending_channels(),
         "dispatch_pending"
     );
@@ -4545,6 +4660,13 @@ fn handle_prompt_result(
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
+    // Stamp the session's idle clock at return time. The reaper only ever
+    // sees idle agents, so this is exact; a session the task already
+    // invalidated is simply not stamped.
+    result
+        .agent
+        .state
+        .touch(&result.source, tokio::time::Instant::now());
     if let PromptSource::Channel(scope) = &result.source {
         // The task may have invalidated this session before returning. Never
         // resurrect delivery state for a dead session; its replacement must
@@ -5074,14 +5196,35 @@ fn dispatch_heartbeat(
     pool: &mut AgentPool,
     ctx: &Arc<PromptContext>,
     heartbeat_in_flight: &mut bool,
+    fleet: &mut Option<FleetPool>,
 ) {
     if *heartbeat_in_flight {
         return;
     }
-    let agent = match pool.try_claim(None) {
+    let mut agent = match pool.try_claim(None) {
         Some(a) => a,
         None => return,
     };
+    // A heartbeat session counts against the fleet like any other. Heartbeats
+    // are droppable by design, so an exhausted fleet just skips this tick.
+    if agent.state.heartbeat_session.is_none() {
+        if let Some(fleet) = fleet.as_mut() {
+            match fleet.try_acquire() {
+                Some(slot) => agent.state.pending_slot = Some(slot),
+                None => {
+                    tracing::debug!(agent = agent.index, "heartbeat skipped — fleet exhausted");
+                    // Not a turn: keep the surplus-idle clock where it was.
+                    let idle_since = agent.state.idle_since;
+                    let index = agent.index;
+                    pool.return_agent(agent);
+                    if let Some(agent) = pool.agents_mut()[index].as_mut() {
+                        agent.state.idle_since = idle_since;
+                    }
+                    return;
+                }
+            }
+        }
+    }
 
     let prompt_text = ctx
         .heartbeat_prompt
@@ -5280,6 +5423,188 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
         .to_ascii_lowercase()
 }
 
+/// Put a flushed batch back exactly as it was: live events to the queue front
+/// with their timestamps, cancelled events back to the cancelled store (which
+/// `requeue_preserve_timestamps` alone would drop), and the channel released
+/// from in-flight with no retry accounting.
+fn park_batch(queue: &mut EventQueue, mut batch: FlushBatch) {
+    let channel_id = batch.channel_id;
+    let scope = batch.scope.clone();
+    let cancelled_events = std::mem::take(&mut batch.cancelled_events);
+    let cancel_reason = batch.cancel_reason;
+    queue.requeue_preserve_timestamps(batch);
+    if !cancelled_events.is_empty() {
+        queue.requeue_as_cancelled(
+            FlushBatch {
+                channel_id,
+                scope: scope.clone(),
+                events: Vec::new(),
+                cancelled_events,
+                cancel_reason,
+            },
+            cancel_reason.unwrap_or(CancelReason::Steer),
+        );
+    }
+    queue.mark_complete(&scope);
+}
+
+/// How many on-demand slots to fill right now: waiting channels beyond what
+/// in-flight (re)spawns will absorb, and only while agents are the bottleneck.
+fn on_demand_fill(
+    pool: &AgentPool,
+    queue: &EventQueue,
+    crash_history: &[SlotCircuit],
+    fleet_waiting: bool,
+) -> usize {
+    // An idle agent means the queue is not agent-bound; an exhausted fleet
+    // means no new session could start on a fresh agent anyway.
+    if pool.any_idle() || fleet_waiting {
+        return 0;
+    }
+    let arriving = crash_history
+        .iter()
+        .filter(|slot| slot.respawn_in_flight)
+        .count();
+    queue.undispatched_scopes().saturating_sub(arriving)
+}
+
+/// Spawn background (re)spawns for empty slots. Baseline slots
+/// (`< min_agents`) refill whenever `include_baseline` and their circuit
+/// allows; on-demand slots refill only while `on_demand` remains.
+#[allow(clippy::too_many_arguments)]
+fn refill_slots(
+    pool: &AgentPool,
+    crash_history: &mut [SlotCircuit],
+    config: &Config,
+    respawn_tx: &mpsc::Sender<RespawnResult>,
+    respawn_tasks: &mut tokio::task::JoinSet<()>,
+    observer: Option<observer::ObserverHandle>,
+    include_baseline: bool,
+    mut on_demand: usize,
+) {
+    let min_agents = config.min_agents as usize;
+    for (idx, slot) in crash_history.iter_mut().enumerate() {
+        if pool.slot_alive(idx) || slot.respawn_in_flight {
+            continue;
+        }
+        let baseline = idx < min_agents;
+        if baseline {
+            if !include_baseline {
+                continue;
+            }
+        } else if on_demand == 0 {
+            continue;
+        }
+        if !slot.can_refill() {
+            continue;
+        }
+        if !baseline {
+            on_demand -= 1;
+        }
+        slot.respawn_in_flight = true;
+        tracing::info!(
+            agent = idx,
+            on_demand = !baseline,
+            "slot refill: spawning background respawn"
+        );
+        let cmd = config.agent_command.clone();
+        let args = config.agent_args.clone();
+        let env = config.persona_env_vars.clone();
+        let has_codex = config.has_generated_codex_config;
+        let observer = observer.clone();
+        let guard = RespawnGuard::new(idx, respawn_tx.clone());
+        respawn_tasks.spawn(async move {
+            let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+            guard.send(result);
+        });
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ReapSummary {
+    sessions_closed: usize,
+    agents_released: usize,
+}
+
+/// Idle housekeeping over the agents sitting in the pool (never checked-out
+/// ones): flush queued `session/close`es, close channel/heartbeat sessions
+/// that have not run a turn for `bound`, and shut down on-demand agents
+/// (slot index `>= min_agents`) left holding no session for `bound`.
+/// `bound == 0` keeps only the flush.
+async fn reap_idle_sessions(
+    pool: &mut AgentPool,
+    now: tokio::time::Instant,
+    bound: Duration,
+    min_agents: usize,
+) -> ReapSummary {
+    let mut summary = ReapSummary::default();
+    for slot in pool.agents_mut().iter_mut() {
+        let Some(agent) = slot.as_mut() else {
+            continue;
+        };
+        if !bound.is_zero() {
+            let due: Vec<scope::SessionScope> = agent
+                .state
+                .sessions
+                .keys()
+                .filter(|scope| {
+                    agent
+                        .state
+                        .last_used
+                        .get(scope)
+                        .is_some_and(|last| now.duration_since(*last) >= bound)
+                })
+                .cloned()
+                .collect();
+            for scope in &due {
+                tracing::info!(
+                    target: "pool::session",
+                    agent = agent.index,
+                    channel = %scope.channel_id(),
+                    scope = %scope.telemetry_label(),
+                    idle_bound_secs = bound.as_secs(),
+                    "session idle — closing"
+                );
+                agent.state.invalidate_scope(scope);
+            }
+            summary.sessions_closed += due.len();
+            if agent
+                .state
+                .heartbeat_last_used
+                .is_some_and(|last| now.duration_since(last) >= bound)
+            {
+                tracing::info!(
+                    target: "pool::session",
+                    agent = agent.index,
+                    idle_bound_secs = bound.as_secs(),
+                    "heartbeat session idle — closing"
+                );
+                agent.state.invalidate(&PromptSource::Heartbeat);
+                summary.sessions_closed += 1;
+            }
+        }
+        agent.flush_pending_close().await;
+
+        let surplus_idle = !bound.is_zero()
+            && agent.index >= min_agents
+            && agent.state.sessions.is_empty()
+            && agent.state.heartbeat_session.is_none()
+            && agent.state.pending_close.is_empty()
+            && agent
+                .state
+                .idle_since
+                .is_some_and(|since| now.duration_since(since) >= bound);
+        if surplus_idle {
+            if let Some(mut agent) = slot.take() {
+                tracing::info!(agent = agent.index, "idle on-demand agent released");
+                agent.acp.shutdown().await;
+                summary.agents_released += 1;
+            }
+        }
+    }
+    summary
+}
+
 async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
     for slot in slots {
         if let Some(mut agent) = slot.take() {
@@ -5302,6 +5627,7 @@ async fn shutdown_agent_pool(pool: &mut AgentPool) {
 
 struct PoolStartup {
     agents: u32,
+    min_agents: u32,
     command: String,
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
@@ -5315,6 +5641,7 @@ impl PoolStartup {
     fn from_config(config: &Config, observer: Option<observer::ObserverHandle>) -> Self {
         Self {
             agents: config.agents,
+            min_agents: config.min_agents,
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
@@ -5334,6 +5661,12 @@ async fn initialize_agent_pool(
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
+        if i >= startup.min_agents as usize {
+            // On-demand slot: filled by `refill_slots` when waiting channels
+            // outgrow the started agents, emptied again once idle.
+            agent_slots.push(None);
+            continue;
+        }
         let spawn_result = AcpClient::spawn(
             &startup.command,
             &startup.args,
@@ -5421,14 +5754,18 @@ async fn initialize_agent_pool(
             startup.agents
         ));
     }
-    if live_count < startup.agents as usize {
+    if live_count < startup.min_agents as usize {
         tracing::warn!(
             "started {}/{} agents — continuing with reduced pool",
             live_count,
-            startup.agents
+            startup.min_agents
         );
     }
-    tracing::info!("agent_pool_ready agents={}", live_count);
+    tracing::info!(
+        "agent_pool_ready agents={} max_agents={}",
+        live_count,
+        startup.agents
+    );
     Ok(AgentPool::from_slots(agent_slots))
 }
 
@@ -8934,6 +9271,11 @@ mod build_mcp_servers_tests {
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
             replay_floor_unix: None,
+            min_agents: 1,
+            fleet_slots: 0,
+            fleet_slot_dir: std::path::PathBuf::new(),
+            session_idle_close_secs: 0,
+            dm_autopublish: true,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -9160,6 +9502,11 @@ mod error_outcome_emission_tests {
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
             replay_floor_unix: None,
+            min_agents: 1,
+            fleet_slots: 0,
+            fleet_slot_dir: std::path::PathBuf::new(),
+            session_idle_close_secs: 0,
+            dm_autopublish: true,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -9203,6 +9550,270 @@ mod error_outcome_emission_tests {
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
+        }
+    }
+
+    mod session_pool_tests {
+        use super::*;
+        use crate::{on_demand_fill, reap_idle_sessions, refill_slots, ReapSummary};
+
+        fn capture_path(name: &str) -> std::path::PathBuf {
+            std::env::temp_dir().join(format!(
+                "buzz-acp-reaper-{name}-{}-{}",
+                std::process::id(),
+                Uuid::new_v4()
+            ))
+        }
+
+        /// Fake adapter: appends every request line to `capture` and answers
+        /// each one with an empty result, so `session/close` succeeds.
+        async fn recording_agent(index: usize, capture: &std::path::Path) -> OwnedAgent {
+            let script = format!(
+                r#"n=0; while IFS= read -r line; do printf '%s\n' "$line" >> '{}'; printf '{{"jsonrpc":"2.0","id":%d,"result":{{}}}}\n' "$n"; n=$((n+1)); done"#,
+                capture.display()
+            );
+            let mut agent = dummy_agent(index).await;
+            agent.acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+                .await
+                .expect("spawn recording adapter");
+            agent
+        }
+
+        fn closed_session_ids(capture: &std::path::Path) -> Vec<String> {
+            std::fs::read_to_string(capture)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|req| req["method"] == "session/close")
+                .filter_map(|req| req["params"]["sessionId"].as_str().map(str::to_string))
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn idle_sessions_are_closed_and_recent_ones_kept() {
+            let capture = capture_path("idle");
+            let mut agent = recording_agent(0, &capture).await;
+            let base = tokio::time::Instant::now();
+            let stale = scope::SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            };
+            let fresh = scope::SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            };
+            agent
+                .state
+                .sessions
+                .insert(stale.clone(), "sess-stale".into());
+            agent.state.last_used.insert(stale.clone(), base);
+            agent
+                .state
+                .sessions
+                .insert(fresh.clone(), "sess-fresh".into());
+            agent
+                .state
+                .last_used
+                .insert(fresh.clone(), base + Duration::from_secs(500));
+            let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+            let summary = reap_idle_sessions(
+                &mut pool,
+                base + Duration::from_secs(600),
+                Duration::from_secs(600),
+                1,
+            )
+            .await;
+
+            assert_eq!(
+                summary,
+                ReapSummary {
+                    sessions_closed: 1,
+                    agents_released: 0
+                }
+            );
+            let agent = pool.agents_mut()[0].as_ref().expect("agent kept");
+            assert!(!agent.state.sessions.contains_key(&stale));
+            assert!(agent.state.sessions.contains_key(&fresh));
+            assert!(agent.state.pending_close.is_empty(), "close was flushed");
+            assert_eq!(closed_session_ids(&capture), vec!["sess-stale".to_string()]);
+            let _ = std::fs::remove_file(capture);
+        }
+
+        #[tokio::test]
+        async fn invalidated_sessions_get_session_close_even_without_an_idle_bound() {
+            let capture = capture_path("rotate");
+            let mut agent = recording_agent(0, &capture).await;
+            let cid = Uuid::new_v4();
+            let scope = scope::SessionScope::Conversation { channel_id: cid };
+            agent
+                .state
+                .sessions
+                .insert(scope.clone(), "sess-rotated".into());
+            assert_eq!(agent.state.invalidate_channel(&cid), 1);
+            let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+            let summary =
+                reap_idle_sessions(&mut pool, tokio::time::Instant::now(), Duration::ZERO, 1).await;
+
+            assert_eq!(summary, ReapSummary::default());
+            let agent = pool.agents_mut()[0]
+                .as_ref()
+                .expect("bound 0 never releases");
+            assert!(agent.state.pending_close.is_empty());
+            assert_eq!(
+                closed_session_ids(&capture),
+                vec!["sess-rotated".to_string()]
+            );
+            let _ = std::fs::remove_file(capture);
+        }
+
+        #[tokio::test]
+        async fn surplus_idle_agent_is_released_but_baseline_and_busy_ones_are_kept() {
+            let base = tokio::time::Instant::now();
+            let mut baseline = dummy_agent(0).await;
+            baseline.state.idle_since = Some(base);
+            let mut surplus_idle = dummy_agent(1).await;
+            surplus_idle.state.idle_since = Some(base);
+            let mut surplus_with_session = dummy_agent(2).await;
+            surplus_with_session.state.idle_since = Some(base);
+            let live = scope::SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            };
+            surplus_with_session
+                .state
+                .sessions
+                .insert(live.clone(), "sess-live".into());
+            surplus_with_session
+                .state
+                .last_used
+                .insert(live.clone(), base + Duration::from_secs(300));
+            let mut pool = AgentPool::from_slots(vec![
+                Some(baseline),
+                Some(surplus_idle),
+                Some(surplus_with_session),
+            ]);
+
+            let summary = reap_idle_sessions(
+                &mut pool,
+                base + Duration::from_secs(600),
+                Duration::from_secs(600),
+                1,
+            )
+            .await;
+
+            assert_eq!(
+                summary,
+                ReapSummary {
+                    sessions_closed: 0,
+                    agents_released: 1
+                }
+            );
+            let slots = pool.agents_mut();
+            assert!(slots[0].is_some(), "baseline slot is never released");
+            assert!(slots[1].is_none(), "idle on-demand agent released");
+            assert!(
+                slots[2].is_some(),
+                "on-demand agent with a live session kept"
+            );
+        }
+
+        #[tokio::test]
+        async fn on_demand_fill_counts_waiting_channels_beyond_arriving_agents() {
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            for _ in 0..3 {
+                let channel_id = Uuid::new_v4();
+                let keys = nostr::Keys::generate();
+                let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "x")
+                    .sign_with_keys(&keys)
+                    .unwrap();
+                queue.push(QueuedEvent {
+                    channel_id,
+                    scope: scope::SessionScope::Conversation { channel_id },
+                    event,
+                    received_at: std::time::Instant::now(),
+                    prompt_tag: "test".into(),
+                });
+            }
+            let circuit = |in_flight: bool| SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: in_flight,
+            };
+
+            let empty = AgentPool::from_slots(vec![None, None, None]);
+            assert_eq!(
+                on_demand_fill(
+                    &empty,
+                    &queue,
+                    &[circuit(false), circuit(true), circuit(false)],
+                    false
+                ),
+                2,
+                "three waiting channels minus one agent already on its way"
+            );
+            assert_eq!(
+                on_demand_fill(&empty, &queue, &[], true),
+                0,
+                "an exhausted fleet means a fresh agent could not start a session anyway"
+            );
+
+            let with_idle = AgentPool::from_slots(vec![Some(dummy_agent(0).await), None]);
+            assert_eq!(
+                on_demand_fill(&with_idle, &queue, &[circuit(false), circuit(false)], false),
+                0,
+                "an idle agent means the queue is not agent-bound"
+            );
+        }
+
+        #[tokio::test]
+        async fn refill_spawns_on_demand_slots_only_while_demand_remains() {
+            let mut config = test_config();
+            config.agents = 3;
+            config.min_agents = 1;
+            let pool = AgentPool::from_slots(vec![None, None, None]);
+            let mut crash_history: Vec<SlotCircuit> = (0..3)
+                .map(|_| SlotCircuit {
+                    crash_times: Vec::new(),
+                    open_until: None,
+                    respawn_in_flight: false,
+                })
+                .collect();
+            let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+            let mut respawn_tasks = tokio::task::JoinSet::new();
+
+            refill_slots(
+                &pool,
+                &mut crash_history,
+                &config,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                false,
+                1,
+            );
+            let in_flight: Vec<bool> = crash_history.iter().map(|s| s.respawn_in_flight).collect();
+            assert_eq!(
+                in_flight,
+                vec![false, true, false],
+                "one unit of demand fills exactly one on-demand slot; baseline untouched"
+            );
+
+            refill_slots(
+                &pool,
+                &mut crash_history,
+                &config,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                true,
+                0,
+            );
+            let in_flight: Vec<bool> = crash_history.iter().map(|s| s.respawn_in_flight).collect();
+            assert_eq!(
+                in_flight,
+                vec![true, true, false],
+                "maintenance refills the baseline slot, no demand → slot 2 stays empty"
+            );
+            respawn_tasks.abort_all();
         }
     }
 

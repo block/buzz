@@ -71,10 +71,11 @@ toml = "1.0"
 # Filter expressions
 evalexpr = { workspace = true }
 
-# Process-group kill (safe wrapper around killpg) — Unix-only; kill_process_group
-# has a #[cfg(not(unix))] fallback in acp.rs.
+# Process-group kill (safe wrapper around killpg) and flock(2) fleet slots —
+# Unix-only; kill_process_group has a #[cfg(not(unix))] fallback in acp.rs and
+# fleet.rs refuses to start without flock.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "fs"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

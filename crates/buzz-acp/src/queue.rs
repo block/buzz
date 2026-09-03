@@ -774,6 +774,33 @@ impl EventQueue {
         has_queued || has_cancelled || has_withheld
     }
 
+    /// Number of distinct pending session scopes with undispatched work — the
+    /// per-scope count behind [`has_undispatched_work`](Self::has_undispatched_work).
+    ///
+    /// On-demand agent sizing keys on this: each pending scope needs its own
+    /// provider session, so this is the number of sessions' worth of waiting
+    /// work. Under `channel` policy every scope is a `Conversation`, so it
+    /// equals the count of channels with undispatched work; under `thread`
+    /// policy it counts distinct waiting thread partitions.
+    pub fn undispatched_scopes(&self) -> usize {
+        let mut scopes: HashSet<&SessionScope> = HashSet::new();
+        scopes.extend(
+            self.queues
+                .iter()
+                .filter(|(_, q)| !q.is_empty())
+                .map(|(scope, _)| scope),
+        );
+        scopes.extend(self.cancelled_batches.keys());
+        scopes.extend(
+            self.withheld_native_steer
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(scope, _)| scope),
+        );
+        scopes.retain(|scope| !self.in_flight_scopes.contains(scope));
+        scopes.len()
+    }
+
     /// Number of pending partitions (session scopes) with queued events.
     ///
     /// Under `channel` policy this equals the number of channels with pending
