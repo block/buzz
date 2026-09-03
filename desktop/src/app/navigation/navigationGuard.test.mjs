@@ -8,8 +8,12 @@ const target = {
   threadRootId: "thread-a",
 };
 
-const { allowNavigation, registerNavigationGuard, traverseHistory } =
-  await import("./navigationGuard.ts");
+const {
+  allowNavigation,
+  registerNavigationGuard,
+  traverseHistory,
+  traverseHistoryBy,
+} = await import("./navigationGuard.ts");
 
 test("all navigation consults the registered boundary guard", () => {
   let received;
@@ -65,6 +69,30 @@ test("guarded history traversal invokes the selected direction when allowed", ()
     true,
   );
   assert.equal(forwardCalls, 1);
+});
+
+test("guarded multi-entry traversal checks direction before jumping", () => {
+  let received;
+  let receivedDelta;
+  const unregister = registerNavigationGuard((nextTarget) => {
+    received = nextTarget;
+    return true;
+  });
+
+  assert.equal(
+    traverseHistoryBy(
+      {
+        go: (delta) => {
+          receivedDelta = delta;
+        },
+      },
+      -3,
+    ),
+    true,
+  );
+  assert.deepEqual(received, { kind: "history", direction: "back" });
+  assert.equal(receivedDelta, -3);
+  unregister();
 });
 
 test("unregistering the newer guard restores the prior live guard", () => {
