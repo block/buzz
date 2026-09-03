@@ -238,7 +238,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             relay_metrics::MetricsInstallFailure::ExporterBuild => LifecycleReason::ExporterBuild,
         },
     )?;
-    boot.finish();
+    let lifecycle = boot.finish();
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     metrics::gauge!("buzz_push_enabled").set(if config.push_enabled { 1.0 } else { 0.0 });
     info!(
@@ -256,10 +256,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         ..DbConfig::default()
     }
     .with_session_timeouts_from_env();
-    let db = Db::new(&db_config).await.map_err(|e| {
-        error!("Failed to connect to Postgres: {e}");
-        anyhow::anyhow!("DB connection failed: {e}")
-    })?;
+    let db = Db::new_with_connection_observer(&db_config, Arc::new(lifecycle))
+        .await
+        .map_err(|e| {
+            error!("Failed to connect to Postgres: {e}");
+            anyhow::anyhow!("DB connection failed: {e}")
+        })?;
     if db.has_read_pool() {
         info!("Postgres connected (writer + lazy read replica pool)");
         // Reader-down at boot must not crash or block the relay; this warn-only

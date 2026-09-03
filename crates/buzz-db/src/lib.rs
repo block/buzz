@@ -31,8 +31,9 @@ pub mod error;
 mod test_support;
 
 pub use runtime::{
-    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, DbReadinessOutcome,
-    ReadSession,
+    insert_mentions, migration, replica_fence, Db, DbConfig, DbConnectionEdge,
+    DbConnectionLifecycleEvent, DbConnectionObserver, DbConnectionOutcome, DbConnectionReason,
+    DbConnectionStep, DbPoolRole, DbPoolStats, DbReadinessOutcome, ReadSession,
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
@@ -42,6 +43,21 @@ pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] =
 /// Raw Prometheus series ceiling per relay pod for the operation-aware contract.
 pub const DB_POOL_ACQUIRE_RAW_SERIES_PER_POD: usize =
     runtime::observability::POOL_ACQUIRE_RAW_SERIES_PER_POD;
+
+/// Valid database connection role/step pairs with a start counter.
+pub const DB_CONNECTION_STARTED_STEPS: [(DbPoolRole, DbConnectionStep); 4] =
+    runtime::CONNECTION_STARTED_STEPS;
+
+/// Valid database connection role/step pairs with a duration histogram.
+pub const DB_CONNECTION_DURATION_STEPS: [(DbPoolRole, DbConnectionStep); 4] =
+    runtime::CONNECTION_DURATION_STEPS;
+
+/// Valid database connection role/step/outcome terminal combinations.
+pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutcome); 15] =
+    runtime::CONNECTION_TERMINALS;
+
+/// Raw Prometheus series ceiling per pod for connection-step telemetry.
+pub const DB_CONNECTION_RAW_SERIES_PER_POD: usize = runtime::CONNECTION_RAW_SERIES_PER_POD;
 pub(crate) use runtime::{
     insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
     RoutePredicate,

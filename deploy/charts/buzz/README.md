@@ -148,8 +148,9 @@ state to zero; it does not fabricate dependency failures or latency samples.
 
 ### Operation-aware database pool acquisition contract
 
-The operation-aware families separate three questions: who is waiting now,
-how completed/abandoned attempts ended, and how long checkout waits took.
+The operation-aware families separate four questions: when an operation asked
+for a connection, who is waiting now, how completed/abandoned attempts ended,
+and how long checkout waits took.
 Outcome remains on the terminal counter for historical deployment comparison;
 it is intentionally absent from the expensive duration histogram.
 
@@ -161,6 +162,7 @@ maximum gauges when diagnosing total capacity pressure.
 
 | Metric | Type | Labels |
 |--------|------|--------|
+| `buzz_db_pool_acquire_started_total` | counter | `pool_role`, `operation` |
 | `buzz_db_pool_acquire_duration_seconds` | histogram | `pool_role`, `operation` |
 | `buzz_db_pool_acquire_attempts_total` | counter | `pool_role`, `operation`, `outcome` |
 | `buzz_db_pool_waiters` | gauge | `pool_role`, `operation`; tracked operations only, periodically refreshed including zero |
@@ -182,11 +184,41 @@ writer/maintenance
 ```
 
 Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
-series per valid pair. The new contract therefore has a hard ceiling of 187
-raw Prometheus series per pod: `11 × (12 + 4 + 1)`. The two legacy acquisition
+series per valid pair. The new contract therefore has a hard ceiling of 198
+raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
 families remain temporarily for dashboard compatibility and are not part of
 that new-family budget. No `other` operation or request-controlled/sensitive
 label is valid.
+
+### Writer connection setup contract
+
+Writer connection setup is separate from checkout. At boot, SQLx constructs
+the writer pool and creates its minimum physical connections. Later it may
+create more when the pool grows or replaces a broken or expired connection.
+Every connected writer session must install the created-at floor, install the
+session timeouts, verify READ COMMITTED isolation, and reach `ready` before SQLx
+can give it to a caller.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_connection_step_started_total` | counter | `pool_role`, `step` |
+| `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
+| `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
+
+The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+`session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
+duration, and terminal evidence. `physical_connect` and `ready` are success
+milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
+authentication finish, so Buzz does not invent separate timings for those
+internal phases. Raw connect failures before `after_connect` are classified on
+the aggregate `writer_pool` phase during initial construction. Outcomes are
+`succeeded`, `failed`, `timed_out`, and `cancelled` where valid.
+
+Four start counters, four 13-series histograms, and fifteen terminal counters
+create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
+labels. Fixed-schema `buzz_process_lifecycle` logs preserve exact per-pod event
+order and process-local connection ordinals; metrics provide bucketed trends.
 
 ## Relay Pod extensions
 
