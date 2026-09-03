@@ -108,7 +108,8 @@ pub fn verify_nip98_event(
 
     if normalize_url(u_tag) != normalize_url(expected_url) {
         return Err(AuthError::Nip98Invalid(format!(
-            "URL mismatch: event has `{u_tag}`, expected `{expected_url}`"
+            "{}: event has `{u_tag}`, expected `{expected_url}`",
+            crate::error::NIP98_URL_MISMATCH_PREFIX
         )));
     }
 
@@ -485,5 +486,26 @@ mod tests {
         // And identity still holds — same host on both sides verifies.
         let json3 = make_nip98_event(&keys, loopback_url, TEST_METHOD, None, None);
         assert!(verify_nip98_event(&json3, loopback_url, TEST_METHOD, None).is_ok());
+    }
+
+    #[test]
+    fn url_mismatch_client_message_omits_expected_host() {
+        let keys = Keys::generate();
+        let signed = "https://public.example.com/query";
+        let expected = "http://10.0.0.1:3001/query";
+        let json = make_nip98_event(&keys, signed, TEST_METHOD, None, None);
+        let err = verify_nip98_event(&json, expected, TEST_METHOD, None)
+            .expect_err("cross-host u-tag must fail");
+        let full = err.to_string();
+        assert!(
+            full.contains("10.0.0.1"),
+            "operator Display must retain the expected host; got {full}"
+        );
+        let client = err.client_message();
+        assert_eq!(client, "NIP-98: URL mismatch");
+        assert!(
+            !client.contains("10.0.0.1") && !client.contains("public.example.com"),
+            "client message must not embed either URL; got {client}"
+        );
     }
 }
