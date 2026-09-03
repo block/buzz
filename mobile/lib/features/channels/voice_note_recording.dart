@@ -12,20 +12,32 @@ import 'package:record/record.dart';
 
 import '../../shared/relay/media_image.dart';
 
+/// Maximum duration accepted for a recorded voice note.
 const voiceNoteMaxDuration = Duration(minutes: 5);
+
+/// Maximum time allowed for an authenticated voice-note download.
 const voiceNoteDownloadTimeout = Duration(seconds: 30);
+
+/// Maximum number of bytes accepted for a downloaded voice note.
 const voiceNoteMaxDownloadBytes = 32 * 1024 * 1024;
+
+/// Playback rates offered by the voice-note player, in selection order.
 const voiceNotePlaybackRates = <double>[1, 1.5, 2, 0.5];
+
+/// Route observer used to cancel recording when its composer is covered.
 final voiceNoteRouteObserver = RouteObserver<ModalRoute<void>>();
 
+/// Returns the playback rate following [current] in the supported rate cycle.
 double nextVoiceNotePlaybackRate(double current) {
   final index = voiceNotePlaybackRates.indexOf(current);
   return voiceNotePlaybackRates[(index + 1) % voiceNotePlaybackRates.length];
 }
 
+/// Formats a supported voice-note playback rate for display.
 String formatVoiceNotePlaybackRate(double rate) =>
     '${rate == 0.5 ? '.5' : rate.toStringAsFixed(rate % 1 == 0 ? 0 : 1)}×';
 
+/// A finalized local voice-note recording and its presentation metadata.
 @immutable
 class VoiceNoteRecording {
   const VoiceNoteRecording({
@@ -39,6 +51,7 @@ class VoiceNoteRecording {
   final List<double> waveform;
 }
 
+/// Records one voice note and owns its native lifecycle.
 abstract interface class VoiceNoteRecorder {
   Stream<double> get levels;
 
@@ -51,10 +64,12 @@ abstract interface class VoiceNoteRecorder {
   Future<void> dispose();
 }
 
+/// Provider for creating independently owned voice-note recorders.
 final voiceNoteRecorderFactoryProvider = Provider<VoiceNoteRecorder Function()>(
   (ref) => DeviceVoiceNoteRecorder.new,
 );
 
+/// Injectable native recorder contract used by [DeviceVoiceNoteRecorder].
 abstract interface class VoiceNoteRecorderBackend {
   Future<bool> hasPermission();
 
@@ -93,6 +108,7 @@ class _DeviceVoiceNoteRecorderBackend implements VoiceNoteRecorderBackend {
   Future<void> dispose() => _recorder.dispose();
 }
 
+/// Device-backed [VoiceNoteRecorder] with cancellation-safe lifecycle fences.
 class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
   DeviceVoiceNoteRecorder({
     VoiceNoteRecorderBackend? backend,
@@ -272,6 +288,7 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
   }
 }
 
+/// Immutable state exposed by a [VoiceNotePlayerController].
 @immutable
 class VoiceNotePlaybackState {
   const VoiceNotePlaybackState({
@@ -295,18 +312,19 @@ class VoiceNotePlaybackState {
     Duration? duration,
     bool? isPlaying,
     bool? isLoading,
-    bool canCancelLoading = false,
+    bool? canCancelLoading,
     bool? hasError,
   }) => VoiceNotePlaybackState(
     position: position ?? this.position,
     duration: duration ?? this.duration,
     isPlaying: isPlaying ?? this.isPlaying,
     isLoading: isLoading ?? this.isLoading,
-    canCancelLoading: canCancelLoading,
+    canCancelLoading: canCancelLoading ?? this.canCancelLoading,
     hasError: hasError ?? this.hasError,
   );
 }
 
+/// Controller contract for loading and playing one voice-note source.
 abstract class VoiceNotePlayerController extends ChangeNotifier {
   VoiceNotePlaybackState get state;
 
@@ -327,6 +345,7 @@ abstract class VoiceNotePlayerController extends ChangeNotifier {
   Future<void> setSpeed(double speed);
 }
 
+/// Arbitrates the single voice note allowed to own playback at a time.
 class VoiceNotePlaybackCoordinator {
   VoiceNotePlayerController? _active;
 
@@ -346,10 +365,12 @@ class VoiceNotePlaybackCoordinator {
   }
 }
 
+/// Provider for the channel-scoped voice-note playback coordinator.
 final voiceNotePlaybackCoordinatorProvider = Provider(
   (ref) => VoiceNotePlaybackCoordinator(),
 );
 
+/// Provider for creating voice-note player controllers.
 final voiceNotePlayerFactoryProvider =
     Provider<VoiceNotePlayerController Function()>((ref) {
       final coordinator = ref.watch(voiceNotePlaybackCoordinatorProvider);
@@ -360,7 +381,7 @@ final voiceNotePlayerFactoryProvider =
       );
     });
 
-/// Minimal audio backend contract used by the voice-note playback controller.
+/// Injectable audio-player contract used by [DeviceVoiceNotePlayerController].
 abstract interface class VoiceNoteAudioPlayerBackend {
   Stream<Duration> get positionStream;
 
@@ -377,6 +398,9 @@ abstract interface class VoiceNoteAudioPlayerBackend {
   Future<void> play();
 
   Future<void> pause();
+
+  /// Interrupts a pending source load and releases its native resources.
+  Future<void> cancelPendingLoad();
 
   Future<void> seek(Duration position);
 
@@ -418,6 +442,9 @@ class _DeviceVoiceNoteAudioPlayerBackend
   Future<void> pause() => _player.pause();
 
   @override
+  Future<void> cancelPendingLoad() => _player.stop();
+
+  @override
   Future<void> seek(Duration position) => _player.seek(position);
 
   @override
@@ -427,6 +454,7 @@ class _DeviceVoiceNoteAudioPlayerBackend
   Future<void> dispose() => _player.dispose();
 }
 
+/// Device-backed voice-note player with authenticated loading and cancellation.
 class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   DeviceVoiceNotePlayerController({
     required VoiceNotePlaybackCoordinator coordinator,
@@ -463,6 +491,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
               position: Duration.zero,
               isPlaying: false,
               isLoading: false,
+              canCancelLoading: false,
             ),
           );
           unawaited(_stopAndRewindCompletedPlayback());
@@ -475,7 +504,9 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           _state.copyWith(
             isPlaying: playerState.playing,
             isLoading: isBackendLoading,
-            canCancelLoading: isBackendLoading && _toggleOperation != null,
+            canCancelLoading:
+                isBackendLoading &&
+                (_toggleOperation != null || playerState.playing),
           ),
         );
       }),
@@ -499,6 +530,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   _pendingRemote;
   Completer<void>? _downloadAbort;
   Future<void>? _toggleOperation;
+  Object? _cancellableSourceLoad;
   bool _toggleCancellationRequested = false;
   int _playbackOperationGeneration = 0;
   File? _downloadingRemoteFile;
@@ -680,6 +712,8 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
     int? playbackOperationGeneration,
     bool canCancelLoading = false,
   }) async {
+    final sourceLoad = Object();
+    if (canCancelLoading) _cancellableSourceLoad = sourceLoad;
     _update(
       VoiceNotePlaybackState(
         duration: fallbackDuration,
@@ -694,7 +728,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           (playbackOperationGeneration != null &&
               playbackOperationGeneration != _playbackOperationGeneration)) {
         if (sourceGeneration == _sourceGeneration) {
-          _update(_state.copyWith(isLoading: false));
+          _update(_state.copyWith(isLoading: false, canCancelLoading: false));
         }
         return;
       }
@@ -703,6 +737,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
         _state.copyWith(
           duration: duration ?? fallbackDuration,
           isLoading: false,
+          canCancelLoading: false,
           hasError: false,
         ),
       );
@@ -712,12 +747,22 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           (playbackOperationGeneration != null &&
               playbackOperationGeneration != _playbackOperationGeneration)) {
         if (sourceGeneration == _sourceGeneration) {
-          _update(_state.copyWith(isLoading: false));
+          _update(_state.copyWith(isLoading: false, canCancelLoading: false));
         }
         return;
       }
       _coordinator.release(this);
-      _update(_state.copyWith(isLoading: false, hasError: true));
+      _update(
+        _state.copyWith(
+          isLoading: false,
+          canCancelLoading: false,
+          hasError: true,
+        ),
+      );
+    } finally {
+      if (identical(_cancellableSourceLoad, sourceLoad)) {
+        _cancellableSourceLoad = null;
+      }
     }
   }
 
@@ -749,14 +794,21 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
     } catch (_) {
       if (_disposed || sourceGeneration != _sourceGeneration) return;
       _coordinator.release(this);
-      _update(_state.copyWith(isLoading: false, hasError: true));
+      _update(
+        _state.copyWith(
+          isLoading: false,
+          canCancelLoading: false,
+          hasError: true,
+        ),
+      );
     }
   }
 
   Future<void> _toggle(int playbackOperationGeneration) async {
-    if (_state.isLoading) return;
     if (_player.playing) {
       await pause();
+    } else if (_state.isLoading) {
+      return;
     } else {
       final remote = _pendingRemote;
       if (_state.hasError && remote == null && !_hasPlayableSource) return;
@@ -811,13 +863,18 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
 
   @override
   Future<void> pause() async {
+    final shouldCancelPendingLoad = _cancellableSourceLoad != null;
     _playbackOperationGeneration += 1;
     _coordinator.release(this);
     final activeDownloadAbort = _downloadAbort;
     if (activeDownloadAbort != null && !activeDownloadAbort.isCompleted) {
       activeDownloadAbort.complete();
     }
-    await _player.pause();
+    if (shouldCancelPendingLoad) {
+      await _player.cancelPendingLoad();
+    } else {
+      await _player.pause();
+    }
   }
 
   @override
@@ -850,6 +907,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   }
 }
 
+/// Formats a duration as a non-negative `m:ss` voice-note timestamp.
 String formatVoiceNoteDuration(Duration duration) {
   final totalSeconds = math.max(0, duration.inSeconds);
   final minutes = totalSeconds ~/ 60;
@@ -857,6 +915,7 @@ String formatVoiceNoteDuration(Duration duration) {
   return '$minutes:${seconds.toString().padLeft(2, '0')}';
 }
 
+/// Resamples [samples] into normalized waveform bars for attachment previews.
 List<double> normalizeVoiceNoteWaveform(
   List<double> samples, {
   int barCount = 36,

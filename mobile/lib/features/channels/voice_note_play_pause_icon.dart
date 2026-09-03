@@ -3,6 +3,7 @@ import 'dart:ui' show lerpDouble;
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
+/// Animated icon that morphs between voice-note play and pause glyphs.
 class VoiceNotePlayPauseIcon extends HookWidget {
   const VoiceNotePlayPauseIcon({
     super.key,

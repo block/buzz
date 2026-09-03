@@ -90,6 +90,7 @@ class _FakeAudioPlayerBackend implements VoiceNoteAudioPlayerBackend {
   bool _playing = false;
   int playCount = 0;
   int pauseCount = 0;
+  int cancelPendingLoadCount = 0;
   final loadedPaths = <String>[];
   final loadedUrls = <String>[];
   final loadedUrlHeaders = <Map<String, String>?>[];
@@ -143,6 +144,17 @@ class _FakeAudioPlayerBackend implements VoiceNoteAudioPlayerBackend {
     pauseCount += 1;
     _playing = false;
     states.add(audio.PlayerState(false, audio.ProcessingState.ready));
+  }
+
+  @override
+  Future<void> cancelPendingLoad() async {
+    cancelPendingLoadCount += 1;
+    for (final load in [...pathLoads, ...urlLoads]) {
+      if (!load.isCompleted) {
+        load.completeError(audio.PlayerInterruptedException('cancelled'));
+      }
+    }
+    states.add(audio.PlayerState(false, audio.ProcessingState.idle));
   }
 
   @override
@@ -543,9 +555,9 @@ void main() {
       }
       final cancelledFile = File(audioPlayer.loadedPaths.single);
       final secondToggle = player.toggle();
-      audioPlayer.pathLoads.single.complete(const Duration(seconds: 7));
       await Future.wait([firstToggle, secondToggle]);
 
+      expect(audioPlayer.cancelPendingLoadCount, 1);
       expect(audioPlayer.playCount, 0);
       expect(player.state.isLoading, isFalse);
       expect(await cancelledFile.exists(), isFalse);
@@ -884,6 +896,90 @@ void main() {
     expect(audioPlayer.pauseCount, 1);
     expect(audioPlayer.playing, isFalse);
   });
+
+  test('active playback remains pauseable while buffering', () async {
+    final audioPlayer = _FakeAudioPlayerBackend();
+    final player = DeviceVoiceNotePlayerController(
+      coordinator: VoiceNotePlaybackCoordinator(),
+      client: _SequencedHttpClient(),
+      requiresAuthenticatedLocalFile: false,
+      player: audioPlayer,
+    );
+    addTearDown(player.dispose);
+    await player.loadLocal(
+      '/tmp/voice-note.m4a',
+      fallbackDuration: const Duration(seconds: 7),
+    );
+    await player.toggle();
+
+    audioPlayer.states.add(
+      audio.PlayerState(true, audio.ProcessingState.buffering),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(player.state.isPlaying, isTrue);
+    expect(player.state.isLoading, isTrue);
+    expect(player.state.canCancelLoading, isTrue);
+
+    await player.toggle();
+
+    expect(audioPlayer.pauseCount, 1);
+    expect(audioPlayer.cancelPendingLoadCount, 0);
+    expect(audioPlayer.playing, isFalse);
+  });
+
+  test(
+    'Android cancel interrupts pending preload, preserves loading capability, and retries',
+    () async {
+      final audioPlayer = _FakeAudioPlayerBackend()..delayUrlLoads = true;
+      final player = DeviceVoiceNotePlayerController(
+        coordinator: VoiceNotePlaybackCoordinator(),
+        client: _SequencedHttpClient(),
+        requiresAuthenticatedLocalFile: false,
+        player: audioPlayer,
+      );
+      addTearDown(player.dispose);
+      var authGeneration = 0;
+      await player.loadRemote(
+        'https://example.com/voice-note.mp4',
+        headers: () => {
+          'Authorization': 'Nostr signed-event-${authGeneration++}',
+        },
+        fallbackDuration: const Duration(seconds: 7),
+      );
+
+      final firstToggle = player.toggle();
+      await Future<void>.delayed(Duration.zero);
+      expect(player.state.canCancelLoading, isTrue);
+
+      audioPlayer.positions.add(const Duration(seconds: 1));
+      audioPlayer.durations.add(const Duration(seconds: 8));
+      await Future<void>.delayed(Duration.zero);
+      expect(player.state.canCancelLoading, isTrue);
+
+      final cancel = player.toggle();
+      await Future.wait([firstToggle, cancel]);
+
+      expect(audioPlayer.cancelPendingLoadCount, 1);
+      expect(audioPlayer.pauseCount, 0);
+      expect(audioPlayer.playCount, 0);
+      expect(player.state.isLoading, isFalse);
+      expect(player.state.canCancelLoading, isFalse);
+
+      final retry = player.toggle();
+      await Future<void>.delayed(Duration.zero);
+      expect(audioPlayer.loadedUrls, hasLength(2));
+      expect(
+        audioPlayer.loadedUrlHeaders.last?['Authorization'],
+        'Nostr signed-event-1',
+      );
+      audioPlayer.urlLoads.single.complete(const Duration(seconds: 7));
+      await retry;
+
+      expect(authGeneration, 2);
+      expect(audioPlayer.playCount, 1);
+    },
+  );
 
   test('Android defers remote auth until playback starts', () async {
     final audioPlayer = _FakeAudioPlayerBackend();

@@ -14,6 +14,7 @@ import 'voice_note_play_pause_icon.dart';
 import 'voice_note_recording.dart';
 import 'voice_note_waveform.dart';
 
+/// Displays a recorded or remote voice note with playback controls.
 class VoiceNoteAttachment extends HookConsumerWidget {
   const VoiceNoteAttachment.local({
     super.key,
@@ -124,7 +125,9 @@ class VoiceNoteAttachment extends HookConsumerWidget {
             unawaited(player.toggle());
           };
     final playbackControlLabel = state.isLoading
-        ? canCancelLoading
+        ? state.isPlaying
+              ? 'Pause voice note'
+              : canCancelLoading
               ? 'Cancel voice note loading'
               : 'Loading voice note'
         : state.hasError && isRemote

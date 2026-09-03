@@ -21,6 +21,7 @@ class _VoiceNoteRouteAware extends RouteAware {
   void didPushNext() => onCovered();
 }
 
+/// Composer control that records, previews levels, and finalizes a voice note.
 class VoiceNoteComposerRecorder extends HookConsumerWidget {
   const VoiceNoteComposerRecorder({
     super.key,

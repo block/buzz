@@ -125,6 +125,30 @@ class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
   }
 }
 
+class _BufferingVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  int toggleCount = 0;
+
+  @override
+  VoiceNotePlaybackState get state => const VoiceNotePlaybackState(
+    duration: Duration(seconds: 3),
+    isPlaying: true,
+    isLoading: true,
+    canCancelLoading: true,
+  );
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required Map<String, String> Function() headers,
+    required Duration fallbackDuration,
+  }) async {}
+
+  @override
+  Future<void> toggle() async {
+    toggleCount += 1;
+  }
+}
+
 class _HeldAudioPlayerBackend implements VoiceNoteAudioPlayerBackend {
   final positions = const Stream<Duration>.empty();
   final durations = const Stream<Duration?>.empty();
@@ -155,6 +179,9 @@ class _HeldAudioPlayerBackend implements VoiceNoteAudioPlayerBackend {
 
   @override
   Future<void> pause() async {}
+
+  @override
+  Future<void> cancelPendingLoad() async {}
 
   @override
   Future<void> seek(Duration position) async {}
@@ -1111,6 +1138,49 @@ void main() {
             nodeId: controlSemantics.id,
           ),
         );
+        await tester.pump();
+
+        expect(player.toggleCount, 1);
+      });
+
+      testWidgets('active buffering playback keeps its pause action', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/buffering-voice-note.mp4';
+        final player = _BufferingVoiceNotePlayer();
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-buffering.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final control = find.bySemanticsLabel('Pause voice note');
+        expect(control, findsOneWidget);
+        expect(
+          tester
+              .getSemantics(control)
+              .getSemanticsData()
+              .hasAction(SemanticsAction.tap),
+          isTrue,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
         await tester.pump();
 
         expect(player.toggleCount, 1);

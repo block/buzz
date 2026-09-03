@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart';
 
+/// Media presentation selected for a message attachment URL.
 enum MessageMediaKind { image, video, audio }
 
+/// Parsed metadata from a NIP-92 `imeta` tag.
 @immutable
 class ImetaEntry {
   final String url;
@@ -44,6 +46,7 @@ class ImetaEntry {
   }
 }
 
+/// Parses NIP-92 `imeta` tags into entries keyed by their attachment URL.
 Map<String, ImetaEntry> parseImetaTags(List<List<String>> tags) {
   final byUrl = <String, ImetaEntry>{};
   for (final tag in tags) {
@@ -108,6 +111,7 @@ Map<String, ImetaEntry> parseImetaTags(List<List<String>> tags) {
   return byUrl;
 }
 
+/// Classifies [url] using authoritative [imeta] before extension fallback.
 MessageMediaKind? classifyMediaUrl(String url, {ImetaEntry? imeta}) {
   final mimeType = imeta?.mimeType;
   if (mimeType != null) {

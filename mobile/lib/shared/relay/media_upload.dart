@@ -73,6 +73,8 @@ typedef SanitizeImageBytes =
     Future<Uint8List> Function(Uint8List bytes, String mimeType);
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
 typedef TranscodeVideoToMp4 = Future<String> Function(String filePath);
+
+/// Packages a recorded voice-note file into its upload container.
 typedef PackageVoiceNoteForUpload = Future<String> Function(String filePath);
 
 /// Generates poster-frame bytes for the video at [filePath], when available.
@@ -172,6 +174,7 @@ class BlobDescriptor {
     filename: value,
   );
 
+  /// Returns a descriptor carrying canonical packaged voice-note metadata.
   BlobDescriptor withVoiceNoteMetadata({
     required String filename,
     required double fallbackDurationSeconds,

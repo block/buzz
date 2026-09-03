@@ -19,6 +19,7 @@ import 'package:flutter/material.dart';
   return (barWidth: barWidth, gap: gap);
 }
 
+/// Paints voice-note samples and optionally exposes seek semantics.
 class VoiceNoteWaveform extends StatelessWidget {
   const VoiceNoteWaveform({
     super.key,
