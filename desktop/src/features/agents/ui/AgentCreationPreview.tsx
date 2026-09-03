@@ -724,7 +724,7 @@ export function AgentCreationPreview({
                     ? isCompact
                       ? "rounded-2xl"
                       : "rounded-[2rem]"
-                    : "rounded-[30%]",
+                    : "agent-avatar-squircle",
                 )}
                 role="img"
                 style={{ backgroundColor: emojiAvatarPreview.color }}
@@ -936,7 +936,7 @@ export function AgentCreationPreview({
                   {emojiAvatarPreview ? (
                     <div
                       aria-label={`${label} ${assetLabel}`}
-                      className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-[30%] shadow-xs transition-[background-color] duration-200 ease-out"
+                      className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden agent-avatar-squircle shadow-xs transition-[background-color] duration-200 ease-out"
                       role="img"
                       style={{
                         backgroundColor: emojiAvatarPreview.color,
@@ -985,7 +985,7 @@ export function AgentCreationPreview({
                         ? isCompact
                           ? "rounded-2xl"
                           : "rounded-[2rem]"
-                        : "rounded-[30%]",
+                        : "agent-avatar-squircle",
                       isDragOverAvatar &&
                         !isAvatarMenuOpen &&
                         "border-primary/70 bg-primary/5 ring-2 ring-primary/15",

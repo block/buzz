@@ -102,7 +102,7 @@ export function TypingIndicatorRow({
                   key={pubkey}
                   className={cn(
                     "relative shrink-0 ring-1 ring-background",
-                    profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                    profile?.isAgent ? "agent-avatar-squircle" : "rounded-full",
                     isActivityVariant ? "h-4 w-4" : "h-5 w-5",
                     index > 0 && "-ml-1.5",
                   )}

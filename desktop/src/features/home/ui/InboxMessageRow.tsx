@@ -202,7 +202,7 @@ export function InboxMessageRow({
               <span
                 className={cn(
                   "inline-flex shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                  isAuthorAgent ? "rounded-[30%]" : "rounded-full",
+                  isAuthorAgent ? "agent-avatar-squircle" : "rounded-full",
                 )}
               >
                 <UserAvatar

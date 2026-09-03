@@ -179,24 +179,29 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                           scale: reducedMotion
                               ? (active ? 1.15 : 1)
                               : 1 + animatedHaloLevel * 1.55,
-                          child: Container(
-                            key: ValueKey('huddle-speaking-halo-$pubkey'),
-                            width: speakingRingSize,
-                            height: speakingRingSize,
-                            decoration: BoxDecoration(
-                              shape: isAgent
-                                  ? BoxShape.rectangle
-                                  : BoxShape.circle,
-                              borderRadius: isAgent
-                                  ? BorderRadius.circular(
-                                      speakingRingSize * 0.3,
-                                    )
-                                  : null,
-                              color: context.colors.primary.withValues(
-                                alpha: 0.07,
-                              ),
-                            ),
-                          ),
+                          child: isAgent
+                              ? SizedBox.square(
+                                  key: ValueKey('huddle-speaking-halo-$pubkey'),
+                                  dimension: speakingRingSize,
+                                  child: AgentAvatarSquircle(
+                                    child: ColoredBox(
+                                      color: context.colors.primary.withValues(
+                                        alpha: 0.07,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                              : Container(
+                                  key: ValueKey('huddle-speaking-halo-$pubkey'),
+                                  width: speakingRingSize,
+                                  height: speakingRingSize,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: context.colors.primary.withValues(
+                                      alpha: 0.07,
+                                    ),
+                                  ),
+                                ),
                         ),
                       ),
                       AnimatedSwitcher(
@@ -208,31 +213,47 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                         transitionBuilder: (child, animation) =>
                             FadeTransition(opacity: animation, child: child),
                         child: showPreparingResponse
-                            ? Container(
+                            ? SizedBox.square(
                                 key: ValueKey(
                                   'huddle-agent-preparing-response-$pubkey',
                                 ),
-                                width: avatarRadius * 2,
-                                height: avatarRadius * 2,
-                                decoration: BoxDecoration(
-                                  shape: isAgent
-                                      ? BoxShape.rectangle
-                                      : BoxShape.circle,
-                                  borderRadius: isAgent
-                                      ? BorderRadius.circular(
-                                          avatarRadius * 0.6,
-                                        )
-                                      : null,
-                                  color: context.colors.primaryContainer,
-                                ),
-                                alignment: Alignment.center,
-                                child: BouncingDotsIndicator(
-                                  color: context.colors.onPrimaryContainer,
-                                  dotSize: 6 * scale,
-                                  gap: 4 * scale,
-                                  semanticLabel:
-                                      '$label is preparing a response',
-                                ),
+                                dimension: avatarRadius * 2,
+                                child: isAgent
+                                    ? AgentAvatarSquircle(
+                                        child: ColoredBox(
+                                          color:
+                                              context.colors.primaryContainer,
+                                          child: Center(
+                                            child: BouncingDotsIndicator(
+                                              color: context
+                                                  .colors
+                                                  .onPrimaryContainer,
+                                              dotSize: 6 * scale,
+                                              gap: 4 * scale,
+                                              semanticLabel:
+                                                  '$label is preparing a response',
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    : DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color:
+                                              context.colors.primaryContainer,
+                                        ),
+                                        child: Center(
+                                          child: BouncingDotsIndicator(
+                                            color: context
+                                                .colors
+                                                .onPrimaryContainer,
+                                            dotSize: 6 * scale,
+                                            gap: 4 * scale,
+                                            semanticLabel:
+                                                '$label is preparing a response',
+                                          ),
+                                        ),
+                                      ),
                               )
                             : AvatarImage(
                                 key: ValueKey('huddle-avatar-image-$pubkey'),

@@ -407,7 +407,7 @@ function ActivityCard({
                 aria-label={`View ${actorLabel}'s profile`}
                 className={cn(
                   "pointer-events-auto relative z-10 shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                  profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                  profile?.isAgent ? "agent-avatar-squircle" : "rounded-full",
                 )}
                 type="button"
               >

@@ -388,7 +388,7 @@ export function InboxListPane({
                 <span
                   className={cn(
                     "inline-flex shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                    isSenderAgent ? "rounded-[30%]" : "rounded-full",
+                    isSenderAgent ? "agent-avatar-squircle" : "rounded-full",
                   )}
                   data-testid={`home-inbox-avatar-${item.id}`}
                 >
