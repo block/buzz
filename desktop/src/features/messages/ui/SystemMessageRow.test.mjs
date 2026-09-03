@@ -315,3 +315,31 @@ test("grouped self-joins plus additions render neutral arrival copy", async () =
     "Elrond arrived along with Legolas",
   );
 });
+
+test("grouped duplicate mixed-mechanism arrivals render singular neutral copy", async () => {
+  const { screen } = await import("@testing-library/react");
+  const viewer = "10".repeat(32);
+  const elrond = "11".repeat(32);
+  const groupedMessages = [
+    systemMessage({ actor: elrond, createdAt: 1, id: "a", target: elrond }),
+    systemMessage({ actor: viewer, createdAt: 2, id: "b", target: elrond }),
+  ];
+
+  await renderSystemMessageRow({
+    currentPubkey: viewer,
+    groupedMessages,
+    profiles: {
+      [elrond]: {
+        avatarUrl: null,
+        displayName: "Elrond",
+        isAgent: false,
+        name: null,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+    },
+  });
+
+  const row = screen.getByTestId("system-message-row");
+  assert.equal(normalizeText(row.textContent ?? ""), "Elrond arrived");
+});
