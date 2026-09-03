@@ -250,7 +250,7 @@ export function AgentRuntimeAvatarControl({
               : "bg-primary",
       )}
       className="h-24 w-24"
-      cornerRadius={AGENT_AVATAR_SIZE * 0.3}
+      shape="squircle"
       curve={showStatusDot ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
       cutout={badge.cutout}
       cutoutWidth={actionCutoutWidth}

@@ -6,6 +6,7 @@ import type {
 } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow";
+import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFormatters";
 import {
   getThreadReplyAvatarCenterRem,
@@ -21,6 +22,13 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 const THREAD_SUMMARY_CONTENT_OFFSET_REM =
   THREAD_REPLY_BODY_OFFSET_REM - THREAD_REPLY_ROW_MARGIN_INLINE_REM;
 const THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM = 0.25;
+const THREAD_SUMMARY_AVATAR_SIZE = 24;
+const THREAD_SUMMARY_AVATAR_OVERLAP = 4;
+const THREAD_SUMMARY_STACK_CUTOUT = {
+  cx: THREAD_SUMMARY_AVATAR_SIZE + THREAD_SUMMARY_AVATAR_OVERLAP,
+  cy: THREAD_SUMMARY_AVATAR_SIZE / 2,
+  r: THREAD_SUMMARY_AVATAR_SIZE / 2 + 2,
+} as const;
 
 function ParticipantAvatar({
   participant,
@@ -31,6 +39,18 @@ function ParticipantAvatar({
   index: number;
   participantCount: number;
 }) {
+  const hasForegroundAvatar = index < participantCount - 1;
+  const avatar = (
+    <UserAvatar
+      avatarUrl={participant.avatarUrl}
+      className="h-6 w-6 text-2xs"
+      displayName={participant.author}
+      shape={participant.isAgent ? "squircle" : "circle"}
+      size="sm"
+      testId={`message-thread-summary-avatar-${index}`}
+    />
+  );
+
   return (
     <div
       className={cn("relative", index > 0 && "-ml-1")}
@@ -39,16 +59,18 @@ function ParticipantAvatar({
         zIndex: index + 1,
       }}
     >
-      <UserAvatar
-        avatarUrl={participant.avatarUrl}
-        className={cn(
-          "h-6 w-6 text-2xs",
-          index < participantCount - 1 && "ring-2 ring-background",
-        )}
-        displayName={participant.author}
-        shape={participant.isAgent ? "squircle" : "circle"}
-        size="sm"
-      />
+      {hasForegroundAvatar ? (
+        <MaskedAvatarBadgeFrame
+          clipTestId={`message-thread-summary-stack-mask-${index}`}
+          cutout={THREAD_SUMMARY_STACK_CUTOUT}
+          maskMode="radial"
+          size={THREAD_SUMMARY_AVATAR_SIZE}
+        >
+          {avatar}
+        </MaskedAvatarBadgeFrame>
+      ) : (
+        avatar
+      )}
     </div>
   );
 }

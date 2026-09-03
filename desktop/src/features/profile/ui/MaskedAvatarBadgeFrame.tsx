@@ -3,6 +3,7 @@ import type * as React from "react";
 import { motion } from "motion/react";
 
 import { cn } from "@/shared/lib/cn";
+import { sampleAgentAvatarSquircle } from "@/shared/ui/AvatarClipPaths";
 
 export type AvatarBadgeCircle = {
   cx: number;
@@ -53,6 +54,7 @@ type MaskedAvatarBadgeFrameProps = {
   cutoutWidth?: number;
   maskMode?: "clip-path" | "radial";
   maskTransition?: React.ComponentProps<typeof motion.path>["transition"];
+  shape?: "circle" | "squircle";
   size: number;
 };
 
@@ -560,6 +562,78 @@ function getRoundedAvatarCapsuleMaskPolygon(
   return `polygon(${alignedPoints.map((point) => toPolygonPoint(point, size)).join(", ")})`;
 }
 
+function getSquircleMaskPolygon(size: number, cutout: AvatarBadgeCircle) {
+  const points = sampleAgentAvatarSquircle(size, 32);
+  const distanceFromCutout = (point: Point) =>
+    Math.hypot(point.x - cutout.cx, point.y - cutout.cy);
+  const outsideCutout = (point: Point) => distanceFromCutout(point) >= cutout.r;
+  const crossings: Array<{
+    index: number;
+    outside: Point;
+    inside: Point;
+    entersCutout: boolean;
+  }> = [];
+
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    if (outsideCutout(current) === outsideCutout(next)) continue;
+    crossings.push({
+      index,
+      outside: outsideCutout(current) ? current : next,
+      inside: outsideCutout(current) ? next : current,
+      entersCutout: outsideCutout(current),
+    });
+  }
+
+  if (crossings.length !== 2) {
+    return `polygon(${points.map((point) => toPolygonPoint(point, size)).join(", ")})`;
+  }
+
+  const intersectionPoint = ({
+    outside,
+    inside,
+  }: (typeof crossings)[number]) => {
+    let low = outside;
+    let high = inside;
+    for (let iteration = 0; iteration < 12; iteration += 1) {
+      const midpoint = {
+        x: (low.x + high.x) / 2,
+        y: (low.y + high.y) / 2,
+      };
+      if (outsideCutout(midpoint)) low = midpoint;
+      else high = midpoint;
+    }
+    return {
+      x: (low.x + high.x) / 2,
+      y: (low.y + high.y) / 2,
+    };
+  };
+  const enter = crossings.find((crossing) => crossing.entersCutout);
+  const exit = crossings.find((crossing) => !crossing.entersCutout);
+  if (!enter || !exit) {
+    return `polygon(${points.map((point) => toPolygonPoint(point, size)).join(", ")})`;
+  }
+
+  const enterPoint = intersectionPoint(enter);
+  const exitPoint = intersectionPoint(exit);
+  const enterAngle = getAngle(cutout, enterPoint);
+  const exitAngle = getAngle(cutout, exitPoint);
+  let cutoutSweep = exitAngle - enterAngle;
+  while (cutoutSweep >= 0) cutoutSweep -= Math.PI * 2;
+  const cutoutPoints = Array.from({ length: 32 }, (_, index) =>
+    getPointOnCircle(cutout, enterAngle + cutoutSweep * ((index + 1) / 32)),
+  );
+  const maskPoints = [
+    ...points.slice(0, enter.index + 1),
+    enterPoint,
+    ...cutoutPoints,
+    ...points.slice(exit.index + 1),
+  ];
+
+  return `polygon(${maskPoints.map((point) => toPolygonPoint(point, size)).join(", ")})`;
+}
+
 function getRoundedSquareMaskPolygon(
   size: number,
   cornerRadius: number,
@@ -669,27 +743,32 @@ export function MaskedAvatarBadgeFrame({
   cutoutWidth,
   maskMode = "clip-path",
   maskTransition,
+  shape = "circle",
   size,
 }: MaskedAvatarBadgeFrameProps) {
-  const shouldMask = Boolean(badge && badgeBox && cutout);
+  const shouldMask = Boolean(
+    cutout && (maskMode === "radial" || (badge && badgeBox)),
+  );
   const stabilizeOuterBoundary = Boolean(maskTransition);
   const maskPolygon = cutout
-    ? cornerRadius === undefined
-      ? cutoutWidth && cutoutWidth > cutout.r * 2
-        ? getRoundedAvatarCapsuleMaskPolygon(
-            size,
-            cutout,
-            cutoutWidth,
-            curve,
-            stabilizeOuterBoundary,
-          )
-        : getRoundedAvatarMaskPolygon(
-            size,
-            cutout,
-            curve,
-            stabilizeOuterBoundary,
-          )
-      : getRoundedSquareMaskPolygon(size, cornerRadius, cutout, curve)
+    ? shape === "squircle"
+      ? getSquircleMaskPolygon(size, cutout)
+      : cornerRadius === undefined
+        ? cutoutWidth && cutoutWidth > cutout.r * 2
+          ? getRoundedAvatarCapsuleMaskPolygon(
+              size,
+              cutout,
+              cutoutWidth,
+              curve,
+              stabilizeOuterBoundary,
+            )
+          : getRoundedAvatarMaskPolygon(
+              size,
+              cutout,
+              curve,
+              stabilizeOuterBoundary,
+            )
+        : getRoundedSquareMaskPolygon(size, cornerRadius, cutout, curve)
     : undefined;
   const radialMask =
     maskMode === "radial" && cutout
