@@ -1,5 +1,8 @@
 import * as React from "react";
 
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+
 import { cn } from "@/shared/lib/cn";
 
 type MessageHeaderRowProps = {
@@ -102,5 +105,42 @@ export function MessageAuthorText({
     >
       {children}
     </Component>
+  );
+}
+
+/** Author navigation and provenance always refer to the same exact identity. */
+export function MessageAuthorIdentity({
+  pubkey,
+  ownerPubkey,
+  role,
+  displayName,
+  children,
+}: {
+  pubkey?: string | null;
+  ownerPubkey?: string | null;
+  role?: string;
+  displayName: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <>
+      {pubkey ? (
+        <UserProfilePopover
+          pubkey={pubkey}
+          role={role}
+          botIdenticonValue={displayName}
+        >
+          <button
+            className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            type="button"
+          >
+            {children}
+          </button>
+        </UserProfilePopover>
+      ) : (
+        children
+      )}
+      <AgentManagementMarker pubkey={pubkey} ownerPubkey={ownerPubkey} />
+    </>
   );
 }

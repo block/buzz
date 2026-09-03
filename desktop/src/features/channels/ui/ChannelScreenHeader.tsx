@@ -14,6 +14,7 @@ import {
   ProfileAvatarWithStatus,
   scaleProfileAvatarStatusGeometry,
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
 import { Button } from "@/shared/ui/button";
@@ -195,9 +196,17 @@ export function ChannelScreenHeader({
         ) : undefined
       }
       statusBadge={
-        <ChannelHeaderStatusBadge
-          ephemeralDisplay={activeChannelEphemeralDisplay}
-        />
+        <>
+          <ChannelHeaderStatusBadge
+            ephemeralDisplay={activeChannelEphemeralDisplay}
+          />
+          {!isGroupDm && activeDmParticipant ? (
+            <AgentManagementMarker
+              pubkey={activeDmParticipant.pubkey}
+              testId="chat-header-agent-provenance"
+            />
+          ) : null}
+        </>
       }
       title={activeChannelTitle}
       titleAdornment={

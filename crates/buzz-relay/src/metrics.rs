@@ -37,6 +37,12 @@ const READINESS_DURATION_BUCKETS_S: [f64; 15] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5,
 ];
 
+/// Pool checkout buckets: dense around normal sub-100ms waits, with explicit
+/// coverage of the reader's 150ms and writer's default three-second budgets.
+const DB_POOL_ACQUIRE_DURATION_BUCKETS_S: [f64; 9] =
+    [0.001, 0.005, 0.01, 0.025, 0.05, 0.15, 0.5, 1.0, 3.0];
+const DB_POOL_ACQUIRE_DURATION_UNIT: metrics::Unit = metrics::Unit::Seconds;
+
 /// Seconds-scale buckets for Git hydration and pack streams.
 const GIT_DURATION_BUCKETS_S: [f64; 13] = [
     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
@@ -105,6 +111,11 @@ fn configured_prometheus_builder(gauge_idle_timeout_secs: u64) -> PrometheusBuil
         )
         .expect("valid readiness duration bucket boundaries")
         .set_buckets_for_metric(
+            Matcher::Full("buzz_db_pool_acquire_duration_seconds".to_owned()),
+            &DB_POOL_ACQUIRE_DURATION_BUCKETS_S,
+        )
+        .expect("valid DB pool acquisition duration bucket boundaries")
+        .set_buckets_for_metric(
             Matcher::Full("buzz_git_hydrate_bytes".to_owned()),
             &GIT_BYTES_BUCKETS,
         )
@@ -158,6 +169,7 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
 
     metrics::set_global_recorder(recorder).expect("global recorder must be set exactly once");
     describe_readiness_metrics();
+    describe_db_pool_metrics();
     tokio::spawn(exporter);
 }
 
@@ -179,6 +191,23 @@ pub(crate) fn describe_readiness_metrics() {
     metrics::describe_gauge!(
         "buzz_readiness_state",
         "Latest publishable readiness state by check, where 1 is ready and 0 is not ready"
+    );
+}
+
+/// Register the frozen operation-aware pool-acquisition contract.
+pub(crate) fn describe_db_pool_metrics() {
+    metrics::describe_histogram!(
+        "buzz_db_pool_acquire_duration_seconds",
+        DB_POOL_ACQUIRE_DURATION_UNIT,
+        "Database pool checkout duration by valid pool role and operation"
+    );
+    metrics::describe_counter!(
+        "buzz_db_pool_acquire_attempts_total",
+        "Database pool checkout terminals by valid pool role, operation, and outcome"
+    );
+    metrics::describe_gauge!(
+        "buzz_db_pool_waiters",
+        "Current tracked-operation database pool checkout attempts in progress by valid pool role and operation"
     );
 }
 
@@ -250,4 +279,111 @@ pub async fn track_metrics(req: Request, next: Next) -> Response {
     metrics::histogram!("http_request_latency_ms", &labels).record(latency_ms);
 
     response
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use std::collections::BTreeSet;
+
+    const OUTCOMES: [&str; 4] = ["success", "timeout", "error", "cancelled"];
+
+    fn label_keys(line: &str) -> BTreeSet<&str> {
+        line.split_once('{')
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(labels, _)| {
+                labels
+                    .split(',')
+                    .filter_map(|label| label.split_once('=').map(|(key, _)| key))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn production_builder_exports_frozen_db_pool_contract_and_187_series_budget() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::describe_db_pool_metrics();
+            for (pool_role, operation) in buzz_db::DB_POOL_ACQUIRE_VALID_PAIRS {
+                metrics::histogram!(
+                    "buzz_db_pool_acquire_duration_seconds",
+                    "pool_role" => pool_role,
+                    "operation" => operation,
+                )
+                .record(0.02);
+                metrics::gauge!(
+                    "buzz_db_pool_waiters",
+                    "pool_role" => pool_role,
+                    "operation" => operation,
+                )
+                .set(0.0);
+                for outcome in OUTCOMES {
+                    metrics::counter!(
+                        "buzz_db_pool_acquire_attempts_total",
+                        "pool_role" => pool_role,
+                        "operation" => operation,
+                        "outcome" => outcome,
+                    )
+                    .increment(1);
+                }
+            }
+        });
+
+        let scrape = handle.render();
+        assert!(scrape.contains("# TYPE buzz_db_pool_acquire_duration_seconds histogram"));
+        assert!(scrape.contains("# TYPE buzz_db_pool_acquire_attempts_total counter"));
+        assert!(scrape.contains("# TYPE buzz_db_pool_waiters gauge"));
+        assert!(scrape.contains("# HELP buzz_db_pool_acquire_duration_seconds Database pool checkout duration by valid pool role and operation"));
+        assert!(scrape.contains("# HELP buzz_db_pool_acquire_attempts_total Database pool checkout terminals by valid pool role, operation, and outcome"));
+        assert!(scrape.contains("# HELP buzz_db_pool_waiters Current tracked-operation database pool checkout attempts in progress by valid pool role and operation"));
+        assert_eq!(super::DB_POOL_ACQUIRE_DURATION_UNIT, metrics::Unit::Seconds);
+        let readiness_buckets = scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_db_pool_acquire_duration_seconds_bucket{")
+                    && line.contains("pool_role=\"writer\"")
+                    && line.contains("operation=\"readiness\"")
+            })
+            .map(|line| {
+                line.split(",le=\"")
+                    .nth(1)
+                    .and_then(|rest| rest.split_once('"').map(|(bucket, _)| bucket))
+                    .expect("duration bucket carries le label")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            readiness_buckets,
+            ["0.001", "0.005", "0.01", "0.025", "0.05", "0.15", "0.5", "1", "3", "+Inf",],
+            "duration bucket contract drifted:\n{scrape}"
+        );
+
+        let raw_series = scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_db_pool_acquire_duration_seconds")
+                    || line.starts_with("buzz_db_pool_acquire_attempts_total")
+                    || line.starts_with("buzz_db_pool_waiters{")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw_series.len(),
+            buzz_db::DB_POOL_ACQUIRE_RAW_SERIES_PER_POD,
+            "unexpected raw scrape:\n{scrape}"
+        );
+
+        for line in raw_series {
+            let keys = label_keys(line);
+            if line.starts_with("buzz_db_pool_acquire_duration_seconds_bucket") {
+                assert_eq!(keys, BTreeSet::from(["le", "operation", "pool_role"]));
+            } else if line.starts_with("buzz_db_pool_acquire_duration_seconds") {
+                assert_eq!(keys, BTreeSet::from(["operation", "pool_role"]));
+            } else if line.starts_with("buzz_db_pool_acquire_attempts_total") {
+                assert_eq!(keys, BTreeSet::from(["operation", "outcome", "pool_role"]));
+            } else {
+                assert_eq!(keys, BTreeSet::from(["operation", "pool_role"]));
+            }
+            assert!(!line.contains("operation=\"other\""));
+            assert!(!line.contains("result="));
+        }
+    }
 }

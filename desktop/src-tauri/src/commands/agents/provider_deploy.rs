@@ -6,7 +6,7 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         discover_provider_candidates, load_managed_agents, provider_deploy,
-        resolve_provider_binary, save_managed_agents, BackendKind,
+        resolve_provider_binary, save_managed_agents, BackendKind, REPLAY_FLOOR_ENV_VAR,
     },
     util::now_iso,
 };
@@ -31,6 +31,13 @@ use super::build_deploy_payload;
 /// deployment fails closed instead of deploying a stale start into the new
 /// tenant under the new tenant's owner identity. `None` preserves the
 /// unscoped behavior for callers without a tenant boundary.
+///
+/// `replay_floor_unix`: optional unix-seconds replay floor from a
+/// publish-first mention send. It is injected into the rebuilt payload's
+/// `launch.policy_env` as `BUZZ_ACP_REPLAY_FLOOR`, so the remote harness's
+/// startup watermark replays back past the already-published triggering
+/// message exactly like a local spawn. Per-invocation only — never persisted
+/// on the record, so later redeploys do not carry a stale floor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn deploy_to_provider(
     app: &AppHandle,
@@ -42,6 +49,7 @@ pub(crate) async fn deploy_to_provider(
     _cached_binary_path: Option<&str>,
     expected_relay_url: Option<&str>,
     expected_signer_pubkey: Option<&str>,
+    replay_floor_unix: Option<u64>,
 ) -> Result<(), String> {
     let deploy_lock = {
         let mut locks = state
@@ -58,7 +66,7 @@ pub(crate) async fn deploy_to_provider(
     // The payload may have waited behind another deployment. Rebuild it from
     // the current record so the final provider invocation always carries the
     // newest saved policy rather than the stale snapshot captured by its caller.
-    let (provider_id, config, cached_binary_path, agent_json) = {
+    let (provider_id, config, cached_binary_path, mut agent_json) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -83,6 +91,9 @@ pub(crate) async fn deploy_to_provider(
     // Assert the caller's captured scope against THIS payload — the exact
     // value invoked below — not the pre-lock snapshot its caller validated.
     assert_payload_scope(&agent_json, expected_relay_url, expected_signer_pubkey)?;
+    // The floor is invocation state, not record state, so the post-lock
+    // rebuild cannot restore it — inject it into the payload actually invoked.
+    apply_replay_floor(&mut agent_json, replay_floor_unix);
     // Resolve via discovered candidates only. Cached path must match BOTH
     // "is a discovered candidate" AND "belongs to this provider_id". A tampered
     // record cannot redirect deploys to a different provider's binary.
@@ -157,6 +168,58 @@ fn assert_payload_scope(
         None => {}
     }
     Ok(())
+}
+
+/// Inject a caller-supplied replay floor into the deploy payload so the
+/// remote harness consumes it exactly like a local spawn: as the
+/// [`REPLAY_FLOOR_ENV_VAR`] environment variable. The floor rides
+/// `launch.policy_env` (tier 1); any same-named key in `launch.env` (tier 2)
+/// is stripped because that tier later-wins and a persisted user value must
+/// not shadow this send's floor — the remote mirror of
+/// `apply_replay_floor_env`'s post-`descriptor.env` write on the local spawn.
+/// With no caller floor the payload is left untouched — a user-supplied
+/// `launch.env` value passes through, and plain redeploys never carry a stale
+/// floor.
+fn apply_replay_floor(agent_json: &mut serde_json::Value, replay_floor_unix: Option<u64>) {
+    let Some(floor) = replay_floor_unix else {
+        return;
+    };
+    let Some(launch) = agent_json
+        .get_mut("launch")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if let Some(env) = launch
+        .get_mut("env")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        let shadowed: Vec<String> = env
+            .keys()
+            .filter(|key| key.eq_ignore_ascii_case(REPLAY_FLOOR_ENV_VAR))
+            .cloned()
+            .collect();
+        for key in shadowed {
+            env.remove(&key);
+        }
+    }
+    match launch
+        .get_mut("policy_env")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        Some(policy_env) => {
+            policy_env.insert(
+                REPLAY_FLOOR_ENV_VAR.to_string(),
+                serde_json::Value::String(floor.to_string()),
+            );
+        }
+        None => {
+            launch.insert(
+                "policy_env".to_string(),
+                serde_json::json!({ (REPLAY_FLOOR_ENV_VAR): floor.to_string() }),
+            );
+        }
+    }
 }
 
 fn policy_matches_payload(
@@ -281,6 +344,79 @@ mod tests {
         )
         .unwrap();
         assert_payload_scope(&serde_json::json!({}), None, None).unwrap();
+    }
+
+    // ── apply_replay_floor: publish-first floor threading into the payload ──
+
+    fn launch_payload() -> serde_json::Value {
+        serde_json::json!({
+            "launch": {
+                "env": { "KEEP_ME": "yes" },
+                "policy_env": { "BUZZ_ACP_LAZY_POOL": "true" },
+            },
+        })
+    }
+
+    #[test]
+    fn caller_replay_floor_rides_launch_policy_env() {
+        // A publish-first mention send's floor must reach the remote harness
+        // as BUZZ_ACP_REPLAY_FLOOR, exactly like a local spawn's env.
+        let mut payload = launch_payload();
+        apply_replay_floor(&mut payload, Some(1_756_600_000));
+        assert_eq!(
+            payload["launch"]["policy_env"]["BUZZ_ACP_REPLAY_FLOOR"],
+            "1756600000"
+        );
+        assert_eq!(payload["launch"]["env"]["KEEP_ME"], "yes");
+        assert_eq!(
+            payload["launch"]["policy_env"]["BUZZ_ACP_LAZY_POOL"],
+            "true"
+        );
+    }
+
+    #[test]
+    fn caller_replay_floor_strips_user_env_shadow() {
+        // launch.env later-wins over policy_env in the remote three-tier
+        // model; a persisted user floor must not shadow this send's floor.
+        let mut payload = launch_payload();
+        payload["launch"]["env"]["BUZZ_ACP_REPLAY_FLOOR"] = "1".into();
+        payload["launch"]["env"]["buzz_acp_replay_floor"] = "2".into();
+        apply_replay_floor(&mut payload, Some(42));
+        assert_eq!(
+            payload["launch"]["policy_env"]["BUZZ_ACP_REPLAY_FLOOR"],
+            "42"
+        );
+        assert!(payload["launch"]["env"]["BUZZ_ACP_REPLAY_FLOOR"].is_null());
+        assert!(payload["launch"]["env"]["buzz_acp_replay_floor"].is_null());
+        assert_eq!(payload["launch"]["env"]["KEEP_ME"], "yes");
+    }
+
+    #[test]
+    fn no_caller_floor_leaves_payload_untouched() {
+        // Create-flow deploys and plain redeploys carry no floor: user env
+        // passthrough stands and no stale floor is invented.
+        let mut payload = launch_payload();
+        payload["launch"]["env"]["BUZZ_ACP_REPLAY_FLOOR"] = "1".into();
+        let before = payload.clone();
+        apply_replay_floor(&mut payload, None);
+        assert_eq!(payload, before);
+    }
+
+    #[test]
+    fn replay_floor_tolerates_payload_without_launch() {
+        let mut payload = serde_json::json!({});
+        apply_replay_floor(&mut payload, Some(42));
+        assert_eq!(payload, serde_json::json!({}));
+    }
+
+    #[test]
+    fn replay_floor_creates_missing_policy_env() {
+        let mut payload = serde_json::json!({ "launch": {} });
+        apply_replay_floor(&mut payload, Some(42));
+        assert_eq!(
+            payload["launch"]["policy_env"]["BUZZ_ACP_REPLAY_FLOOR"],
+            "42"
+        );
     }
 
     #[test]

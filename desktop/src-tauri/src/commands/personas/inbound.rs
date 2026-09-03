@@ -131,6 +131,7 @@ pub async fn reconcile_inbound_persona_event(
                 cached_binary_path.as_deref(),
                 None,
                 None,
+                None,
             )
             .await
             .map_err(|error| {

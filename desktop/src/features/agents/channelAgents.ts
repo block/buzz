@@ -36,6 +36,16 @@ export type AttachManagedAgentToChannelInput = {
   agent: ManagedAgent;
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
+  /**
+   * When set, a needed start/deploy is handed to this callback instead of
+   * being awaited: the attach resolves as soon as the membership write lands
+   * and the callback owns the start, including surfacing its failure. The
+   * message-send path passes a queue collector here — the wake it records is
+   * flushed fire-and-forget only after the relay accepts the publish, with a
+   * replay floor stamped at queue time, so the spawned harness replays the
+   * published message and an aborted send leaves no orphan wake.
+   */
+  detachedStart?: (agent: ManagedAgent) => void;
 };
 
 export type AttachManagedAgentToChannelResult = {
@@ -85,6 +95,9 @@ export type CreateChannelManagedAgentInput = {
   respondToAllowlist?: string[];
   /** Skip reuse logic and always create a fresh agent instance. */
   forceNewInstance?: boolean;
+  /** Detached start hook forwarded to the channel attach — see
+   * `AttachManagedAgentToChannelInput.detachedStart`. */
+  detachedStart?: (agent: ManagedAgent) => void;
 };
 
 export type CreateChannelManagedAgentResult =
@@ -120,11 +133,25 @@ type ChannelAgentReuseContext = {
   >[];
 };
 
+export type ApplyReusableAgentAccessPolicyResult = {
+  agent: ManagedAgent;
+  /**
+   * True when reconciling the policy required a relay write. Callers that
+   * sequence authorization around this call — the message-send path revalidates
+   * mention authorization at the publish boundary whenever an awaited relay
+   * round-trip separated it from its earlier pass — depend on this flag rather
+   * than on comparing the returned record's identity against the input, so the
+   * signal survives any future change to whether an update returns a fresh
+   * object.
+   */
+  wrote: boolean;
+};
+
 export async function applyReusableAgentAccessPolicy(
   agent: ManagedAgent,
   request: Pick<CreateManagedAgentInput, "respondTo" | "respondToAllowlist">,
   persona?: Pick<AgentPersona, "respondTo" | "respondToAllowlist">,
-) {
+): Promise<ApplyReusableAgentAccessPolicyResult> {
   const policy = resolveReusableAgentAccessPolicy(request, persona);
   const matches =
     agent.respondTo === policy.respondTo &&
@@ -132,14 +159,13 @@ export async function applyReusableAgentAccessPolicy(
     agent.respondToAllowlist.every(
       (pubkey, index) => pubkey === policy.respondToAllowlist[index],
     );
-  if (matches) return agent;
+  if (matches) return { agent, wrote: false };
 
-  return (
-    await updateManagedAgent({
-      pubkey: agent.pubkey,
-      ...policy,
-    })
-  ).agent;
+  const { agent: updatedAgent } = await updateManagedAgent({
+    pubkey: agent.pubkey,
+    ...policy,
+  });
+  return { agent: updatedAgent, wrote: true };
 }
 
 export async function attachManagedAgentToChannel(
@@ -177,16 +203,16 @@ export async function attachManagedAgentToChannel(
     // pair — so this ensures the pair the caller is attaching to, never
     // another community's.
     const isRemote = input.agent.backend.type === "provider";
-    if (isRemote && input.agent.status !== "deployed") {
-      agent = await startManagedAgent(input.agent.pubkey);
-      started = true;
-    } else if (
-      !isRemote &&
-      input.agent.status !== "running" &&
-      input.agent.status !== "deployed"
-    ) {
-      agent = await startManagedAgent(input.agent.pubkey);
-      started = true;
+    const needsStart = isRemote
+      ? input.agent.status !== "deployed"
+      : input.agent.status !== "running" && input.agent.status !== "deployed";
+    if (needsStart) {
+      if (input.detachedStart) {
+        input.detachedStart(input.agent);
+      } else {
+        agent = await startManagedAgent(input.agent.pubkey);
+        started = true;
+      }
     }
   }
 
@@ -317,7 +343,7 @@ export async function provisionChannelManagedAgent(
       const definition = context.personas.find(
         (persona) => persona.id === input.personaId,
       );
-      const updatedAgent = await applyReusableAgentAccessPolicy(
+      const { agent: updatedAgent } = await applyReusableAgentAccessPolicy(
         reusable,
         input,
         definition,
@@ -346,7 +372,7 @@ export async function provisionChannelManagedAgent(
       context.channelMemberPubkeys,
     );
     if (reusable) {
-      const updatedAgent = await applyReusableAgentAccessPolicy(
+      const { agent: updatedAgent } = await applyReusableAgentAccessPolicy(
         reusable,
         input,
       );
@@ -411,6 +437,7 @@ export async function createChannelManagedAgent(
     agent: provisioned.agent,
     role: input.role ?? "bot",
     ensureRunning: input.ensureRunning ?? true,
+    detachedStart: input.detachedStart,
   });
 
   return {

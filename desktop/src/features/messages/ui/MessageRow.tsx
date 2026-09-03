@@ -650,6 +650,7 @@ export const MessageRow = React.memo(
         {message.pubkey ? (
           <MessageAuthorWithIndicators
             authorName={message.author}
+            ownerPubkey={message.ownerPubkey}
             pubkey={message.pubkey}
             role={profilePopoverRole}
           >

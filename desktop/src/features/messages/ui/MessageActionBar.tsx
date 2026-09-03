@@ -49,6 +49,7 @@ import {
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { ProtectedMessageAction } from "@protected-feature-components";
 
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
@@ -561,6 +562,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
               </PopoverContent>
             </Popover>
           ) : null}
+
+          <ProtectedMessageAction channelId={channelId} message={message} />
 
           {hasReactionAction && quickReactionItems.length > 0 ? (
             <div

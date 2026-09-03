@@ -259,10 +259,10 @@
 
    Plain-text mention decorations stay inline because inline-flex pulls the
    caret into their decorated range and swallows the trailing space after an
-   @mention. Composer Buzz links are atom nodes, but their labels may still
-   fragment between characters; only the icon and leading label fragment stay
-   together. The line-height keeps each inline decoration box tall enough to
-   paint both block-padding edges without clipping. */
+   @mention. Their generated icon participates in the first line's inline
+   flow: absolute positioning anchors it to the union of every wrapped line,
+   and icon-sized left padding is cloned onto every continuation fragment.
+   Composer Buzz links are atom nodes with their own leading-fragment wrapper. */
 .rich-text-composer .tiptap .mention-chip {
   display: inline;
   min-height: 0;
@@ -271,4 +271,26 @@
     var(--inline-chip-padding-block-start) +
     var(--inline-chip-padding-block-end)
   );
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-with-icon:not(.wrapping-inline-chip) {
+  padding-left: var(--inline-chip-padding-inline);
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-with-icon:not(.wrapping-inline-chip)::before {
+  position: static;
+  display: inline-block;
+  margin-right: var(--inline-chip-icon-gap);
+  transform: none;
+  vertical-align: -0.125em;
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-icon-human:not(.wrapping-inline-chip)::before {
+  transform: translateY(0.0625rem);
 }

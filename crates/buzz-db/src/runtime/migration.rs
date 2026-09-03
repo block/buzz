@@ -82,9 +82,12 @@ where
     F: FnOnce(PgConnection) -> Fut,
     Fut: Future<Output = (PgConnection, Result<T>)>,
 {
-    let mut lock_conn = crate::observability::acquire(pool, crate::observability::PoolRole::Writer)
-        .await?
-        .detach();
+    let mut lock_conn = crate::observability::acquire_writer_with_legacy_metrics(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?
+    .detach();
     // This dedicated connection intentionally waits for the current migration
     // or schema-destruction owner and may then run long DDL. Exempt those two
     // phases from runtime lock/statement budgets. Keep the idle-in-transaction

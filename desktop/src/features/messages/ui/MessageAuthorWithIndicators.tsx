@@ -1,11 +1,12 @@
 import type * as React from "react";
 
-import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { MessageAuthorIdentity } from "@/features/messages/ui/MessageHeader";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
 
 type MessageAuthorWithIndicatorsProps = {
   authorName: string;
   children: React.ReactNode;
+  ownerPubkey?: string | null;
   pubkey: string;
   role?: string;
 };
@@ -13,23 +14,20 @@ type MessageAuthorWithIndicatorsProps = {
 export function MessageAuthorWithIndicators({
   authorName,
   children,
+  ownerPubkey,
   pubkey,
   role,
 }: MessageAuthorWithIndicatorsProps) {
   return (
     <span className="inline-flex min-w-0 items-baseline gap-1">
-      <UserProfilePopover
-        botIdenticonValue={authorName}
+      <MessageAuthorIdentity
+        displayName={authorName}
+        ownerPubkey={ownerPubkey}
         pubkey={pubkey}
         role={role}
       >
-        <button
-          className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-          type="button"
-        >
-          {children}
-        </button>
-      </UserProfilePopover>
+        {children}
+      </MessageAuthorIdentity>
       <UserNameIndicators pubkey={pubkey} />
     </span>
   );

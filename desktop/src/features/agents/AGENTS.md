@@ -200,7 +200,27 @@ with a TypeScript lookup table or an id comparison in a component.
    agent from Agents, a DM, or a channel must expose the same actions, tabs,
    fields, and profile-wide activity selection. Caller context may control the
    panel shell or return navigation, but must not filter or replace profile
-   content.
+   content. Explicit public-key targets are always exact, including stopped,
+   archived, and relay-only identities. Only explicit persona navigation may
+   select a representative or offer persona Start; a relay persona link cannot
+   borrow a local sibling's management controls. See
+   [the identity contract](../../../../docs/agent-profile-identity.md).
+   Availability dots read relay presence, never a saved deployment
+   receipt or runtime status. Failed/disconnected reads are unknown; lifecycle
+   actions retain their separate routing. Current exact-key Online/Away presence
+   suppresses Start for an inactive local record without granting Stop authority;
+   list/profile/member startup guards must not interpret Offline as proof of safe
+   startup. Deletion also consumes that same exact-key availability reader:
+   unknown requests shutdown when a channel exists, request failure retains the
+   record, and only established Offline keeps the intentional no-request path.
+   Unqueried persona siblings are unknown. No presence state grants deletion or
+   Stop authority; native local stop-before-remove remains independent. See
+   [the availability contract](../../../../docs/agent-availability.md).
+   The shared cloud marker means “Not managed on this device” only
+   after ownership and successful local inventory are known. It does not imply
+   hosting location, availability, or permission. Keep all identity surfaces on
+   the shared provenance context, without per-row directory subscriptions. See
+   [the provenance contract](../../../../docs/agent-management-provenance.md).
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
