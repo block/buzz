@@ -13,6 +13,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
+#[cfg(unix)]
+use crate::heavy_run_guard::HeavyRunGuard;
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{
     PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
@@ -141,6 +143,9 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
+    /// Keeps the per-agent command shims alive for the lifetime of the adapter.
+    #[cfg(unix)]
+    _heavy_run_guard: Option<HeavyRunGuard>,
     /// Write end of the agent's stdin pipe.
     stdin: ChildStdin,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
@@ -469,6 +474,9 @@ impl AcpClient {
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
 
+        #[cfg(unix)]
+        let heavy_run_guard = HeavyRunGuard::install(&mut cmd, command)?;
+
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
         // in the parent environment.
@@ -547,6 +555,8 @@ impl AcpClient {
 
         Ok(Self {
             child,
+            #[cfg(unix)]
+            _heavy_run_guard: heavy_run_guard,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
