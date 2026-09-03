@@ -301,11 +301,14 @@
    spans where highlight patterns overlap). Paint the actual @/# prefix rather
    than absolutely positioned icons, which overlap labels or wrapped key lines.
    Cloned padding must not extend a wrapped key past the editable line box. */
-.rich-text-composer .tiptap .mention-chip.mention-literal-key {
+.rich-text-composer .tiptap
+  .mention-chip.mention-literal-key:not(.wrapping-inline-chip) {
   padding-inline: 0;
 }
 
-.rich-text-composer .tiptap .mention-chip.mention-literal-key::before {
+.rich-text-composer
+  .tiptap
+  .mention-chip.mention-literal-key:not(.wrapping-inline-chip)::before {
   display: none;
 }
 

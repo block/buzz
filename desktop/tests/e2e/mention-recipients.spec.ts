@@ -31,15 +31,23 @@ async function install(page: Page, channel = "general") {
 }
 
 async function recipients(page: Page, content: string) {
-  return page.evaluate(
-    (content) =>
-      (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
-        .filter((event) => event.content === content)
-        .map((event) =>
-          event.tags.filter((tag) => tag[0] === "p").map((tag) => tag[1]),
-        ),
-    content,
-  );
+  return page.evaluate((content) => {
+    const signed = (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
+      .filter((event) => event.content === content)
+      .map((event) =>
+        event.tags.filter((tag) => tag[0] === "p").map((tag) => tag[1]),
+      );
+    if (signed.length > 0) return signed;
+    // Thread sends use native IPC in the mock bridge, not signed capture.
+    return (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+      .filter((call) => call.command === "send_channel_message")
+      .map(
+        (call) =>
+          call.payload as { content?: string; mentionPubkeys?: string[] },
+      )
+      .filter((payload) => payload.content === content)
+      .map((payload) => payload.mentionPubkeys ?? []);
+  }, content);
 }
 
 for (const channel of ["general", "watercooler"]) {
@@ -135,8 +143,8 @@ test("same-name teammates unfurl into distinct exact-key recipients", async ({
   await expect.poll(() => recipients(page, content)).toEqual([pubkeys]);
 });
 
-for (const removal of ["delete", "audience-toggle"]) {
-  test(`same-name automatic recipients: ${removal} A preserves only B at send`, async ({
+for (const removal of ["delete", "audience-remove", "audience-unpin"]) {
+  test(`same-name automatic recipients: ${removal} A preserves exact remaining recipients`, async ({
     page,
   }) => {
     const [a, b] = ["a".repeat(64), "b".repeat(64)];
@@ -151,17 +159,25 @@ for (const removal of ["delete", "audience-toggle"]) {
         channelNames: ["general"],
       })),
     });
-    await page.goto("/");
-    await page.getByTestId("channel-general").click();
-    const input = page.getByTestId("message-input");
+    // Main retains automatic audiences only in threads, never root posts.
+    await page.goto(
+      "/#/channels/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50?messageId=mock-general-welcome&thread=mock-general-welcome",
+    );
+    const composer = page.getByTestId("thread-composer-overlay");
+    await expect(composer).toBeVisible();
+    const input = composer.getByTestId("message-input");
     await input.fill("@Scout");
-    await page.getByTestId(`mention-suggestion-${a}`).click();
+    await composer.getByTestId(`mention-suggestion-${a}`).click();
     await page.keyboard.type("@Scout");
-    await page.getByTestId(`mention-suggestion-${b}`).click();
+    await composer.getByTestId(`mention-suggestion-${b}`).click();
     await page.keyboard.type("hello");
     await expect(input).toHaveText(`@Scout @Scout (${b}) hello`);
-    await expect(page.getByTestId(`composer-address-lock-${a}`)).toBeVisible();
-    await expect(page.getByTestId(`composer-address-lock-${b}`)).toBeVisible();
+    await expect(
+      composer.getByTestId(`composer-address-lock-${a}`),
+    ).toBeVisible();
+    await expect(
+      composer.getByTestId(`composer-address-lock-${b}`),
+    ).toBeVisible();
     if (removal === "delete") {
       // Select the literal prefix through the browser DOM, then use the real
       // editor delete path. Do not replace draft state or mock the composer.
@@ -187,17 +203,26 @@ for (const removal of ["delete", "audience-toggle"]) {
         element.dispatchEvent(new Event("focus"));
       });
       await input.press("Backspace");
+    } else if (removal === "audience-remove") {
+      await composer.getByTestId(`composer-address-lock-remove-${a}`).click();
     } else {
-      await page.locator("[data-mention-picker-trigger]").click();
-      await page.getByTestId(`mention-always-address-${a}`).click();
+      await composer.locator("[data-mention-picker-trigger]").click();
+      await composer.getByTestId(`mention-always-address-${a}`).click();
       await input.press("Escape");
     }
-    const content = `@Scout (${b}) hello`;
+    // The tray unpins without deleting an authored mention; removal deletes it.
+    const content = `${removal === "audience-unpin" ? "@Scout " : ""}@Scout (${b}) hello`;
     await expect(input).toHaveText(content);
-    await expect(page.getByTestId(`composer-address-lock-${a}`)).toHaveCount(0);
-    await expect(page.getByTestId(`composer-address-lock-${b}`)).toBeVisible();
-    await page.getByTestId("send-message").click();
-    await expect.poll(() => recipients(page, content)).toEqual([[b]]);
+    await expect(
+      composer.getByTestId(`composer-address-lock-${a}`),
+    ).toHaveCount(0);
+    await expect(
+      composer.getByTestId(`composer-address-lock-${b}`),
+    ).toBeVisible();
+    await composer.getByTestId("send-message").click();
+    await expect
+      .poll(() => recipients(page, content))
+      .toEqual([removal === "audience-unpin" ? [a, b] : [b]]);
   });
 }
 
@@ -441,7 +466,9 @@ for (const scale of [1, 1.5]) {
       for (const chip of result.chips) {
         expect(chip.wrap).toBe("anywhere");
         if (stage !== "sent") {
-          expect(chip.iconDisplay).toBe(chip.literalKey ? "none" : "block");
+          expect(chip.iconDisplay).toBe(
+            chip.literalKey ? "none" : "inline-block",
+          );
         }
         for (const rect of chip.rects) {
           expect(rect.left).toBeGreaterThanOrEqual(-1);

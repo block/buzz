@@ -572,9 +572,8 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     // In-channel selections send immediately without opening the prompt.
   }
   await expect
-    .poll(() =>
-      readOutgoingMentionPubkeys(page, `@carl (${relayPubkey}) remote`),
-    )
+    // Sending the first root message clears its draft-local label reservation.
+    .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
     .toEqual([relayPubkey]);
 
   await page.getByTestId("channel-members-trigger").click();
@@ -1115,7 +1114,7 @@ test("selecting a person mention inserts @Name into input", async ({
     await mentionChip.evaluate(
       (element) => getComputedStyle(element, "::before").display,
     ),
-  ).toBe("block");
+  ).toBe("inline-block");
   await expect(
     input.locator(".mention-prefix-hidden", { hasText: "@" }),
   ).toHaveCSS("opacity", "0");
@@ -1425,7 +1424,7 @@ test("channel references keep caret movement through the channel name", async ({
     await channelChip.evaluate(
       (element) => getComputedStyle(element, "::before").display,
     ),
-  ).toBe("block");
+  ).toBe("inline-block");
   await expect(
     input.locator(".mention-prefix-hidden", { hasText: "#" }),
   ).toHaveCSS("opacity", "0");
@@ -1474,7 +1473,7 @@ test("selecting a managed agent mention inserts @Name into input", async ({
     await agentMentionChip.evaluate(
       (element) => getComputedStyle(element, "::before").display,
     ),
-  ).toBe("block");
+  ).toBe("inline-block");
   await expect(
     input.locator(".mention-prefix-hidden", { hasText: "@" }),
   ).toHaveCSS("opacity", "0");

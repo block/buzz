@@ -3822,10 +3822,11 @@ test("closing a thread while editing a reply preserves the typed edit", async ({
     .getByTestId("message-timeline")
     .getByTestId("message-row")
     .last();
+  await expect(timelineRoot).toContainText(root);
+  await waitForAnimations(page);
+  await timelineRoot.scrollIntoViewIfNeeded();
   await timelineRoot.hover();
-  await timelineRoot
-    .getByRole("button", { name: "Reply" })
-    .click({ force: true });
+  await timelineRoot.getByRole("button", { name: "Reply" }).click();
 
   const threadPanel = page.getByTestId("message-thread-panel");
   const threadInput = threadPanel.getByTestId("message-input");
@@ -3911,10 +3912,11 @@ test("main ArrowUp refuses to replace a dirty thread edit", async ({
     .getByTestId("message-timeline")
     .getByTestId("message-row")
     .last();
+  await expect(timelineRoot).toContainText(root);
+  await waitForAnimations(page);
+  await timelineRoot.scrollIntoViewIfNeeded();
   await timelineRoot.hover();
-  await timelineRoot
-    .getByRole("button", { name: "Reply" })
-    .click({ force: true });
+  await timelineRoot.getByRole("button", { name: "Reply" }).click();
 
   const threadPanel = page.getByTestId("message-thread-panel");
   const threadInput = threadPanel.getByTestId("message-input");
