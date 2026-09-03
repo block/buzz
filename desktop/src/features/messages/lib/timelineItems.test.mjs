@@ -363,6 +363,30 @@ test("buildTimelineItems: a member joining then leaving is one lifecycle group",
   );
 });
 
+test("buildTimelineItems: duplicate self-joins then leaving stay one group keyed by the departure", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberJoinedEntry({ id: "joined-1", target: "member-a", createdAt: start }),
+    memberJoinedEntry({
+      id: "joined-2",
+      target: "member-a",
+      createdAt: start + 30,
+    }),
+    memberLeftEntry({ id: "left", target: "member-a", createdAt: start + 90 }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  const group = items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["joined-1", "joined-2", "left"],
+  );
+  // Anchored on the newest entry so prepending older history cannot repartition
+  // the loaded rows; splitting this into separate rows would change both.
+  assert.equal(group?.key, "left");
+});
+
 test("buildTimelineItems: consecutive same-author messages within the window are grouped", () => {
   const entries = [
     entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),

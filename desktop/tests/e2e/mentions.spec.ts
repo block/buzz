@@ -4083,6 +4083,57 @@ test("membership activity folds a member joining then leaving", async ({
   );
 });
 
+test("membership activity folds duplicate self-joins then leaving into one row", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
+
+  // The relay re-emits `member_joined` on each PUT_USER, so a member can arrive
+  // twice before leaving. Both arrivals group with the departure; describing
+  // only a 2-event pair dropped the departure and left the member rendered as
+  // still present.
+  await page.evaluate(
+    ({ alicePubkey, kind }) => {
+      const createdAt = Math.floor(Date.now() / 1_000);
+      const join = {
+        type: "member_joined",
+        actor: alicePubkey,
+        target: alicePubkey,
+      };
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify(join),
+        createdAt,
+        kind,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify(join),
+        createdAt: createdAt + 1,
+        kind,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify({ type: "member_left", actor: alicePubkey }),
+        createdAt: createdAt + 2,
+        kind,
+      });
+    },
+    { alicePubkey: TEST_IDENTITIES.alice.pubkey, kind: SYSTEM_MESSAGE_KIND },
+  );
+  await waitForTimelineSettled(page);
+
+  const aliceRows = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "alice" });
+  await expect(aliceRows).toHaveCount(1);
+  await expect(aliceRows).toHaveText(/joined, then left the channel/);
+  await expect(aliceRows.getByTestId("system-message-avatar")).toHaveCount(1);
+});
+
 test("profile-only agent author hides actions without agent access", async ({
   page,
 }) => {

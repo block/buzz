@@ -26,6 +26,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
+  buildGroupedMembershipPayload,
+  parseSystemMessagePayload,
+  type SystemMessagePayload,
+} from "../lib/membershipGroupPayload";
+import {
   addedActionPrefix,
   addedByActionPrefix,
   describeChannelTextFieldChange,
@@ -46,98 +51,12 @@ import {
 const SYSTEM_ACTION_BUTTON_CLASS = "h-6 w-6 rounded-full p-0";
 const SYSTEM_ACTION_ICON_CLASS = "!h-4 !w-4";
 
-type SystemMessagePayload = {
-  type: string;
-  actor?: string;
-  arrivals?: Array<{ actor: string; target: string }>;
-  target?: string;
-  targets?: string[];
-  topic?: string;
-  purpose?: string;
-  // Moderation tombstone fields (kind:40099 "message_deleted"). All optional and
-  // moderator-authored — present when a moderator removed the message, absent for
-  // a plain member self-delete. Reporter identity/evidence never appears here.
-  public_reason?: string;
-  reason_code?: string;
-  action_id?: string;
-};
-
 type SystemMessageDescription = {
   action: React.ReactNode;
   title: React.ReactNode;
 };
 
 const MAX_VISIBLE_ADDITIONAL_MEMBER_NAMES = 3;
-
-function parseSystemMessagePayload(
-  message: TimelineMessage,
-): SystemMessagePayload | null {
-  try {
-    return JSON.parse(message.body) as SystemMessagePayload;
-  } catch {
-    return null;
-  }
-}
-
-function buildGroupedMembershipPayload(
-  messages: readonly TimelineMessage[],
-): SystemMessagePayload | null {
-  if (messages.length < 2) return null;
-
-  const payloads = messages.map(parseSystemMessagePayload);
-  const joinedThenLeft = buildJoinedThenLeftPayload(payloads);
-  if (joinedThenLeft) return joinedThenLeft;
-
-  const arrivals = payloads.map((payload) => {
-    const payloadActor = payload?.actor ? normalizePubkey(payload.actor) : null;
-    const payloadTarget = payload?.target
-      ? normalizePubkey(payload.target)
-      : null;
-    if (payload?.type !== "member_joined" || !payloadActor || !payloadTarget) {
-      return null;
-    }
-    return { actor: payloadActor, target: payloadTarget };
-  });
-  if (arrivals.some((arrival) => !arrival)) return null;
-
-  const membershipArrivals = arrivals as Array<{
-    actor: string;
-    target: string;
-  }>;
-  const targets = [...new Set(membershipArrivals.map(({ target }) => target))];
-  return {
-    arrivals: membershipArrivals,
-    type: "members_arrived",
-    target: targets[0],
-    targets,
-  };
-}
-
-function buildJoinedThenLeftPayload(
-  payloads: readonly (SystemMessagePayload | null)[],
-): SystemMessagePayload | null {
-  if (payloads.length !== 2) return null;
-
-  const [arrival, departure] = payloads;
-  const arrivalTarget = arrival?.target
-    ? normalizePubkey(arrival.target)
-    : null;
-  const departureActor = departure?.actor
-    ? normalizePubkey(departure.actor)
-    : null;
-  if (
-    arrival?.type !== "member_joined" ||
-    departure?.type !== "member_left" ||
-    !arrival.actor ||
-    !arrivalTarget ||
-    normalizePubkey(arrival.actor) !== arrivalTarget ||
-    arrivalTarget !== departureActor
-  ) {
-    return null;
-  }
-
-  return { type: "member_joined_then_left", target: arrival.target };
-}
 
 function aggregateGroupedReactions(
   messages: readonly TimelineMessage[],

@@ -120,9 +120,13 @@ function membershipChangesCanGroup(
  *
  * Compatible membership activities stay together while they are contiguous.
  * Arrival cohorts are actor-neutral even when self-joins and additions mix, but
- * a self-join immediately followed by that member leaving remains a single
- * lifecycle summary. Each adjacent event must fall within the one-hour activity
- * window, so uninterrupted activity can extend beyond an hour overall.
+ * one or more equivalent self-joins followed by that member leaving remain a
+ * single lifecycle summary — every contiguous self-arrival of the departing
+ * member is absorbed, since the relay re-emits `member_joined` on each
+ * PUT_USER. `buildGroupedMembershipPayload` must describe every group this
+ * emits; `membershipGroupPayload.test.mjs` pins that with a matrix invariant.
+ * Each adjacent event must fall within the one-hour activity window, so
+ * uninterrupted activity can extend beyond an hour overall.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
