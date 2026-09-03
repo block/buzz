@@ -319,12 +319,25 @@ pub fn try_record_agent_command(
     Ok(default_agent_command())
 }
 
+/// Resolve the canonical invocation args for a harness command.
+///
+/// Two tiers, mirroring `canonical_harness_command`:
+///
+/// 1. **Builtins** — `KNOWN_ACP_RUNTIMES`, matched by normalised command.
+/// 2. **Static presets** — `PRESET_HARNESSES`, the source of truth for their
+///    own invocations (`devin acp`, `cursor-agent acp`, `grok agent …`).
+///
+/// Tier 2 exists because builtins alone left every preset resolving to `None`,
+/// which silently dropped the args a preset declares. An agent pinned to a
+/// preset by command (no `runtime` id on the record, so the id-keyed registry
+/// lookup in `resolve_effective_harness_descriptor` misses) then spawned bare:
+/// `devin` instead of `devin acp`, which exits immediately.
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
-        _ => None,
+        _ => presets::preset_args_for_command(command),
     }
 }
 
