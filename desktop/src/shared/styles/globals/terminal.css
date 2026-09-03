@@ -248,8 +248,8 @@
   }
 
   .buzz-content-primary:has(
-    + .buzz-terminal-dock-host [data-terminal-mode="maximized"]
-  ) {
+      + .buzz-terminal-dock-host [data-terminal-mode="maximized"]
+    ) {
     flex: 0 1 0%;
     min-height: 0;
   }
