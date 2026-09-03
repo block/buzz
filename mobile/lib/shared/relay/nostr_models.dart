@@ -67,6 +67,12 @@ abstract final class EventKind {
     streamMessageEdit, // 40003
     streamMessageDiff, // 40008
     systemMessage, // 40099
+    jobRequest, // 43001 — job request row
+    jobAccepted, // 43002 — job accepted row
+    jobProgress, // 43003 — job progress row
+    jobResult, // 43004 — job result row
+    jobCancel, // 43005 — job cancellation row
+    jobError, // 43006 — job error row
     huddleStarted, // 48100 — visible huddle session row
     huddleParticipantJoined, // 48101 — huddle lifecycle metadata
     huddleParticipantLeft, // 48102 — huddle lifecycle metadata
