@@ -104,9 +104,30 @@ async fn sync_once(
     info!(relay = %cfg.relay_url, "connected and authenticated");
 
     discover_channels(&mut conn, cfg, store, registry).await?;
+    // Discovery just read the authoritative rosters, so membership is known
+    // current as of `now` (captured before the roster query). Advancing the
+    // watermark here is what lets the live-membership subscription anchor at
+    // it instead of "now": a 44100/44101 emitted while this connection was
+    // still backfilling — or while the daemon was disconnected — replays on
+    // subscribe and triggers the resync it would otherwise have missed.
+    store
+        .set_meta(MEMBERSHIP_WATERMARK_KEY, &now.to_string())
+        .await?;
     backfill(&mut conn, store, registry).await?;
     backfill_profiles(&mut conn, store).await?;
     live_tail(&mut conn, cfg, store, registry).await
+}
+
+/// Meta key holding the unix-seconds timestamp up to which membership
+/// notifications are known to be reflected in the channel table.
+const MEMBERSHIP_WATERMARK_KEY: &str = "membership_watermark";
+
+/// `since` anchor for the live membership subscription: the persisted
+/// watermark when one exists (replaying anything missed while unsubscribed),
+/// otherwise "now" — discovery has just run either way, the watermark simply
+/// wasn't persisted yet on first boot. Skew keeps the boundary inclusive.
+pub(crate) fn membership_since(watermark: Option<i64>, now: i64) -> i64 {
+    (watermark.unwrap_or(now) - SINCE_SKEW_SECS).max(0)
 }
 
 /// Discovers every channel the key is a member of (39002 → 39000) and
@@ -393,6 +414,16 @@ async fn live_tail(
     ]))
     .await?;
     tokio::time::sleep(REQ_PACING).await;
+    // Membership notifications are persisted and p-gated, so anchoring at the
+    // watermark (not "now") replays anything emitted while this daemon was
+    // backfilling, reconnecting, or down since the last discovery — e.g. a
+    // channel the person created during startup. Each replayed or live event
+    // triggers the same clean resync, and the resync's discovery advances the
+    // watermark, so replays terminate.
+    let watermark = store
+        .get_meta(MEMBERSHIP_WATERMARK_KEY)
+        .await?
+        .and_then(|v| v.parse::<i64>().ok());
     conn.send_raw(&json!([
         "REQ", "live-membership",
         {
@@ -401,7 +432,7 @@ async fn live_tail(
                 buzz_core::kind::KIND_MEMBER_REMOVED_NOTIFICATION
             ],
             "#p": [me],
-            "since": now - SINCE_SKEW_SECS
+            "since": membership_since(watermark, now)
         }
     ]))
     .await?;
@@ -421,6 +452,16 @@ async fn live_tail(
                 registry.saw_event(chrono::Utc::now().timestamp());
                 if subscription_id == "live-membership" {
                     // Membership changed; the clean move is a full resync.
+                    // Advance the watermark past this notification first —
+                    // the resync's discovery reads the authoritative rosters
+                    // regardless, and this keeps a notification stamped ahead
+                    // of our clock from replaying on every reconnect.
+                    let advance = (event.created_at.as_secs() as i64)
+                        .saturating_add(1)
+                        .max(now);
+                    store
+                        .set_meta(MEMBERSHIP_WATERMARK_KEY, &advance.to_string())
+                        .await?;
                     info!(kind = %event.kind, "membership changed; resyncing");
                     return Ok(());
                 }
@@ -624,6 +665,21 @@ mod tests {
         assert_eq!(backoff_delay(1), Duration::from_secs(1));
         assert_eq!(backoff_delay(3), Duration::from_secs(4));
         assert_eq!(backoff_delay(99), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn membership_anchor_replays_from_the_watermark() {
+        // With a persisted watermark, the subscription reaches back to it —
+        // notifications emitted while unsubscribed (startup backfill window,
+        // disconnect, downtime) replay instead of vanishing.
+        assert_eq!(
+            membership_since(Some(1_000), 5_000),
+            1_000 - SINCE_SKEW_SECS
+        );
+        // First boot (no watermark yet): discovery just ran, anchor at now.
+        assert_eq!(membership_since(None, 5_000), 5_000 - SINCE_SKEW_SECS);
+        // Never underflows.
+        assert_eq!(membership_since(Some(2), 5), 0);
     }
 
     #[test]

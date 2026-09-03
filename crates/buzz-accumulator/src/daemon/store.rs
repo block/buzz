@@ -634,6 +634,30 @@ impl Store {
             .await?
             .get::<i64, _>("n"))
     }
+
+    // ---- meta ----
+
+    /// Reads one daemon bookkeeping value (`meta` table).
+    pub async fn get_meta(&self, key: &str) -> Result<Option<String>, sqlx::Error> {
+        Ok(sqlx::query("SELECT value FROM meta WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|r| r.get("value")))
+    }
+
+    /// Writes one daemon bookkeeping value (`meta` table), replacing any prior.
+    pub async fn set_meta(&self, key: &str, value: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO meta (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 /// Base signal query: columns + window + selection predicates, no ordering.
@@ -1031,6 +1055,31 @@ mod tests {
         let second = store.insert_artifact(&payload).await;
         assert!(second.is_err(), "duplicate version must be refused");
         assert_eq!(store.artifacts("f").await.expect("chain").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn meta_roundtrip_and_overwrite() {
+        let store = Store::open(":memory:").await.expect("open");
+        assert_eq!(
+            store.get_meta("membership_watermark").await.expect("get"),
+            None
+        );
+        store
+            .set_meta("membership_watermark", "100")
+            .await
+            .expect("set");
+        assert_eq!(
+            store.get_meta("membership_watermark").await.expect("get"),
+            Some("100".into())
+        );
+        store
+            .set_meta("membership_watermark", "200")
+            .await
+            .expect("overwrite");
+        assert_eq!(
+            store.get_meta("membership_watermark").await.expect("get"),
+            Some("200".into())
+        );
     }
 
     #[tokio::test]
