@@ -5,11 +5,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    record_agent_command, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    terminate_process, terminate_untracked_pair_runtime, write_agent_runtime_receipt,
+    AgentReadiness, BackendKind, ManagedAgentPairRuntime, ManagedAgentRuntimeKey,
+    ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -331,6 +330,16 @@ fn start_pair(
     Ok(status)
 }
 
+fn stop_tracked_child(child: &mut std::process::Child) -> Result<std::process::ExitStatus, String> {
+    match child.try_wait().map_err(|error| error.to_string())? {
+        Some(status) => Ok(status),
+        None => {
+            terminate_process(child.id())?;
+            child.wait().map_err(|error| error.to_string())
+        }
+    }
+}
+
 #[tauri::command]
 pub fn stop_managed_agent_runtime(
     pubkey: String,
@@ -354,12 +363,7 @@ pub fn stop_managed_agent_runtime(
         .lock()
         .map_err(|e| e.to_string())?;
     if let Some(mut runtime) = runtimes.remove(&key) {
-        let stop_result = if process_is_running(runtime.child.id()) {
-            terminate_process(runtime.child.id())
-        } else {
-            Ok(())
-        }
-        .and_then(|()| runtime.child.wait().map_err(|e| e.to_string()));
+        let stop_result = stop_tracked_child(&mut runtime.child);
         match stop_result {
             Ok(status) => {
                 record.last_exit_code = status.code();
@@ -700,6 +704,21 @@ mod tests {
             false
         ));
         assert!(scheduled.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tracked_child_stop_terminates_a_running_windows_process() {
+        use std::os::windows::process::CommandExt;
+
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "ping -n 30 127.0.0.1 >NUL"])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .unwrap();
+
+        let _ = stop_tracked_child(&mut child).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
