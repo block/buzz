@@ -1,18 +1,33 @@
-//! OS keyring access for desktop nsec private keys.
+//! Secret storage for desktop nsec private keys.
 //!
-//! All secrets are stored as a single JSON blob under one keychain entry
-//! (service = the store's service name, username = `"secrets"`). This means
-//! exactly one OS prompt per process lifetime regardless of how many keys are
-//! stored — the same pattern used by Goose.
+//! All secrets are stored as a single JSON blob under one entry
+//! (service = the store's service name, username = `"secrets"`). Two
+//! backends share that blob format:
 //!
-//! The chosen backend is selected at compile time by the per-target feature in
-//! `Cargo.toml`. On macOS the legacy `keyring` crate (SecKeychain API) is used
-//! for the blob entry so that signed release builds and unsigned dev builds
-//! share the same store. DPK (Data Protection Keychain) is used only by the
-//! one-time migration path that reads old per-key entries written by #1264.
-//! Windows and Linux use the `keyring` crate directly. The `system-keyring`
-//! feature gates the whole store; when it is off, [`SecretStore`] is unusable
-//! and callers fall back to their own `0o600` file storage.
+//! - **OS keyring** — release builds, and debug builds with
+//!   `BUZZ_DEV_USE_KEYCHAIN=1`. One keychain entry means exactly one OS
+//!   prompt per process lifetime regardless of how many keys are stored —
+//!   the same pattern used by Goose. On macOS the legacy `keyring` crate
+//!   (SecKeychain API) is used for the blob entry so that signed release
+//!   builds and keychain-opted dev builds share the same store. DPK (Data
+//!   Protection Keychain) is used only by the one-time migration path that
+//!   reads old per-key entries written by #1264. Windows and Linux use the
+//!   `keyring` crate directly.
+//! - **Plain file** — debug builds by default: `secrets.<service>.json`
+//!   (0o600) in the app-data dir. Unsigned dev binaries get a fresh code
+//!   identity on every rebuild, which invalidates the keychain item's
+//!   "Always Allow" ACL and made macOS demand the login password on every
+//!   `tauri dev` relaunch; a file sidesteps the keychain entirely. The file
+//!   store deliberately starts empty — there is NO migration from the old
+//!   `buzz-desktop-dev` keychain item. Dev keys are cheap to re-import, and
+//!   a one-shot migration would live on as dead code. Old dev keychain
+//!   items are simply never read again (every legacy-keychain path
+//!   short-circuits in file mode); clean them up manually with
+//!   `security delete-generic-password -s buzz-desktop-dev -a secrets`.
+//!
+//! The `system-keyring` feature gates the whole store; when it is off,
+//! [`SecretStore`] is unusable and callers fall back to their own `0o600`
+//! file storage.
 //!
 //! The store is deliberately NOT on any env-read path. `BUZZ_PRIVATE_KEY`
 //! resolution for harnessed agents and CI is handled upstream (an env
@@ -21,7 +36,6 @@
 //! divergent-behavior trap.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Result of probing the keyring before a migration: distinguishes "reachable
@@ -43,192 +57,64 @@ pub enum KeyringProbe {
 /// as a JSON map under this name within the service.
 const BLOB_KEY: &str = "secrets";
 
-// ── Interprocess advisory lock ─────────────────────────────────────────────
-//
-// Two concurrent Buzz processes (e.g. the signed DMG build and an unsigned dev
-// build via `just staging`) share the same OS keychain blob because the
-// service name `"buzz-desktop"` is a constant — it does not key off the bundle
-// identifier. Each process holds its own in-memory cache, so without an
-// interprocess lock a warm-cache write in process A drops keys added by process
-// B between A's last cache-warming read and A's write.
-//
-// The fix: `mutate_blob` acquires an exclusive advisory file lock, then always
-// performs a fresh `read_blob_raw()` inside the lock, applies the mutation,
-// writes back, and releases. The cache is still updated after a successful
-// write, so same-process reads remain fast. The lock is file-based at a fixed
-// per-user path `/tmp/buzz-keychain-<uid>-<service>.lock` on Unix — a path
-// that is invariant to `$TMPDIR`/process environment, so both the GUI-launched
-// signed DMG and a terminal-launched dev build always take the same lock.
-
-/// Return the path of the advisory lockfile for `service`.
-///
-/// The path is `/tmp/buzz-keychain-<uid>-<service>.lock` on Unix — a
-/// deterministic per-user path that is invariant to `$TMPDIR`/process
-/// environment. Both a GUI-launched signed DMG (`launchd`, env-stripped) and a
-/// terminal-launched dev build resolve `/tmp` to the same inode, so they
-/// contend on the same lockfile and achieve mutual exclusion.
-///
-/// On Windows the same name used for the kernel mutex is derived from the
-/// lockfile path, so the service-keyed uniqueness is preserved.
-fn blob_lockfile_path(service: &str) -> PathBuf {
-    #[cfg(unix)]
-    {
-        // Use the real UID so distinct users get distinct lockfiles.
-        // SAFETY: getuid() is always safe on Unix — it never fails.
-        let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/buzz-keychain-{uid}-{service}.lock"))
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows: no lockfile used (named mutex instead); this path is only
-        // used to derive the mutex name and for test assertions.
-        std::env::temp_dir().join(format!("buzz-keychain-{service}.lock"))
-    }
-}
-
-/// Acquire an exclusive advisory file lock for the blob identified by `service`.
-///
-/// Opens (or creates) the lockfile and blocks until the lock is acquired.
-/// Returns the open `File`; the lock is released when the file is dropped.
-///
-/// On non-Unix/non-Windows platforms this is a no-op that returns a stub.
+#[path = "secret_store_lock.rs"]
+mod lock;
 #[cfg(feature = "system-keyring")]
-fn acquire_blob_lock(service: &str) -> Result<BlobLockGuard, String> {
-    let path = blob_lockfile_path(service);
-    BlobLockGuard::acquire(&path)
-}
+use lock::acquire_blob_lock;
 
-/// RAII guard that holds an exclusive advisory file lock.
-///
-/// On Unix, implemented via `flock(2)` on a lockfile in the system temp dir.
-/// On Windows, implemented via a named kernel mutex (cross-process, no file I/O
-/// needed). The Windows mutex handle is released on drop.
-#[cfg(feature = "system-keyring")]
-struct BlobLockGuard {
-    /// The open lockfile. Never read — held purely for RAII: closing the fd
-    /// releases the `flock(LOCK_EX)` on Unix.
-    #[cfg(unix)]
-    #[allow(dead_code)]
-    file: std::fs::File,
-    #[cfg(windows)]
-    mutex_handle: windows_sys::Win32::Foundation::HANDLE,
-}
+#[path = "secret_store_file.rs"]
+mod file_backend;
+#[cfg(debug_assertions)]
+pub use file_backend::init_file_backend_dir;
+use file_backend::{backend_for, SecretBackend};
+#[cfg(all(debug_assertions, feature = "system-keyring"))]
+use file_backend::{read_blob_raw_file, write_blob_raw_file};
 
-#[cfg(feature = "system-keyring")]
-impl BlobLockGuard {
-    fn acquire(path: &std::path::Path) -> Result<Self, String> {
-        #[cfg(unix)]
-        {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(path)
-                .map_err(|e| format!("blob lock open {}: {e}", path.display()))?;
-            use std::os::unix::io::AsRawFd;
-            // LOCK_EX blocks until the lock is acquired (no LOCK_NB).
-            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(format!("blob lock flock: {err}"));
-            }
-            return Ok(BlobLockGuard { file });
-        }
-
-        #[cfg(windows)]
-        {
-            // Named kernel mutexes are cross-process on Windows — no lockfile
-            // needed. Derive a unique mutex name from the lockfile path so
-            // distinct services get distinct mutexes.
-            let name_str = format!(
-                "Local\\BuzzKeychain-{}",
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("default")
-            );
-            // Encode as null-terminated UTF-16.
-            let name_wide: Vec<u16> = name_str
-                .encode_utf16()
-                .chain(std::iter::once(0u16))
-                .collect();
-            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-            use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-            use windows_sys::Win32::System::Threading::{
-                CreateMutexW, WaitForSingleObject, INFINITE,
-            };
-            // CreateMutexW: lpMutexAttributes = null (default security),
-            // bInitialOwner = FALSE (0), lpName = our mutex name.
-            let handle = unsafe {
-                CreateMutexW(
-                    std::ptr::null::<SECURITY_ATTRIBUTES>(),
-                    0,
-                    name_wide.as_ptr(),
-                )
-            };
-            // HANDLE = *mut c_void; null means creation failed.
-            if handle.is_null() {
-                let err = std::io::Error::last_os_error();
-                return Err(format!("blob lock CreateMutexW: {err}"));
-            }
-            let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
-            if wait_result != WAIT_OBJECT_0 {
-                // Also accept WAIT_ABANDONED (0x80) — previous holder crashed;
-                // the mutex is still acquired and we own it.
-                if wait_result != windows_sys::Win32::Foundation::WAIT_ABANDONED {
-                    let err = std::io::Error::last_os_error();
-                    unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-                    return Err(format!(
-                        "blob lock WaitForSingleObject: {wait_result} / {err}"
-                    ));
-                }
-            }
-            return Ok(BlobLockGuard {
-                mutex_handle: handle,
-            });
-        }
-
-        // Fallback for exotic platforms: no-op lock (only Unix/Windows ship).
-        #[allow(unreachable_code)]
-        Err("blob lock: unsupported platform".to_string())
-    }
-}
-
-#[cfg(feature = "system-keyring")]
-impl Drop for BlobLockGuard {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            // Dropping `self.file` closes the fd, which releases flock on Unix.
-            // Nothing explicit needed.
-        }
-        #[cfg(windows)]
-        {
-            unsafe {
-                windows_sys::Win32::System::Threading::ReleaseMutex(self.mutex_handle);
-                windows_sys::Win32::Foundation::CloseHandle(self.mutex_handle);
-            }
-        }
-    }
-}
-
-// ── End interprocess advisory lock ────────────────────────────────────────
-
-/// An OS keyring, addressed by service name. All secrets are stored in a
-/// single JSON blob entry (one OS prompt per process lifetime).
+/// Secret storage addressed by service name. All secrets are stored in a
+/// single JSON blob (one OS prompt per process lifetime on the keyring
+/// backend; a `0o600` file on the debug file backend).
 pub struct SecretStore {
     service: String,
+    backend: SecretBackend,
     /// In-memory cache of the deserialized blob. `None` means "not yet loaded".
     cache: Mutex<Option<HashMap<String, String>>>,
 }
 
 impl SecretStore {
-    /// Keyring-backed store under `service`. The active platform backend
-    /// (apple-native / windows-native / sync-secret-service) is chosen at
-    /// compile time.
+    /// Keyring-backed store under `service`, unconditionally — never the
+    /// debug file backend. For the build's default backend use
+    /// [`SecretStore::shared`]. The active platform keyring (apple-native /
+    /// windows-native / sync-secret-service) is chosen at compile time.
     pub fn keyring(service: impl Into<String>) -> Self {
         SecretStore {
             service: service.into(),
+            backend: SecretBackend::Keyring,
             cache: Mutex::new(None),
+        }
+    }
+
+    /// Store for `service` on the build's default backend: the debug file
+    /// backend when active, the OS keyring otherwise.
+    pub fn for_service(service: impl Into<String>) -> Self {
+        let service = service.into();
+        let backend = backend_for(&service);
+        SecretStore {
+            service,
+            backend,
+            cache: Mutex::new(None),
+        }
+    }
+
+    /// Whether this store is on the debug file backend. Callers use this to
+    /// report `local-file` storage to the UI and to skip keychain-only work.
+    pub(crate) fn is_file_backed(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            matches!(self.backend, SecretBackend::File(_))
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
         }
     }
 
@@ -242,7 +128,7 @@ impl SecretStore {
     pub fn shared(service: &'static str) -> &'static SecretStore {
         use std::sync::OnceLock;
         static INSTANCE: OnceLock<SecretStore> = OnceLock::new();
-        INSTANCE.get_or_init(|| SecretStore::keyring(service))
+        INSTANCE.get_or_init(|| SecretStore::for_service(service))
     }
 }
 
@@ -334,19 +220,18 @@ impl SecretStore {
         Ok(Some(map))
     }
 
-    /// Read the raw blob bytes from the keychain. `Ok(None)` = not found.
+    /// Read the raw blob bytes from the active backend. `Ok(None)` = not found.
     ///
-    /// Always uses the legacy keyring crate on macOS so that signed and
-    /// unsigned (dev) builds share the same store. DPK is only used by
-    /// `migrate_legacy_key` to read old per-key entries written by #1264.
-    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    /// The keyring path always uses the legacy keyring crate on macOS so that
+    /// signed and keychain-opted dev builds share the same store. DPK is only
+    /// used by `migrate_legacy_key` to read old per-key entries from #1264.
+    #[cfg(feature = "system-keyring")]
     fn read_blob_raw(&self) -> Result<Option<Vec<u8>>, String> {
-        self.read_blob_raw_keyring()
-    }
-
-    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
-    fn read_blob_raw(&self) -> Result<Option<Vec<u8>>, String> {
-        self.read_blob_raw_keyring()
+        match &self.backend {
+            SecretBackend::Keyring => self.read_blob_raw_keyring(),
+            #[cfg(debug_assertions)]
+            SecretBackend::File(path) => read_blob_raw_file(path),
+        }
     }
 
     /// Read blob via the legacy `keyring` crate (Windows, Linux, or macOS dev
@@ -451,15 +336,14 @@ impl SecretStore {
         }
     }
 
-    /// Always uses the legacy keyring crate on macOS — see `read_blob_raw`.
-    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    /// Write the raw blob bytes to the active backend — see `read_blob_raw`.
+    #[cfg(feature = "system-keyring")]
     fn write_blob_raw(&self, bytes: &[u8]) -> Result<(), String> {
-        self.write_blob_raw_keyring(bytes)
-    }
-
-    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
-    fn write_blob_raw(&self, bytes: &[u8]) -> Result<(), String> {
-        self.write_blob_raw_keyring(bytes)
+        match &self.backend {
+            SecretBackend::Keyring => self.write_blob_raw_keyring(bytes),
+            #[cfg(debug_assertions)]
+            SecretBackend::File(path) => write_blob_raw_file(path, bytes),
+        }
     }
 
     #[cfg(feature = "system-keyring")]
@@ -480,6 +364,9 @@ impl SecretStore {
                 Ok(Some(map)) => {
                     if map.contains_key(key) {
                         KeyringProbe::Present
+                    } else if self.is_file_backed() {
+                        // File mode never consults the legacy keychain.
+                        KeyringProbe::ReachableButEmpty
                     } else {
                         // Blob exists but key absent — still check old per-key
                         // entries so a partial migration (e.g. identity migrated
@@ -487,6 +374,7 @@ impl SecretStore {
                         self.probe_legacy_key(key)
                     }
                 }
+                Ok(None) if self.is_file_backed() => KeyringProbe::ReachableButEmpty,
                 // No blob yet — check old per-key entries so callers that
                 // gate `load()` on `Present` still trigger migration.
                 Ok(None) => self.probe_legacy_key(key),
@@ -553,6 +441,9 @@ impl SecretStore {
                 Ok(Some(map)) => {
                     if let Some(value) = map.get(key) {
                         Ok(Some(value.clone()))
+                    } else if self.is_file_backed() {
+                        // File mode never consults the legacy keychain.
+                        Ok(None)
                     } else {
                         // Blob exists but key absent — attempt migration from old
                         // per-key entry. migrate_legacy_key writes the result into
@@ -560,6 +451,7 @@ impl SecretStore {
                         self.migrate_legacy_key(key)
                     }
                 }
+                Ok(None) if self.is_file_backed() => Ok(None),
                 Ok(None) => {
                     // No blob yet — attempt one-time migration from old per-key
                     // DPK entry (macOS) or return Ok(None) (other platforms).
@@ -758,6 +650,20 @@ impl SecretStore {
         {
             let _lock = acquire_blob_lock(&self.service)?;
 
+            // File mode: deleting the file IS the complete wipe — nothing
+            // reads the keychain in this mode, so legacy entries are inert.
+            #[cfg(debug_assertions)]
+            if let SecretBackend::File(path) = &self.backend {
+                match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(format!("secrets file delete {}: {e}", path.display())),
+                }
+                let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = None;
+                return Ok(());
+            }
+
             // Step 1: read current blob keys (best-effort; no entry = empty set).
             let blob_keys: Vec<String> = match self.read_blob_raw() {
                 Ok(Some(bytes)) => {
@@ -848,6 +754,13 @@ impl SecretStore {
     pub fn verify_fully_wiped(&self) -> bool {
         #[cfg(feature = "system-keyring")]
         {
+            // File mode: the secrets file is the only shape `load()` can
+            // consume — its absence is the whole proof.
+            #[cfg(debug_assertions)]
+            if let SecretBackend::File(path) = &self.backend {
+                return !path.exists();
+            }
+
             // 1. Main blob must be absent.
             match self.read_blob_raw() {
                 Ok(None) => {}
@@ -904,6 +817,11 @@ impl SecretStore {
             self.mutate_blob(|map| {
                 map.remove(key);
             })?;
+            // File mode never reads the keychain, so there is nothing a
+            // leftover legacy entry could resurrect — skip the cleanup.
+            if self.is_file_backed() {
+                return Ok(());
+            }
             // Best-effort: also delete any old per-key entry for this key to
             // prevent resurrection on the next probe/load (migration path).
             #[cfg(target_os = "macos")]
@@ -930,6 +848,7 @@ mod tests {
         fn with_cache(service: &str, cache: Option<HashMap<String, String>>) -> Self {
             SecretStore {
                 service: service.to_string(),
+                backend: SecretBackend::Keyring,
                 cache: Mutex::new(cache),
             }
         }
@@ -1047,64 +966,6 @@ mod tests {
         // Cleanup.
         let _ = reader.delete("agent_a");
         let _ = reader.delete("agent_b");
-    }
-
-    #[test]
-    fn test_blob_lockfile_path_is_in_tmp_with_uid() {
-        // The lockfile must be at a deterministic per-user path under /tmp —
-        // invariant to $TMPDIR — so both a GUI-launched DMG (env-stripped by
-        // launchd) and a terminal-launched dev build resolve the same inode and
-        // achieve mutual exclusion.
-        let path = blob_lockfile_path("buzz-desktop");
-        #[cfg(unix)]
-        {
-            let uid = unsafe { libc::getuid() };
-            assert!(
-                path.starts_with("/tmp"),
-                "lockfile {path:?} must start with /tmp (not $TMPDIR)"
-            );
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            assert!(
-                name.contains(&uid.to_string()),
-                "lockfile {path:?} must contain uid {uid}"
-            );
-            assert!(
-                name.contains("buzz-keychain"),
-                "lockfile name must contain 'buzz-keychain'"
-            );
-        }
-        #[cfg(not(unix))]
-        {
-            assert!(
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.contains("buzz-keychain")),
-                "lockfile name must contain 'buzz-keychain'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_blob_lock_acquire_and_release() {
-        // Verify the advisory lock can be acquired and released without errors.
-        // This exercises the real flock/mutex path on the current platform.
-        let guard = acquire_blob_lock("buzz-test-lock-smoke");
-        assert!(
-            guard.is_ok(),
-            "advisory lock acquire must succeed: {:?}",
-            guard.err()
-        );
-        // Drop the guard — lock is released. A second acquire must succeed.
-        drop(guard);
-        let guard2 = acquire_blob_lock("buzz-test-lock-smoke");
-        assert!(
-            guard2.is_ok(),
-            "advisory lock re-acquire after release must succeed: {:?}",
-            guard2.err()
-        );
     }
 
     #[ignore = "requires real OS keychain (run locally)"]

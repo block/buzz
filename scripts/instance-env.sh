@@ -50,19 +50,30 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         # tauri-plugin-single-instance or the app data directory.
         if [[ "${BUZZ_SHARE_IDENTITY:-0}" == "1" ]]; then
             KEYRING_SERVICE="buzz-desktop-dev"
+            # Debug builds store secrets in a per-service file (see
+            # desktop/src-tauri/src/secret_store.rs); prefer it over the
+            # legacy OS keychain item, which dev builds no longer write.
+            SECRETS_FILE=""
             KEYRING_BLOB=""
             case "$(uname -s)" in
                 Darwin)
-                    if command -v security &>/dev/null; then
+                    SECRETS_FILE="$HOME/Library/Application Support/xyz.block.buzz.app.dev/secrets.${KEYRING_SERVICE}.json"
+                    if [[ ! -f "$SECRETS_FILE" ]] && command -v security &>/dev/null; then
                         KEYRING_BLOB="$(security find-generic-password -s "$KEYRING_SERVICE" -a secrets -w 2>/dev/null || true)"
                     fi
                     ;;
                 Linux)
-                    if command -v secret-tool &>/dev/null; then
+                    SECRETS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/xyz.block.buzz.app.dev/secrets.${KEYRING_SERVICE}.json"
+                    if [[ ! -f "$SECRETS_FILE" ]] && command -v secret-tool &>/dev/null; then
                         KEYRING_BLOB="$(secret-tool lookup service "$KEYRING_SERVICE" username secrets target default 2>/dev/null || true)"
                     fi
                     ;;
             esac
+            # BUZZ_DEV_USE_KEYCHAIN=1 puts the app on the keychain, so the
+            # file may hold a stale identity — only prefer it in file mode.
+            if [[ "${BUZZ_DEV_USE_KEYCHAIN:-0}" != "1" && -f "$SECRETS_FILE" ]]; then
+                KEYRING_BLOB="$(cat "$SECRETS_FILE")"
+            fi
 
             KEYRING_IDENTITY="$(printf '%s' "$KEYRING_BLOB" | python3 -c 'import json, sys; value = json.load(sys.stdin).get("identity", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)"
             CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.buzz.app.dev/identity.key"
@@ -78,7 +89,7 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
             if [[ -n "$SHARED_IDENTITY" ]]; then
                 export BUZZ_PRIVATE_KEY="$SHARED_IDENTITY"
             else
-                echo "⚠ BUZZ_SHARE_IDENTITY=1 but no identity found in keyring service $KEYRING_SERVICE, at $CANONICAL_KEY, or at $LEGACY_CANONICAL_KEY — run Buzz from repo root first" >&2
+                echo "⚠ BUZZ_SHARE_IDENTITY=1 but no identity found in $SECRETS_FILE, keyring service $KEYRING_SERVICE, $CANONICAL_KEY, or $LEGACY_CANONICAL_KEY — run Buzz from repo root first" >&2
             fi
         fi
 

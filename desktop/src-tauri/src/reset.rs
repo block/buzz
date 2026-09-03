@@ -126,7 +126,9 @@ pub(crate) fn run_boot_reset(app_data_dir: &Path) -> ResetOutcome {
         .map(crate::migration::is_dev_data_dir_name)
         .unwrap_or(false);
 
-    let store = crate::secret_store::SecretStore::keyring(crate::app_state::keyring_service());
+    // shared() (not keyring()) so the wipe targets the build's active
+    // backend — the debug file backend when it is in play.
+    let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
     let home_dir = dirs::home_dir();
     let legacy_dir = crate::migration::legacy_app_data_dir(app_data_dir);
     let nest_dir = crate::managed_agents::nest_dir();
@@ -145,7 +147,7 @@ pub(crate) fn run_boot_reset(app_data_dir: &Path) -> ResetOutcome {
         app_data_dir,
         legacy_app_data_dir: legacy_dir,
         nest_dir,
-        keychain: &store,
+        keychain: store,
         home_dir,
         is_dev,
         demo_config_dir,

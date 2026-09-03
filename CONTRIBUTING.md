@@ -186,10 +186,18 @@ just reset   # Wipe all dev state and recreate it; installed Buzz is preserved
 ```
 
 Development desktop state uses separate bundle identifiers
-(`xyz.block.buzz.app.dev` and per-worktree variants), a separate keyring service
-(`buzz-desktop-dev`), and `~/.buzz-dev`. `just reset` removes those dev-only
-locations and the local Docker volumes. It does not touch the installed app's
-`xyz.block.buzz.app` data, `buzz-desktop` keyring service, or `~/.buzz` nest.
+(`xyz.block.buzz.app.dev` and per-worktree variants), a separate secret-store
+service (`buzz-desktop-dev`), and `~/.buzz-dev`. `just reset` removes those
+dev-only locations and the local Docker volumes. It does not touch the
+installed app's `xyz.block.buzz.app` data, `buzz-desktop` keyring service, or
+`~/.buzz` nest.
+
+Debug builds keep their secrets (dev nsecs) in a `0o600` file,
+`secrets.<service>.json` in the app-data dir, instead of the OS keychain —
+unsigned dev binaries get a new code identity every rebuild, which would
+otherwise trigger a macOS keychain password prompt on every relaunch. Set
+`BUZZ_DEV_USE_KEYCHAIN=1` to opt a debug build back into the keychain.
+Release builds always use the OS keychain.
 
 ---
 
