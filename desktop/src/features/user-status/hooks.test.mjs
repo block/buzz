@@ -21,6 +21,32 @@ function statusEvent(pubkey, createdAt = 1) {
   };
 }
 
+test("does not let a pending history result replace a newer live status", async () => {
+  const pubkey = "a".repeat(64);
+  let resolveHistory;
+  let current = {};
+  const lookupPromise = fetchUserStatusLookup(
+    [pubkey],
+    () => new Promise((resolve) => (resolveHistory = resolve)),
+    () => current,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  current = {
+    [pubkey]: {
+      text: "Live",
+      emoji: "💬",
+      updatedAt: 2,
+      eventId: "live",
+    },
+  };
+  resolveHistory([statusEvent(pubkey, 1)]);
+
+  const lookup = await lookupPromise;
+
+  assert.equal(lookup[pubkey]?.text, "Live");
+  assert.equal(lookup[pubkey]?.eventId, "live");
+});
+
 test("fetches every current status when the author set exceeds one relay page", async () => {
   const pubkeys = Array.from(
     { length: USER_STATUS_AUTHOR_CHUNK_SIZE + 7 },

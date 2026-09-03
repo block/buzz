@@ -29,7 +29,9 @@ function event({
       roster_revision: rosterRevision,
       generation,
     }),
-    tags,
+    tags: tags.some((tag) => tag[0] === "h")
+      ? tags
+      : [["h", "general"], ...tags],
     created_at: createdAt,
     sig: "",
   };
@@ -1045,7 +1047,7 @@ test("stale liveness removes unchanged requested sessions and preserves new ones
   dispose();
 });
 
-test("bounds Cartesian liveness requests while preserving every chunk", async () => {
+test("bounds parent-routed liveness requests while preserving every session", async () => {
   const channels = Array.from(
     { length: 257 },
     (_, index) => `channel-${index}`,
@@ -1055,6 +1057,7 @@ test("bounds Cartesian liveness requests while preserving every chunk", async ()
       id: `start-${index}`,
       kind: 48100,
       session: `room-${index}`,
+      tags: [["h", channels[index]]],
       createdAt: index + 1,
     }),
   );
@@ -1062,6 +1065,10 @@ test("bounds Cartesian liveness requests while preserving every chunk", async ()
   let peakRequests = 0;
   let totalRequests = 0;
   const filters = [];
+  let hydrationComplete;
+  const hydrated = new Promise((resolve) => {
+    hydrationComplete = resolve;
+  });
   const dispose = startHuddlePresenceRuntime({
     relaySelfPubkey: RELAY,
     channelIds: channels,
@@ -1077,15 +1084,14 @@ test("bounds Cartesian liveness requests while preserving every chunk", async ()
       return filter["#d"].map((session) => livenessEvent(session));
     },
     subscribeToReconnects: () => () => {},
-    onPresence: () => {},
+    onPresence: () => hydrationComplete(),
     setLivenessTimer: (callback) => callback,
     clearLivenessTimer: () => {},
   });
 
-  await settle();
-  await settle();
-  assert.equal(totalRequests, 9);
-  assert.equal(peakRequests, 4);
+  await hydrated;
+  assert.equal(totalRequests, 3);
+  assert.equal(peakRequests, 3);
   assert.equal(
     filters.every((filter) => filter["#h"].length <= 128),
     true,
@@ -1094,7 +1100,191 @@ test("bounds Cartesian liveness requests while preserving every chunk", async ()
     filters.every((filter) => filter["#d"].length <= 128),
     true,
   );
+  assert.deepEqual(
+    new Set(filters.flatMap((filter) => filter["#d"])),
+    new Set(
+      history.map((item) => JSON.parse(item.content).ephemeral_channel_id),
+    ),
+  );
   dispose();
+});
+
+test("packs parent-routed liveness linearly without widening full session chunks", async () => {
+  const channels = ["channel-a", "channel-b"];
+  const history = [
+    ...Array.from({ length: 128 }, (_, index) =>
+      event({
+        id: `start-a-${index}`,
+        kind: 48100,
+        session: `room-a-${index}`,
+        tags: [["h", channels[0]]],
+        createdAt: index + 1,
+      }),
+    ),
+    event({
+      id: "start-b",
+      kind: 48100,
+      session: "room-b",
+      tags: [["h", channels[1]]],
+      createdAt: 129,
+    }),
+  ];
+  const filters = [];
+  const dispose = startHuddlePresenceRuntime({
+    relaySelfPubkey: RELAY,
+    channelIds: channels,
+    subscribeLive: async () => () => {},
+    fetchEvents: async (filter) => {
+      if (!filter.kinds?.includes(48104)) return history;
+      filters.push(filter);
+      return [];
+    },
+    subscribeToReconnects: () => () => {},
+    onPresence: () => {},
+    setLivenessTimer: (callback) => callback,
+    clearLivenessTimer: () => {},
+  });
+
+  await settle();
+  assert.deepEqual(
+    filters.map((filter) => [filter["#h"].length, filter["#d"].length]),
+    [
+      [1, 128],
+      [1, 1],
+    ],
+  );
+  dispose();
+});
+
+test("drains failed liveness workers before recovery starts a replacement batch", async () => {
+  const channels = Array.from(
+    { length: 513 },
+    (_, index) => `channel-${index}`,
+  );
+  const history = channels.map((channel, index) =>
+    event({
+      id: `start-${index}`,
+      kind: 48100,
+      session: `room-${index}`,
+      tags: [["h", channel]],
+      createdAt: index + 1,
+    }),
+  );
+  let retry;
+  let activeRequests = 0;
+  let peakRequests = 0;
+  let requestCount = 0;
+  let failureDelivered = false;
+  const held = [];
+  const snapshots = [];
+  const dispose = startHuddlePresenceRuntime({
+    relaySelfPubkey: RELAY,
+    channelIds: channels,
+    subscribeLive: async () => () => {},
+    fetchEvents: async (filter) => {
+      if (!filter.kinds?.includes(48104)) {
+        return history.filter((item) =>
+          item.tags.some(
+            (tag) => tag[0] === "h" && filter["#h"]?.includes(tag[1]),
+          ),
+        );
+      }
+      requestCount += 1;
+      activeRequests += 1;
+      peakRequests = Math.max(peakRequests, activeRequests);
+      if (!failureDelivered && requestCount === 4) {
+        failureDelivered = true;
+        activeRequests -= 1;
+        throw new Error("temporary timeout");
+      }
+      if (!failureDelivered) {
+        return new Promise((resolve) => held.push({ filter, resolve }));
+      }
+      activeRequests -= 1;
+      return filter["#d"].map((session) => livenessEvent(session));
+    },
+    subscribeToReconnects: () => () => {},
+    onPresence: (participants) => snapshots.push(new Set(participants)),
+    setRetryTimer: (callback) => {
+      retry = callback;
+      return callback;
+    },
+    clearRetryTimer: () => {
+      retry = undefined;
+    },
+    setLivenessTimer: (callback) => callback,
+    clearLivenessTimer: () => {},
+  });
+
+  await settle();
+  assert.equal(requestCount, 4);
+  assert.equal(retry, undefined);
+  for (const request of held) {
+    activeRequests -= 1;
+    request.resolve(
+      request.filter["#d"].map((session) => livenessEvent(session)),
+    );
+  }
+  await settle();
+  assert.equal(typeof retry, "function");
+
+  retry();
+  await settle();
+  assert.equal(peakRequests, 4);
+  assert.equal(requestCount, 9);
+  assert.equal(snapshots.at(-1).size, 0);
+  dispose();
+});
+
+test("stops dispatching queued liveness requests after disposal", async () => {
+  const channels = Array.from(
+    { length: 513 },
+    (_, index) => `channel-${index}`,
+  );
+  const history = channels.map((channel, index) =>
+    event({
+      id: `start-${index}`,
+      kind: 48100,
+      session: `room-${index}`,
+      tags: [["h", channel]],
+      createdAt: index + 1,
+    }),
+  );
+  const held = [];
+  let requestCount = 0;
+  const dispose = startHuddlePresenceRuntime({
+    relaySelfPubkey: RELAY,
+    channelIds: channels,
+    subscribeLive: async () => () => {},
+    fetchEvents: async (filter) => {
+      if (!filter.kinds?.includes(48104)) {
+        return history.filter((item) =>
+          item.tags.some(
+            (tag) => tag[0] === "h" && filter["#h"]?.includes(tag[1]),
+          ),
+        );
+      }
+      requestCount += 1;
+      return new Promise((resolve) => held.push({ filter, resolve }));
+    },
+    subscribeToReconnects: () => () => {},
+    onPresence: () => {},
+    setRetryTimer: (callback) => callback,
+    clearRetryTimer: () => {},
+    setLivenessTimer: (callback) => callback,
+    clearLivenessTimer: () => {},
+  });
+
+  await settle();
+  assert.equal(requestCount, 4);
+  dispose();
+  for (const request of held) {
+    request.resolve(
+      request.filter["#d"].map((session) => livenessEvent(session)),
+    );
+  }
+  await settle();
+  assert.equal(requestCount, 4);
 });
 
 test("retries hydration when one bounded liveness request fails", async () => {
@@ -1139,7 +1329,7 @@ test("retries hydration when one bounded liveness request fails", async () => {
 
   retry();
   await settle();
-  assert.equal(livenessRequests, 4);
+  assert.equal(livenessRequests, 2);
   assert.equal(snapshots.at(-1).has(BOB), true);
   dispose();
 });

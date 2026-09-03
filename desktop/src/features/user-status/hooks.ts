@@ -150,7 +150,7 @@ export function parseUserStatusEvent(event: RelayEvent): {
 }
 
 export function applyUserStatusEventToQueries(
-  queryClient: Pick<QueryClient, "setQueriesData">,
+  queryClient: Pick<QueryClient, "getQueriesData" | "setQueryData">,
   event: RelayEvent,
   nowSeconds = Math.floor(Date.now() / 1_000),
 ): void {
@@ -170,22 +170,24 @@ export function applyUserStatusEventToQueries(
         }
       : hiddenUserStatus(parsed);
 
-  queryClient.setQueriesData<UserStatusLookup>(
-    { queryKey: ["user-status"] },
-    (old) => {
-      if (!old || !(parsed.pubkey in old)) return old;
-      const existing = old[parsed.pubkey];
-      if (
-        statusVersionIsAtLeast(existing ?? undefined, {
-          updatedAt: parsed.updatedAt,
-          eventId: parsed.eventId,
-        })
-      ) {
-        return old;
-      }
-      return { ...old, [parsed.pubkey]: status };
-    },
-  );
+  for (const [queryKey, old] of queryClient.getQueriesData<UserStatusLookup>({
+    queryKey: ["user-status"],
+  })) {
+    if (!queryKey.slice(1).includes(parsed.pubkey)) continue;
+    const existing = old?.[parsed.pubkey];
+    if (
+      statusVersionIsAtLeast(existing ?? undefined, {
+        updatedAt: parsed.updatedAt,
+        eventId: parsed.eventId,
+      })
+    ) {
+      continue;
+    }
+    queryClient.setQueryData(queryKey, {
+      ...(old ?? {}),
+      [parsed.pubkey]: status,
+    });
+  }
 }
 
 /** Keeps focused polling at the established 2-minute backstop cadence. */
@@ -208,6 +210,7 @@ type FetchStatusEvents = (
 export async function fetchUserStatusLookup(
   pubkeys: string[],
   fetchEvents: FetchStatusEvents = (filter) => relayClient.fetchEvents(filter),
+  readCurrentLookup: () => UserStatusLookup = () => ({}),
 ): Promise<UserStatusLookup> {
   const normalizedAuthors = normalizePubkeys(pubkeys);
   const chunks: string[][] = [];
@@ -231,8 +234,11 @@ export async function fetchUserStatusLookup(
     ),
   );
 
+  const currentLookup = readCurrentLookup();
   const lookup: UserStatusLookup = {};
-  for (const pubkey of normalizedAuthors) lookup[pubkey] = null;
+  for (const pubkey of normalizedAuthors) {
+    lookup[pubkey] = currentLookup[pubkey] ?? null;
+  }
   const latestEvents = new Map<string, RelayEvent>();
   for (const event of pages.flat()) {
     const pubkey = normalizePubkey(event.pubkey);
@@ -250,7 +256,8 @@ export async function fetchUserStatusLookup(
     const parsed = parseUserStatusEvent(event);
     const isExpired =
       parsed.expiresAt !== undefined && parsed.expiresAt <= nowSeconds;
-    lookup[parsed.pubkey] =
+    lookup[parsed.pubkey] = newerUserStatus(
+      lookup[parsed.pubkey],
       (parsed.text || parsed.emoji) && !isExpired
         ? {
             text: parsed.text,
@@ -259,7 +266,8 @@ export async function fetchUserStatusLookup(
             eventId: parsed.eventId,
             expiresAt: parsed.expiresAt,
           }
-        : hiddenUserStatus(parsed);
+        : hiddenUserStatus(parsed),
+    );
   }
   return lookup;
 }
@@ -274,10 +282,36 @@ export function useUserStatusQuery(
   const normalizedPubkeys = normalizePubkeys(pubkeys);
   const enabled = normalizedPubkeys.length > 0;
 
+  const queryClient = useQueryClient();
+
   return useQuery<UserStatusLookup>({
     enabled,
     queryKey: userStatusQueryKey(normalizedPubkeys),
-    queryFn: () => fetchUserStatusLookup(normalizedPubkeys),
+    queryFn: () =>
+      fetchUserStatusLookup(
+        normalizedPubkeys,
+        (filter) => relayClient.fetchEvents(filter),
+        () => {
+          const currentLookup: UserStatusLookup = {};
+          for (const [
+            queryKey,
+            lookup,
+          ] of queryClient.getQueriesData<UserStatusLookup>({
+            queryKey: ["user-status"],
+          })) {
+            if (!lookup) continue;
+            for (const pubkey of normalizedPubkeys) {
+              if (
+                queryKey.slice(1).includes(pubkey) &&
+                lookup[pubkey] !== undefined
+              ) {
+                currentLookup[pubkey] = lookup[pubkey];
+              }
+            }
+          }
+          return currentLookup;
+        },
+      ),
     ...(preservePreviousData
       ? {
           placeholderData: (previous: UserStatusLookup | undefined) => previous,

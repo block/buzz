@@ -99,6 +99,11 @@ export function huddleSessionId(event: RelayEvent): string | null {
   return lifecycleContent(event).ephemeralChannelId;
 }
 
+export function huddleParentChannelId(event: RelayEvent): string | null {
+  const value = event.tags.find((tag) => tag[0] === "h")?.[1] ?? "";
+  return value.trim() || null;
+}
+
 export function huddleLifecycleGeneration(event: RelayEvent): string | null {
   return lifecycleContent(event).generation;
 }

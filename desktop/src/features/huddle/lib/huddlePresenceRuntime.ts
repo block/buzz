@@ -2,6 +2,7 @@ import {
   compareHuddleLifecycleEvents,
   fetchHuddleLifecycleHistory,
   huddleLifecycleGeneration,
+  huddleParentChannelId,
   huddleSessionId,
   HuddlePresenceTracker,
   HUDDLE_LIFECYCLE_PAGE_LIMIT,
@@ -83,6 +84,7 @@ export function startHuddlePresenceRuntime(
   let hydrated = false;
   let tracker = new HuddlePresenceTracker(dependencies.relaySelfPubkey);
   let activeSessionGenerations = new Map<string, string>();
+  let sessionParentChannelIds = new Map<string, string>();
   let pendingLiveEvents: RelayEvent[] = [];
   let pendingOverflowed = false;
   let retryHandle: unknown = null;
@@ -253,6 +255,9 @@ export function startHuddlePresenceRuntime(
 
     const sessionId = huddleSessionId(event);
     if (sessionId) {
+      const parentChannelId = huddleParentChannelId(event);
+      if (parentChannelId)
+        sessionParentChannelIds.set(sessionId, parentChannelId);
       if (event.kind === KIND_HUDDLE_ENDED) {
         activeSessionGenerations.delete(sessionId);
         clearPendingOpaqueLifecycleForSession(sessionId);
@@ -277,29 +282,56 @@ export function startHuddlePresenceRuntime(
   };
 
   const fetchActiveSessionIds = async (sessionIds: readonly string[]) => {
-    const sessionChunks: string[][] = [];
-    for (
-      let index = 0;
-      index < sessionIds.length;
-      index += MAX_EXPLICIT_CHANNEL_VALUES
-    ) {
-      sessionChunks.push(
-        sessionIds.slice(index, index + MAX_EXPLICIT_CHANNEL_VALUES),
-      );
+    const sessionsByParent = new Map<string, string[]>();
+    for (const sessionId of sessionIds) {
+      const parentChannelId = sessionParentChannelIds.get(sessionId);
+      if (!parentChannelId) continue;
+      const sessions = sessionsByParent.get(parentChannelId) ?? [];
+      sessions.push(sessionId);
+      sessionsByParent.set(parentChannelId, sessions);
     }
-    const requests = channelChunks.flatMap((channelIds) =>
-      sessionChunks.map((sessions) => ({ channelIds, sessions })),
-    );
+
+    const requests: Array<{ channelIds: string[]; sessions: string[] }> = [];
+    for (const [channelId, sessions] of sessionsByParent) {
+      for (
+        let index = 0;
+        index < sessions.length;
+        index += MAX_EXPLICIT_CHANNEL_VALUES
+      ) {
+        const sessionChunk = sessions.slice(
+          index,
+          index + MAX_EXPLICIT_CHANNEL_VALUES,
+        );
+        const current = requests.at(-1);
+        const canAppend =
+          sessionChunk.length < MAX_EXPLICIT_CHANNEL_VALUES &&
+          current &&
+          current.sessions.length + sessionChunk.length <=
+            MAX_EXPLICIT_CHANNEL_VALUES &&
+          (current.channelIds.includes(channelId) ||
+            current.channelIds.length < MAX_EXPLICIT_CHANNEL_VALUES);
+        if (canAppend) {
+          if (!current.channelIds.includes(channelId)) {
+            current.channelIds.push(channelId);
+          }
+          current.sessions.push(...sessionChunk);
+        } else {
+          requests.push({ channelIds: [channelId], sessions: sessionChunk });
+        }
+      }
+    }
     const livenessPages = await collectWithConcurrency(
       requests,
       LIVENESS_REQUEST_CONCURRENCY,
-      ({ channelIds, sessions }) =>
-        dependencies.fetchEvents({
+      ({ channelIds, sessions }) => {
+        if (disposed) return Promise.resolve([]);
+        return dependencies.fetchEvents({
           kinds: [KIND_HUDDLE_LIVENESS],
           "#h": channelIds,
           "#d": sessions,
           limit: sessions.length,
-        }),
+        });
+      },
     );
     const generations = new Map<string, string>();
     for (const event of livenessPages.flat()) {
@@ -419,13 +451,18 @@ export function startHuddlePresenceRuntime(
           historyPages.flat().map((event) => [event.id, event]),
         ).values(),
       ];
-      const sessionIds = [
-        ...new Set(
-          [...history, ...pendingLiveEvents]
-            .map(huddleSessionId)
-            .filter((sessionId): sessionId is string => Boolean(sessionId)),
-        ),
-      ];
+      const nextSessionParentChannelIds = new Map<string, string>();
+      for (const event of [...history, ...pendingLiveEvents].sort(
+        compareHuddleLifecycleEvents,
+      )) {
+        const sessionId = huddleSessionId(event);
+        const parentChannelId = huddleParentChannelId(event);
+        if (sessionId && parentChannelId) {
+          nextSessionParentChannelIds.set(sessionId, parentChannelId);
+        }
+      }
+      sessionParentChannelIds = nextSessionParentChannelIds;
+      const sessionIds = [...sessionParentChannelIds.keys()];
       const nextActiveSessionGenerations =
         await fetchActiveSessionIds(sessionIds);
       if (disposed) return;
@@ -562,5 +599,6 @@ export function startHuddlePresenceRuntime(
     pendingOpaqueLifecycleEvents.clear();
     pendingOverflowed = false;
     activeSessionGenerations.clear();
+    sessionParentChannelIds.clear();
   };
 }

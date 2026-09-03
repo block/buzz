@@ -71,6 +71,23 @@ function statusEvent({ id, createdAt, text = "Busy", expiresAt }) {
   };
 }
 
+test("applies a live status to a requested lookup before history resolves", () => {
+  const queryClient = new QueryClient();
+  const queryKey = userStatusQueryKey([ALICE]);
+  queryClient.setQueryData(queryKey, {});
+
+  applyUserStatusEventToQueries(
+    queryClient,
+    statusEvent({ id: "live", createdAt: 101 }),
+    101,
+  );
+
+  assert.equal(
+    visibleUserStatus(queryClient.getQueryData(queryKey)?.[ALICE])?.text,
+    "Busy",
+  );
+});
+
 test("expiration retains the replacement fence against delayed older events", () => {
   const queryClient = new QueryClient();
   const queryKey = userStatusQueryKey([ALICE]);
