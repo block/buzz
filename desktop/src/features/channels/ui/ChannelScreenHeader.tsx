@@ -8,7 +8,10 @@ import { getChannelDescription } from "@/features/channels/lib/channelDescriptio
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
-import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import {
+  ChannelMembersBar,
+  ChannelMembersButton,
+} from "@/features/channels/ui/ChannelMembersBar";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -98,7 +101,11 @@ export function ChannelScreenHeader({
   ) : null;
   const channelActions = activeChannel ? (
     showJoinButton ? (
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-[6px]">
+        <ChannelMembersButton
+          memberCount={activeChannel.memberCount}
+          onToggleMembers={onToggleMembers}
+        />
         <Button
           disabled={isJoining}
           onClick={() => void onJoinChannel()}

@@ -5,6 +5,42 @@ import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/message-feedback";
 
+/**
+ * Hover `target` and return its background colour once the `transition-colors`
+ * hover fade has landed.
+ *
+ * Reading `getComputedStyle` straight after `hover()` samples an interpolated
+ * frame (`rgba(0, 0, 0, 0.027)` instead of the resting `rgba(0, 0, 0, 0.04)`),
+ * so a comparison against another element's settled hover colour can never
+ * match. Poll until two consecutive reads agree on a value that has moved off
+ * the resting colour.
+ */
+async function settledHoverBackground(
+  target: import("@playwright/test").Locator,
+): Promise<string> {
+  const readBackground = () =>
+    target.evaluate((element) => getComputedStyle(element).backgroundColor);
+
+  const resting = await readBackground();
+  await target.hover();
+
+  let previous = resting;
+  let settled = resting;
+  await expect
+    .poll(async () => {
+      const current = await readBackground();
+      const isSettled = current !== resting && current === previous;
+      previous = current;
+      if (isSettled) {
+        settled = current;
+      }
+      return isSettled;
+    })
+    .toBe(true);
+
+  return settled;
+}
+
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
   channelName: string,
@@ -100,10 +136,7 @@ test("profile hover uses the channel hover surface", async ({ page }) => {
 
   const profile = page.getByTestId("sidebar-profile-card");
   const channel = page.getByTestId("channel-random");
-  await channel.hover();
-  const channelHoverColor = await channel.evaluate(
-    (element) => getComputedStyle(element).backgroundColor,
-  );
+  const channelHoverColor = await settledHoverBackground(channel);
   await profile.hover();
   await expect(profile).toHaveCSS("background-color", channelHoverColor);
 

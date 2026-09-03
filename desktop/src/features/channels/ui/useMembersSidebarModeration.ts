@@ -18,14 +18,17 @@ import type { MemberModerationState } from "./MembersSidebarMemberCard";
 /**
  * Owns community ban/timeout wiring for the members sidebar. Gated by relay
  * role (owner/admin), independent of the per-channel role — the relay rejects
- * the command events otherwise. Restrictions are only fetched while the sidebar
- * is open and the caller can moderate.
+ * the command events otherwise. Restrictions are only fetched while `enabled`
+ * (sidebar open on a channel the viewer has joined — pre-join rosters are
+ * read-only) and the caller can moderate.
  */
-export function useMembersSidebarModeration(open: boolean) {
+export function useMembersSidebarModeration(enabled: boolean) {
   const relayMembershipQuery = useMyRelayMembershipQuery();
   const relayRole = relayMembershipQuery.data?.role;
   const canModerate = relayRole === "owner" || relayRole === "admin";
-  const restrictionsQuery = useModerationRestrictionsQuery(open && canModerate);
+  const restrictionsQuery = useModerationRestrictionsQuery(
+    enabled && canModerate,
+  );
   const banMutation = useBanMemberMutation();
   const unbanMutation = useUnbanMemberMutation();
   const timeoutMutation = useTimeoutMemberMutation();

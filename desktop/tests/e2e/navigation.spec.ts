@@ -577,27 +577,29 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
     name: "Open repository relaytoolsobservabilityconsole-main",
   });
   await expect(sentChip).toBeVisible();
-  await sentChip.evaluate((element) => {
-    const container = element.parentElement;
-    if (container) container.style.width = "220px";
-  });
-  const fragmentRects = await sentChip.evaluate((element) =>
-    Array.from(element.getClientRects(), (rect) => ({
-      bottom: rect.bottom,
-      height: rect.height,
-      left: rect.left,
-      right: rect.right,
-      top: rect.top,
-      width: rect.width,
-    })).filter((rect) => rect.width > 0 && rect.height > 0),
-  );
-  expect(fragmentRects.length).toBeGreaterThanOrEqual(2);
+  // The optimistic message row can be re-created when the relay echo lands,
+  // dropping any inline style applied before the swap — apply the width and
+  // measure in one evaluate, polling until the chip settles into wrapped
+  // fragments.
+  await expect
+    .poll(() =>
+      sentChip.evaluate((element) => {
+        const container = element.parentElement;
+        if (container) container.style.width = "220px";
+        return Array.from(element.getClientRects()).filter(
+          (rect) => rect.width > 0 && rect.height > 0,
+        ).length;
+      }),
+    )
+    .toBeGreaterThanOrEqual(2);
 
   const tooltip = page.getByRole("tooltip");
   await sentChip.focus();
   await expect(tooltip).toBeVisible();
   const positionOverFragment = async (index: number) => {
     const fragment = await sentChip.evaluate((element, fragmentIndex) => {
+      const container = element.parentElement;
+      if (container) container.style.width = "220px";
       const rects = Array.from(element.getClientRects()).filter(
         (rect) => rect.width > 0 && rect.height > 0,
       );

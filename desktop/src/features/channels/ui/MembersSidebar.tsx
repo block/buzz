@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { UserRoundPlus, X } from "lucide-react";
+import { Search, UserRoundPlus, X } from "lucide-react";
 import {
   invalidateChannelState,
   useAddChannelMembersMutation,
@@ -143,6 +143,13 @@ export function MembersSidebar({
   relayUrl,
 }: MembersSidebarProps) {
   const channelId = channel?.id ?? null;
+  // An open channel's roster is reachable before joining, and that pre-join
+  // view is strictly read-only. Every management affordance — add/search,
+  // community moderation, managed-agent lifecycle/access, view activity, role
+  // changes, removal, bulk agent actions — and each supporting action-data
+  // fetch hangs off this single membership fence. Profile opening stays: it
+  // is part of reading the roster, not managing it.
+  const isReadOnlyRoster = channel?.isMember !== true;
   const queryClient = useQueryClient();
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
@@ -240,11 +247,14 @@ export function MembersSidebar({
     () => new Set(rawMembers.map((member) => normalizePubkey(member.pubkey))),
     [rawMembers],
   );
-  const canAddMembers = canAddChannelMembers({
-    channelType: channel?.channelType,
-    visibility: channel?.visibility,
-    selfRole: selfMember?.role,
-  });
+  const canAddMembers =
+    !isReadOnlyRoster &&
+    canAddChannelMembers({
+      channelType: channel?.channelType,
+      visibility: channel?.visibility,
+      selfRole: selfMember?.role,
+    });
+  const MemberSearchIcon = canAddMembers ? UserRoundPlus : Search;
   // Distinguish "you can't add here" from "nothing to add" so a non-member
   // viewing a private channel gets the reason instead of a silently missing affordance.
   const showPrivateAddDeniedNotice =
@@ -441,17 +451,22 @@ export function MembersSidebar({
   ]);
 
   const canManageMembers =
-    selfMember?.role === "owner" || selfMember?.role === "admin";
+    !isReadOnlyRoster &&
+    (selfMember?.role === "owner" || selfMember?.role === "admin");
 
   const {
-    canModerate,
+    canModerate: canModerateCommunity,
     isModerationPending,
     moderationStateByPubkey,
     onBan,
     onUnban,
     onTimeout,
     onUntimeout,
-  } = useMembersSidebarModeration(open);
+  } = useMembersSidebarModeration(open && !isReadOnlyRoster);
+  // Community moderation authority is relay-role derived and so survives into
+  // channels the viewer never joined — the pre-join fence still applies before
+  // it can reach a row.
+  const canModerate = !isReadOnlyRoster && canModerateCommunity;
 
   const isArchived =
     channel?.archivedAt !== null && channel?.archivedAt !== undefined;
@@ -475,18 +490,27 @@ export function MembersSidebar({
     [archived, bots, managedAgentByPubkey],
   );
   const managedAgentRuntimesQuery = useManagedAgentRuntimesQuery({
-    enabled: open && Boolean(relayUrl) && hasLocalManagedMember,
+    enabled:
+      open && !isReadOnlyRoster && Boolean(relayUrl) && hasLocalManagedMember,
   });
   const controllableManagedBots = React.useMemo(
     () =>
-      bots.flatMap((member) => {
-        const agent = managedAgentByPubkey.get(normalizePubkey(member.pubkey));
-        return agent ? [agent] : [];
-      }),
-    [bots, managedAgentByPubkey],
+      isReadOnlyRoster
+        ? []
+        : bots.flatMap((member) => {
+            const agent = managedAgentByPubkey.get(
+              normalizePubkey(member.pubkey),
+            );
+            return agent ? [agent] : [];
+          }),
+    [bots, isReadOnlyRoster, managedAgentByPubkey],
   );
   const canRemoveMember = React.useCallback(
     (member: ChannelMember) => {
+      if (isReadOnlyRoster) {
+        return false;
+      }
+
       return (
         (selfMember?.role === "admin" && member.pubkey !== currentPubkey) ||
         (selfMember?.role === "owner" && member.role !== "owner") ||
@@ -494,7 +518,7 @@ export function MembersSidebar({
         member.pubkey === currentPubkey
       );
     },
-    [currentPubkey, isMyBot, selfMember],
+    [currentPubkey, isMyBot, isReadOnlyRoster, selfMember],
   );
   const removableManagedBots = React.useMemo(
     () =>
@@ -539,6 +563,19 @@ export function MembersSidebar({
 
   const [editRespondToAgent, setEditRespondToAgent] =
     React.useState<ManagedAgent | null>(null);
+  // Membership can be revoked while the sidebar is open (member-removed
+  // notifications invalidate the channel queries live) and the roster
+  // deliberately stays visible afterwards, so the read-only fence must also
+  // fail closed over mutation surfaces opened BEFORE revocation. Clamp the
+  // agent-access dialog at render — an effect-only reset would leave its Save
+  // dispatchable for a frame — and clear the stale selection so a later
+  // re-join cannot spontaneously reopen the dialog.
+  const respondToDialogAgent = isReadOnlyRoster ? null : editRespondToAgent;
+  React.useEffect(() => {
+    if (isReadOnlyRoster) {
+      setEditRespondToAgent(null);
+    }
+  }, [isReadOnlyRoster]);
 
   React.useEffect(() => {
     if (!open) {
@@ -686,6 +723,7 @@ export function MembersSidebar({
           memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
         }
         profileAvatarUrl={memberProfile?.avatarUrl ?? null}
+        readOnly={isReadOnlyRoster}
         showOtherSetupMarker={showOtherSetupMarker}
         viewerIsOwner={viewerIsOwner}
       />
@@ -728,7 +766,7 @@ export function MembersSidebar({
               className={MODAL_SEARCH_SHELL_CLASS}
               htmlFor="channel-management-search-users"
             >
-              <UserRoundPlus className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
+              <MemberSearchIcon className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
               <input
                 autoCapitalize="none"
                 autoCorrect="off"
@@ -911,12 +949,12 @@ export function MembersSidebar({
         </DialogContent>
       </Dialog>
       <EditRespondToDialog
-        agent={editRespondToAgent}
+        agent={respondToDialogAgent}
         currentPubkey={currentPubkey}
         onOpenChange={(dialogOpen) => {
           if (!dialogOpen) setEditRespondToAgent(null);
         }}
-        open={editRespondToAgent !== null}
+        open={respondToDialogAgent !== null}
       />
     </>
   );

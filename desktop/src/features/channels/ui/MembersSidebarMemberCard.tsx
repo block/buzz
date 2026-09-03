@@ -74,6 +74,10 @@ type MembersSidebarMemberCardProps = {
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
+  /** Read-only roster row (pre-join open channel): suppresses the entire
+   * actions menu — moderation, agent lifecycle/access, view activity,
+   * role/remove — while identity, status badges, and profile opening stay. */
+  readOnly: boolean;
   showOtherSetupMarker?: boolean;
   viewerIsOwner: boolean;
 };
@@ -143,6 +147,7 @@ export function MembersSidebarMemberCard({
   onViewActivity,
   presenceStatus,
   profileAvatarUrl,
+  readOnly,
   showOtherSetupMarker = false,
   viewerIsOwner,
 }: MembersSidebarMemberCardProps) {
@@ -156,9 +161,13 @@ export function MembersSidebarMemberCard({
   // owner (whom no moderator can restrict).
   const canModerateMember =
     canModerate && !memberIsBot && member.role !== "owner";
-  const hasActions = memberIsBot
-    ? Boolean(managedAgent) || canRemoveMember || canViewActivity
-    : canRemoveMember || canChangeRole || canModerateMember;
+  // The read-only fence beats every capability, including ones that don't
+  // derive from channel role (relay moderation, owning the managed agent).
+  const hasActions =
+    !readOnly &&
+    (memberIsBot
+      ? Boolean(managedAgent) || canRemoveMember || canViewActivity
+      : canRemoveMember || canChangeRole || canModerateMember);
 
   const memberIdentity = (
     <div className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-3">

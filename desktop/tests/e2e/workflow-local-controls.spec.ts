@@ -47,6 +47,45 @@ async function selectTrigger(
   await page.getByRole("menuitem", { name: trigger, exact: true }).click();
 }
 
+/**
+ * Read the first `count` boxes matched by `locator` from a single frame, once
+ * their geometry has stopped moving.
+ *
+ * The node inspector animates in over 240ms (width 0 → 26rem, x 24 → 0) under
+ * Framer Motion, which drives that off requestAnimationFrame rather than
+ * WAAPI — so `document.getAnimations()` stays empty and `waitForAnimations`
+ * cannot see it. Sequential `boundingBox()` calls sample different frames of
+ * that slide and can report a later control to the left of an earlier one.
+ */
+async function settledBoxes(
+  locator: import("@playwright/test").Locator,
+  count: number,
+): Promise<Array<{ x: number; y: number }>> {
+  const read = () =>
+    locator.evaluateAll(
+      (elements, limit) =>
+        elements.slice(0, limit).map((element) => {
+          const rect = element.getBoundingClientRect();
+          return { x: rect.x, y: rect.y };
+        }),
+      count,
+    );
+
+  let previous = JSON.stringify(await read());
+  let current = previous;
+  await expect
+    .poll(async () => {
+      const boxes = await read();
+      current = JSON.stringify(boxes);
+      const stable = boxes.length === count && current === previous;
+      previous = current;
+      return stable;
+    })
+    .toBe(true);
+
+  return JSON.parse(current) as Array<{ x: number; y: number }>;
+}
+
 async function openTriggerInspector(
   dialog: import("@playwright/test").Locator,
 ) {
@@ -63,6 +102,14 @@ async function addMessageStep(
 ) {
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
+  // Adding a step moves the inspector from the trigger to the new step. A
+  // message-text trigger condition labels its input "Message text" too, so
+  // filling before that handover types the step body into the trigger
+  // condition — leaving the step text empty and the workflow unparseable as a
+  // form on reopen. Wait for the step inspector's own controls first.
+  await expect(
+    dialog.getByRole("button", { exact: true, name: "Action" }),
+  ).toBeVisible();
   await dialog.getByLabel("Message text").fill("Workflow notification");
 }
 
@@ -288,17 +335,11 @@ test("round-trips and reopens structured message-text conditions", async ({
   await openTriggerInspector(dialog);
   const matchControls = dialog.getByRole("group", { name: "Match" });
   const operatorButtons = matchControls.getByRole("button");
-  const firstOperatorBox = await operatorButtons.nth(0).boundingBox();
-  const secondOperatorBox = await operatorButtons.nth(1).boundingBox();
-  const thirdOperatorBox = await operatorButtons.nth(2).boundingBox();
-  expect(firstOperatorBox).not.toBeNull();
-  expect(secondOperatorBox).not.toBeNull();
-  expect(thirdOperatorBox).not.toBeNull();
-  expect(secondOperatorBox?.x).toBeGreaterThan(firstOperatorBox?.x ?? 0);
-  expect(
-    Math.abs((secondOperatorBox?.y ?? 0) - (firstOperatorBox?.y ?? 0)),
-  ).toBeLessThan(1);
-  expect(thirdOperatorBox?.y).toBeGreaterThan(firstOperatorBox?.y ?? 0);
+  const [firstOperatorBox, secondOperatorBox, thirdOperatorBox] =
+    await settledBoxes(operatorButtons, 3);
+  expect(secondOperatorBox.x).toBeGreaterThan(firstOperatorBox.x);
+  expect(Math.abs(secondOperatorBox.y - firstOperatorBox.y)).toBeLessThan(1);
+  expect(thirdOperatorBox.y).toBeGreaterThan(firstOperatorBox.y);
   await waitForAnimations(page);
   await matchControls.screenshot({
     path: "test-results/workflow-message-condition-operators.png",
@@ -315,6 +356,22 @@ test("round-trips and reopens structured message-text conditions", async ({
 
   await addMessageStep(page, dialog);
   await createEnabled(page, dialog);
+  // Pin the saved definition before reopening. A step body that lands in the
+  // trigger condition leaves the step textless, which makes the definition
+  // unparseable as a form — the dialog then reopens in YAML mode and the
+  // assertions below stall on trigger controls that never render.
+  const created = parseYaml(
+    (await page.evaluate(() => {
+      const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+        .reverse()
+        .find((candidate) => candidate.command === "create_workflow");
+      return (call?.payload as { yamlDefinition?: string } | undefined)
+        ?.yamlDefinition;
+    })) ?? "",
+  );
+  expect(created.trigger.filter).toBe(expression);
+  expect(created.steps[0].text).toBe("Workflow notification");
+
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
   await expect(
