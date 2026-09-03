@@ -30,6 +30,12 @@ import {
   AttachmentMedia,
   AttachmentTitle,
 } from "@/shared/ui/attachment";
+import {
+  claimMediaSession,
+  markMediaSessionPaused,
+  type NowPlayingMetadata,
+  useReleasingVideoRef,
+} from "@/shared/ui/mediaSession";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Progress } from "@/shared/ui/progress";
 import { Toggle } from "@/shared/ui/toggle";
@@ -264,6 +270,10 @@ const MediaAttachmentItem = React.forwardRef<
 ) {
   const [open, setOpen] = React.useState(false);
   const [mode, setMode] = React.useState<"view" | "edit">("view");
+  // Closing the lightbox unmounts the preview; without an explicit release it
+  // would keep the macOS Now Playing session (and the hardware play/pause key)
+  // until the detached element is collected.
+  const attachPreviewVideo = useReleasingVideoRef();
 
   const hash = shortHash(attachment.sha256);
   const isVideo = attachment.type.startsWith("video/");
@@ -287,6 +297,16 @@ const MediaAttachmentItem = React.forwardRef<
     : attachment.thumb
       ? rewriteRelayUrl(attachment.thumb)
       : undefined;
+
+  // `navigator.mediaSession.metadata` is page-global, so a preview that played
+  // without claiming would leave Control Center showing whatever timeline video
+  // published last. No channel subtitle here — the attachment isn't posted yet.
+  const mediaSessionMetadata = React.useMemo<NowPlayingMetadata>(
+    () => ({
+      title: attachment.filename?.trim() || mediaLabel,
+    }),
+    [attachment.filename, mediaLabel],
+  );
 
   // Only Buzz-hosted uploads have a content hash. URL-only provider media
   // must remain externally hosted instead of being copied into storage by the
@@ -430,12 +450,22 @@ const MediaAttachmentItem = React.forwardRef<
               ) : isVideo ? (
                 // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
                 <video
+                  ref={attachPreviewVideo}
                   src={rewriteRelayUrl(attachment.url)}
                   controls
                   className={cn(
                     "relative max-h-[90vh] max-w-[90vw] rounded-lg",
                     isSpoilered && "blur-2xl brightness-75",
                   )}
+                  onEnded={(event) =>
+                    markMediaSessionPaused(event.currentTarget)
+                  }
+                  onPause={(event) =>
+                    markMediaSessionPaused(event.currentTarget)
+                  }
+                  onPlay={(event) =>
+                    claimMediaSession(event.currentTarget, mediaSessionMetadata)
+                  }
                 />
               ) : (
                 <img
