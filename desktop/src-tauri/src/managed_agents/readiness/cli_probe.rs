@@ -60,6 +60,12 @@ pub(crate) fn login_probe(
 ) -> ProbeOutcome {
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
+    // Close stdin explicitly. `output()` pipes stdout/stderr but leaves stdin
+    // inherited, and a GUI-launched desktop has no console — CLIs that sniff
+    // stdin for piped input (Claude Code does) then block on it forever. A
+    // hung probe is worse than a failed one: readiness never resolves, the
+    // agent stays NotReady, and creation/spawn flows wedge behind it.
+    command.stdin(std::process::Stdio::null());
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
