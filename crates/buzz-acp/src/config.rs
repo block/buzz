@@ -556,7 +556,7 @@ pub struct CliArgs {
     /// In DM channels, when a turn ends without the agent having published a
     /// message, post the agent's trailing reply text as a top-level channel
     /// message so the human never gets silence. Channels are unaffected.
-    #[arg(long, env = "BUZZ_ACP_DM_AUTOPUBLISH", default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, env = "BUZZ_ACP_DM_AUTOPUBLISH", default_value_t = false, action = clap::ArgAction::Set)]
     pub dm_autopublish: bool,
 }
 
@@ -2393,6 +2393,7 @@ channels = "ALL"
         assert_eq!(default.fleet_slots, 0);
         assert_eq!(default.fleet_slot_dir, None);
         assert_eq!(default.session_idle_close, 0);
+        assert!(!default.dm_autopublish);
 
         let configured = CliArgs::parse_from([
             "buzz-acp",
@@ -2408,6 +2409,8 @@ channels = "ALL"
             "/tmp/fleet",
             "--session-idle-close",
             "600",
+            "--dm-autopublish",
+            "true",
         ]);
         assert_eq!(configured.min_agents, Some(2));
         assert_eq!(configured.fleet_slots, 20);
@@ -2416,6 +2419,7 @@ channels = "ALL"
             Some(std::path::Path::new("/tmp/fleet"))
         );
         assert_eq!(configured.session_idle_close, 600);
+        assert!(configured.dm_autopublish);
     }
 
     #[test]
