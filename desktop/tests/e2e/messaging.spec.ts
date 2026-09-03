@@ -396,6 +396,7 @@ test("agent avatars use the one normalized SVG clip path", async ({ page }) => {
     .filter({ hasText: "Hey team — checking in." });
   const avatar = agentMessage.getByTestId("message-avatar");
   await expect(avatar).toHaveClass(/agent-avatar-squircle/);
+  await expect(avatar).toHaveCSS("border-radius", "0px");
   await expect(avatar).toHaveCSS("clip-path", /agent-avatar-squircle-clip/);
   await expect(page.locator("#agent-avatar-squircle-clip")).toHaveCount(1);
 
@@ -417,6 +418,7 @@ test("agent avatars use the one normalized SVG clip path", async ({ page }) => {
     .locator(".agent-avatar-squircle")
     .first();
   await expect(profileAvatar).toBeVisible();
+  await expect(profileAvatar).toHaveCSS("border-radius", "0px");
   await expect(profileAvatar).toHaveCSS(
     "clip-path",
     /agent-avatar-squircle-clip/,

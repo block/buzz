@@ -1,5 +1,9 @@
 .agent-avatar-squircle,
 .agent-avatar-squircle-border::before {
+  /* Avatar primitives default to rounded-full with overflow hidden. Clear that
+     inner circle before applying the shared path, or the clip can only remove
+     pixels from an avatar that has already been made circular. */
+  border-radius: 0;
   -webkit-clip-path: url("#agent-avatar-squircle-clip");
   clip-path: url("#agent-avatar-squircle-clip");
 }
