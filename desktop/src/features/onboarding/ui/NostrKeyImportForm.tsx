@@ -206,7 +206,7 @@ export function NostrKeyImportForm({
           ? "Enter the password for this key backup."
           : isEncryptedInput
             ? "That doesn't look like a complete ncryptsec backup."
-            : "That doesn't look like a valid nsec. Paste an nsec1 key.",
+            : "That doesn't look like a valid key. Paste an nsec1… or 64-char hex secret.",
       );
       return;
     }
@@ -348,7 +348,7 @@ export function NostrKeyImportForm({
                 setNsecInput(event.target.value);
                 setImportError(null);
               }}
-              placeholder="nsec1..."
+              placeholder="nsec1… or hex"
               ref={inputRef}
               spellCheck={false}
               type="password"
@@ -577,7 +577,7 @@ export function NostrKeyImportForm({
             <p className="text-sm text-muted-foreground">
               {isEncryptedInput
                 ? "Waiting for a complete ncryptsec backup"
-                : "Waiting for a valid nsec1 key"}
+                : "Waiting for a valid nsec1… or hex key"}
             </p>
           ) : null}
 
