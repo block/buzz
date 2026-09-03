@@ -121,3 +121,11 @@ and rendered mention chips break between characters within narrow line boxes;
 rendered chips expose the complete label through their accessible name/title.
 The browser regression covers 800px windows at 100% and 150% root text size,
 send/reopen, and historical replacement followed by forwarding.
+
+Ordinary composer mentions retain their human, agent, or channel identity icon.
+Full-key literal decorations explicitly opt into wrapping with a visible text
+prefix and no cloned inline padding or pseudo-icon; `spellcheck=false` is not a
+presentation marker. Readonly mention chips keep their own wrapping/accessibility
+contract. Menu-based edit activation waits for Radix exit-focus cleanup before
+loading/focusing the editor; navigation tests must observe edit content and focus,
+not treat an already enabled reply input as an activated edit.

@@ -297,19 +297,19 @@
   transform: translateY(0.0625rem);
 }
 
-/* Literal decorations can split at any character (including into multiple
+/* Full-key literal decorations can split at any character (including into multiple
    spans where highlight patterns overlap). Paint the actual @/# prefix rather
    than absolutely positioned icons, which overlap labels or wrapped key lines.
    Cloned padding must not extend a wrapped key past the editable line box. */
-.rich-text-composer .tiptap .mention-chip[spellcheck="false"] {
+.rich-text-composer .tiptap .mention-chip.mention-literal-key {
   padding-inline: 0;
 }
 
-.rich-text-composer .tiptap .mention-chip[spellcheck="false"]::before {
+.rich-text-composer .tiptap .mention-chip.mention-literal-key::before {
   display: none;
 }
 
-.rich-text-composer .tiptap .mention-prefix-hidden {
+.rich-text-composer .tiptap .mention-prefix-hidden.mention-literal-key {
   display: inline;
   width: auto;
   max-width: none;

@@ -321,6 +321,10 @@ test("edit focus transfers after menu exit; Escape still restores the trigger", 
   await expect(closingMenu).toHaveCount(1);
   await expect(page.getByTestId("edit-target")).toHaveCount(0);
   await expect(input).toHaveText("");
+  // Leave the closing menu while its exit is held. Radix can still process
+  // pointer-leave here; it must not own focus after the edit handoff.
+  await input.hover();
+  await expect(page.getByTestId("edit-target")).toHaveCount(0);
   await closingMenu.evaluate((element) => {
     const animations = element.getAnimations();
     if (!animations.length)
@@ -416,6 +420,7 @@ for (const scale of [1, 1.5]) {
           clientWidth: element.clientWidth,
           chips: chips.map((chip) => ({
             text: chip.textContent,
+            literalKey: chip.classList.contains("mention-literal-key"),
             wrap: getComputedStyle(chip).overflowWrap,
             iconDisplay: getComputedStyle(chip, "::before").display,
             rects: [...chip.getClientRects()].map((r) => ({
@@ -435,7 +440,9 @@ for (const scale of [1, 1.5]) {
       expect(result.scrollWidth).toBeLessThanOrEqual(result.clientWidth + 1);
       for (const chip of result.chips) {
         expect(chip.wrap).toBe("anywhere");
-        if (stage !== "sent") expect(chip.iconDisplay).toBe("none");
+        if (stage !== "sent") {
+          expect(chip.iconDisplay).toBe(chip.literalKey ? "none" : "block");
+        }
         for (const rect of chip.rects) {
           expect(rect.left).toBeGreaterThanOrEqual(-1);
           expect(rect.right).toBeLessThanOrEqual(result.width + 1);
@@ -445,8 +452,14 @@ for (const scale of [1, 1.5]) {
         for (const prefix of await host
           .locator(".mention-prefix-hidden")
           .all()) {
-          await expect(prefix).toHaveCSS("opacity", "1");
-          await expect(prefix).toHaveCSS("display", "inline");
+          const literalKey = await prefix.evaluate((element) =>
+            element.classList.contains("mention-literal-key"),
+          );
+          await expect(prefix).toHaveCSS("opacity", literalKey ? "1" : "0");
+          await expect(prefix).toHaveCSS(
+            "display",
+            literalKey ? "inline" : "inline-block",
+          );
         }
       }
       await testInfo.attach(`${stage}-geometry`, {

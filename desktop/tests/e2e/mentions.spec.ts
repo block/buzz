@@ -1111,6 +1111,14 @@ test("selecting a person mention inserts @Name into input", async ({
     ),
   );
   expect(iconMask).toContain("data:image/svg+xml");
+  expect(
+    await mentionChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "@" }),
+  ).toHaveCSS("opacity", "0");
   await expect(mentionChip).toHaveCSS("line-height", "18px");
   const scrollViewport = page.getByTestId("message-input-scroll");
   const paintedBounds = await mentionChip.evaluate((element) => {
@@ -1413,6 +1421,14 @@ test("channel references keep caret movement through the channel name", async ({
     ),
   );
   expect(iconMask).toContain("data:image/svg+xml");
+  expect(
+    await channelChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "#" }),
+  ).toHaveCSS("opacity", "0");
 
   await input.focus();
   await input.press("ArrowLeft");
@@ -1454,6 +1470,14 @@ test("selecting a managed agent mention inserts @Name into input", async ({
   await expect(agentMentionChip).toHaveText("alice");
   await expect(agentMentionChip).toHaveCSS("display", "inline");
   await expect(agentMentionChip).toHaveCSS("border-top-width", "0px");
+  expect(
+    await agentMentionChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "@" }),
+  ).toHaveCSS("opacity", "0");
 });
 
 test("selecting a persona mention creates a channel agent before sending and starts it detached", async ({
