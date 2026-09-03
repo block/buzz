@@ -448,8 +448,8 @@
   }
 
   .buzz-onboarding-neutral-theme[data-system-color-scheme="dark"]:not(
-      .buzz-startup-shell
-    ) {
+    .buzz-startup-shell
+  ) {
     --background: 0 0% 3.9%;
     --foreground: 0 0% 98%;
     --primary: 0 0% 98%;
