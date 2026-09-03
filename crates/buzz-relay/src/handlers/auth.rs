@@ -327,6 +327,49 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             state
                 .conn_manager
                 .set_authenticated_pubkey(conn_id, pubkey.to_bytes().to_vec());
+
+            // Test hook: fires immediately after set_authenticated_pubkey (registration)
+            // and before the deny-set check, so a straddle test can insert a deny entry
+            // in the exact window between registration and check. No-op in production.
+            // [nip_fi_test_hooks::deny_set_check_hook, W_deny_straddle]
+            #[cfg(test)]
+            crate::nip_fi_test_hooks::before_deny_set_check(conn.tenant.community()).await;
+
+            // Step 6 (NIP-FI.md:227-233): deny-set check — runs AFTER
+            // registration so any concurrent disconnect either sees this
+            // session in the close scan OR we see the deny entry here.
+            // Both sides of the straddle are covered; neither side can miss.
+            // [FI-TRACE-DENY-SET]
+            if let Some(assertion) = &conn.nip_fi_assertion {
+                if let Some(asserted_key) = assertion.asserted_key() {
+                    if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+                        if deny_map.is_denied(
+                            assertion.identity().issuer(),
+                            &asserted_key,
+                            chrono::Utc::now(),
+                        ) {
+                            warn!(
+                                conn_id = %conn_id,
+                                pubkey = %pubkey.to_hex(),
+                                "NIP-FI deny-set hit at post-registration check — denying"
+                            );
+                            metrics::counter!(
+                                "buzz_nip_fi_admission_denied_total",
+                                "reason" => "deny_set_post_registration"
+                            )
+                            .increment(1);
+                            let _ = conn.ctrl_tx.try_send(
+                                crate::nip_fi_session::authorization_denied_frame(
+                                    crate::nip_fi_session::NipFiWsRoute::Root,
+                                ),
+                            );
+                            conn.cancel.cancel();
+                            return;
+                        }
+                    }
+                }
+            }
+
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
             // _auth_permit drops here — expiry's write guard may proceed.
         }
@@ -824,5 +867,191 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── W_deny_straddle: deny entry inserted in window between registration and check
+    //
+    // Arms `before_deny_set_check` — the hook immediately AFTER
+    // `set_authenticated_pubkey` (registration) and BEFORE the `is_denied` call.
+    // The key starts absent from the deny map. Once registration occurs the
+    // handler stalls at the hook. The test inserts the deny entry into the live
+    // map, then releases the hook. The deny check fires and finds the entry;
+    // the connection is closed without sending OK(true).
+    //
+    // This is the canonical straddle proof: a disconnect that fires in this
+    // window would also see the registered session (close-scan side). This test
+    // exercises the check side — proving the normative placement catches the
+    // entry inserted after registration.
+    //
+    // Hook location: `handlers/auth.rs`, immediately after
+    // `state.conn_manager.set_authenticated_pubkey(...)` at the deny-check seam.
+    //
+    // Mutation evidence:
+    //   A) Delete `#[cfg(test)] before_deny_set_check(...)` from auth.rs →
+    //      handler never stalls → deny entry inserted AFTER check runs and
+    //      missed → OK(true) is sent → "no OK(true)" assertion panics.
+    //   B) Remove the `is_denied` check entirely → same outcome as (A).
+    //   C) Move hook to before `set_authenticated_pubkey` → handler stalls
+    //      before registration → close-scan side cannot see session → but this
+    //      test still passes (entry is still inserted before check).
+    //      The hook position verifies BOTH that the barrier is at the correct
+    //      seam AND that the check fires after it.
+    //
+    // Requires a local DB (same constraint as W1: ban-check is fail-closed).
+    #[tokio::test]
+    async fn w_deny_straddle_entry_inserted_between_registration_and_check_is_caught() {
+        use buzz_auth::{IssuerCapacity, NipFiDenyMap, VerifiedAssertion};
+        use chrono::{Duration, Utc};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{mpsc, RwLock};
+        use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
+
+        // Same key for assertion and NIP-42 event — pairing passes.
+        let key = Keys::generate();
+        let deadline = Utc::now() + Duration::hours(1);
+        // `for_test` produces issuer = "test-issuer".
+        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+
+        let challenge = "w-deny-straddle-challenge".to_string();
+        let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<WsMessage>(8);
+        let (terminal_ctrl_tx, mut terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
+
+        let cancel = CancellationToken::new();
+        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
+            remote_addr: "127.0.0.1:1234".parse().unwrap(),
+            auth_state: RwLock::new(AuthState::Pending {
+                challenge: challenge.clone(),
+            }),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            terminal_ctrl_tx,
+            cancel: cancel.clone(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            grace_limit: 3,
+            nip_fi_assertion: Some(assertion),
+            session_deadline: Some(deadline),
+            nip_fi_gate: gate,
+        });
+
+        // Real DB required (ban-check is fail-closed; lazy pool denies before hook).
+        let mut state = match auth_test_state_real_db().await {
+            Some(s) => Arc::try_unwrap(s).unwrap_or_else(|arc| (*arc).clone()),
+            None => {
+                eprintln!(
+                    "W_deny_straddle: skipping — local DB not available at \
+                     postgres://buzz:buzz_dev@127.0.0.1:5432/buzz"
+                );
+                return;
+            }
+        };
+
+        // Wire an empty deny map for issuer "test-issuer" (the issuer used by
+        // VerifiedAssertion::for_test). No entries yet — the key is clean.
+        let deny_map = Arc::new(NipFiDenyMap::new(
+            16,
+            vec![IssuerCapacity {
+                issuer: "test-issuer".to_owned(),
+                capacity: 16,
+            }],
+        ));
+        // Retain a handle so we can insert the entry during the hook window.
+        let deny_map_for_insert = Arc::clone(&deny_map);
+        state.nip_fi_deny_map = Some(deny_map);
+        let state = Arc::new(state);
+
+        let relay_url = "ws://test.local";
+        let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+            .tag(nostr::Tag::parse(["relay", relay_url]).unwrap())
+            .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+            .sign_with_keys(&key)
+            .unwrap();
+
+        // Arm the barrier: fires when handle_auth reaches before_deny_set_check.
+        let (arrived_rx, release) = crate::nip_fi_test_hooks::deny_set_check_hook::arm(community);
+
+        // Spawn handle_auth — it will stall at the hook after registration.
+        let conn2 = Arc::clone(&conn);
+        let state2 = Arc::clone(&state);
+        let handle = tokio::spawn(async move { handle_auth(auth_event, conn2, state2).await });
+
+        // Wait for the handler to reach the deny-check seam.
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+            .await
+            .expect("W_deny_straddle: handler must reach before_deny_set_check within 5s")
+            .expect("arrived channel closed");
+
+        // Handler is now AFTER set_authenticated_pubkey (registered) and BEFORE
+        // the deny check. Insert the deny entry into the live map.
+        let until = Utc::now() + Duration::seconds(3600);
+        let merge = deny_map_for_insert.merge_cross_pod_deny(
+            "test-issuer",
+            &key.public_key(),
+            until,
+            Utc::now(),
+        );
+        assert!(
+            matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
+            "W_deny_straddle: deny entry must be inserted during the hook window"
+        );
+
+        // Release the hook — handler resumes and calls is_denied().
+        release.notify_one();
+
+        // Wait for handle_auth to return.
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("W_deny_straddle: handle_auth must return within 5s after hook release")
+            .expect("handle_auth task must not panic");
+
+        // The connection must be cancelled — the deny check closed it.
+        assert!(
+            cancel.is_cancelled(),
+            "W_deny_straddle: connection must be cancelled after deny-set hit \
+             (entry inserted between registration and check)"
+        );
+
+        // The denial frame must be on the ctrl channel (authorization_denied).
+        let ctrl_frame = ctrl_rx
+            .try_recv()
+            .expect("W_deny_straddle: ctrl channel must contain the denial frame");
+        // The frame is the NIP-FI denial (not a NOTICE; it's a JSON control frame).
+        match ctrl_frame {
+            WsMessage::Text(t) => {
+                assert!(
+                    t.contains("authorization denied") || t.contains("\"restricted\""),
+                    "W_deny_straddle: ctrl frame must be the authorization_denied frame; got: {t}"
+                );
+            }
+            WsMessage::Binary(_) => {} // binary close frame is also acceptable
+            other => panic!("W_deny_straddle: ctrl frame must be Text or Binary; got {other:?}"),
+        }
+
+        // No OK(true) on the data channel.
+        while let Ok(frame) = send_rx.try_recv() {
+            if let WsMessage::Text(t) = &frame {
+                assert!(
+                    !t.contains("\"true\"") && !t.contains(r#"[true"#),
+                    "W_deny_straddle: no OK(true) must be sent when deny-set catches \
+                     the entry inserted between registration and check; got: {t}"
+                );
+            }
+        }
+
+        // No terminal frame (denial goes to ctrl, not terminal).
+        assert!(
+            terminal_ctrl_rx.try_recv().is_err(),
+            "W_deny_straddle: terminal channel must be empty (deny-set denial \
+             uses ctrl channel, not terminal)"
+        );
     }
 }

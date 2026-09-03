@@ -6,8 +6,6 @@ mod admission;
 mod build_info;
 mod rejection;
 
-/// NIP-FI relay-level configuration (issuer set, session lifetime, JWKS warm).
-pub mod nip_fi_config;
 /// NIP-FI session admission gate — per-connection effect-permit and quiescence barrier.
 pub(crate) mod nip_fi_gate;
 pub(crate) mod nip_fi_session;

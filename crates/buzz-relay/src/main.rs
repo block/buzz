@@ -1224,14 +1224,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    serve(
-        router,
-        health_router,
-        Arc::clone(&state),
-        jwks_refresh_cancel,
-        jwks_refresh_handle,
-    )
-    .await?;
+    serve(router, health_router, Arc::clone(&state)).await?;
     state.community_revalidator_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
@@ -1382,8 +1375,6 @@ async fn serve(
     router: axum::Router,
     health_router: axum::Router,
     state: Arc<AppState>,
-    jwks_refresh_cancel: CancellationToken,
-    jwks_refresh_handle: Option<tokio::task::JoinHandle<()>>,
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
@@ -1512,13 +1503,7 @@ async fn serve(
             .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
         uds_handle.abort();
         hard_shutdown.abort();
-        // Cancel and join the JWKS refresh task so it doesn't outlive the process.
-        jwks_refresh_cancel.cancel();
-        if let Some(h) = jwks_refresh_handle {
-            if let Err(e) = h.await {
-                tracing::warn!(error = %e, "NIP-FI: JWKS refresh supervisor join error on shutdown");
-            }
-        }
+        // The JWKS refresh loop exits via the shutting_down flag set by AppState::shutdown().
         return Ok(());
     }
 
@@ -1543,13 +1528,7 @@ async fn serve(
         .await
         .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
     hard_shutdown.abort();
-    // Cancel and join the JWKS refresh task so it doesn't outlive the process.
-    jwks_refresh_cancel.cancel();
-    if let Some(h) = jwks_refresh_handle {
-        if let Err(e) = h.await {
-            tracing::warn!(error = %e, "NIP-FI: JWKS refresh supervisor join error on shutdown");
-        }
-    }
+    // The JWKS refresh loop exits via the shutting_down flag set by AppState::shutdown().
     Ok(())
 }
 

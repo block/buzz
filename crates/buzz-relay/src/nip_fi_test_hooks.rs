@@ -177,6 +177,32 @@ make_hook!(audio_participant_commit_hook, before_participant_commit);
 make_hook!(audio_participant_fanout_hook, after_participant_fanout);
 make_hook!(audio_add_peer_hook, after_add_peer);
 
+// ── Deny-set admission hooks ───────────────────────────────────────────────
+// `before_deny_set_check`: fires in BOTH the root WS handler (handlers/auth.rs)
+// and the audio handler (audio/handler.rs), immediately AFTER
+// `set_authenticated_pubkey`/`audio_post_auth_register` (registration) and
+// immediately BEFORE the `is_denied(iss, k, now)` call.
+//
+// The straddle witness arms this gate, then inserts a deny entry in the window
+// between registration and check. The invariant: either
+//   (a) a concurrent disconnect sees the registered session and closes it (close
+//       scan side), OR
+//   (b) the deny check fires here and finds the entry (check side).
+// This test exercises path (b): the entry is inserted AFTER registration but
+// BEFORE the check — the check sees it and closes the connection.
+//
+// Mutation evidence (W_deny_straddle, W_audio_deny):
+//   A) Delete `before_deny_set_check(...)` from auth.rs / audio/handler.rs →
+//      handler never stalls → deny entry is inserted AFTER the check already
+//      ran and missed it → connection is admitted → `is_cancelled()` assertion
+//      panics.
+//   B) Remove the `is_denied` check entirely → same outcome as (A).
+//   C) Move `before_deny_set_check` to BEFORE `set_authenticated_pubkey` →
+//      hook fires before registration → straddle semantics violated (close scan
+//      cannot see the session) → test still passes because (b) side still works,
+//      but the barrier witness is no longer at the correct seam.
+make_hook!(deny_set_check_hook, before_deny_set_check);
+
 // ── Publication-attempt counter ────────────────────────────────────────────
 // `before_event_publish`: fires immediately before `state.pubsub.publish_event`
 // in `dispatch_persistent_event_inner`. Used by W2: after handle_event returns
