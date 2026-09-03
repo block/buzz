@@ -116,6 +116,9 @@ const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 
 use std::time::Instant;
 
+use buzz_core::client_identity::{
+    client_header_value_for_host, may_identify_to, ClientApp, CLIENT_HEADER,
+};
 use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_TYPING_INDICATOR,
@@ -125,6 +128,7 @@ use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::client::ClientRequestBuilder;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -4058,7 +4062,28 @@ async fn do_connect(
         .parse::<url::Url>()
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
-    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+    // Advisory `Buzz-Client` identity so the relay can attribute this
+    // connection to the harness. Best-effort: an unshipped platform or a
+    // destination we must not identify to simply connects without the header.
+    // No version is sent — buzz-acp inherits the workspace version, which is
+    // never bumped (see `RELEASING.md`), so reporting it would pin every
+    // harness connection to a fixed number forever.
+    let request = {
+        let uri = parsed
+            .as_str()
+            .parse()
+            .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+        let builder = ClientRequestBuilder::new(uri);
+        match may_identify_to(&parsed)
+            .then(|| client_header_value_for_host(ClientApp::Acp, None))
+            .flatten()
+        {
+            Some(value) => builder.with_header(CLIENT_HEADER, value),
+            None => builder,
+        }
+    };
+
+    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
         .await
         .map_err(|_| RelayError::ConnectionClosed)? // timeout → treat as connection failure
         .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
