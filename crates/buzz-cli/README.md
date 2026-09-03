@@ -49,6 +49,14 @@ buzz channels create --name "my-channel" --type stream --visibility open
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
 
+# Synced sidebar sections (encrypted to the current identity)
+buzz sidebar sections list > layout.json
+# Edit section names/order and channel UUIDs or exact names, then compare-and-set:
+buzz sidebar sections apply --input layout.json
+# Individual writes require the revision returned by `list`:
+buzz sidebar sections create --name "Run the Business" --icon "🎯" --expected-revision <event-id>
+buzz sidebar sections assign --section "Run the Business" --channel main --channel system --expected-revision <event-id>
+
 # Reactions
 buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
@@ -136,6 +144,10 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `members` | List channel members |
 | | `add-member` | Add a member |
 | | `remove-member` | Remove a member |
+| `sidebar` | `sections list` | List the decrypted identity-scoped section layout and revision |
+| | `sections apply` | Compare-and-set the complete encrypted section layout |
+| | `sections create/assign/unassign` | Add a section or move channels by stable ID/exact name |
+| | `sections rename/reorder/delete` | Mutate sections with revision conflict checks |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
 | `reactions` | `add` | React to a message |
