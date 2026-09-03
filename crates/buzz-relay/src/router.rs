@@ -1868,11 +1868,6 @@ mod tests {
     //   C) Remove the `nip_fi_deny_map` assignment from `nip_fi_deny_state`
     //      → the map is `None` → the block is a no-op → upgrade proceeds to
     //      404 (no community) → assertion panics.
-    //
-    // This test also acts as the regression for TOCTOU ordering: the denial is
-    // returned on the SAME HTTP connection as the assertion (before `101
-    // Switching Protocols` is sent), so there is no window between "check"
-    // and "upgrade admitted".
 
     // ES256 key pair — same as command.rs / api/nip_fi.rs test material.
     const DENY_TEST_PRIVATE_KEY_PEM: &str =

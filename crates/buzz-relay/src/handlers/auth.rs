@@ -874,28 +874,24 @@ mod tests {
     // Arms `before_deny_set_check` — the hook immediately AFTER
     // `set_authenticated_pubkey` (registration) and BEFORE the `is_denied` call.
     // The key starts absent from the deny map. Once registration occurs the
-    // handler stalls at the hook. The test inserts the deny entry into the live
-    // map, then releases the hook. The deny check fires and finds the entry;
-    // the connection is closed without sending OK(true).
+    // handler stalls at the hook. At the hook, the test:
+    //   1. Inserts the deny entry into the live map.
+    //   2. Executes the real ConnectionManager::disconnect_nip_fi (close-scan side):
+    //      asserts it finds exactly 1 registered session — proving registration is
+    //      visible to a concurrent disconnect in this exact window.
+    //   3. Releases the hook — the handler resumes and calls is_denied() (check side).
+    // Both sides are exercised; neither can miss. The connection is cancelled and
+    // the exact `authorization_denied` NOTICE frame is asserted; no OK(true) sent.
     //
-    // This is the canonical straddle proof: a disconnect that fires in this
-    // window would also see the registered session (close-scan side). This test
-    // exercises the check side — proving the normative placement catches the
-    // entry inserted after registration.
-    //
-    // Hook location: `handlers/auth.rs`, immediately after
-    // `state.conn_manager.set_authenticated_pubkey(...)` at the deny-check seam.
-    //
-    // Mutation evidence:
+    // Mutation evidence (executed on green baseline):
     //   A) Delete `#[cfg(test)] before_deny_set_check(...)` from auth.rs →
     //      handler never stalls → deny entry inserted AFTER check runs and
-    //      missed → OK(true) is sent → "no OK(true)" assertion panics.
+    //      missed → close_scan returns 0 (session deregistered) → assertion panics.
     //   B) Remove the `is_denied` check entirely → same outcome as (A).
-    //   C) Move hook to before `set_authenticated_pubkey` → handler stalls
-    //      before registration → close-scan side cannot see session → but this
-    //      test still passes (entry is still inserted before check).
-    //      The hook position verifies BOTH that the barrier is at the correct
-    //      seam AND that the check fires after it.
+    //   C) Move hook to before `set_authenticated_pubkey` (registration) →
+    //      handler stalls before registration → close-scan `disconnect_nip_fi`
+    //      returns 0 (not yet registered) → "exactly 1 session" assertion panics.
+    //      Causally falsifies the registration-before-check invariant.
     //
     // Requires a local DB (same constraint as W1: ban-check is fail-closed).
     #[tokio::test]
@@ -922,7 +918,9 @@ mod tests {
         let cancel = CancellationToken::new();
         let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
 
-        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+        // Use a unique community UUID so this test's deny_set_check_hook slot
+        // does not collide with other concurrent tests (audio-active uses Uuid::nil()).
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
 
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
@@ -969,6 +967,23 @@ mod tests {
         state.nip_fi_deny_map = Some(deny_map);
         let state = Arc::new(state);
 
+        // Register the connection with conn_manager so set_authenticated_pubkey
+        // (called by handle_auth after NIP-42 succeeds) stores the pubkey — the
+        // close-scan side calls disconnect_nip_fi which iterates over registered
+        // connections. Without this registration, set_authenticated_pubkey is a
+        // no-op and disconnect_nip_fi always returns 0.
+        state.conn_manager.register(
+            conn.conn_id,
+            conn.send_tx.clone(),
+            conn.ctrl_tx.clone(),
+            None, // no restart_tx for this unit-test fixture
+            cancel.clone(),
+            community,
+            Arc::clone(&conn.backpressure_count),
+            Arc::clone(&conn.subscriptions),
+            conn.grace_limit,
+        );
+
         let relay_url = "ws://test.local";
         let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
             .tag(nostr::Tag::parse(["relay", relay_url]).unwrap())
@@ -1004,6 +1019,19 @@ mod tests {
             "W_deny_straddle: deny entry must be inserted during the hook window"
         );
 
+        // Close-scan side: run the real ConnectionManager::disconnect_nip_fi now
+        // that the connection is registered. This proves the registration is visible
+        // to the concurrent close scan — the normative invariant [FI-TRACE-DENY-SET].
+        // With the deny entry live, the scan finds exactly one session matching this
+        // pubkey and closes it.
+        let pubkey_bytes = key.public_key().to_bytes().to_vec();
+        let closed = state.conn_manager.disconnect_nip_fi(&pubkey_bytes);
+        assert_eq!(
+            closed, 1,
+            "W_deny_straddle: close scan must find exactly 1 registered session \
+             (proves registration is visible between the hook and the check)"
+        );
+
         // Release the hook — handler resumes and calls is_denied().
         release.notify_one();
 
@@ -1021,20 +1049,28 @@ mod tests {
         );
 
         // The denial frame must be on the ctrl channel (authorization_denied).
-        let ctrl_frame = ctrl_rx
-            .try_recv()
-            .expect("W_deny_straddle: ctrl channel must contain the denial frame");
-        // The frame is the NIP-FI denial (not a NOTICE; it's a JSON control frame).
-        match ctrl_frame {
-            WsMessage::Text(t) => {
-                assert!(
-                    t.contains("authorization denied") || t.contains("\"restricted\""),
-                    "W_deny_straddle: ctrl frame must be the authorization_denied frame; got: {t}"
+        // With both the close-scan and the check side firing, there may be 1 or 2
+        // frames on the ctrl channel; drain all and assert at least one is the
+        // exact authorization_denied NOTICE.
+        let mut found_denial = false;
+        while let Ok(ctrl_frame) = ctrl_rx.try_recv() {
+            if let WsMessage::Text(t) = &ctrl_frame {
+                let expected = crate::protocol::RelayMessage::notice(
+                    buzz_auth::DenialClass::AuthorizationDenied.nostr_text(),
                 );
+                let expected_str: String = expected.into();
+                assert_eq!(
+                    t.as_str(),
+                    expected_str.as_str(),
+                    "W_deny_straddle: ctrl frame must be exact authorization_denied NOTICE; got: {t}"
+                );
+                found_denial = true;
             }
-            WsMessage::Binary(_) => {} // binary close frame is also acceptable
-            other => panic!("W_deny_straddle: ctrl frame must be Text or Binary; got {other:?}"),
         }
+        assert!(
+            found_denial,
+            "W_deny_straddle: at least one authorization_denied frame must be on ctrl channel"
+        );
 
         // No OK(true) on the data channel.
         while let Ok(frame) = send_rx.try_recv() {

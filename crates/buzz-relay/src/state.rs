@@ -881,9 +881,11 @@ pub struct AppState {
     pub nip_fi_verifier:
         Option<Arc<buzz_auth::FederatedAssertionVerifier<Arc<buzz_auth::ProductionJwksSource>>>>,
 
-    /// The shared JWKS source backing `nip_fi_verifier`, exposed so `main.rs`
-    /// can warm it at startup and drive the background refresh loop.
-    /// `None` iff `nip_fi_verifier` is `None`.
+    /// The shared JWKS source backing `nip_fi_verifier`, exposed so callers
+    /// can warm it at startup as a latency optimization.
+    /// `ProductionJwksSource::get_snapshot` refreshes on-demand when the cached
+    /// snapshot is stale or expired — no external refresh loop is required for
+    /// correctness. `None` iff `nip_fi_verifier` is `None`.
     pub nip_fi_jwks_source: Option<Arc<buzz_auth::ProductionJwksSource>>,
 
     // ── NIP-FI command API (S4) ────────────────────────────────────────────
@@ -1079,9 +1081,10 @@ impl AppState {
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
-            // S3 assertion verifier fields — initialized by main.rs after startup.
-            nip_fi_verifier: None,
-            nip_fi_jwks_source: None,
+            // NIP-FI assertion verifier and JWKS source — built from config above.
+            // `main.rs` warms the JWKS source and starts the background refresh loop.
+            nip_fi_verifier,
+            nip_fi_jwks_source,
             // NIP-FI deny map and command verifier are initialized lazily by
             // `build_nip_fi_command_components` in `api::nip_fi`, called from
             // `main.rs` after startup validation.  `None` is safe before that

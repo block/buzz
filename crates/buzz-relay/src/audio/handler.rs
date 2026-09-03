@@ -306,10 +306,6 @@ pub(crate) async fn handle_active_audio_connection(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let parent_channel_id = auth_msg.parent_channel_id;
 
-    // Register the proven pubkey with the registry so that a NIP-FI targeted
-    // disconnect can reach this audio socket alongside its Nostr relay peers.
-    audio_post_auth_register(&control, pubkey_bytes.clone());
-
     // NIP-FI key pairing [FI-INV-05]: unconditional, using the shared production
     // seam. When an assertion was presented at upgrade, the proven NIP-42 key
     // MUST equal the assertion's `nostr_pubkey` claim. Claimless assertion is
@@ -329,6 +325,12 @@ pub(crate) async fn handle_active_audio_connection(
     {
         return;
     }
+
+    // Register the proven pubkey with the registry AFTER successful pairing so
+    // the spec sequence (NIP-FI.md:217-233) is proof → equality → register →
+    // deny check. A pre-pairing registration would admit an unproven key into
+    // the close-scan scope.
+    audio_post_auth_register(&control, pubkey_bytes.clone());
 
     // Step 6 (NIP-FI.md:227-233): deny-set check — runs AFTER registration
     // (audio_post_auth_register above) so any concurrent disconnect either sees
@@ -366,6 +368,13 @@ pub(crate) async fn handle_active_audio_connection(
             }
         }
     }
+
+    // Test hook: fires immediately AFTER the deny-set check block when the key
+    // was NOT denied (absent or off-mode). Proves the handler reached the
+    // post-check/membership gate for a clean key. No-op in production.
+    // [nip_fi_test_hooks::audio_after_deny_check_passed_hook, W_audio_deny_absent]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::after_deny_set_check_passed(tenant.community()).await;
 
     // Compute the NIP-FI session deadline (same three-term formula as main relay).
     // Partition is rooted at `connection_time` captured before NIP-42 auth.
@@ -2787,10 +2796,8 @@ mod tests {
 
     async fn audio_test_state() -> std::sync::Arc<crate::state::AppState> {
         use std::sync::Arc;
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::hermetic_for_test();
         config.require_relay_membership = false;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
-        config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
@@ -3777,27 +3784,29 @@ mod tests {
 
     #[tokio::test]
     async fn w_audio_deny_absent_key_passes_deny_check_reaches_membership_gate() {
-        // A key NOT in the deny map must pass the deny check and proceed.
-        // This test uses `before_deny_set_check` to prove the hook fires (i.e.,
-        // the handler reaches the deny-check seam) without being denied beforehand.
-        // Releasing the hook confirms the deny check passes for an absent key.
-        // The absence of a denial frame before the hook signals proves the deny
-        // path was not taken; any subsequent failure (lazy-DB membership error)
-        // is out of scope for this witness.
+        // A key NOT in the deny map must pass the deny-set check and reach the
+        // post-check / membership-entry gate without denial or cancellation.
+        //
+        // Two hooks bracket the deny-set check block:
+        //   1. `before_deny_set_check` (pre-check): proves the handler reached
+        //      the deny-check seam after pairing + registration; connection is
+        //      NOT cancelled here.
+        //   2. `after_deny_set_check_passed` (post-check): fires only when the
+        //      key was NOT denied — proves the handler continued past the check
+        //      without a denial or cancel. An unconditional denial immediately
+        //      after the pre-check hook would prevent this hook from firing.
         //
         // Mutation evidence:
-        //   A) Invert the `is_denied` condition (deny all keys) → the deny branch
-        //      fires immediately after registration; the handler sends the denial
-        //      frame and cancels the connection BEFORE the hook would fire.
-        //      `arrived_rx` still fires (hook is before the check), but after
-        //      release the connection is cancelled → `cancel_for_assert.is_cancelled()`
-        //      is true. A stronger check: assert the server sends NO denial frame
-        //      before the hook fires (impossible with inverted condition, since the
-        //      deny fires after the hook releases). To detect inversion, a separate
-        //      mutation test is needed (see W_audio_deny_active).
-        //   B) Remove `nip_fi_deny_map` from state → `state.nip_fi_deny_map` is
-        //      None → `if let Some(deny_map)` guard short-circuits → hook still
-        //      fires (hook is before the map guard); absent key test is the same.
+        //   A) Invert `is_denied` → absent key is denied after pre-check hook
+        //      releases → handler returns early → post-check hook NEVER fires →
+        //      `post_arrived_rx` times out → test panics.
+        //   B) Delete the `before_deny_set_check` hook → pre-check `arrived_rx`
+        //      times out → test panics (seam unreachable).
+        //   C) Delete the `after_deny_set_check_passed` hook → post-check
+        //      `post_arrived_rx` times out → test panics (pass-through unproven).
+        //   D) Remove `nip_fi_deny_map` from state → map is None → guard
+        //      short-circuits → both hooks still fire (map guard is after both
+        //      hooks are in the control path) — off-mode passes through cleanly.
         use buzz_auth::VerifiedAssertion;
         use chrono::{Duration, Utc};
         use std::sync::Arc;
@@ -3872,9 +3881,13 @@ mod tests {
             .await
             .expect("connect client");
 
-        // Arm the barrier to prove the handler reaches the deny-check seam.
-        // The key is NOT denied — is_denied returns false, deny branch is skipped.
-        let (arrived_rx, release) = crate::nip_fi_test_hooks::deny_set_check_hook::arm(community);
+        // Arm BOTH hooks before sending the auth message.
+        // Hook 1: pre-check barrier — fires when handler reaches before_deny_set_check.
+        let (pre_arrived_rx, pre_release) =
+            crate::nip_fi_test_hooks::deny_set_check_hook::arm(community);
+        // Hook 2: post-check barrier — fires when handler passes deny check (key absent).
+        let (post_arrived_rx, post_release) =
+            crate::nip_fi_test_hooks::audio_after_deny_check_passed_hook::arm(community);
 
         // Receive challenge.
         let challenge_msg = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
@@ -3907,33 +3920,47 @@ mod tests {
             .await
             .expect("send auth msg");
 
-        // Wait for the handler to reach the deny-check seam.
-        // Proves: (1) pairing passed, (2) registration happened, (3) deny check reached.
-        tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+        // === Pre-check seam ===
+        // Wait for handler to reach before_deny_set_check.
+        // Proves: pairing passed, registration happened, deny check reached.
+        tokio::time::timeout(std::time::Duration::from_secs(5), pre_arrived_rx)
             .await
             .expect("W_audio_deny_absent: handler must reach before_deny_set_check within 5s")
             .expect("arrived channel closed");
 
-        // While stalled at the hook, the connection is NOT yet cancelled.
-        // A denied key would have its deny check fire after the hook releases;
-        // an absent key continues past the check without denial.
+        // Connection is NOT cancelled at the pre-check seam.
         assert!(
             !cancel_for_assert.is_cancelled(),
-            "W_audio_deny_absent: connection must NOT be cancelled while stalled at \
-             deny-check seam (denial fires after the hook, not before)"
+            "W_audio_deny_absent: connection must NOT be cancelled at the pre-check seam"
         );
 
-        // Release the hook — handler continues past the deny check (key absent → no denial).
-        release.notify_one();
+        // Release pre-check hook — handler proceeds to run the deny check.
+        pre_release.notify_one();
 
-        // The key insight: the hook fired without the connection being cancelled,
-        // which proves: (1) the handler reached the deny-check seam past pairing
-        // and registration, and (2) the deny check did NOT fire before the hook
-        // (if it had, cancel would be set). After hook release, the deny check
-        // runs and passes (key absent) — no denial frame is sent at this point.
-        // Any subsequent close (lazy-DB membership error) is out of scope.
+        // === Post-check seam ===
+        // Wait for handler to reach after_deny_set_check_passed.
+        // This hook ONLY fires if the key was NOT denied. An inverted `is_denied`
+        // would deny the absent key and return early, never reaching this hook.
+        tokio::time::timeout(std::time::Duration::from_secs(5), post_arrived_rx)
+            .await
+            .expect(
+                "W_audio_deny_absent: handler must reach after_deny_set_check_passed within 5s \
+                 (absent key must pass the deny check without denial)",
+            )
+            .expect("post-check arrived channel closed");
 
-        // Allow the handler to proceed briefly past the hook.
+        // Connection is STILL not cancelled — the absent key passed clean.
+        assert!(
+            !cancel_for_assert.is_cancelled(),
+            "W_audio_deny_absent: connection must NOT be cancelled after the deny check \
+             (absent key must pass clean)"
+        );
+
+        // Release post-check hook — handler proceeds to membership check (lazy DB).
+        post_release.notify_one();
+
+        // Allow the handler to proceed briefly (lazy-DB membership error is expected;
+        // that path is out of scope for this witness).
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         server.abort();
@@ -3980,6 +4007,20 @@ mod tests {
         let tenant_c = tenant.clone();
         let assertion_c = assertion.clone();
 
+        // Pre-create and register the CommunityConnectionControl before the server
+        // runs. audio_post_auth_register writes proven_pubkey on the control; since
+        // Clone shares the same proven_pubkey Arc, the registered entry is updated
+        // in-place and disconnect_nip_fi can find it at the close-scan assertion.
+        // The guard keeps the entry live through that assertion.
+        let conn_control = crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+        let conn_id_for_registration = uuid::Uuid::new_v4();
+        let _conn_guard = state.community_connections.register(
+            conn_id_for_registration,
+            community,
+            conn_control.clone(),
+        );
+        let conn_control_for_server = conn_control.clone();
+
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -3992,14 +4033,15 @@ mod tests {
                     let state_i = Arc::clone(&state_c);
                     let tenant_i = tenant_c.clone();
                     let assertion_i = assertion_c.clone();
-                    let cancel_i = conn_cancel.clone();
+                    let control_outer = conn_control_for_server.clone();
                     move |ws: WebSocketUpgrade| {
                         let state_i = Arc::clone(&state_i);
                         let tenant_i = tenant_i.clone();
                         let assertion_i = assertion_i.clone();
                         let conn_time = chrono::Utc::now();
-                        let control_inner =
-                            crate::state::CommunityConnectionControl::new(cancel_i.clone());
+                        // Use the pre-registered control so audio_post_auth_register
+                        // writes to the registered entry (shared proven_pubkey Arc).
+                        let control_inner = control_outer.clone();
                         async move {
                             ws.on_upgrade(move |socket| async move {
                                 handle_active_audio_connection(
@@ -4080,6 +4122,24 @@ mod tests {
         assert!(
             matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
             "W_audio_deny_straddle: deny entry must be inserted during hook window"
+        );
+
+        // Close-scan side: run the real CommunityConnectionRegistry::disconnect_nip_fi
+        // now that the audio connection is registered (audio_post_auth_register fired
+        // before the hook). This proves registration is visible to the concurrent close
+        // scan — the normative invariant [FI-TRACE-DENY-SET] for the audio path.
+        // With the deny entry live, the scan finds exactly one session matching this
+        // pubkey and closes it.
+        //
+        // Mutation evidence (Mut-C: move hook before audio_post_auth_register):
+        //   disconnect_nip_fi returns 0 (not yet registered) → assertion panics.
+        //   Causally falsifies the registration-before-check invariant.
+        let pubkey_bytes = key.public_key().to_bytes().to_vec();
+        let closed = state.community_connections.disconnect_nip_fi(&pubkey_bytes);
+        assert_eq!(
+            closed, 1,
+            "W_audio_deny_straddle: close scan must find exactly 1 registered audio session \
+             (proves audio_post_auth_register is visible between the hook and the check)"
         );
 
         // Release — handler resumes and calls is_denied().

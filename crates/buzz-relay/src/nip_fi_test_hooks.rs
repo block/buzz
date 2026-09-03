@@ -203,6 +203,22 @@ make_hook!(audio_add_peer_hook, after_add_peer);
 //      but the barrier witness is no longer at the correct seam.
 make_hook!(deny_set_check_hook, before_deny_set_check);
 
+// `after_deny_set_check_passed`: fires in the audio handler immediately after the
+// deny-set check block completes WITHOUT denying (i.e., the key passed). Used by
+// `w_audio_deny_absent` to prove the absent key reached the post-check/membership
+// gate without being denied or cancelled.
+//
+// Mutation evidence (W_audio_deny_absent):
+//   A) Invert `is_denied` → the absent key is denied BEFORE this hook fires →
+//      handler returns early → hook never fires → `arrived_rx` times out → panics.
+//   B) Move the hook to before the deny check → fires unconditionally regardless
+//      of denial; but the cancel assertion (not yet set) would still pass the
+//      absent case until after release — use in combination with the active test.
+make_hook!(
+    audio_after_deny_check_passed_hook,
+    after_deny_set_check_passed
+);
+
 // ── Publication-attempt counter ────────────────────────────────────────────
 // `before_event_publish`: fires immediately before `state.pubsub.publish_event`
 // in `dispatch_persistent_event_inner`. Used by W2: after handle_event returns
