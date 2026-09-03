@@ -197,6 +197,82 @@ async fn acquire_channel_membership_lock(
     Ok(())
 }
 
+// ── Transaction-level membership helpers (for commit_participant_join) ────────
+
+/// Acquire the per-channel membership advisory lock on a caller-owned transaction.
+///
+/// Equivalent to the internal `acquire_channel_membership_lock`, but exposed
+/// for callers that need to compose multiple operations in one transaction
+/// (e.g., `commit_participant_join` in `audio/handler.rs`).
+pub async fn acquire_channel_membership_lock_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<()> {
+    acquire_channel_membership_lock(tx, community_id, channel_id).await
+}
+
+/// Check whether a pubkey is an active channel member on a caller-owned transaction.
+///
+/// Runs the same query as `is_member` but within the caller's transaction so
+/// the read is serialized with any concurrent membership writes on the same lock.
+pub async fn is_member_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 AND cm.removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_one(&mut **tx)
+    .await?;
+    let cnt: i64 = row.try_get("cnt")?;
+    Ok(cnt > 0)
+}
+
+/// Auto-add a member on a caller-owned transaction (for ephemeral-channel admission).
+///
+/// Inserts or reactivates the membership row at `Member` role with the given
+/// `invited_by` (channel creator for huddle auto-add). Does NOT acquire the
+/// advisory lock — callers must have already called
+/// `acquire_channel_membership_lock_in_transaction` before calling this.
+///
+/// Used by `commit_participant_join` to atomically add membership and the
+/// `48101` event in a single transaction under a session effect permit.
+pub async fn insert_auto_membership_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    invited_by: &[u8],
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+        VALUES ($1, $2, $3, 'member'::member_role, $4)
+        ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            removed_at = NULL,
+            removed_by = NULL,
+            role = EXCLUDED.role
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .bind(invited_by)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+// ── End transaction-level helpers ─────────────────────────────────────────────
+
 /// An active member roster captured while holding the channel's membership
 /// serialization lock on one writer connection.
 pub struct LockedMemberSnapshot {

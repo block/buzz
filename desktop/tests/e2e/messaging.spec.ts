@@ -454,7 +454,7 @@ test("long autolink wraps without widening the timeline", async ({ page }) => {
     .toBeLessThanOrEqual(0);
 });
 
-test("markdown tables overflow wide content and fill the message when narrow", async ({
+test("markdown tables wrap long prose and fill the message when narrow", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 900, height: 600 });
@@ -497,13 +497,15 @@ test("markdown tables overflow wide content and fill the message when narrow", a
   await expect(wideTable).toBeVisible();
   await expect(narrowTable).toBeVisible();
 
+  // Long prose should wrap, not force horizontal scrolling. Unavoidable
+  // many-column overflow is covered separately in markdown-tables.spec.ts.
   await expect
     .poll(() =>
       wideTable.evaluate(
         (element) => element.scrollWidth - element.clientWidth,
       ),
     )
-    .toBeGreaterThan(1);
+    .toBeLessThanOrEqual(1);
   await expect
     .poll(() =>
       narrowTable.evaluate((element) => {

@@ -500,7 +500,11 @@ async fn main() -> anyhow::Result<()> {
     }
     let state = Arc::new(app_state);
 
-    // Inter-relay mesh
+    // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
+    // kill switch is off — nothing is bound, published, or spawned, so the
+    // relay behaves byte-identically to a build without the mesh. When
+    // enabled, a misconfigured mesh is fatal here (bind/Redis failure): an
+    // operator who asked for the mesh gets it or gets told why not.
     if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
         &state.config,
         state.redis_pool.clone(),
@@ -1220,7 +1224,14 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    serve(router, health_router, Arc::clone(&state)).await?;
+    serve(
+        router,
+        health_router,
+        Arc::clone(&state),
+        jwks_refresh_cancel,
+        jwks_refresh_handle,
+    )
+    .await?;
     state.community_revalidator_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
@@ -1371,6 +1382,8 @@ async fn serve(
     router: axum::Router,
     health_router: axum::Router,
     state: Arc<AppState>,
+    jwks_refresh_cancel: CancellationToken,
+    jwks_refresh_handle: Option<tokio::task::JoinHandle<()>>,
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
@@ -1499,6 +1512,13 @@ async fn serve(
             .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
         uds_handle.abort();
         hard_shutdown.abort();
+        // Cancel and join the JWKS refresh task so it doesn't outlive the process.
+        jwks_refresh_cancel.cancel();
+        if let Some(h) = jwks_refresh_handle {
+            if let Err(e) = h.await {
+                tracing::warn!(error = %e, "NIP-FI: JWKS refresh supervisor join error on shutdown");
+            }
+        }
         return Ok(());
     }
 
@@ -1523,6 +1543,13 @@ async fn serve(
         .await
         .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
     hard_shutdown.abort();
+    // Cancel and join the JWKS refresh task so it doesn't outlive the process.
+    jwks_refresh_cancel.cancel();
+    if let Some(h) = jwks_refresh_handle {
+        if let Err(e) = h.await {
+            tracing::warn!(error = %e, "NIP-FI: JWKS refresh supervisor join error on shutdown");
+        }
+    }
     Ok(())
 }
 
