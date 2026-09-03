@@ -348,6 +348,22 @@ Set `BUZZ_ACP_AGENT_COMMAND` and `BUZZ_ACP_AGENT_ARGS` to point at your agent bi
 
 See the [root TESTING.md](../../TESTING.md) for the full integration testing guide — automated test suites, multi-agent E2E testing via the ACP harness, and troubleshooting.
 
+## Troubleshooting
+
+### Agent stays "online" but every mention fails with `-32000`
+
+Claude / Codex subscription credentials can expire while the harness process is
+still up. When the agent returns a non-retryable auth error (`Authentication
+required`, `Re-authenticate`, or `API Error: 401`), buzz-acp:
+
+1. Dead-letters the failed turn and posts a channel notice asking you to re-login
+2. Stops renewing presence heartbeats
+3. Publishes presence `offline` so the sidebar stops looking live
+
+Re-authenticate the CLI (`claude /login` / `codex login`) and **restart**
+`buzz-acp` — presence does not automatically flip back to online inside the
+same process after auth death.
+
 ## License
 
 Apache-2.0
