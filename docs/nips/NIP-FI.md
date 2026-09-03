@@ -612,6 +612,10 @@ hexadecimal SHA-256 of the exact consumed request body bytes.  The signed `x`
 MUST be verified against the completed body; temporal admission is checked
 before the body is consumed.
 
+Upload proofs MUST carry exactly one `server` tag whose value matches the
+request's already-resolved tenant host.  An upload proof with an absent or
+mismatched `server` tag MUST be rejected as `evidence_rejected`.
+
 #### Read proofs
 
 Read proofs MAY be host-wide: no `x` tag is required for reads, and a valid
@@ -648,15 +652,14 @@ The following freshness rules apply to all kind-24242 proofs (upload and read):
 
 The following cardinality rules apply to all kind-24242 proofs:
 
-- Exactly one `Authorization` header field MUST be present, using the `Nostr`
-  scheme with a single base64-encoded event value.  Missing, repeated,
-  comma-combined, empty, or wrong-scheme values MUST be rejected as
-  `evidence_rejected`.
+- A missing `Authorization` header field MUST be treated as `missing_evidence`.
+  Repeated, comma-combined, empty, malformed, or wrong-scheme `Authorization`
+  values MUST be rejected as `evidence_rejected`.
 - Exactly one `t` tag MUST be present.  A missing, duplicate, or unrecognized
   `t` value MUST be rejected as `evidence_rejected`.
 - Exactly one `expiration` tag MUST be present (see Freshness above).
-- Exactly one `server` tag MUST be present on read proofs (see Read proofs
-  above).
+- Exactly one `server` tag MUST be present on all kind-24242 proofs (see
+  Upload proofs and Read proofs above).
 - If `x` is present, exactly one instance is permitted (see Upload proofs and
   Read proofs above).
 - Malformed, empty, duplicate, or conflicting instances of any of these fields
@@ -836,7 +839,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
 | `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` is registered before the deny-set check, ensuring the close scan catches it); two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
-| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 5 seconds in the future denies; a proof older than 60 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry denies. |
+| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 5 seconds in the future denies; a proof older than 60 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry denies. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal `sub` values under different `iss` values remain distinct identities. |
