@@ -78,6 +78,7 @@ void _useComposeDraftLifecycle({
   required ValueNotifier<_AttachmentSurface> attachmentSurface,
   required ValueNotifier<String?> uploadError,
   required _IOSAttachmentPopoverController iosAttachmentPopover,
+  required VoidCallback onDraftIdentityChanged,
 }) {
   final lastDraftIdentity = useRef<String?>(null);
   useEffect(() {
@@ -88,6 +89,7 @@ void _useComposeDraftLifecycle({
     final saved = ref.read(composeDraftsProvider.notifier).textFor(draftKey);
     if (identityChanged) {
       draftRevision.value += 1;
+      onDraftIdentityChanged();
       uploadGeneration.value += 1;
       activeUploadCancellation.value?.cancel();
       activeUploadCancellation.value = null;
@@ -122,5 +124,5 @@ void _useComposeDraftLifecycle({
 
     controller.addListener(persistDraft);
     return () => controller.removeListener(persistDraft);
-  }, [controller, draftKey, draftIdentity]);
+  }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
 }

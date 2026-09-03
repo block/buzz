@@ -3,6 +3,9 @@
 use super::*;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 
+#[path = "runtime_policy_tests.rs"]
+mod runtime_policy_tests;
+
 /// Build a signed event for testing with the given kind, content, and tags.
 fn ev(kind: u16, content: &str, tags: Vec<Vec<&str>>) -> Event {
     let keys = Keys::generate();
@@ -437,6 +440,11 @@ fn managed_agent_directory_accepts_only_the_verified_owner_policy() {
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].pubkey, agent_pubkey);
     assert_eq!(agents[0].name, "Codex");
+    assert_eq!(agents[0].status, "unknown");
+    assert_eq!(
+        serde_json::to_value(&agents[0]).unwrap()["status"],
+        "unknown"
+    );
     assert_eq!(
         agents[0].respond_to,
         Some(crate::managed_agents::RespondTo::Allowlist)
@@ -510,8 +518,11 @@ fn managed_agent_candidates_use_only_relay_signed_bot_membership() {
         vec![vec!["d", "forged"], vec!["p", &agent_pubkey, "", "bot"]],
     );
 
-    let channel_ids =
-        member_agent_channel_ids_from_events(&[forged, general], &relay_keys.public_key().to_hex());
+    let channel_ids = member_agent_channel_ids_from_events(
+        &[forged, general],
+        &relay_keys.public_key().to_hex(),
+        &Default::default(),
+    );
 
     assert_eq!(
         channel_ids.get(&agent_pubkey),
@@ -759,4 +770,63 @@ fn timestamp_to_iso_known_value() {
     assert_eq!(timestamp_to_iso(1_609_459_200), "2021-01-01T00:00:00Z");
     // Epoch
     assert_eq!(timestamp_to_iso(0), "1970-01-01T00:00:00Z");
+}
+
+#[test]
+fn known_owned_agents_have_membership_independent_of_role() {
+    let relay = Keys::generate();
+    let agent = Keys::generate().public_key().to_hex();
+    let event = EventBuilder::new(Kind::Custom(39002), "")
+        .tags([
+            Tag::parse(["d", "general"]).unwrap(),
+            Tag::parse(["p", &agent, "", "member"]).unwrap(),
+        ])
+        .sign_with_keys(&relay)
+        .unwrap();
+    let memberships = member_agent_channel_ids_from_events(
+        &[event],
+        &relay.public_key().to_hex(),
+        &std::collections::HashSet::from([agent.clone()]),
+    );
+    assert_eq!(memberships.get(&agent), Some(&vec!["general".to_string()]));
+}
+
+#[test]
+fn managed_directory_rejects_tampered_event_envelopes() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let auth = buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap();
+    let auth: Vec<String> = serde_json::from_str(&auth).unwrap();
+    let profile = EventBuilder::new(Kind::Metadata, "{}")
+        .tags([Tag::parse(auth).unwrap()])
+        .sign_with_keys(&agent)
+        .unwrap();
+    let policy = managed_agent_event(
+        &owner,
+        &agent.public_key().to_hex(),
+        "Scout",
+        "owner-only",
+        &[],
+    );
+    let tamper = |event: &Event, content: &str| -> Event {
+        let mut value = serde_json::to_value(event).unwrap();
+        value["content"] = serde_json::json!(content);
+        serde_json::from_value(value).unwrap()
+    };
+    let forged_policy = tamper(
+        &policy,
+        r#"{"name":"Scout","parallelism":1,"respond_to":"anyone"}"#,
+    );
+    assert!(forged_policy.verify().is_err());
+    assert!(
+        relay_agents_from_managed_agent_events(&[forged_policy], std::slice::from_ref(&profile),)
+            .is_empty(),
+        "an owner pubkey string is not an owner signature"
+    );
+    let forged_profile = tamper(&profile, r#"{"name":"forged"}"#);
+    assert!(forged_profile.verify().is_err());
+    assert!(
+        relay_agents_from_managed_agent_events(&[policy], &[forged_profile],).is_empty(),
+        "a valid OA tag does not authenticate the profile envelope"
+    );
 }

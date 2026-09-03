@@ -31,6 +31,8 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
   private let rootView: UIView
   private let surfaceView: UIView
   private let channel: FlutterMethodChannel
+  private let corners: String
+  private let usesGlass: Bool
 
   init(
     frame: CGRect,
@@ -42,15 +44,24 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     let colorValue = (arguments?["color"] as? NSNumber)?.uint32Value ?? 0xFFFF_FFFF
     let backdropColorValue = (arguments?["backdropColor"] as? NSNumber)?.uint32Value
     let minimumRadius = (arguments?["minimumRadius"] as? NSNumber)?.doubleValue ?? 24
-    let corners = arguments?["corners"] as? String ?? "all"
+    corners = arguments?["corners"] as? String ?? "all"
+    usesGlass = (arguments?["usesGlass"] as? NSNumber)?.boolValue == true
 
     rootView = UIView(frame: frame)
-    rootView.isOpaque = backdropColorValue != nil
+    rootView.isUserInteractionEnabled = false
+    rootView.isOpaque = !usesGlass && backdropColorValue != nil
     rootView.backgroundColor = backdropColorValue.map { Self.color(from: $0) } ?? .clear
 
-    surfaceView = UIView(frame: rootView.bounds)
-    surfaceView.isOpaque = true
-    surfaceView.backgroundColor = Self.color(from: colorValue)
+    if #available(iOS 26.0, *), usesGlass {
+      let effect = UIGlassEffect(style: .regular)
+      effect.isInteractive = false
+      surfaceView = UIVisualEffectView(effect: effect)
+    } else {
+      surfaceView = UIView()
+    }
+    surfaceView.frame = rootView.bounds
+    surfaceView.isUserInteractionEnabled = false
+    surfaceView.isOpaque = !usesGlass
     surfaceView.clipsToBounds = true
     surfaceView.layer.cornerCurve = .continuous
     surfaceView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -61,6 +72,87 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
       binaryMessenger: messenger
     )
 
+    super.init()
+
+    updateColors(
+      colorValue: colorValue,
+      backdropColorValue: backdropColorValue
+    )
+    applyInterfaceStyle(from: arguments?["brightness"])
+    applyCornerConfiguration(minimumRadius: minimumRadius)
+
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self else {
+        result(nil)
+        return
+      }
+      switch call.method {
+      case "updateColors":
+        guard
+          let arguments = call.arguments as? [String: Any],
+          let colorValue = arguments["color"] as? NSNumber
+        else {
+          result(
+            FlutterError(
+              code: "invalid_arguments",
+              message: "Expected a surface color.",
+              details: nil
+            )
+          )
+          return
+        }
+
+        self.updateColors(
+          colorValue: colorValue.uint32Value,
+          backdropColorValue: (arguments["backdropColor"] as? NSNumber)?.uint32Value
+        )
+        result(nil)
+      case "updateGeometry":
+        guard
+          let arguments = call.arguments as? [String: Any],
+          let minimumRadius = arguments["minimumRadius"] as? NSNumber
+        else {
+          result(
+            FlutterError(
+              code: "invalid_arguments",
+              message: "Expected a minimum corner radius.",
+              details: nil
+            )
+          )
+          return
+        }
+        self.applyInterfaceStyle(from: arguments["brightness"])
+        self.applyCornerConfiguration(
+          minimumRadius: minimumRadius.doubleValue
+        )
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
+  deinit {
+    channel.setMethodCallHandler(nil)
+  }
+
+  func view() -> UIView {
+    rootView
+  }
+
+  private func updateColors(colorValue: UInt32, backdropColorValue: UInt32?) {
+    let surfaceColor = Self.color(from: colorValue)
+    if let glassView = surfaceView as? UIVisualEffectView {
+      glassView.backgroundColor = .clear
+      glassView.contentView.backgroundColor = surfaceColor.withAlphaComponent(0.12)
+    } else {
+      surfaceView.backgroundColor = surfaceColor
+    }
+    rootView.isOpaque = !usesGlass && backdropColorValue != nil
+    rootView.backgroundColor = backdropColorValue.map { Self.color(from: $0) } ?? .clear
+  }
+
+  private func applyCornerConfiguration(minimumRadius: CGFloat) {
     if #available(iOS 26.0, *) {
       let radius = UICornerRadius.containerConcentric(minimum: minimumRadius)
       surfaceView.cornerConfiguration =
@@ -80,48 +172,17 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
         ]
       }
     }
+  }
 
-    super.init()
-
-    channel.setMethodCallHandler { [weak self] call, result in
-      guard call.method == "updateColors" else {
-        result(FlutterMethodNotImplemented)
-        return
-      }
-      guard
-        let arguments = call.arguments as? [String: Any],
-        let colorValue = arguments["color"] as? NSNumber
-      else {
-        result(
-          FlutterError(
-            code: "invalid_arguments",
-            message: "Expected a surface color.",
-            details: nil
-          )
-        )
-        return
-      }
-
-      self?.updateColors(
-        colorValue: colorValue.uint32Value,
-        backdropColorValue: (arguments["backdropColor"] as? NSNumber)?.uint32Value
-      )
-      result(nil)
+  private func applyInterfaceStyle(from value: Any?) {
+    switch value as? String {
+    case "dark":
+      rootView.overrideUserInterfaceStyle = .dark
+    case "light":
+      rootView.overrideUserInterfaceStyle = .light
+    default:
+      rootView.overrideUserInterfaceStyle = .unspecified
     }
-  }
-
-  deinit {
-    channel.setMethodCallHandler(nil)
-  }
-
-  func view() -> UIView {
-    rootView
-  }
-
-  private func updateColors(colorValue: UInt32, backdropColorValue: UInt32?) {
-    surfaceView.backgroundColor = Self.color(from: colorValue)
-    rootView.isOpaque = backdropColorValue != nil
-    rootView.backgroundColor = backdropColorValue.map { Self.color(from: $0) } ?? .clear
   }
 
   private static func color(from value: UInt32) -> UIColor {

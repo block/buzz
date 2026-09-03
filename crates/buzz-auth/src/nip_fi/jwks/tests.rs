@@ -896,7 +896,9 @@ async fn two_issuer_keys_and_generations_are_isolated() {
 
     fn sign(pkcs8_pem: &str, kid: &str, iss: &str, aud: &str) -> String {
         let now = chrono::Utc::now().timestamp();
+        // nostr_pubkey is required unconditionally by spec v2.
         let claims = json!({"iss": iss, "aud": aud, "sub": "u",
+                            "nostr_pubkey": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
                             "iat": now, "exp": now + 600});
         let mut hdr = Header::new(Algorithm::ES256);
         hdr.kid = Some(kid.to_owned());
@@ -921,7 +923,6 @@ async fn two_issuer_keys_and_generations_are_isolated() {
             TokenClass::DedicatedNipFi,
             FreshnessClass::OfflineJwt,
             vec![Algorithm::ES256],
-            false,
             60,
             3600,
             None,
@@ -1112,7 +1113,9 @@ async fn shared_arc_source_verifier_observes_rotation() {
 
     fn sign_token(pkcs8_pem: &str, kid: &str, iss: &str, aud: &str) -> String {
         let now = chrono::Utc::now().timestamp();
+        // nostr_pubkey is required unconditionally by spec v2.
         let claims = json!({"iss": iss, "aud": aud, "sub": "u",
+                            "nostr_pubkey": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
                             "iat": now, "exp": now + 600});
         let mut hdr = Header::new(Algorithm::ES256);
         hdr.kid = Some(kid.to_owned());
@@ -1171,7 +1174,6 @@ async fn shared_arc_source_verifier_observes_rotation() {
             TokenClass::DedicatedNipFi,
             FreshnessClass::OfflineJwt,
             vec![Algorithm::ES256],
-            false,
             60,
             3600,
             None,
@@ -1233,7 +1235,6 @@ fn jwks_contract_uri_canonicalization_convergence_and_divergence() {
             TokenClass::DedicatedNipFi,
             FreshnessClass::OfflineJwt,
             vec![Algorithm::ES256],
-            false,
             30,
             600,
             None,
@@ -1489,7 +1490,9 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
 
     fn sign_token(pkcs8_pem: &str, kid: &str, iss: &str, aud: &str) -> String {
         let wall_now = chrono::Utc::now().timestamp();
+        // nostr_pubkey is required unconditionally by spec v2.
         let claims = json!({"iss": iss, "aud": aud, "sub": "u",
+                            "nostr_pubkey": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
                             "iat": wall_now, "exp": wall_now + 600});
         let mut hdr = Header::new(Algorithm::ES256);
         hdr.kid = Some(kid.to_owned());
@@ -1572,7 +1575,6 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
             TokenClass::DedicatedNipFi,
             FreshnessClass::OfflineJwt,
             vec![Algorithm::ES256],
-            false,
             60,
             HARD_DEADLINE_SECS,
             None,

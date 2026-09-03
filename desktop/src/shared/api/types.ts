@@ -270,7 +270,8 @@ export type RelayAgent = {
   channels: string[];
   channelIds: string[];
   capabilities: string[];
-  status: "online" | "away" | "offline";
+  /** Policy-only discovery has no liveness evidence. */
+  status: "online" | "away" | "offline" | "unknown";
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
 };
@@ -501,6 +502,15 @@ export type AcpRuntimeCatalogEntry = {
   providerEnvVar: string | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
+  /**
+   * Canonical accepted effort values for this runtime, in display order.
+   *
+   * Non-null only for runtimes with a static finite effort vocabulary
+   * (currently Goose: `["off","low","medium","high","max"]`). The renderer
+   * uses this instead of the TS-side `GOOSE_EFFORT_CANONICAL_VALUES` duplicate.
+   * Null for buzz-agent (provider/model catalog), Claude/Codex/unknown runtimes.
+   */
+  effortCanonicalValues: string[] | null;
   maxTokensEnvVar: string | null;
   contextLimitEnvVar: string | null;
   maxRoundsEnvVar: string | null;
@@ -664,9 +674,9 @@ export type RuntimeConfigSurface = {
   sources: ConfigSourceReport;
   /** #3493: `true` when the surface was read from a user-set `CLAUDE_CONFIG_DIR` — drives the Keychain caveat note in the panel. */
   claudeConfigDirCustom?: boolean;
-  /** B5: the adapter-advertised `thought_level` configId, discovered from the running session. Present only for claude after the first session. Drives the effort picker. */
+  /** The adapter-advertised `thought_level` configId, discovered from the running session — present once a session advertises `thought_level` support (Claude today; any effort-capable ACP adapter in general). Drives the effort picker. */
   effortConfigId?: string;
-  /** B5/I-7: adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
+  /** Adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
   effortOptions?: AcpConfigOptionValue[];
 };
 
@@ -694,11 +704,10 @@ export type UpdateManagedAgentInput = {
   mcpCommand?: string;
   /** Absent = don't touch. Present = set the mode. */
   respondTo?: RespondToMode;
-  /**
-   * Absent = don't touch. Present = replace the allowlist with this list
-   * (validated & normalized server-side).
-   */
+  /** Absent = keep. Present = replace the allowlist (server-validated). */
   respondToAllowlist?: string[];
+  /** Tri-state: absent = don't touch; `null` = clear; `string` = set. Persisted in the locked update so access-change restarts snapshot the new effort. Send only when `effortTouched`. */
+  effortLevel?: string | null;
 };
 // Persona (agent definition) types live in a sibling module to keep this
 // file inside the repo-wide size ratchet; re-exported so import paths

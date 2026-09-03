@@ -17,6 +17,7 @@ import {
   positionAfterArrowLeftThroughMentionSpace,
   selectionAfterMentionTrailingSpace,
   shouldAdvanceMentionCaret,
+  settleAutocompleteMentionInsert,
 } from "./mentionHighlightExtension.ts";
 
 // ── buildHighlightPatterns ────────────────────────────────────────────
@@ -504,4 +505,61 @@ test("a whitespace-run rewrite after a mention pick keeps the draft space", () =
     const typed = textInput(picked, shape.from, shape.to, shape.text);
     assert.equal(typed.doc.textContent, "hello @bob a world", shape.name);
   }
+});
+
+// Multi-word display names must use the same settlement as single-word names.
+// Simulate the browser remapping the DOM caret to the chip edge before typing.
+test("multi-word autocomplete keeps its separator after a chip-edge remap", () => {
+  const storage = { names: ["Remote Scout"], agentNames: [], channelNames: [] };
+  const plugins = MentionHighlightExtension.config.addProseMirrorPlugins.call({
+    storage,
+  });
+  const state = EditorState.create({
+    doc: document(paragraph(text("@Remote"))),
+    schema,
+    plugins,
+  });
+  const tr = state.tr.insertText("@Remote Scout ", 1, 8);
+  tr.setSelection(TextSelection.create(tr.doc, 15));
+  settleAutocompleteMentionInsert(
+    { storage: { mentionHighlight: storage } },
+    tr,
+    "@Remote Scout ",
+  );
+  const picked = state.apply(tr);
+  const spacePos = 1 + "@Remote Scout".length;
+  const typed = textInput(picked, spacePos, spacePos, "hello");
+  assert.equal(typed.doc.textContent, "@Remote Scout hello");
+});
+
+test("full-name boundaries preserve internal spaces and intentional caret moves", () => {
+  const names = ["Remote Scout", "Scout (ed12)"];
+  const doc = document(paragraph(text("@Remote Scout  world")));
+  const edge = 1 + "@Remote Scout".length;
+  assert.equal(
+    selectionAfterMentionTrailingSpace(doc, 1 + "@Remote".length, names),
+    1 + "@Remote".length,
+  );
+  assert.equal(selectionAfterMentionTrailingSpace(doc, edge, names), edge + 1);
+  assert.equal(
+    positionAfterArrowLeftThroughMentionSpace(doc, edge + 1, names),
+    edge,
+  );
+  assert.equal(
+    mentionTextInputInsertion(doc, edge, edge, "x", false, names),
+    null,
+  );
+  assert.deepEqual(
+    insertionForMentionTextInput(doc, edge, edge + 2, "\u00a0x", names),
+    { insertAt: edge + 1, text: "x" },
+  );
+  const disambiguated = document(paragraph(text("@Scout (ed12) ")));
+  assert.equal(
+    selectionAfterMentionTrailingSpace(
+      disambiguated,
+      1 + "@Scout (ed12)".length,
+      names,
+    ),
+    1 + "@Scout (ed12) ".length,
+  );
 });

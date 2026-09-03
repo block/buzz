@@ -49,10 +49,13 @@ export type RelaySubscriptionFilter = {
 
 type HistorySubscription = {
   mode: "history";
+  filter: RelaySubscriptionFilter;
   events: RelayEvent[];
   resolve: (events: RelayEvent[]) => void;
   reject: (error: Error) => void;
   timeout: number;
+  timeoutMs: number;
+  closedRetryAttempt?: number;
 };
 
 type FirstEventSubscription = {

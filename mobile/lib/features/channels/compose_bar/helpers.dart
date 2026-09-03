@@ -1,5 +1,9 @@
 part of '../compose_bar.dart';
 
+String _composerDraftIdentity(WidgetRef ref) =>
+    '${ref.watch(relayConfigProvider).baseUrl}'
+    ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
+
 void _useComposerFocusRestorer({
   required ValueChanged<VoidCallback>? onChanged,
   required ValueNotifier<bool> isExpanded,
@@ -86,6 +90,25 @@ void _dismissComposerKeyboard(FocusNode focusNode) {
   unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
 }
 
+void _chooseComposerAttachment(
+  BuildContext context,
+  ValueNotifier<_AttachmentSurface> attachmentSurface,
+  ValueNotifier<String?> uploadError,
+  Future<void> Function() choose, {
+  String? errorMessage,
+}) {
+  attachmentSurface.value = _AttachmentSurface.closed;
+  unawaited(() async {
+    try {
+      await choose();
+    } catch (error) {
+      if (context.mounted) {
+        uploadError.value = errorMessage ?? _formatUploadError(error);
+      }
+    }
+  }());
+}
+
 Duration _composerMotionDuration(
   bool reducedMotion,
   _AttachmentSurface surface,
@@ -168,6 +191,7 @@ Widget _composerAttachmentPanel({
   required VoidCallback onCamera,
   required VoidCallback onPhotos,
   required VoidCallback onVideo,
+  required VoidCallback onVoiceNote,
   required VoidCallback onFiles,
   required Future<void> Function(XFile image) onCapture,
   required Future<List<XFile>> Function() onPickAllPhotos,
@@ -185,6 +209,7 @@ Widget _composerAttachmentPanel({
   onCamera: onCamera,
   onPhotos: onPhotos,
   onVideo: onVideo,
+  onVoiceNote: onVoiceNote,
   onFiles: onFiles,
   onCapture: onCapture,
   onPickAllPhotos: onPickAllPhotos,

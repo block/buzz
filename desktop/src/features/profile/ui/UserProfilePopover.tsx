@@ -1,6 +1,8 @@
 import * as React from "react";
 import { Activity, Headphones, MessageSquare } from "lucide-react";
 
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   useUserProfileQuery,
@@ -18,7 +20,7 @@ import {
   ownsAuthorAgent,
 } from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
-import { usePresenceQuery } from "@/features/presence/hooks";
+import { useAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
@@ -262,7 +264,7 @@ function UserProfilePopoverBody({
   const usersBatchQuery = useUsersBatchQuery([pubkey]);
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
-  const presenceQuery = usePresenceQuery([pubkey]);
+  const { status: presenceStatus } = useAgentAvailability(pubkey);
   const userStatusQuery = useUserStatusQuery([pubkey]);
 
   const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
@@ -331,7 +333,6 @@ function UserProfilePopoverBody({
     showHumanProfileActions || showMessageAction || showHuddleAction;
   const canViewActivity =
     isBotProfile && viewerIsOwner && canOpenAgentActivity(pubkey);
-  const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
   const userStatus = userStatusQuery.data?.[pubkey.toLowerCase()];
   const userStatusText = userStatus?.text.trim() ?? "";
   const hasUserStatus = Boolean(userStatusText || userStatus?.emoji);
@@ -383,7 +384,7 @@ function UserProfilePopoverBody({
         label={displayName}
         shape={isBotProfile ? "squircle" : "circle"}
         size={40}
-        status={presenceStatus ?? "offline"}
+        status={presenceStatus}
         statusTestId="user-profile-popover-presence-badge"
         testId="user-profile-popover-avatar"
       />
@@ -391,6 +392,11 @@ function UserProfilePopoverBody({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <HoverPubkeyName displayName={displayName} pubkey={pubkey} />
+          <AgentManagementMarker
+            pubkey={pubkey}
+            ownerPubkey={ownerPubkey}
+            testId="user-profile-popover-agent-provenance"
+          />
           {isBotProfile && botIdenticonValue ? (
             <BotIdenticon
               value={botIdenticonValue}

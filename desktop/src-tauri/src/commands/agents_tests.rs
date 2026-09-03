@@ -188,6 +188,45 @@ fn deploy_resolver_inherits_global_when_definition_blank() {
     );
 }
 
+#[test]
+fn production_delete_orchestration_restores_bestie_when_agent_save_fails() {
+    use crate::managed_agents::{
+        bestie_assignment::{assignment_matches, replace_assignment},
+        retention::open_retention_db,
+    };
+
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"));
+    let retention_dir = dir.path().join("retention");
+    std::fs::create_dir_all(&retention_dir)
+        .unwrap_or_else(|error| panic!("create retention dir: {error}"));
+    let db_path = retention_dir.join("owner.db");
+    let pubkey = "a".repeat(64);
+    replace_assignment(
+        &mut open_retention_db(&db_path)
+            .unwrap_or_else(|error| panic!("open assignment DB: {error}")),
+        &pubkey,
+    )
+    .unwrap_or_else(|error| panic!("seed assignment: {error}"));
+    let mut record = bare_agent_record(None, None, None);
+    record.pubkey.clone_from(&pubkey);
+    let mut records = vec![record];
+
+    let result = run_managed_agent_deletion(dir.path(), &pubkey, &mut records, |_records| {
+        Err::<(), _>("injected managed-agent save failure".to_string())
+    });
+
+    assert_eq!(
+        result,
+        Err("injected managed-agent save failure".to_string())
+    );
+    assert!(assignment_matches(
+        &open_retention_db(&db_path)
+            .unwrap_or_else(|error| panic!("reopen assignment DB: {error}")),
+        &pubkey,
+    )
+    .unwrap_or_else(|error| panic!("read restored assignment: {error}")));
+}
+
 /// Deploy resolver falls back to global when both definition and record have none.
 #[test]
 fn deploy_resolver_falls_back_to_global_when_definition_and_record_have_none() {

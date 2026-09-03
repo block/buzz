@@ -799,7 +799,6 @@ export class RelayClient {
       this.handleEose(rest[0], generation);
       return;
     }
-
     if (type === "CLOSED" && typeof rest[0] === "string") {
       handleRelayClosed({
         subscriptions: this.subscriptions,
@@ -810,6 +809,7 @@ export class RelayClient {
             ["REQ", subId, filter],
             "Failed to restore relay subscription after CLOSED.",
           ),
+        closeSubscription: (subId) => this.closeSubscription(subId),
       });
       return;
     }

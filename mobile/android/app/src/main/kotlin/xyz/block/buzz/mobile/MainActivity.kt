@@ -107,6 +107,9 @@ class MainActivity : FlutterFragmentActivity() {
                     GENERATE_VIDEO_POSTER_METHOD -> {
                         handleGenerateVideoPoster(call.arguments, result)
                     }
+                    PACKAGE_VOICE_NOTE_FOR_UPLOAD_METHOD -> {
+                        handlePackageVoiceNoteForUpload(call.arguments, result)
+                    }
                     REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD -> {
                         result.success(Build.VERSION.SDK_INT <= Build.VERSION_CODES.P)
                     }
@@ -349,6 +352,33 @@ class MainActivity : FlutterFragmentActivity() {
         }.start()
     }
 
+    private fun handlePackageVoiceNoteForUpload(
+        arguments: Any?,
+        result: MethodChannel.Result,
+    ) {
+        val sourcePath = arguments as? String ?: run {
+            invalidArguments(result, "Expected source file path as String.")
+            return
+        }
+
+        Thread {
+            try {
+                result.success(
+                    AndroidVoiceNotePackager.packageForUpload(
+                        sourcePath = sourcePath,
+                        cacheDirectory = cacheDir,
+                    ),
+                )
+            } catch (error: Exception) {
+                result.error(
+                    "transcode_failed",
+                    "Unable to assemble voice note for upload.",
+                    error.message,
+                )
+            }
+        }.start()
+    }
+
     private fun invalidArguments(
         result: MethodChannel.Result,
         message: String,
@@ -362,6 +392,7 @@ class MainActivity : FlutterFragmentActivity() {
         private const val TRANSCODE_IMAGE_TO_JPEG_METHOD = "transcodeImageToJpeg"
         private const val TRANSCODE_VIDEO_TO_MP4_METHOD = "transcodeVideoToMp4"
         private const val GENERATE_VIDEO_POSTER_METHOD = "generateVideoPoster"
+        private const val PACKAGE_VOICE_NOTE_FOR_UPLOAD_METHOD = "packageVoiceNoteForUpload"
         private const val REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD =
             "requiresLegacyMediaStoragePermission"
     }

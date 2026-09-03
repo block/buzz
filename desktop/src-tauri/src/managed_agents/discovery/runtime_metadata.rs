@@ -1,3 +1,69 @@
+/// Canonicalization contract for a harness's thinking-effort env var.
+///
+/// The single value authority shared by UI choices, the spawn/deploy launch
+/// projection, and the reader. All effort candidates (native env, legacy env,
+/// ACP tier, file tier) are normalized through `normalize_str` before any
+/// validity, precedence, override, or B-equality check.
+///
+/// Source for Goose: `crates/goose-provider-types/src/thinking.rs`
+///   • `FromStr` (aliases, case-insensitive): `off|disabled|none`, `low`,
+///     `medium|med`, `high`, `max|xhigh`
+///   • `Display` (canonical): `off`, `low`, `medium`, `high`, `max`
+///   • Live ACP emits Display values via `response_builder.rs:326-337`.
+pub(crate) struct EffortNormalization {
+    /// Canonical values in UI display order (drive choices, persistence, ACP comparison).
+    pub canonical: &'static [&'static str],
+    /// `(alias, canonical)` pairs, case-insensitive. Only aliases that differ
+    /// from their canonical form are listed.
+    pub aliases: &'static [(&'static str, &'static str)],
+}
+
+/// Goose thinking-effort canonicalization contract.
+///
+/// Source: `crates/goose-provider-types/src/thinking.rs` at Goose `2db0e31fe`.
+/// Canonical Display values: `off`, `low`, `medium`, `high`, `max`.
+/// Aliases (case-insensitive): `none|disabled→off`, `med→medium`, `xhigh→max`.
+/// `minimal` (Buzz-only) is invalid — skipped as absent at every tier.
+pub(crate) static GOOSE_EFFORT_NORMALIZATION: EffortNormalization = EffortNormalization {
+    canonical: &["off", "low", "medium", "high", "max"],
+    aliases: &[
+        ("none", "off"),
+        ("disabled", "off"),
+        ("med", "medium"),
+        ("xhigh", "max"),
+    ],
+};
+
+/// buzz-agent's accepted persisted thinking-effort values — a validation-only
+/// contract, NOT a canonicalization one. Unlike Goose, buzz-agent keeps `xhigh`
+/// and `max` as *distinct* efforts, so these values are validated (invalid →
+/// skip as absent) but never aliased or collapsed.
+///
+/// Source of truth: `parse_thinking_effort`, `crates/buzz-agent/src/config.rs`
+/// (`none|minimal|low|medium|high|xhigh|max`). A destination-vocabulary check
+/// at projection time keeps a foreign canonical (e.g. Goose `off`) from being
+/// emitted as `BUZZ_AGENT_THINKING_EFFORT=off`, which the parser rejects at
+/// config init (child exits 2).
+pub(crate) static BUZZ_AGENT_EFFORT_VALUES: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+impl EffortNormalization {
+    /// Normalize `raw` to canonical form. `None` → invalid for this harness;
+    /// the caller must treat it as absent (skip-as-absent policy).
+    pub fn normalize_str(&self, raw: &str) -> Option<String> {
+        let lower = raw.to_lowercase();
+        if self.canonical.contains(&lower.as_str()) {
+            return Some(lower);
+        }
+        for &(alias, canon) in self.aliases {
+            if lower == alias {
+                return Some(canon.to_string());
+            }
+        }
+        None
+    }
+}
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -47,6 +113,35 @@ pub(crate) struct KnownAcpRuntime {
     pub config_file_format: Option<&'static str>,
     pub supports_acp_native_config: bool, // tier 1a: config/read+write
     pub thinking_env_var: Option<&'static str>,
+    /// Canonicalization contract for `thinking_env_var` on this harness.
+    ///
+    /// `Some(contract)` — harness uses a finite, static effort vocabulary.
+    /// All candidates (native env, legacy env, ACP tier, file tier) are
+    /// normalized through this contract before validity checks, precedence
+    /// resolution, override tracking, and B-equality comparison.
+    ///
+    /// `None` — harness accepts any provider/model-specific value via its own
+    /// catalog (buzz-agent); see `getProviderEffortConfig()` in TS for that
+    /// path. Contract-less does NOT mean keyless: buzz-agent still has a native
+    /// `thinking_env_var`, and Claude/Codex route the canonical through
+    /// `BUZZ_ACP_EFFORT_LEVEL` for ACP startup even with `thinking_env_var: None`.
+    ///
+    /// The single canonical authority shared by UI choices, the launch
+    /// projection, and the reader. No value-authority logic may live outside
+    /// this struct for harnesses that declare one.
+    pub effort_normalization: Option<&'static EffortNormalization>,
+    /// Accepted persisted effort values for a runtime that has NO
+    /// canonicalization contract but still constrains its vocabulary
+    /// (buzz-agent: `parse_thinking_effort`'s accepted set). Used only for
+    /// destination-vocabulary validation at projection/read time — a candidate
+    /// outside this set is skipped as absent, so a foreign canonical (e.g.
+    /// Goose `off`) is never emitted under `thinking_env_var` where the
+    /// destination parser would reject it and crash the child.
+    ///
+    /// `None` means "no validation": Goose validates through
+    /// `effort_normalization`; Claude/Codex and unknown/custom runtimes accept
+    /// any string over the `BUZZ_ACP_EFFORT_LEVEL` transport.
+    pub effort_accepted_values: Option<&'static [&'static str]>,
     /// Env var for normalizing `max_output_tokens`. `None` when the harness
     /// does not have a first-class env var for this field (config-file only).
     pub max_tokens_env_var: Option<&'static str>,

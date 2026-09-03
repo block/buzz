@@ -327,7 +327,7 @@ pub async fn provision_community(
     if let Some(owner_hex) = &initial_owner {
         state
             .db
-            .bootstrap_owner(record.id, owner_hex)
+            .provision_owner(record.id, owner_hex)
             .await
             .map_err(|e| format!("community provisioned but owner bootstrap failed: {e}"))?;
         publish_membership_snapshot_if_required(state, record.id, &record.host).await;
