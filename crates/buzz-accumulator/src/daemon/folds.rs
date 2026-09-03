@@ -337,6 +337,7 @@ mod tests {
                 created_at: 100,
                 content: "hello world".into(),
                 raw: "{}".into(),
+                parent: None,
             }])
             .await
             .expect("seed signal");
@@ -446,6 +447,7 @@ mod tests {
                 created_at: 5_000,
                 content: "after the freeze".into(),
                 raw: "{}".into(),
+                parent: None,
             }])
             .await
             .expect("late event");
@@ -488,6 +490,7 @@ mod tests {
                 created_at: 1_000 + i as i64,
                 content: "m".repeat(5_000),
                 raw: "{}".into(),
+                parent: None,
             })
             .collect();
         store.upsert_events(&backlog).await.expect("seed backlog");
@@ -569,6 +572,7 @@ mod tests {
                 created_at: 9_000,
                 content: "the new arrival".into(),
                 raw: "{}".into(),
+                parent: None,
             }])
             .await
             .expect("late event");

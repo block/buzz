@@ -247,7 +247,14 @@ async fn get_event(
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("event not found: {id}")))?;
     let names = s.store.names(&BTreeSet::from([sig.pubkey.clone()])).await?;
-    Ok(Json(event_json(&sig, names.get(&sig.pubkey))))
+    let mut body = event_json(&sig, names.get(&sig.pubkey));
+    // Reply lineage for thread pickers: the direct parent and the topmost
+    // mirrored ancestor. `thread_root == id` means the event starts a thread.
+    if let Some((parent, root)) = s.store.thread_lineage(&sig.id).await? {
+        body["parent"] = json!(parent);
+        body["thread_root"] = json!(root);
+    }
+    Ok(Json(body))
 }
 
 fn event_json(sig: &crate::Signal, author_name: Option<&String>) -> Value {
@@ -656,6 +663,7 @@ mod tests {
             created_at: ts,
             content: format!("msg-{id_char}"),
             raw: "{}".into(),
+            parent: None,
         }
     }
 

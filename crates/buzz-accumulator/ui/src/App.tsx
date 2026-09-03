@@ -24,6 +24,7 @@ function fromUrl(): { selection: Selection; window: TimeWindow } {
     selection: {
       channels: list("channels"),
       authors: list("authors"),
+      threads: list("threads"),
       kinds: list("kinds")
         .map((k) => Number.parseInt(k, 10))
         .filter((k) => Number.isFinite(k) && k >= 0),

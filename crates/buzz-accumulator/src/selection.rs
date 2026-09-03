@@ -25,6 +25,13 @@ pub struct Selection {
     /// Author pubkeys (hex).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
+    /// Thread anchors: 64-hex event ids, each selecting itself plus every
+    /// descendant reply at any depth. Joins `channels` as a scope union — an
+    /// event is in scope when it is in a listed channel OR a listed subtree.
+    /// An anchor need not be a thread root: a mid-thread id selects that
+    /// sub-subtree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub threads: Vec<String>,
     /// Event kinds; empty means [`DEFAULT_SIGNAL_KINDS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<u32>,
@@ -48,15 +55,20 @@ impl Selection {
         for a in &mut self.authors {
             *a = a.trim().to_ascii_lowercase();
         }
+        for t in &mut self.threads {
+            *t = t.trim().to_ascii_lowercase();
+        }
         self.channels.sort();
         self.channels.dedup();
         self.authors.sort();
         self.authors.dedup();
+        self.threads.sort();
+        self.threads.dedup();
         self.kinds.sort_unstable();
         self.kinds.dedup();
-        if self.channels.is_empty() && self.authors.is_empty() {
+        if self.channels.is_empty() && self.authors.is_empty() && self.threads.is_empty() {
             return Err(Error::InvalidSpec(
-                "selection must name at least one channel or author".into(),
+                "selection must name at least one channel, author, or thread".into(),
             ));
         }
         if let Some(c) = self.channels.iter().find(|c| !is_uuid(c)) {
@@ -67,6 +79,11 @@ impl Selection {
         if let Some(a) = self.authors.iter().find(|a| !is_hex_pubkey(a)) {
             return Err(Error::InvalidSpec(format!(
                 "author {a:?} is not a 64-hex pubkey"
+            )));
+        }
+        if let Some(t) = self.threads.iter().find(|t| !is_hex_id(t)) {
+            return Err(Error::InvalidSpec(format!(
+                "thread {t:?} is not a 64-hex event id"
             )));
         }
         if let Some(k) = self.kinds.iter().find(|k| **k > u16::MAX as u32) {
@@ -135,6 +152,11 @@ fn is_uuid(s: &str) -> bool {
 /// Lowercase 64-hex pubkey.
 fn is_hex_pubkey(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Lowercase 64-hex event id (same alphabet as a pubkey).
+fn is_hex_id(s: &str) -> bool {
+    is_hex_pubkey(s)
 }
 
 /// Deterministically materialize fetched signals: `created_at ASC, id ASC`,
@@ -259,6 +281,34 @@ mod tests {
         // A wider clamp cannot widen; a narrower one narrows.
         assert_eq!(s.resolve_window(Some(0), Some(10_000), 10_000), (100, 200));
         assert_eq!(s.resolve_window(Some(150), Some(180), 10_000), (150, 180));
+    }
+
+    #[test]
+    fn threads_clause_canonicalizes_and_satisfies_the_scope_rule() {
+        let root = "F".repeat(64);
+        let mut s = Selection {
+            threads: vec![root.clone(), root.to_ascii_lowercase()],
+            ..Selection::default()
+        };
+        s.canonicalize().expect("threads alone are a valid scope");
+        assert_eq!(s.threads, vec![root.to_ascii_lowercase()]);
+
+        let mut bad = Selection {
+            threads: vec!["not-an-id".into()],
+            ..Selection::default()
+        };
+        assert!(bad.canonicalize().is_err());
+    }
+
+    #[test]
+    fn selection_json_without_threads_still_loads_and_compares_equal() {
+        // Specs saved before the threads clause must keep loading and stay
+        // cache-compatible with a threads-less selection.
+        let legacy = format!(r#"{{"channels":["{CH_A}"]}}"#);
+        let loaded: Selection = serde_json::from_str(&legacy).expect("deserialize");
+        assert_eq!(loaded, channels(&[CH_A]));
+        let out = serde_json::to_string(&loaded).expect("serialize");
+        assert!(!out.contains("threads"), "empty threads must not serialize");
     }
 
     #[test]

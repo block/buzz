@@ -10,9 +10,16 @@ Signals — raw relay events, never rewritten — are the substrate. On top of
 them:
 
 - **Selection** — a frozen-or-live description of a signal set: who × what ×
-  when (`channels`, `authors`, `kinds`, plus the selection's own `since` /
-  `until_exclusive`). A pinned `until_exclusive` **freezes** it; an open end
-  means **live** — "and whatever comes next".
+  when (`channels`, `authors`, `threads`, `kinds`, plus the selection's own
+  `since` / `until_exclusive`). A pinned `until_exclusive` **freezes** it; an
+  open end means **live** — "and whatever comes next".
+  `threads` holds event ids: each anchor selects **itself plus every
+  descendant reply at any depth** (an anchor need not be a thread root — a
+  mid-thread id selects that sub-subtree). `channels` and `threads` **union**
+  as scope; `authors` and `kinds` intersect on top. Subtrees are resolved
+  from the mirror's reply linkage (`parent` column, NIP-10 `e` tags) at
+  materialization time, so a live thread selection keeps picking up new
+  replies.
 - **Fold** — name + selection + model + instructions: a **factory for
   artifacts**. Each run computes `artifact' = fold(artifact, new_signals)`.
   A frozen selection makes the fold run until its set is covered, then it is
@@ -92,7 +99,7 @@ so any non-loopback bind must add authentication first.
 |---|---|
 | `GET /status` | Connection, backfill, mirror counts. |
 | `GET /channels` | Discovered channels. |
-| `GET /events/{id}` | One mirrored event (the citation-chip endpoint). |
+| `GET /events/{id}` | One mirrored event (the citation-chip endpoint), with `parent` + `thread_root` reply lineage. |
 | `POST /select/preview` | `{selection, since?, until_exclusive?}` → count, size, daily rhythm. $0. |
 | `POST /select/events` | Same body + `limit`, `after` keyset cursor → the actual events, paged. |
 | `GET /folds` | All fold specs. |
@@ -116,6 +123,21 @@ makes resolving them trivial for a client: `GET /channels` lists every channel
 the key follows (the mirror only ever contains those), and "participated in
 since X" is `{authors: [<my pubkey>], since: X}`. Resolve, then create the
 fold.
+
+### One-off artifacts (compare a thread to a channel)
+
+A one-off is just a frozen fold you never touch again — no permanent digest
+chain required first:
+
+1. `GET /events/{id}` on any message in the thread → `thread_root`.
+2. `PUT /folds/compare--<topic>` with a **frozen** selection and a
+   purpose-specific prompt:
+   `{selection: {threads: ["<root>"], channels: ["<other-channel-uuid>"],
+   until_exclusive: <now>}, model, instructions}`.
+3. `POST .../preflight` ($0) to see size/cost, then `POST .../run` until
+   `coverage.complete` (large sets chunk across runs, honestly).
+4. Read the artifact; the fold is done forever — every later preflight says
+   *cached*.
 
 ## Layout
 

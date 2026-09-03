@@ -568,6 +568,7 @@ async fn verify_and_map(events: Vec<nostr::Event>) -> Vec<StoredEvent> {
 
 /// Distills a verified relay event into its storage row.
 pub(crate) fn event_to_stored(ev: &nostr::Event) -> StoredEvent {
+    let tag_rows: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
     StoredEvent {
         id: ev.id.to_hex(),
         channel: tag_value(ev, "h").map(str::to_string),
@@ -576,6 +577,7 @@ pub(crate) fn event_to_stored(ev: &nostr::Event) -> StoredEvent {
         created_at: ev.created_at.as_secs() as i64,
         content: ev.content.clone(),
         raw: serde_json::to_string(ev).unwrap_or_default(),
+        parent: super::store::parent_from_tag_rows(&tag_rows),
     }
 }
 

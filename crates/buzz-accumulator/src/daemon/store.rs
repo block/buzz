@@ -32,6 +32,8 @@ pub struct StoredEvent {
     pub content: String,
     /// Full raw event JSON as received from the relay.
     pub raw: String,
+    /// Direct reply parent (NIP-10 `e` tag), 64-hex, if the event is a reply.
+    pub parent: Option<String>,
 }
 
 /// A discovered channel and its backfill bookkeeping.
@@ -84,11 +86,17 @@ CREATE TABLE IF NOT EXISTS events (
     kind       INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     content    TEXT NOT NULL,
-    raw        TEXT NOT NULL
+    raw        TEXT NOT NULL,
+    parent     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_channel_time ON events(channel, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_kind_time    ON events(kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_author       ON events(pubkey);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS channels (
     id              TEXT PRIMARY KEY,
@@ -143,7 +151,73 @@ impl Store {
             .connect_with(options)
             .await?;
         sqlx::raw_sql(SCHEMA).execute(&pool).await?;
-        Ok(Self { pool })
+        let store = Self { pool };
+        store.migrate_parent_column().await?;
+        Ok(store)
+    }
+
+    /// Adds the `parent` column to mirrors created before threads existed and
+    /// backfills it from the raw event JSON already on disk — no relay
+    /// re-fetch, no reset. Idempotent: the backfill runs once, guarded by a
+    /// meta flag.
+    async fn migrate_parent_column(&self) -> Result<(), sqlx::Error> {
+        let has_parent = sqlx::query(
+            "SELECT COUNT(*) AS n FROM pragma_table_info('events') WHERE name = 'parent'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .get::<i64, _>("n")
+            > 0;
+        if !has_parent {
+            sqlx::raw_sql("ALTER TABLE events ADD COLUMN parent TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+        // The index lives here, not in SCHEMA: on a legacy mirror the column
+        // must exist before the index can.
+        sqlx::raw_sql("CREATE INDEX IF NOT EXISTS idx_events_parent ON events(parent)")
+            .execute(&self.pool)
+            .await?;
+        let done = sqlx::query("SELECT value FROM meta WHERE key = 'parent_backfill'")
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|r| r.get::<String, _>("value"));
+        if done.as_deref() == Some("done") {
+            return Ok(());
+        }
+        // Page by id keyset so a large mirror is never fully in memory.
+        let mut last_id = String::new();
+        loop {
+            let rows =
+                sqlx::query("SELECT id, raw FROM events WHERE id > ? ORDER BY id LIMIT 2000")
+                    .bind(&last_id)
+                    .fetch_all(&self.pool)
+                    .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let mut tx = self.pool.begin().await?;
+            for r in &rows {
+                let id: String = r.get("id");
+                let raw: String = r.get("raw");
+                if let Some(parent) = parent_from_raw(&raw) {
+                    sqlx::query("UPDATE events SET parent = ? WHERE id = ?")
+                        .bind(parent)
+                        .bind(&id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                last_id = id;
+            }
+            tx.commit().await?;
+        }
+        sqlx::query(
+            "INSERT INTO meta (key, value) VALUES ('parent_backfill', 'done')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     // ---- events ----
@@ -154,8 +228,8 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         for ev in events {
             let done = sqlx::query(
-                "INSERT OR IGNORE INTO events (id, channel, pubkey, kind, created_at, content, raw)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO events (id, channel, pubkey, kind, created_at, content, raw, parent)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&ev.id)
             .bind(&ev.channel)
@@ -164,6 +238,7 @@ impl Store {
             .bind(ev.created_at)
             .bind(&ev.content)
             .bind(&ev.raw)
+            .bind(&ev.parent)
             .execute(&mut *tx)
             .await?;
             inserted += done.rows_affected();
@@ -251,6 +326,49 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(row_to_signal))
+    }
+
+    /// Reply lineage of one event: its direct parent and its thread root —
+    /// the topmost *mirrored* ancestor (an event whose own parent is absent
+    /// or unknown to the mirror). Returns `None` when the event itself is
+    /// unknown. Cycle-safe.
+    pub async fn thread_lineage(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Option<String>, String)>, sqlx::Error> {
+        let rows = sqlx::query(
+            "WITH RECURSIVE up(id, parent) AS (
+                 SELECT id, parent FROM events WHERE id = ?
+                 UNION
+                 SELECT e.id, e.parent FROM events e JOIN up ON e.id = up.parent
+             )
+             SELECT id, parent FROM up",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+        let chain: BTreeMap<String, Option<String>> = rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("id"),
+                    r.get::<Option<String>, _>("parent"),
+                )
+            })
+            .collect();
+        if !chain.contains_key(id) {
+            return Ok(None);
+        }
+        let parent = chain.get(id).cloned().flatten();
+        let mut root = id.to_string();
+        let mut seen = BTreeSet::new();
+        while let Some(Some(p)) = chain.get(&root) {
+            if !chain.contains_key(p) || !seen.insert(p.clone()) {
+                break;
+            }
+            root = p.clone();
+        }
+        Ok(Some((parent, root)))
     }
 
     // ---- channels ----
@@ -519,24 +637,54 @@ impl Store {
 }
 
 /// Base signal query: columns + window + selection predicates, no ordering.
+///
+/// Scope rule: `channels` and `threads` union — an event is in scope when it
+/// is in a listed channel OR in the subtree (anchor + descendants at any
+/// depth) of a listed thread anchor. `authors` and `kinds` intersect on top.
+/// The subtree is resolved by a recursive CTE over the mirror's `parent`
+/// links; `UNION` (not `UNION ALL`) makes it terminate even on a pathological
+/// parent cycle.
 fn signal_query(
     selection: &Selection,
     since: i64,
     until_exclusive: i64,
 ) -> QueryBuilder<sqlx::Sqlite> {
-    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new("");
+    if !selection.threads.is_empty() {
+        qb.push("WITH RECURSIVE thread_scope(id) AS (SELECT id FROM events WHERE id IN (");
+        let mut sep = qb.separated(", ");
+        for t in &selection.threads {
+            sep.push_bind(t);
+        }
+        qb.push(") UNION SELECT e.id FROM events e JOIN thread_scope ts ON e.parent = ts.id) ");
+    }
+    qb.push(
         "SELECT id, channel, pubkey, kind, created_at, content FROM events WHERE created_at >= ",
     );
     qb.push_bind(since);
     qb.push(" AND created_at < ");
     qb.push_bind(until_exclusive);
-    if !selection.channels.is_empty() {
-        qb.push(" AND channel IN (");
-        let mut sep = qb.separated(", ");
-        for c in &selection.channels {
-            sep.push_bind(c);
+    match (selection.channels.is_empty(), selection.threads.is_empty()) {
+        (false, false) => {
+            qb.push(" AND (channel IN (");
+            let mut sep = qb.separated(", ");
+            for c in &selection.channels {
+                sep.push_bind(c);
+            }
+            qb.push(") OR id IN (SELECT id FROM thread_scope))");
         }
-        qb.push(")");
+        (false, true) => {
+            qb.push(" AND channel IN (");
+            let mut sep = qb.separated(", ");
+            for c in &selection.channels {
+                sep.push_bind(c);
+            }
+            qb.push(")");
+        }
+        (true, false) => {
+            qb.push(" AND id IN (SELECT id FROM thread_scope)");
+        }
+        (true, true) => {}
     }
     if !selection.authors.is_empty() {
         qb.push(" AND pubkey IN (");
@@ -553,6 +701,46 @@ fn signal_query(
     }
     qb.push(")");
     qb
+}
+
+/// Extracts the direct reply parent from raw event JSON (used by the one-time
+/// backfill; live ingest parses typed tags in `sync`).
+fn parent_from_raw(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let tags: Vec<Vec<String>> = value
+        .get("tags")?
+        .as_array()?
+        .iter()
+        .filter_map(|t| {
+            t.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+        .collect();
+    parent_from_tag_rows(&tags)
+}
+
+/// NIP-10 direct-parent resolution over `e` tags: prefer the `reply`-marked
+/// tag; else the `root`-marked one (a direct reply to the root carries only
+/// that); else the last positional `e` tag.
+pub(crate) fn parent_from_tag_rows(tags: &[Vec<String>]) -> Option<String> {
+    let e_tags: Vec<&Vec<String>> = tags
+        .iter()
+        .filter(|t| t.first().map(String::as_str) == Some("e") && t.get(1).is_some())
+        .collect();
+    let marked = |m: &str| {
+        e_tags
+            .iter()
+            .find(|t| t.get(3).map(String::as_str) == Some(m))
+            .and_then(|t| t.get(1))
+    };
+    marked("reply")
+        .or_else(|| marked("root"))
+        .or_else(|| e_tags.last().and_then(|t| t.get(1)))
+        .map(|id| id.trim().to_ascii_lowercase())
 }
 
 fn row_to_signal(r: sqlx::sqlite::SqliteRow) -> Signal {
@@ -579,7 +767,19 @@ mod tests {
             created_at: ts,
             content: format!("content-{id}"),
             raw: "{}".into(),
+            parent: None,
         }
+    }
+
+    fn reply(id: &str, parent: &str, channel: Option<&str>, ts: i64) -> StoredEvent {
+        StoredEvent {
+            parent: Some(parent.repeat(64 / parent.len().max(1))),
+            ..ev(id, channel, 9, ts)
+        }
+    }
+
+    fn full_id(short: &str) -> String {
+        short.repeat(64 / short.len().max(1))
     }
 
     fn selection(channels: &[&str]) -> Selection {
@@ -619,6 +819,195 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].created_at, 100);
         assert_eq!(got[0].channel.as_deref(), Some("cha"));
+    }
+
+    /// A three-deep thread in `cha` (root → reply → reply-to-reply), a
+    /// bystander in `cha`, and an event in `chb`.
+    async fn thread_fixture(store: &Store) {
+        store
+            .upsert_events(&[
+                ev("a1", Some("cha"), 9, 100),       // thread root
+                reply("b2", "a1", Some("cha"), 110), // depth 1
+                reply("c3", "b2", Some("cha"), 120), // depth 2 (sub-thread)
+                ev("d4", Some("cha"), 9, 130),       // same channel, not in thread
+                ev("e5", Some("chb"), 9, 140),       // other channel
+            ])
+            .await
+            .expect("insert fixture");
+    }
+
+    #[tokio::test]
+    async fn thread_selection_takes_anchor_plus_all_descendants() {
+        let store = Store::open(":memory:").await.expect("open");
+        thread_fixture(&store).await;
+        let sel = Selection {
+            threads: vec![full_id("a1")],
+            ..Selection::default()
+        };
+        let got = store.query_signals(&sel, 0, 1_000).await.expect("query");
+        let ids: Vec<String> = got.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids, vec![full_id("a1"), full_id("b2"), full_id("c3")]);
+        // A mid-thread anchor selects only that sub-subtree.
+        let sel = Selection {
+            threads: vec![full_id("b2")],
+            ..Selection::default()
+        };
+        let got = store.query_signals(&sel, 0, 1_000).await.expect("query");
+        let ids: Vec<String> = got.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids, vec![full_id("b2"), full_id("c3")]);
+    }
+
+    #[tokio::test]
+    async fn threads_and_channels_union_while_filters_intersect() {
+        let store = Store::open(":memory:").await.expect("open");
+        thread_fixture(&store).await;
+        // Riley's comparison shape: thread A + all of channel B.
+        let sel = Selection {
+            threads: vec![full_id("a1")],
+            channels: vec!["chb".into()],
+            ..Selection::default()
+        };
+        let got = store.query_signals(&sel, 0, 1_000).await.expect("query");
+        let ids: Vec<String> = got.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(
+            ids,
+            vec![full_id("a1"), full_id("b2"), full_id("c3"), full_id("e5")]
+        );
+        // The window still clamps subtree members.
+        let got = store.query_signals(&sel, 105, 115).await.expect("query");
+        let ids: Vec<String> = got.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids, vec![full_id("b2")]);
+        // Authors intersect: a different author matches nothing.
+        let sel = Selection {
+            threads: vec![full_id("a1")],
+            authors: vec!["f".repeat(64)],
+            ..Selection::default()
+        };
+        assert!(store
+            .query_signals(&sel, 0, 1_000)
+            .await
+            .expect("query")
+            .is_empty());
+        // An anchor the mirror has never seen selects nothing (not an error).
+        let sel = Selection {
+            threads: vec!["9".repeat(64)],
+            ..Selection::default()
+        };
+        assert!(store
+            .query_signals(&sel, 0, 1_000)
+            .await
+            .expect("query")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn thread_lineage_resolves_parent_and_root() {
+        let store = Store::open(":memory:").await.expect("open");
+        thread_fixture(&store).await;
+        let (parent, root) = store
+            .thread_lineage(&full_id("c3"))
+            .await
+            .expect("query")
+            .expect("known event");
+        assert_eq!(parent.as_deref(), Some(full_id("b2").as_str()));
+        assert_eq!(root, full_id("a1"));
+        let (parent, root) = store
+            .thread_lineage(&full_id("a1"))
+            .await
+            .expect("query")
+            .expect("known event");
+        assert_eq!(parent, None);
+        assert_eq!(root, full_id("a1"));
+        assert!(store
+            .thread_lineage(&"9".repeat(64))
+            .await
+            .expect("query")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_mirror_gains_parent_column_and_backfills_from_raw() {
+        // A pre-threads mirror: no `parent` column, no meta table, raw JSON on
+        // disk. Opening the store must migrate it in place — no relay fetch.
+        let path = std::env::temp_dir().join(format!(
+            "accumulator-parent-migration-{}.db",
+            std::process::id()
+        ));
+        let path_str = path.to_str().expect("utf8 temp path").to_string();
+        let _ = std::fs::remove_file(&path);
+        {
+            let options = SqliteConnectOptions::new()
+                .filename(&path_str)
+                .create_if_missing(true);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("open legacy");
+            sqlx::raw_sql(
+                "CREATE TABLE events (
+                     id TEXT PRIMARY KEY, channel TEXT, pubkey TEXT NOT NULL,
+                     kind INTEGER NOT NULL, created_at INTEGER NOT NULL,
+                     content TEXT NOT NULL, raw TEXT NOT NULL
+                 )",
+            )
+            .execute(&pool)
+            .await
+            .expect("legacy schema");
+            let root = full_id("a1");
+            let raw_reply = format!(
+                r#"{{"id":"{}","tags":[["h","cha"],["e","{root}","","reply"]]}}"#,
+                full_id("b2")
+            );
+            for (id, raw) in [(root.clone(), "{}".to_string()), (full_id("b2"), raw_reply)] {
+                sqlx::query(
+                    "INSERT INTO events (id, channel, pubkey, kind, created_at, content, raw)
+                     VALUES (?, 'cha', ?, 9, 100, 'x', ?)",
+                )
+                .bind(&id)
+                .bind("a".repeat(64))
+                .bind(&raw)
+                .execute(&pool)
+                .await
+                .expect("legacy insert");
+            }
+            pool.close().await;
+        }
+        let store = Store::open(&path_str).await.expect("migrating open");
+        let sel = Selection {
+            threads: vec![full_id("a1")],
+            ..Selection::default()
+        };
+        let got = store.query_signals(&sel, 0, 1_000).await.expect("query");
+        let ids: Vec<String> = got.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids, vec![full_id("a1"), full_id("b2")]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn parent_resolution_prefers_reply_then_root_then_last_positional() {
+        let root = full_id("a1");
+        let mid = full_id("b2");
+        let tag = |name: &str, rest: &[&str]| -> Vec<String> {
+            std::iter::once(name)
+                .chain(rest.iter().copied())
+                .map(str::to_string)
+                .collect()
+        };
+        // Marked reply wins over marked root.
+        let tags = vec![
+            tag("e", &[&root, "", "root"]),
+            tag("e", &[&mid, "", "reply"]),
+        ];
+        assert_eq!(parent_from_tag_rows(&tags), Some(mid.clone()));
+        // Only a root marker: that IS the direct parent.
+        let tags = vec![tag("e", &[&root, "", "root"])];
+        assert_eq!(parent_from_tag_rows(&tags), Some(root.clone()));
+        // Unmarked positional tags: last one is the parent (NIP-10 legacy).
+        let tags = vec![tag("e", &[&root]), tag("e", &[&mid])];
+        assert_eq!(parent_from_tag_rows(&tags), Some(mid.clone()));
+        // No e tags at all.
+        assert_eq!(parent_from_tag_rows(&[tag("h", &["cha"])]), None);
     }
 
     #[tokio::test]

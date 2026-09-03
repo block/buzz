@@ -3,6 +3,8 @@
 export type Selection = {
   channels: string[];
   authors: string[];
+  /** Thread anchors: each event id selects itself + all descendant replies. */
+  threads: string[];
   kinds: number[];
   /** Selection's own window (who × what × when). A pinned `until_exclusive`
    * freezes the selection; open ends mean live ("and whatever comes next"). */
@@ -180,6 +182,7 @@ function normalizeSelection(s: Partial<Selection> | undefined): Selection {
   return {
     channels: s?.channels ?? [],
     authors: s?.authors ?? [],
+    threads: s?.threads ?? [],
     kinds: s?.kinds ?? [],
     since: s?.since,
     until_exclusive: s?.until_exclusive,
