@@ -28,6 +28,22 @@ import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
+import { attachManagedAgentToChannel } from "./channelAgents";
+import { hasDirectAgentCreationGrant } from "./directAgentCreationGrant";
+import {
+  beginDirectAgentCreation,
+  getDirectAgentCreationResult,
+  recordDirectAgentCreationResult,
+} from "./directAgentCreationJournal";
+import {
+  directAgentCreationResultContent,
+  type DirectAgentCreationResult,
+} from "./directAgentCreationResult";
+import { getDefaultPersonaRuntime } from "./lib/resolvePersonaRuntime";
+import { useGlobalAgentConfig } from "./useGlobalAgentConfig";
+import { sendChannelMessage } from "@/shared/api/tauriMessages";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { useCommunities } from "@/features/communities/useCommunities";
 import type {
   CreatePersonaInput,
   UpdatePersonaInput,
@@ -59,6 +75,8 @@ function updateInputFromRequest(
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
+  const identityQuery = useIdentityQuery();
+  const { activeCommunity } = useCommunities();
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const channelsQuery = useChannelsQuery();
@@ -66,6 +84,8 @@ export function useAgentManagement() {
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
+  const { globalConfig, isLoading: isGlobalConfigLoading } =
+    useGlobalAgentConfig();
   const [request, setRequest] = React.useState<AgentManagementRequest | null>(
     null,
   );
@@ -79,6 +99,14 @@ export function useAgentManagement() {
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
+  const directRequestInFlight = React.useRef<string | null>(null);
+
+  const dismiss = React.useEffectEvent(() => {
+    pendingRequestId.current = null;
+    sourceAgentPubkey.current = null;
+    directRequestInFlight.current = null;
+    setRequest(null);
+  });
 
   const acceptOwnedRequest = React.useEffectEvent(
     (agentPubkey: string, next: AgentManagementRequest) => {
@@ -89,7 +117,8 @@ export function useAgentManagement() {
           agentPubkey,
           next.request.channelId,
         ) !== "accept" ||
-        seenRequestIds.current.has(next.requestId)
+        (next.action !== "create_direct" &&
+          seenRequestIds.current.has(next.requestId))
       ) {
         return;
       }
@@ -259,11 +288,212 @@ export function useAgentManagement() {
     }
   }
 
-  function dismiss() {
-    pendingRequestId.current = null;
-    sourceAgentPubkey.current = null;
-    setRequest(null);
+  async function publishDirectResult(
+    result: DirectAgentCreationResult,
+    request: Extract<AgentManagementRequest, { action: "create_direct" }>,
+    requesterPubkey: string,
+    expectedRelayUrl: string,
+    expectedSignerPubkey: string,
+  ) {
+    await sendChannelMessage(
+      request.request.channelId,
+      directAgentCreationResultContent(result),
+      request.request.replyTo ?? null,
+      undefined,
+      [requesterPubkey],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      expectedRelayUrl,
+      expectedSignerPubkey,
+    );
   }
+
+  async function publishDirectResultWithRetry(
+    result: DirectAgentCreationResult,
+    request: Extract<AgentManagementRequest, { action: "create_direct" }>,
+    requesterPubkey: string,
+    expectedRelayUrl: string,
+    expectedSignerPubkey: string,
+  ) {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await publishDirectResult(
+          result,
+          request,
+          requesterPubkey,
+          expectedRelayUrl,
+          expectedSignerPubkey,
+        );
+        return;
+      } catch (cause) {
+        lastError = cause;
+      }
+    }
+    throw lastError;
+  }
+
+  const processDirectCreate = React.useEffectEvent(
+    async (
+      directRequest: Extract<
+        AgentManagementRequest,
+        { action: "create_direct" }
+      >,
+      requesterPubkey: string,
+    ) => {
+      const expectedRelayUrl = activeCommunity?.relayUrl.trim() ?? "";
+      const expectedSignerPubkey =
+        identityQuery.data?.pubkey.trim().toLowerCase() ?? "";
+      if (!expectedRelayUrl || !expectedSignerPubkey) {
+        throw new Error("The active community identity is not ready.");
+      }
+      const replay = getDirectAgentCreationResult(
+        expectedSignerPubkey,
+        directRequest.requestId,
+      );
+      if (replay) {
+        await publishDirectResultWithRetry(
+          replay,
+          directRequest,
+          requesterPubkey,
+          expectedRelayUrl,
+          expectedSignerPubkey,
+        );
+        dismiss();
+        return;
+      }
+
+      let result: DirectAgentCreationResult;
+      try {
+        assertAgentCanActFromOrigin(directRequest.request.channelId);
+        if (
+          !hasDirectAgentCreationGrant(expectedSignerPubkey, requesterPubkey)
+        ) {
+          result = {
+            requestId: directRequest.requestId,
+            status: "denied",
+            displayName: directRequest.request.displayName,
+            message:
+              "This agent does not have a standing direct-creation grant in Settings.",
+          };
+        } else {
+          beginDirectAgentCreation(
+            expectedSignerPubkey,
+            directRequest.requestId,
+            directRequest.request.displayName,
+          );
+          const runtimes = await availableRuntimesForStart(runtimesQuery);
+          const runtime = getDefaultPersonaRuntime(
+            runtimes,
+            globalConfig.preferred_runtime,
+          );
+          if (!runtime) {
+            throw new Error(
+              "No available default runtime is configured for direct creation.",
+            );
+          }
+
+          const avatarUrl = await resolveManagedAgentAvatarUrl(
+            undefined,
+            undefined,
+            runtime.avatarUrl,
+          );
+          const persona = await createPersonaMutation.mutateAsync({
+            ...createInputFromRequest(directRequest),
+            avatarUrl,
+            runtime: runtime.id,
+            provider: globalConfig.provider ?? undefined,
+            model: globalConfig.model ?? undefined,
+            behavior: { respondTo: "owner-only" },
+          });
+          const instanceInput = await buildInstanceInputForDefinition(
+            persona,
+            runtime,
+          );
+          const created = await createAgentMutation.mutateAsync({
+            ...instanceInput,
+            relayUrl: expectedRelayUrl,
+            expectedRelayUrl,
+            expectedSignerPubkey,
+          });
+          if (created.spawnError) throw new Error(created.spawnError);
+          if (created.profileSyncError)
+            throw new Error(created.profileSyncError);
+          const attached = await attachManagedAgentToChannel(
+            directRequest.request.channelId,
+            {
+              agent: created.agent,
+              role: "bot",
+              ensureRunning: true,
+              expectedRelayUrl,
+              expectedSignerPubkey,
+            },
+          );
+          result = {
+            requestId: directRequest.requestId,
+            status: "created",
+            displayName: attached.agent.name,
+            agentPubkey: attached.agent.pubkey,
+            message: "Agent created and added to the originating channel.",
+          };
+        }
+      } catch (cause) {
+        result = {
+          requestId: directRequest.requestId,
+          status: "failed",
+          displayName: directRequest.request.displayName,
+          message:
+            cause instanceof Error ? cause.message : "Direct creation failed.",
+        };
+      }
+
+      recordDirectAgentCreationResult(expectedSignerPubkey, result);
+      await publishDirectResultWithRetry(
+        result,
+        directRequest,
+        requesterPubkey,
+        expectedRelayUrl,
+        expectedSignerPubkey,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: personasQueryKey }),
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+      ]);
+      dismiss();
+    },
+  );
+
+  React.useEffect(() => {
+    if (
+      request?.action !== "create_direct" ||
+      isGlobalConfigLoading ||
+      identityQuery.isLoading ||
+      !activeCommunity ||
+      directRequestInFlight.current === request.requestId
+    ) {
+      return;
+    }
+    const requesterPubkey = sourceAgentPubkey.current;
+    if (!requesterPubkey) return;
+    directRequestInFlight.current = request.requestId;
+    void processDirectCreate(request, requesterPubkey).catch((cause) => {
+      console.error("Direct agent creation acknowledgement failed", cause);
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Direct agent creation acknowledgement failed.",
+      );
+      dismiss();
+    });
+  }, [
+    activeCommunity,
+    identityQuery.isLoading,
+    isGlobalConfigLoading,
+    request,
+  ]);
 
   const createInitialValues = React.useMemo(
     () =>

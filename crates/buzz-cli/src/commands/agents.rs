@@ -1,9 +1,13 @@
 use buzz_core::kind::KIND_IA_ARCHIVED_LIST;
 use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identity_request};
-use nostr::PublicKey;
+use nostr::{JsonUtil, PublicKey};
 use serde_json::json;
+use std::time::{Duration, Instant};
 
-use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
+use crate::agent_management::{
+    build_create, build_direct_create, build_update, CreateAgentDraft, DirectCreateAgentRequest,
+    UpdateAgentDraft,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
@@ -11,6 +15,41 @@ use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::Create {
+            channel,
+            display_name,
+            system_prompt,
+            reply_to,
+            request_id,
+            timeout,
+        } => {
+            let owner = require_owner(client)?;
+            let built = build_direct_create(
+                client.keys(),
+                &owner,
+                DirectCreateAgentRequest {
+                    channel_id: channel.clone(),
+                    display_name,
+                    system_prompt: read_or_stdin(&system_prompt)?,
+                    reply_to,
+                },
+                request_id,
+            )?;
+            let request_id = built.request_id.clone();
+            let since = chrono::Utc::now().timestamp().saturating_sub(5);
+            client.publish_ephemeral_event(built.event).await?;
+            let result = wait_for_direct_create_result(
+                client,
+                &channel,
+                &owner.to_hex(),
+                &request_id,
+                since,
+                Duration::from_secs(timeout.clamp(5, 300)),
+            )
+            .await?;
+            println!("{result}");
+            Ok(())
+        }
         AgentsCmd::DraftCreate {
             channel,
             display_name,
@@ -167,8 +206,104 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
     }
 }
 
-/// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
-/// the `draft-create` and `draft-update` paths.
+async fn wait_for_direct_create_result(
+    client: &BuzzClient,
+    channel: &str,
+    owner_hex: &str,
+    request_id: &str,
+    since: i64,
+    timeout: Duration,
+) -> Result<serde_json::Value, CliError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let filter = json!({
+            "kinds": [9],
+            "authors": [owner_hex],
+            "#h": [channel],
+            "since": since,
+            "limit": 100,
+        });
+        let raw = client.query(&filter).await?;
+        let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+            .map_err(|error| CliError::Other(format!("invalid create-result response: {error}")))?;
+        for value in events {
+            if value.get("pubkey").and_then(serde_json::Value::as_str) != Some(owner_hex) {
+                continue;
+            }
+            let event = nostr::Event::from_json(value.to_string())
+                .map_err(|error| CliError::Other(format!("invalid result event: {error}")))?;
+            if !event.verify_id() || !event.verify_signature() {
+                continue;
+            }
+            let Some(marker) = parse_direct_create_marker(&event.content, request_id) else {
+                continue;
+            };
+            return match marker.status.as_str() {
+                "created" => Ok(json!({
+                    "event_id": event.id.to_hex(),
+                    "request_id": request_id,
+                    "action": "create",
+                    "created": true,
+                    "agent_pubkey": marker.agent_pubkey,
+                })),
+                "denied" | "failed" => Err(CliError::Other(format!(
+                    "direct agent creation {} (request_id {request_id}); see owner result event {}",
+                    marker.status,
+                    event.id.to_hex(),
+                ))),
+                _ => continue,
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err(CliError::Other(format!(
+                "timed out waiting for the owner's Desktop to create the agent (request_id {request_id}); retry with --request-id {request_id} to avoid duplicates"
+            )));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+struct DirectCreateMarker {
+    status: String,
+    agent_pubkey: Option<String>,
+}
+
+fn parse_direct_create_marker(content: &str, request_id: &str) -> Option<DirectCreateMarker> {
+    const PREFIX: &str = "<!-- buzz-agent-create-result ";
+    let marker = content.split(PREFIX).nth(1)?.split(" -->").next()?;
+    let mut request = None;
+    let mut status = None;
+    let mut agent_pubkey = None;
+    for part in marker.split_ascii_whitespace() {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "request" => request = Some(value),
+            "status" => status = Some(value),
+            "pubkey" => agent_pubkey = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    if request != Some(request_id) {
+        return None;
+    }
+    if !matches!(status, Some("created" | "denied" | "failed")) {
+        return None;
+    }
+    if status == Some("created")
+        && !agent_pubkey.as_deref().is_some_and(|value| {
+            value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
+        })
+    {
+        return None;
+    }
+    Some(DirectCreateMarker {
+        status: status?.to_owned(),
+        agent_pubkey,
+    })
+}
+
+/// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used by
+/// owner-addressed agent-management requests.
 fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
     let hex = client
         .auth_tag_owner_hex()
@@ -540,6 +675,39 @@ mod tests {
 
     fn hex128(c: char) -> String {
         std::iter::repeat_n(c, 128).collect()
+    }
+
+    #[test]
+    fn direct_create_marker_requires_matching_request_and_created_pubkey() {
+        let request_id = "2fd826e1-3958-4f39-afbe-c12a83925334";
+        let pubkey = hex64('a');
+        let content = format!(
+            "Created.\n\n<!-- buzz-agent-create-result request={request_id} status=created pubkey={pubkey} -->"
+        );
+
+        let marker = parse_direct_create_marker(&content, request_id).unwrap();
+        assert_eq!(marker.status, "created");
+        assert_eq!(marker.agent_pubkey.as_deref(), Some(pubkey.as_str()));
+        assert!(parse_direct_create_marker(&content, "another-request").is_none());
+        assert!(parse_direct_create_marker(
+            &format!(
+                "<!-- buzz-agent-create-result request={request_id} status=created pubkey=short -->"
+            ),
+            request_id,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn direct_create_marker_accepts_terminal_failure_without_pubkey() {
+        let request_id = "2fd826e1-3958-4f39-afbe-c12a83925334";
+        let content = format!(
+            "Denied.\n\n<!-- buzz-agent-create-result request={request_id} status=denied -->"
+        );
+
+        let marker = parse_direct_create_marker(&content, request_id).unwrap();
+        assert_eq!(marker.status, "denied");
+        assert_eq!(marker.agent_pubkey, None);
     }
 
     // --- (b) auth-selection matrix: extract_owner_auth_tag ---

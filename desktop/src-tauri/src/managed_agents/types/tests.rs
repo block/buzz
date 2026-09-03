@@ -274,6 +274,26 @@ fn create_request_deserializes_camel_case_relay_mesh() {
     );
 }
 
+#[test]
+fn create_request_deserializes_captured_tenant_scope() {
+    let request: CreateManagedAgentRequest = serde_json::from_str(
+        r#"{
+            "name": "scoped-agent",
+            "expectedRelayUrl": "wss://relay.example",
+            "expectedSignerPubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }"#,
+    )
+    .expect("captured tenant scope from TS should deserialize");
+    assert_eq!(
+        request.expected_relay_url.as_deref(),
+        Some("wss://relay.example")
+    );
+    assert_eq!(
+        request.expected_signer_pubkey.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+}
+
 /// Persisted records use snake_case; the camelCase alias must not break
 /// the stored-record round trip.
 #[test]

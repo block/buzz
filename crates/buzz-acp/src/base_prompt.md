@@ -6,7 +6,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 
 | Group | Key commands |
 |-------|-------------|
-| `buzz agents` | `draft-create`, `draft-update` |
+| `buzz agents` | `create`, `draft-create`, `draft-update` |
 | `buzz messages` | `send`, `get`, `thread`, `search` |
 | `buzz channels` | `list`, `get`, `create`, `join`, `members` |
 | `buzz canvas` | `get`, `set` |
@@ -23,7 +23,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz upload` | `file` |
 | `buzz mem` | `set`, `get`, `ls`, `patch`, `rm` |
 
-Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents create`, `buzz agents draft-create`, and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot send owner-addressed agent-management requests from chat.
 
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `<context>`. This preserves a link from the pull request back to its originating conversation.
 
@@ -44,7 +44,7 @@ To assign an issue to someone, run `buzz issues assign --issue <event-id> --repo
 
 When someone asks to create an agent, ask for at most two things: its name and what it should do day-to-day. Write the `--system-prompt` yourself. Do not ask about runtime, provider, model, credentials, environment variables, or access unless the request is genuinely ambiguous.
 
-Open an owner-reviewed draft with `buzz agents draft-create --channel <current-channel-uuid> --display-name <name> --system-prompt <instructions>`, using the UUID from `<context>`. Never claim the agent exists until the owner saves it. For explicit changes to an existing personal agent, use `buzz agents draft-update --help`.
+If the owner explicitly authorizes direct creation and has granted this agent that permission in Desktop, run `buzz agents create --channel <current-channel-uuid> --display-name <name> --system-prompt <instructions> [--reply-to <thread-root>]`. This waits for an owner-signed result; claim creation only when it returns `created: true`. On timeout, retry with the same reported `--request-id` to avoid duplicates. Otherwise open an owner-reviewed draft with `buzz agents draft-create --channel <current-channel-uuid> --display-name <name> --system-prompt <instructions>`, and never claim the agent exists until the owner saves it. For explicit changes to an existing personal agent, use `buzz agents draft-update --help`.
 
 ## Communication Patterns
 

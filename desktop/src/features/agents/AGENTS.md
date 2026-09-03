@@ -324,7 +324,23 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   --mention <agent-pubkey> --content '!cancel'
 ```
 
+## Direct creation grants
+
+`buzz agents create` is a Desktop-mediated privileged operation. Desktop remains
+the authority: accept requests only from a locally managed agent that shares
+the source channel and has an explicit per-agent grant in Settings. Direct
+creation always uses saved owner defaults, forces owner-only response access,
+adds the new agent to the source channel, and reports a signed terminal result
+there. Capture relay and signer scope before the first await and pass that scope
+through membership, start, and acknowledgement calls so community switches
+fail closed. Persist the request ID before creation begins; an incomplete prior
+attempt must stop for inspection rather than risk a duplicate.
+
 ## The tests that enforce this
+
+- `directAgentCreationGrant.test.mjs`, `directAgentCreationJournal.test.mjs`,
+  and `directAgentCreationResult.test.mjs` cover per-agent grant persistence,
+  crash-safe request correlation, and signed-result marker formatting.
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
   policy. Update when the capability model changes.

@@ -195,6 +195,12 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Tenant scope captured by a long-lived caller before its first await.
+    #[serde(default)]
+    pub expected_relay_url: Option<String>,
+    /// Owner identity captured together with the relay scope.
+    #[serde(default)]
+    pub expected_signer_pubkey: Option<String>,
 }
 
 /// Patch request for updating a managed agent's mutable fields.

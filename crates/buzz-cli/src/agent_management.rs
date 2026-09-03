@@ -21,6 +21,16 @@ pub struct CreateAgentDraft {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DirectCreateAgentRequest {
+    pub channel_id: String,
+    pub display_name: String,
+    pub system_prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateAgentDraft {
     pub channel_id: String,
     pub agent_name: String,
@@ -108,6 +118,26 @@ fn build<T: Serialize>(
     request: T,
 ) -> Result<BuiltDraftRequest, CliError> {
     let request_id = uuid::Uuid::new_v4().to_string();
+    build_with_request_id(
+        keys,
+        owner,
+        channel_id,
+        request_kind,
+        action,
+        request,
+        request_id,
+    )
+}
+
+fn build_with_request_id<T: Serialize>(
+    keys: &Keys,
+    owner: &PublicKey,
+    channel_id: String,
+    request_kind: &'static str,
+    action: &'static str,
+    request: T,
+    request_id: String,
+) -> Result<BuiltDraftRequest, CliError> {
     let payload = ObserverEvent {
         seq: 0,
         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -161,6 +191,46 @@ pub fn build_create(
         AGENT_REQUEST_KIND,
         "create",
         request,
+    )
+}
+
+pub fn build_direct_create(
+    keys: &Keys,
+    owner: &PublicKey,
+    request: DirectCreateAgentRequest,
+    request_id: Option<String>,
+) -> Result<BuiltDraftRequest, CliError> {
+    let channel_id = required(request.channel_id, "channel", 128)?;
+    uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
+    let request_id = request_id
+        .map(|value| required(value, "request id", 64))
+        .transpose()?
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    uuid::Uuid::parse_str(&request_id)
+        .map_err(|_| CliError::Usage(format!("invalid request UUID: {request_id}")))?;
+    let reply_to = optional(request.reply_to, "reply-to")?;
+    if reply_to.as_deref().is_some_and(|value| {
+        value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit())
+    }) {
+        return Err(CliError::Usage(
+            "reply-to must be a 64-character hex event id".into(),
+        ));
+    }
+    let request = DirectCreateAgentRequest {
+        channel_id: channel_id.clone(),
+        display_name: required(request.display_name, "display name", MAX_NAME_CHARS)?,
+        system_prompt: required(request.system_prompt, "system prompt", MAX_PROMPT_CHARS)?,
+        reply_to,
+    };
+    build_with_request_id(
+        keys,
+        owner,
+        channel_id,
+        AGENT_REQUEST_KIND,
+        "create_direct",
+        request,
+        request_id,
     )
 }
 
@@ -339,6 +409,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("invalid channel UUID"));
+    }
+
+    #[test]
+    fn direct_create_preserves_idempotency_key_and_reply_target() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let reply_to = "a".repeat(64);
+        let built = build_direct_create(
+            &agent,
+            &owner.public_key(),
+            DirectCreateAgentRequest {
+                channel_id: CHANNEL.into(),
+                display_name: "Operations helper".into(),
+                system_prompt: "Operate safely.".into(),
+                reply_to: Some(reply_to.clone()),
+            },
+            Some(request_id.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(built.request_id, request_id);
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["action"], "create_direct");
+        assert_eq!(payload["payload"]["requestId"], request_id);
+        assert_eq!(payload["payload"]["request"]["replyTo"], reply_to);
     }
 
     #[test]

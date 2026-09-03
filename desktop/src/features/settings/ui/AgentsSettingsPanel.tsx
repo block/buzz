@@ -12,6 +12,7 @@ import {
   SettingsOptionRow,
 } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { DirectAgentCreationSettingsCard } from "./DirectAgentCreationSettingsCard";
 
 export function AgentsSettingsPanel() {
   const automaticallyMentionAgents = useKeepMentionedAgentsPinned();
@@ -48,6 +49,7 @@ export function AgentsSettingsPanel() {
             />
           </SettingsOptionRow>
         </SettingsOptionGroup>
+        <DirectAgentCreationSettingsCard />
         <PreventSleepSettingsCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />

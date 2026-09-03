@@ -431,6 +431,10 @@ export type CreateManagedAgentInput = {
    */
   respondToAllowlist?: string[];
   relayMesh?: RelayMeshConfig;
+  /** Captured tenant scope for long-lived creation flows. */
+  expectedRelayUrl?: string;
+  /** Captured owner identity paired with expectedRelayUrl. */
+  expectedSignerPubkey?: string;
 };
 
 export type CreateManagedAgentResponse = {
