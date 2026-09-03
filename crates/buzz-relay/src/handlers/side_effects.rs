@@ -9,9 +9,9 @@ use uuid::Uuid;
 use buzz_core::kind::{
     event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_DELETE_GROUP,
+    KIND_NIP29_EDIT_METADATA, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
+    KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -34,6 +34,17 @@ pub fn is_admin_kind(kind: u32) -> bool {
 /// duplicates without storing the event at all.
 pub fn is_side_effect_kind(kind: u32) -> bool {
     matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | 41001..=41003 | 40099)
+}
+
+/// Whether an event is one of the explicit lifecycle changes allowed for an
+/// archived channel: restoring it or deleting it permanently.
+pub(crate) fn archived_channel_allows_event(kind: u32, event: &Event) -> bool {
+    kind == KIND_NIP29_DELETE_GROUP
+        || (kind == KIND_NIP29_EDIT_METADATA
+            && event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
+            }))
 }
 
 async fn evict_live_channel_subscriptions(
@@ -326,19 +337,14 @@ pub async fn validate_admin_event(
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
-    // Reject mutations on archived channels — except kind:9002 with archived=false
-    // (unarchive), which must be allowed through so the channel can be restored.
+    // Archived channels are read-only except for restoring or permanently
+    // deleting them.
     let channel = state
         .db
         .get_channel_for_event_write(tenant.community(), channel_id)
         .await
         .map_err(|_| anyhow::anyhow!("channel not found"))?;
-    let is_unarchive_request = kind == 9002
-        && event.tags.iter().any(|t| {
-            let parts = t.as_slice();
-            parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
-        });
-    if channel.archived_at.is_some() && !is_unarchive_request {
+    if channel.archived_at.is_some() && !archived_channel_allows_event(kind, event) {
         return Err(anyhow::anyhow!("channel is archived"));
     }
 
@@ -3745,6 +3751,51 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn admin_event(kind: u32, tags: impl IntoIterator<Item = Tag>) -> Event {
+        EventBuilder::new(Kind::Custom(kind as u16), "")
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign admin event")
+    }
+
+    #[test]
+    fn archived_channel_allows_permanent_deletion() {
+        let event = admin_event(KIND_NIP29_DELETE_GROUP, []);
+
+        assert!(archived_channel_allows_event(
+            KIND_NIP29_DELETE_GROUP,
+            &event
+        ));
+    }
+
+    #[test]
+    fn archived_channel_allows_unarchive_but_not_archive() {
+        let unarchive = admin_event(
+            KIND_NIP29_EDIT_METADATA,
+            [Tag::parse(["archived", "false"]).expect("unarchive tag")],
+        );
+        let archive = admin_event(
+            KIND_NIP29_EDIT_METADATA,
+            [Tag::parse(["archived", "true"]).expect("archive tag")],
+        );
+
+        assert!(archived_channel_allows_event(
+            KIND_NIP29_EDIT_METADATA,
+            &unarchive
+        ));
+        assert!(!archived_channel_allows_event(
+            KIND_NIP29_EDIT_METADATA,
+            &archive
+        ));
+    }
+
+    #[test]
+    fn archived_channel_rejects_other_admin_mutations() {
+        let event = admin_event(9000, []);
+
+        assert!(!archived_channel_allows_event(9000, &event));
+    }
 
     #[test]
     fn nip43_reconciliation_compatibility_alias_is_preserved() {
