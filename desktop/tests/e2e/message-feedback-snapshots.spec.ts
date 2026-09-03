@@ -100,6 +100,7 @@ test("profile hover uses the channel hover surface", async ({ page }) => {
 
   const profile = page.getByTestId("sidebar-profile-card");
   const channel = page.getByTestId("channel-random");
+  await expect(page.locator("html")).toHaveAttribute("data-buzz-sidebar", "");
   const hoverSurface = await channel.evaluate((element) => {
     const probe = document.createElement("span");
     probe.style.backgroundColor = "var(--buzz-hover-surface)";
