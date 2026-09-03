@@ -525,7 +525,7 @@ test("a duplicate self-join lifecycle group surfaces reactions from every source
 });
 
 test("removing a reaction from a duplicate self-join lifecycle group targets every reacted source", async () => {
-  const { fireEvent, screen } = await import("@testing-library/react");
+  const { act, fireEvent, screen } = await import("@testing-library/react");
   const elrond = "11".repeat(32);
   const groupedMessages = [
     systemMessage({
@@ -553,8 +553,12 @@ test("removing a reaction from a duplicate self-join lifecycle group targets eve
     profiles: profileFor(elrond, "Elrond"),
   });
 
-  fireEvent.click(screen.getByRole("button", { name: "Toggle 👍 reaction" }));
-  await Promise.resolve();
+  // `act` (not a bare microtask drain) so the removal's optimistic state update
+  // and its awaited fan-out across every reacted source both settle before the
+  // assertion — a bare `fireEvent` leaves that update outside act.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Toggle 👍 reaction" }));
+  });
 
   assert.deepEqual(removals.sort(), [
     ["a", "👍"],
