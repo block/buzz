@@ -119,7 +119,9 @@ const GLOBAL_LEVELS: [&str; 12] = [
 fn sets_global_level(filter: &str) -> bool {
     filter.split(',').any(|directive| {
         let directive = directive.trim();
-        GLOBAL_LEVELS.iter().any(|level| directive.eq_ignore_ascii_case(level))
+        GLOBAL_LEVELS
+            .iter()
+            .any(|level| directive.eq_ignore_ascii_case(level))
     })
 }
 
@@ -317,6 +319,9 @@ mod tests {
             "buzz_acp=debug"
         );
         assert_eq!(child_rust_log_filter_from(None), "buzz_acp=info");
-        assert_eq!(child_rust_log_filter_from(Some("  ".to_string())), "buzz_acp=info");
+        assert_eq!(
+            child_rust_log_filter_from(Some("  ".to_string())),
+            "buzz_acp=info"
+        );
     }
 }
