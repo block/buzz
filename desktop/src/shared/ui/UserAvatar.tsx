@@ -67,7 +67,7 @@ export function UserAvatar({
       : null;
   const resolvedShape = shape ?? "circle";
   const radiusClass =
-    resolvedShape === "squircle" ? "rounded-[30%]" : "rounded-full";
+    resolvedShape === "squircle" ? "agent-avatar-squircle" : "rounded-full";
 
   return (
     <Avatar

@@ -106,7 +106,7 @@ export function CompactMessageSummary({
             aria-label={`Open ${displayName} profile`}
             className={cn(
               avatarClassName,
-              "pointer-events-auto rounded-[30%] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "agent-avatar-squircle pointer-events-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             )}
             onClick={(event) => {
               event.preventDefault();

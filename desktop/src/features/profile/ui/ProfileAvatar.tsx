@@ -96,7 +96,7 @@ export function ProfileAvatar({
     <Avatar
       className={cn(
         "shrink-0 text-primary shadow-xs",
-        shape === "squircle" && "rounded-[30%]",
+        shape === "squircle" && "agent-avatar-squircle",
         // Animated avatars carry their own backdrop disc and transparent
         // surroundings — any container fill would flatten the pop-out.
         plain || animated ? "bg-transparent shadow-none" : "bg-primary/20",

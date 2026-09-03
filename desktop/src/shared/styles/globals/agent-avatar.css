@@ -1,0 +1,5 @@
+.agent-avatar-squircle,
+.agent-avatar-squircle-border::before {
+  -webkit-clip-path: url("#agent-avatar-squircle-clip");
+  clip-path: url("#agent-avatar-squircle-clip");
+}

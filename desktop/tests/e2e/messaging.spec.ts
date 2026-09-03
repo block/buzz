@@ -387,6 +387,50 @@ test.beforeEach(async ({ page }, testInfo) => {
   await installMockBridge(page, mock);
 });
 
+test("agent avatars use the one normalized SVG clip path", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const agentMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  const avatar = agentMessage.getByTestId("message-avatar");
+  await expect(avatar).toHaveClass(/agent-avatar-squircle/);
+  await expect(avatar).toHaveCSS("clip-path", /agent-avatar-squircle-clip/);
+  await expect(page.locator("#agent-avatar-squircle-clip")).toHaveCount(1);
+
+  const avatarBox = await avatar.boundingBox();
+  expect(avatarBox).toMatchObject({
+    width: expect.any(Number),
+    height: expect.any(Number),
+  });
+  if (avatarBox === null) {
+    throw new Error("agent message avatar has no rendered bounds");
+  }
+  expect(avatarBox.width).toBeGreaterThanOrEqual(24);
+  expect(avatarBox.height).toBeGreaterThanOrEqual(24);
+  expect(Math.abs(avatarBox.width - avatarBox.height)).toBeLessThanOrEqual(1);
+
+  await agentMessage.getByRole("button", { name: "A" }).first().click();
+  const profileAvatar = page
+    .getByTestId("user-profile-panel")
+    .locator(".agent-avatar-squircle")
+    .first();
+  await expect(profileAvatar).toBeVisible();
+  await expect(profileAvatar).toHaveCSS(
+    "clip-path",
+    /agent-avatar-squircle-clip/,
+  );
+  await expect
+    .poll(() =>
+      profileAvatar.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width >= 80 && rect.height >= 80;
+      }),
+    )
+    .toBe(true);
+});
+
 test("agent owner label identifies the agent and owner", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
