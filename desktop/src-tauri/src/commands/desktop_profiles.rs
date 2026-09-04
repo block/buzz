@@ -8,7 +8,7 @@ use tauri::{AppHandle, State};
 use crate::app_state::AppState;
 use crate::managed_agents::retention::{active_retention_scope, open_retention_db, RetentionScope};
 
-fn scope(
+pub(super) fn scope(
     app: &AppHandle,
     state: &AppState,
     owner: &str,
@@ -23,7 +23,7 @@ fn scope(
     Ok(scope)
 }
 
-fn prepare(conn: &mut Connection, scope: &RetentionScope) -> Result<Value, String> {
+pub(super) fn prepare(conn: &mut Connection, scope: &RetentionScope) -> Result<Value, String> {
     // SQLite serializes concurrent startup/open requests across processes. The ID
     // and exact ciphertext/signature commit together, before any network write.
     let tx = conn

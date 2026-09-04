@@ -36,7 +36,7 @@ use buzz_core::kind::{
     RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
-use buzz_core::kind::{KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE};
+use buzz_core::kind::{KIND_DESKTOP_CAPABILITIES, KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE};
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
@@ -437,7 +437,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
-        KIND_PROFILE | KIND_DESKTOP_PROFILE | KIND_DESKTOP_OBSERVATION => Ok(Scope::UsersWrite),
+        KIND_PROFILE | KIND_DESKTOP_PROFILE | KIND_DESKTOP_OBSERVATION | KIND_DESKTOP_CAPABILITIES => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
@@ -660,6 +660,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_PRIVATE_MANAGED_AGENT
             | KIND_DESKTOP_PROFILE
             | KIND_DESKTOP_OBSERVATION
+            | KIND_DESKTOP_CAPABILITIES
             | KIND_TEAM_CATALOG
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
@@ -2170,14 +2171,14 @@ pub async fn ingest_event(
     result
 }
 
-// Profiles are durable display records, not freshness signals. A Desktop may
+// Profiles and capability facts are durable records, not freshness signals. A Desktop may
 // first publish its immutable signed record long after an offline startup.
 // Only their past-age bound is waived; future drift and all other admission
 // checks still apply. Observation/presence kinds must retain their own window.
 fn timestamp_within_ingest_window(kind: u32, event_ts: u64, now: u64) -> bool {
     const MAX_TIMESTAMP_DRIFT_SECS: u64 = 900;
     event_ts <= now.saturating_add(MAX_TIMESTAMP_DRIFT_SECS)
-        && (kind == KIND_DESKTOP_PROFILE
+        && (matches!(kind, KIND_DESKTOP_PROFILE | KIND_DESKTOP_CAPABILITIES)
             || now.saturating_sub(event_ts) <= MAX_TIMESTAMP_DRIFT_SECS)
 }
 
@@ -2793,6 +2794,11 @@ async fn ingest_event_inner(
         }
     }
 
+    if kind_u32 == KIND_DESKTOP_CAPABILITIES {
+        buzz_core::desktop_capabilities::validate_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     if kind_u32 == KIND_DESKTOP_OBSERVATION {
         buzz_core::desktop_observation::validate_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -3338,6 +3344,7 @@ mod postgres_tests {
         // Include the next observation kind explicitly: freshness is not profile age.
         for kind in [
             KIND_DESKTOP_PROFILE,
+            KIND_DESKTOP_CAPABILITIES,
             30181,
             KIND_PROFILE,
             KIND_EVENT_REMINDER,
@@ -3355,7 +3362,7 @@ mod postgres_tests {
             ] {
                 assert_eq!(
                     timestamp_within_ingest_window(kind, timestamp, now),
-                    if kind == KIND_DESKTOP_PROFILE {
+                    if matches!(kind, KIND_DESKTOP_PROFILE | KIND_DESKTOP_CAPABILITIES) {
                         profile
                     } else {
                         ordinary
