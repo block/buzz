@@ -130,7 +130,12 @@ test("collision distinction, deliberate key choice, and exact publication", asyn
   const rowIds = await page
     .locator("[data-mention-suggestion-index]")
     .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
+  expect(rowIds).toEqual([
+    `mention-suggestion-${A}`,
+    `mention-suggestion-${B}`,
+  ]);
   const first = rowIds[1]?.endsWith(A) ? A : B;
+  const second = first === A ? B : A;
   await input.press("ArrowDown");
   // Membership/presence changes affect the next request, not the visible order.
   await page.evaluate(() => {
@@ -176,6 +181,17 @@ test("collision distinction, deliberate key choice, and exact publication", asyn
       ),
     )
     .toEqual([[first]]);
+  await input.fill("@Scout");
+  await expect
+    .poll(() =>
+      page
+        .locator("[data-mention-suggestion-index]")
+        .evaluateAll((rows) =>
+          rows.map((row) => row.getAttribute("data-testid")),
+        ),
+    )
+    .toEqual([`mention-suggestion-${first}`, `mention-suggestion-${second}`]);
+  await capture(page, "next-open-ranking");
 });
 
 test("Escape discards delayed picker results across navigation", async ({
