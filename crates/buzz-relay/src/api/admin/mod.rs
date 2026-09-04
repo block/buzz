@@ -2330,16 +2330,17 @@ mod postgres_tests {
 
         // Build 201 distinct pubkeys.  Pubkey layout:
         //   indices 0..=198 (199 rows) → [i+1, i+1, ..., i+1] where i ∈ 0..199
-        //   indices 199..=200 (2 rows) → [0xE0 | j, 0xE0 | j, ..., 0xE0 | j]
-        // The tied pair uses a 0xE0-prefix to sort below all 0x01..0xC7 entries
-        // under `pubkey DESC`, ensuring they land at the bottom of every page
-        // regardless of the tie-breaking direction.
+        //   indices 199..=200 (2 rows) → [0xE1..] and [0xE2..] (the tied pair)
+        // The tied pair is pinned to positions 200/201 by their OLDER timestamp
+        // (now()-1000s vs. now()-1..199s), not by pubkey ordering.  Under
+        // `pubkey DESC` 0xE2 sorts above 0xE1, so 0xE2 lands at position 200
+        // and 0xE1 at position 201; the default-200 page boundary splits the tie.
         let mut all_pubkeys: Vec<Vec<u8>> = Vec::new();
         for i in 1u8..=199 {
             all_pubkeys.push(vec![i; 32]);
         }
-        all_pubkeys.push(vec![0xE1u8; 32]); // tied pair member A (index 199)
-        all_pubkeys.push(vec![0xE2u8; 32]); // tied pair member B (index 200)
+        all_pubkeys.push(vec![0xE1u8; 32]); // tied pair member A — position 201
+        all_pubkeys.push(vec![0xE2u8; 32]); // tied pair member B — position 200
 
         // Batch-insert all 201 rows with explicit `updated_at` stamps:
         //   rows 0..198 → now() - (i+1) seconds  (distinct, newer)
