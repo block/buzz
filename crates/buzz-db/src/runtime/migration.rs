@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 48);
+        assert_eq!(migrations.len(), 49);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -911,7 +911,7 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
         assert!(include_str!("../../../../schema/schema.sql").contains(
-            "kind IN (1059, 30179, 30180, 30181, 30182, 30300, 30350, 30622, 44100, 44101, 44200, 50180, 50181)"
+            "kind IN (1059, 30179, 30180, 30181, 30182, 30300, 30350, 30622, 44100, 44101, 44200, 50180, 50181, 50182, 50183)"
         ));
 
         // Public push-gateway authority is intentionally deployment-global and
@@ -2396,6 +2396,8 @@ mod postgres_tests {
             (6_u8, 30_182_i32),
             (7_u8, 50_180_i32),
             (8_u8, 50_181_i32),
+            (9_u8, 50_182_i32),
+            (10_u8, 50_183_i32),
         ] {
             sqlx::query(
                 "INSERT INTO events \
@@ -2433,7 +2435,9 @@ mod postgres_tests {
                 (30_182, true),
                 (30_350, true),
                 (50_180, true),
-                (50_181, true)
+                (50_181, true),
+                (50_182, true),
+                (50_183, true)
             ]
         );
 
@@ -2460,7 +2464,9 @@ mod postgres_tests {
                 (30_182, Some(true)),
                 (30_350, None),
                 (50_180, Some(true)),
-                (50_181, Some(true))
+                (50_181, Some(true)),
+                (50_182, Some(true)),
+                (50_183, Some(true))
             ]
         );
 
@@ -2507,6 +2513,17 @@ mod postgres_tests {
         .await
         .unwrap();
         assert_eq!(stop_indexed, 2, "0048 must change brownfield Stop FTS");
+        run_migrations_through(&pool, 48).await.unwrap();
+        let lifecycle_indexed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE kind IN (50182, 50183) AND search_tsv IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            lifecycle_indexed, 2,
+            "0049 must change populated lifecycle FTS"
+        );
 
         run_migrations(&pool)
             .await
@@ -2528,7 +2545,9 @@ mod postgres_tests {
                 (30_182, None),
                 (30_350, None),
                 (50_180, None),
-                (50_181, None)
+                (50_181, None),
+                (50_182, None),
+                (50_183, None)
             ]
         );
         let gin_exists: bool = sqlx::query_scalar(

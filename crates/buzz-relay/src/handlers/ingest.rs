@@ -37,8 +37,8 @@ use buzz_core::kind::{
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::kind::{
-    KIND_DESKTOP_CAPABILITIES, KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE, KIND_DESKTOP_STOP,
-    KIND_DESKTOP_STOP_RESULT,
+    KIND_DESKTOP_CAPABILITIES, KIND_DESKTOP_LIFECYCLE, KIND_DESKTOP_LIFECYCLE_RESULT,
+    KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE, KIND_DESKTOP_STOP, KIND_DESKTOP_STOP_RESULT,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -440,7 +440,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
-        KIND_PROFILE | KIND_DESKTOP_PROFILE | KIND_DESKTOP_OBSERVATION | KIND_DESKTOP_CAPABILITIES | KIND_DESKTOP_STOP | KIND_DESKTOP_STOP_RESULT => Ok(Scope::UsersWrite),
+        KIND_PROFILE | KIND_DESKTOP_PROFILE | KIND_DESKTOP_OBSERVATION | KIND_DESKTOP_CAPABILITIES | KIND_DESKTOP_STOP | KIND_DESKTOP_STOP_RESULT | KIND_DESKTOP_LIFECYCLE | KIND_DESKTOP_LIFECYCLE_RESULT => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
@@ -665,7 +665,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_DESKTOP_OBSERVATION
             | KIND_DESKTOP_CAPABILITIES
             | KIND_DESKTOP_STOP
-            | KIND_DESKTOP_STOP_RESULT
+            | KIND_DESKTOP_STOP_RESULT | KIND_DESKTOP_LIFECYCLE | KIND_DESKTOP_LIFECYCLE_RESULT
             | KIND_TEAM_CATALOG
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
@@ -2189,6 +2189,8 @@ fn timestamp_within_ingest_window(kind: u32, event_ts: u64, now: u64) -> bool {
                 | KIND_DESKTOP_CAPABILITIES
                 | KIND_DESKTOP_STOP
                 | KIND_DESKTOP_STOP_RESULT
+                | KIND_DESKTOP_LIFECYCLE
+                | KIND_DESKTOP_LIFECYCLE_RESULT
         ) || now.saturating_sub(event_ts) <= MAX_TIMESTAMP_DRIFT_SECS)
 }
 
@@ -2804,6 +2806,13 @@ async fn ingest_event_inner(
         }
     }
 
+    if matches!(
+        kind_u32,
+        KIND_DESKTOP_LIFECYCLE | KIND_DESKTOP_LIFECYCLE_RESULT
+    ) {
+        buzz_core::desktop_lifecycle::validate_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
     if matches!(kind_u32, KIND_DESKTOP_STOP | KIND_DESKTOP_STOP_RESULT) {
         buzz_core::desktop_stop::validate_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -3250,7 +3259,7 @@ async fn ingest_event_inner(
         // Stop is a one-shot owned by Desktop, not a replaceable projection.
         // Explicit transport retry must reach a live receiver even after an ACK
         // or its result was lost. Never replay history or repeat relay effects.
-        if kind_u32 == KIND_DESKTOP_STOP {
+        if matches!(kind_u32, KIND_DESKTOP_STOP | KIND_DESKTOP_LIFECYCLE) {
             super::event::redeliver_desktop_stop(tenant, state, &stored_event.event).await;
         }
         return Ok(IngestResult {
@@ -3391,6 +3400,8 @@ mod postgres_tests {
                             | KIND_DESKTOP_CAPABILITIES
                             | KIND_DESKTOP_STOP
                             | KIND_DESKTOP_STOP_RESULT
+                            | KIND_DESKTOP_LIFECYCLE
+                            | KIND_DESKTOP_LIFECYCLE_RESULT
                     ) {
                         profile
                     } else {
