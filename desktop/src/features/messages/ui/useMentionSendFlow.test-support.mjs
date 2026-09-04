@@ -111,11 +111,22 @@ export async function setup({ lifecycle = false } = {}) {
         },
       },
     ),
+    "@/features/communities/useCommunities": {
+      useCommunities: () => ({
+        activeCommunity: { relayUrl: "wss://test.example" },
+      }),
+    },
+    "@/shared/api/hooks": {
+      useIdentityQuery: () => ({ data: { pubkey: "a".repeat(64) } }),
+    },
+    "@/features/messages/lib/detachedToastScope": {
+      matchesDetachedToastScope: () => true,
+    },
     "@/features/agents/channelAgents": {
       applyReusableAgentAccessPolicy: async (agent) => {
         calls.push(["local-policy"]);
         if (control.policy) await control.policy.promise;
-        return agent;
+        return { agent, wrote: false };
       },
     },
     "@/features/agents/lib/resolvePersonaRuntime": {
@@ -159,6 +170,11 @@ export async function setup({ lifecycle = false } = {}) {
       AgentMentionAuthorizationError: class extends Error {},
     },
   };
+  stubs["./useDetachedAgentStart"] = load("useDetachedAgentStart", stubs);
+  stubs["./useEnsureAgentMentionsReady"] = load(
+    "useEnsureAgentMentionsReady",
+    stubs,
+  );
   stubs["./useNonMemberInvite"] = load("useNonMemberInvite", stubs);
   stubs["./useActivePreparedLinkPreviews"] = load(
     "useActivePreparedLinkPreviews",
@@ -227,6 +243,7 @@ export async function setup({ lifecycle = false } = {}) {
     mentions: {
       memberPubkeys: new Set(),
       hasResolvedMembers: true,
+      settlePendingMentionBindings: async () => {},
       extractMentionPersonas: () => [],
       extractMentionPubkeys: () => [KEY],
       isAgentPubkey: (key) => key === KEY,
