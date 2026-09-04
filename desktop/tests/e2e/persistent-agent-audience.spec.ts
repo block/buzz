@@ -350,9 +350,9 @@ async function seedAvailableSkills(page: Page) {
 
 test("inserts a selected agent skill into the composer", async ({ page }) => {
   await installAudienceFixtures(page);
-  await openGeneral(page);
+  await openThread(page);
 
-  const composer = channelComposer(page);
+  const composer = threadComposer(page);
   await automaticallyMention(composer, "Morgarita");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
