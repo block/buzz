@@ -812,9 +812,11 @@ impl MembershipRemovalFence {
 /// the check and the effects (the race that [`verify_member_still_removed`]
 /// leaves open, since it releases the lock before returning).
 ///
-/// The guard is read-only: no domain writes occur inside this transaction.
+/// The guard is read-only before [`Self::commit_disabling_workflows`] is called.
 /// Once the caller has finished its effects, dropping the guard releases the
-/// lock (the transaction is implicitly rolled back).
+/// lock (the transaction is implicitly rolled back if not committed). To
+/// durably write the workflow-disable and release the lock in one step, call
+/// [`Self::commit_disabling_workflows`].
 pub async fn membership_removal_fence(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1548,14 +1550,16 @@ impl Db {
 
     /// Acquire the per-channel membership advisory lock and return a
     /// [`MembershipRemovalFence`] that keeps the lock alive until it is
-    /// dropped, allowing the caller to run eviction and workflow-disable
-    /// while serializing against concurrent [`add_member`] calls.
+    /// dropped or committed via [`MembershipRemovalFence::commit_disabling_workflows`].
     ///
     /// The guard's `still_removed` field indicates whether the kick is still
-    /// the current state (i.e., no re-add has reversed it). When `false` the
-    /// caller must skip eviction and workflow-disable. Dropping the guard
-    /// releases the advisory lock (the transaction is implicitly rolled back —
-    /// this is a read-only fence, no domain writes occur).
+    /// the current state (i.e., no re-add has reversed it). When `true`, the
+    /// caller fires eviction and then calls
+    /// [`MembershipRemovalFence::commit_disabling_workflows`] to durably
+    /// write the workflow-disable and commit the transaction (releasing the
+    /// lock). When `false`, the member was re-added and effects must be skipped.
+    /// Dropping the guard without committing releases the advisory lock (the
+    /// transaction is implicitly rolled back).
     #[datastore_span(name = "membership_removal_fence", system = "postgresql")]
     pub async fn membership_removal_fence(
         &self,

@@ -639,7 +639,13 @@ async fn drive_enforcement(
                     crate::handlers::side_effects::apply_kick_live_side_effects(
                         tenant, state, ch, target,
                     )
-                    .await;
+                    .await
+                    .map_err(|e| {
+                        ResolutionError::Internal(format!(
+                            "kick action {action_id} live side effects failed \
+                             (mutation_committed marker is recoverable; worker will retry): {e}"
+                        ))
+                    })?;
                 }
                 _ => {
                     return Err(ResolutionError::Internal(format!(
@@ -1163,7 +1169,8 @@ mod tests {
             channel_id,
             &target_pubkey,
         )
-        .await;
+        .await
+        .expect("kick live side effects must succeed in test");
 
         // Assert: membership cache entry is gone.
         assert!(
