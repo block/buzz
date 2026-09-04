@@ -33,7 +33,7 @@ async fn revision_binding_skips_history_validation_but_enforces_new_writes() {
     .await
     .expect("legacy tables");
     tx.execute(include_str!(
-        "../../../migrations/0043_workflow_revision_binding.sql"
+        "../../../migrations/0045_workflow_revision_binding.sql"
     ))
     .await
     .expect("revision migration");
