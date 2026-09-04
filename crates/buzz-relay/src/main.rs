@@ -2765,8 +2765,13 @@ mod tests {
     //    due-selection allowed it, not because the test hand-invoked it.
     //
     // 2. After the loop drives a recovery, `IssuerKeySource::key_set` returns
-    //    `Some(...)` for the recovered issuer, and `check_nip_fi_at_upgrade`
-    //    returns `Admitted` rather than `Denied(503)`.
+    //    `Some(...)` for the recovered issuer. `key_set` is the exact method
+    //    `FederatedAssertionVerifier` calls on each token verification; `Some`
+    //    means the verifier proceeds to token parsing rather than returning
+    //    `AuthorizationUnavailable` (503). This is the equivalent admission
+    //    assertion the test asserts — building a full `FederatedAssertionVerifier`
+    //    + signed JWT would require re-testing buzz-auth's own verified paths,
+    //    not the relay scheduler behavior this test exists to witness.
     //
     // The source is a real `ProductionJwksSource<ToggleJwksFetcher>` shared
     // between the loop (as `JwksRefreshSource`) and the verifier (as
@@ -2778,18 +2783,18 @@ mod tests {
     //
     // 1. Remove `run_jwks_refresh_loop` from the supervisor inner task spawn
     //    (or remove its call to `run_jwks_refresh_step`): the source's
-    //    cache is never updated → `check_nip_fi_at_upgrade` still returns
-    //    `Denied(503)` after the toggle is set → `assert!(admitted)` panics.
+    //    cache is never updated → `key_set` stays `None` after the advance
+    //    → `assert!(key_set.is_some())` panics.
     //
     // 2. Revert `jwks_next_retry_after_failed_refresh` to the old behavior
     //    (stay on warm interval after hard death): the loop schedules 300 s
     //    instead of 5 s → advancing 6 s does not reach the retry deadline →
-    //    the step is skipped → cache stays empty → admission still 503 →
-    //    `assert!(admitted)` panics.
+    //    the step is skipped → cache stays empty → `key_set` stays `None`
+    //    → `assert!(key_set.is_some())` panics.
     //
     // 3. Remove the `snapshot_available(…).await` call in `run_jwks_refresh_step`
     //    (replace with constant `false`): cache is never warmed after toggle →
-    //    admission still 503 → `assert!(admitted)` panics.
+    //    `key_set` stays `None` → `assert!(key_set.is_some())` panics.
     #[tokio::test(start_paused = true)]
     async fn f1_supervisor_loop_drives_recovery_and_restores_admission() {
         use buzz_auth::{
