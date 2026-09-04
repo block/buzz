@@ -2665,6 +2665,161 @@ async fn test_private_channel_non_member_cannot_invite() {
         .expect("disconnect outsider");
 }
 
+/// NIP-AW agent work status (kind 30181): writes require channel membership
+/// and a `d` tag matching the `h` channel; stored statuses are readable by
+/// members and invisible to non-members.
+#[tokio::test]
+#[ignore]
+async fn test_agent_work_status_channel_gating() {
+    const WORK_STATUS_KIND: u16 = 30181;
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let outsider_keys = Keys::generate();
+
+    // Owner creates a private channel and adds the agent as a member.
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+    let (accepted, msg) = add_member_ws(
+        &mut owner_client,
+        &channel_id,
+        &agent_keys.public_key().to_hex(),
+        &owner_keys,
+    )
+    .await;
+    assert!(accepted, "owner should add agent as member, got: {msg}");
+
+    let status_event = |keys: &Keys, h: &str, d: &str| {
+        EventBuilder::new(
+            Kind::Custom(WORK_STATUS_KIND),
+            r#"{"v":1,"source":"buzz-acp","status":"working","activity":[]}"#,
+        )
+        .tags(vec![
+            Tag::parse(["h", h]).unwrap(),
+            Tag::parse(["d", d]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap()
+    };
+
+    // Member agent publishes its status: accepted.
+    let mut agent_client = BuzzTestClient::connect(&url, &agent_keys)
+        .await
+        .expect("connect as agent");
+    let ok = agent_client
+        .send_event(status_event(&agent_keys, &channel_id, &channel_id))
+        .await
+        .expect("send work status");
+    assert!(ok.accepted, "member work status rejected: {}", ok.message);
+
+    // `d` diverging from the `h` channel is rejected.
+    let other_uuid = uuid::Uuid::new_v4().to_string();
+    let ok = agent_client
+        .send_event(status_event(&agent_keys, &channel_id, &other_uuid))
+        .await
+        .expect("send mismatched work status");
+    assert!(
+        !ok.accepted,
+        "work status with d != h must be rejected, but was accepted"
+    );
+    assert!(
+        ok.message.contains("must match"),
+        "rejection should mention the d/h mismatch, got: {}",
+        ok.message
+    );
+
+    // A missing `h` tag is rejected — the kind is channel-scoped by contract.
+    let no_h = EventBuilder::new(Kind::Custom(WORK_STATUS_KIND), "{}")
+        .tags(vec![Tag::parse(["d", channel_id.as_str()]).unwrap()])
+        .sign_with_keys(&agent_keys)
+        .unwrap();
+    let ok = agent_client
+        .send_event(no_h)
+        .await
+        .expect("send h-less work status");
+    assert!(
+        !ok.accepted,
+        "work status without an h tag must be rejected, but was accepted"
+    );
+
+    // A non-member cannot publish a status into the channel.
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider_keys)
+        .await
+        .expect("connect as outsider");
+    let ok = outsider_client
+        .send_event(status_event(&outsider_keys, &channel_id, &channel_id))
+        .await
+        .expect("send outsider work status");
+    assert!(
+        !ok.accepted,
+        "non-member work status must be rejected, but was accepted"
+    );
+
+    // A member reads the stored status; a non-member sees nothing.
+    let filter = Filter::new()
+        .kind(Kind::Custom(WORK_STATUS_KIND))
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            [channel_id.as_str()],
+        );
+
+    let sid = sub_id("work-status-member");
+    owner_client
+        .subscribe(&sid, vec![filter.clone()])
+        .await
+        .expect("owner subscribe");
+    let member_view = owner_client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("owner EOSE");
+    assert_eq!(
+        member_view.len(),
+        1,
+        "channel member should read exactly the one live status snapshot"
+    );
+    assert_eq!(member_view[0].pubkey, agent_keys.public_key());
+
+    // The relay rejects a non-member's channel subscription outright: CLOSED
+    // with a membership restriction, never events, never a silent EOSE.
+    let sid = sub_id("work-status-outsider");
+    outsider_client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("outsider subscribe");
+    match outsider_client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("outsider subscription response")
+    {
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            assert_eq!(subscription_id, sid);
+            assert!(
+                message.contains("not a channel member"),
+                "closure should cite membership, got: {message}"
+            );
+        }
+        RelayMessage::Event { event, .. } => {
+            panic!(
+                "non-member must not read channel work status, got event from {}",
+                event.pubkey
+            );
+        }
+        other => panic!("expected CLOSED for non-member work-status REQ, got: {other:?}"),
+    }
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    agent_client.disconnect().await.expect("disconnect agent");
+    outsider_client
+        .disconnect()
+        .await
+        .expect("disconnect outsider");
+}
+
 /// Regular members cannot grant elevated roles (owner/admin) in private channels.
 #[tokio::test]
 #[ignore]
