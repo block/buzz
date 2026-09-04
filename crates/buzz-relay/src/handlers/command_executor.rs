@@ -1666,7 +1666,7 @@ mod postgres_tests {
             .expect("parse signed workflow definition");
         let definition_hash = compute_definition_hash(&definition_json);
         let mut tx = setup_db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("begin workflow seed");
         buzz_db::event::insert_event_in_transaction(
@@ -1866,7 +1866,23 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn approval_resume_executes_the_run_bound_signed_revision() {
+    async fn approval_resume_rejects_replaced_run_revision() {
+        assert_approval_revision(Some(true)).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn approval_resume_rejects_deleted_run_revision() {
+        assert_approval_revision(Some(false)).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn approval_resume_accepts_unchanged_run_revision() {
+        assert_approval_revision(None).await;
+    }
+
+    async fn assert_approval_revision(change: Option<bool>) {
         let (state, tenant, _human, agent, workflow_id, revision_a) =
             manual_trigger_test_context().await;
         let community_id = tenant.community();
@@ -1902,53 +1918,64 @@ mod postgres_tests {
         .await
         .expect("suspend revision A run for approval");
 
-        let channel_id = Uuid::parse_str(exact_tag_value(&revision_a, "h").expect("channel tag"))
-            .expect("channel UUID");
-        let revision_b = EventBuilder::new(
-            Kind::Custom(KIND_WORKFLOW_DEF as u16),
-            concat!(
-                "name: revision-b\n",
-                "trigger:\n  on: message_posted\n",
-                "steps:\n",
-                "  - id: approval\n    action: request_approval\n    from: '@owner'\n    message: approve\n",
-                "  - id: after\n    action: send_message\n    text: revision B\n",
-            ),
-        )
-        .tags(vec![
-            Tag::parse(["d", workflow_id.to_string().as_str()]).expect("d tag"),
-            Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
-        ])
-        .sign_with_keys(&agent)
-        .expect("sign revision B");
-        let (_, definition_b_json) = buzz_workflow::WorkflowEngine::parse_yaml(&revision_b.content)
-            .expect("parse revision B");
-        let definition_b_hash = compute_definition_hash(&definition_b_json);
-        let mut tx = db
-            .begin_transaction()
+        if change == Some(true) {
+            let channel_id =
+                Uuid::parse_str(exact_tag_value(&revision_a, "h").expect("channel tag"))
+                    .expect("channel UUID");
+            let revision_b = EventBuilder::new(
+                Kind::Custom(KIND_WORKFLOW_DEF as u16),
+                concat!(
+                    "name: revision-b\n",
+                    "trigger:\n  on: message_posted\n",
+                    "steps:\n",
+                    "  - id: approval\n    action: request_approval\n    from: '@owner'\n    message: approve\n",
+                    "  - id: after\n    action: send_message\n    text: revision B\n",
+                ),
+            )
+            .tags(vec![
+                Tag::parse(["d", workflow_id.to_string().as_str()]).expect("d tag"),
+                Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
+            ])
+            .custom_created_at(nostr::Timestamp::from(revision_a.created_at.as_secs() + 1))
+            .sign_with_keys(&agent)
+            .expect("sign revision B");
+            let (_, definition_b_json) =
+                buzz_workflow::WorkflowEngine::parse_yaml(&revision_b.content)
+                    .expect("parse revision B");
+            let definition_b_hash = compute_definition_hash(&definition_b_json);
+            let mut tx = db
+                .begin_event_write_transaction()
+                .await
+                .expect("begin revision B update");
+            db.replace_parameterized_event_in_transaction(
+                &mut tx,
+                community_id,
+                &revision_b,
+                &workflow_id.to_string(),
+                Some(channel_id),
+                buzz_db::replaceable::ParameterizedReplacePrecondition::Unconditional,
+            )
             .await
-            .expect("begin revision B update");
-        buzz_db::event::insert_event_in_transaction(
-            &mut tx,
-            community_id,
-            &revision_b,
-            Some(channel_id),
-        )
-        .await
-        .expect("persist revision B");
-        db.upsert_workflow(
-            &mut tx,
-            community_id,
-            workflow_id,
-            Some(channel_id),
-            &agent.public_key().to_bytes(),
-            "revision-b",
-            &definition_b_json,
-            &definition_b_hash,
-            revision_b.id.as_bytes(),
-        )
-        .await
-        .expect("materialize revision B");
-        tx.commit().await.expect("commit revision B update");
+            .expect("persist revision B");
+            db.upsert_workflow(
+                &mut tx,
+                community_id,
+                workflow_id,
+                Some(channel_id),
+                &agent.public_key().to_bytes(),
+                "revision-b",
+                &definition_b_json,
+                &definition_b_hash,
+                revision_b.id.as_bytes(),
+            )
+            .await
+            .expect("materialize revision B");
+            tx.commit().await.expect("commit revision B update");
+        } else if change == Some(false) {
+            db.soft_delete_event(community_id, revision_a.id.as_bytes())
+                .await
+                .expect("delete captured revision");
+        }
 
         let sink = Arc::new(RecordingActionSink::default());
         state.workflow_engine.set_action_sink(sink.clone());
@@ -1966,15 +1993,17 @@ mod postgres_tests {
             .get_workflow_run(community_id, run_id)
             .await
             .expect("load resumed run");
-        assert_eq!(resumed.status, RunStatus::Completed);
-        assert_eq!(
-            sink.messages
-                .lock()
-                .expect("recorded messages lock")
-                .as_slice(),
-            ["done"],
-            "approval resume must execute revision A, never current revision B"
-        );
+        let messages = sink.messages.lock().expect("recorded messages lock");
+        if change.is_some() {
+            assert_eq!(resumed.status, RunStatus::Failed);
+            assert!(
+                messages.is_empty(),
+                "stale approval must execute neither captured A nor current B"
+            );
+        } else {
+            assert_eq!(resumed.status, RunStatus::Completed);
+            assert_eq!(messages.as_slice(), ["done"]);
+        }
     }
 
     #[tokio::test]

@@ -452,7 +452,7 @@ mod postgres_tests {
         let definition_hash = sha2::Sha256::digest(definition_json.as_bytes());
         let mut tx = state
             .db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("begin workflow seed");
         buzz_db::event::insert_event_in_transaction(
