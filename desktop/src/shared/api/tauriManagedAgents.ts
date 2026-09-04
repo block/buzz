@@ -24,6 +24,8 @@ export async function startManagedAgent(
      * long the spawn takes. Local spawns receive it as process env; provider
      * deploys carry it in the payload's launch.policy_env. */
     replayFloorUnix?: number;
+    /** Only a deliberate Start button may supersede a remote Stop. */
+    explicitStart?: boolean;
   },
 ): Promise<ManagedAgent> {
   const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
@@ -31,6 +33,7 @@ export async function startManagedAgent(
     expectedRelayUrl: options?.expectedRelayUrl ?? null,
     expectedSignerPubkey: options?.expectedSignerPubkey ?? null,
     replayFloorUnix: options?.replayFloorUnix ?? null,
+    explicitStart: options?.explicitStart ?? false,
   });
   return fromRawManagedAgent(response);
 }
@@ -81,8 +84,13 @@ export async function listManagedAgentRuntimes(): Promise<
 export async function startManagedAgentRuntime(
   pubkey: string,
   relayUrl: string,
+  explicitStart = false,
 ): Promise<ManagedAgentRuntimeStatus> {
-  return invokeTauri("start_managed_agent_runtime", { pubkey, relayUrl });
+  return invokeTauri("start_managed_agent_runtime", {
+    pubkey,
+    relayUrl,
+    explicitStart,
+  });
 }
 
 export async function stopManagedAgentRuntime(

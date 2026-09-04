@@ -160,15 +160,35 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
     summarize_from_disk(app, record, &runtimes)
 }
 
-pub(super) async fn start_local_agent_with_preflight(
+enum LocalStartIntent {
+    Create,
+    Explicit,
+    Automatic,
+}
+
+async fn start_local_agent_with_preflight(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
-    allow_fresh_create_start: bool,
+    intent: LocalStartIntent,
     expected_relay_url: Option<&str>,
     expected_signer_pubkey: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<ManagedAgentSummary, String> {
+    let launch_owner = workspace_owner_hex(state)?;
+    let launch_key = crate::managed_agents::ManagedAgentRuntimeKey::new(
+        pubkey,
+        &relay_ws_url_with_override(state),
+    )?;
+    let resume = if matches!(intent, LocalStartIntent::Explicit) {
+        Some(crate::managed_agents::remote_stop::capture_resume(
+            app,
+            &launch_key,
+            &launch_owner,
+        )?)
+    } else {
+        None
+    };
     let record_snapshot = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -201,7 +221,12 @@ pub(super) async fn start_local_agent_with_preflight(
             &personas,
             &global,
         );
-    ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
+    ensure_relay_mesh_for_record(
+        app,
+        mesh_model_id.as_deref(),
+        matches!(intent, LocalStartIntent::Create),
+    )
+    .await?;
 
     // The mesh preflight above is the suspension window Projects callbacks
     // capture their scope against: a community switch during that await
@@ -212,15 +237,21 @@ pub(super) async fn start_local_agent_with_preflight(
     // point can no longer retarget the spawn (it only changes state this
     // call no longer consults).
     let workspace_relay_url = crate::relay::bind_expected_relay_scope(
-        expected_relay_url,
+        expected_relay_url.or(Some(launch_key.relay_url.as_str())),
         crate::relay::relay_ws_url_with_override(state),
     )?;
     // Bind the active owner after the same final await as the relay. A
     // same-relay identity replacement during mesh preflight must not release
     // the stale preflight owner to spawn.
-    let workspace_owner =
-        crate::relay::bind_expected_signer(expected_signer_pubkey, workspace_owner_hex(state)?)?;
+    let workspace_owner = crate::relay::bind_expected_signer(
+        expected_signer_pubkey.or(Some(launch_owner.as_str())),
+        workspace_owner_hex(state)?,
+    )?;
 
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -262,6 +293,7 @@ pub(super) async fn start_local_agent_with_preflight(
         Some(workspace_owner.as_str()),
         &workspace_relay_url,
         replay_floor_unix,
+        resume.as_ref(),
     )?;
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
@@ -713,7 +745,16 @@ pub async fn create_managed_agent(
     // ── Phase 3b: local spawn (async preflight outside store lock) ───────────
     let mut spawn_error = None;
     let agent = if input.spawn_after_create && input.backend == BackendKind::Local {
-        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None, None).await
+        match start_local_agent_with_preflight(
+            &app,
+            &state,
+            &pubkey,
+            LocalStartIntent::Create,
+            None,
+            None,
+            None,
+        )
+        .await
         {
             Ok(agent) => agent,
             Err(error) => {
@@ -824,6 +865,7 @@ pub async fn start_managed_agent(
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
     replay_floor_unix: Option<u64>,
+    explicit_start: Option<bool>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
@@ -920,7 +962,11 @@ pub async fn start_managed_agent(
                 &app,
                 &state,
                 &pubkey,
-                false,
+                if explicit_start.unwrap_or(false) {
+                    LocalStartIntent::Explicit
+                } else {
+                    LocalStartIntent::Automatic
+                },
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
                 replay_floor_unix,

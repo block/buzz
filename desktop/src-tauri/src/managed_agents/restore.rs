@@ -345,6 +345,7 @@ pub async fn restore_managed_agents_on_launch(
                                                 true,
                                                 owner_hex_ref,
                                                 None,
+                                                None,
                                             )
                                         }) {
                                         Ok(process) => {
