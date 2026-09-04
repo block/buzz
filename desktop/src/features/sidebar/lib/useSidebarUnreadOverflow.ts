@@ -4,6 +4,10 @@ import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
 
 type ScrollRef = Parameters<typeof useUnreadOverflow>[0]["scrollRef"];
 
+/**
+ * Returns whether any offscreen destination is a DM or has directed unread
+ * activity, which should keep the sidebar overflow control emphasized.
+ */
 export function hasHighPriorityOverflow(
   offscreenChannelIds: readonly string[],
   highPriorityUnreadChannelIds: ReadonlySet<string>,
@@ -16,10 +20,16 @@ export function hasHighPriorityOverflow(
   );
 }
 
+/** Formats the accessible label for a distinct unread destination count. */
 export function sidebarOverflowUnreadLabel(count: number) {
   return `${count} unread`;
 }
 
+/**
+ * Projects unread message and thread activity into offscreen destination sets.
+ * Message and preview destinations are unioned and deduplicated; DMs and
+ * destinations with directed unread activity receive high-priority treatment.
+ */
 export function useSidebarUnreadOverflow({
   dmChannelIds,
   highPriorityUnreadChannelIds,
