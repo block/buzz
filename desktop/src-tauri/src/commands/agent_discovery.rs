@@ -258,6 +258,9 @@ fn install_acp_runtime_blocking(
     crate::managed_agents::refresh_login_shell_path();
     // Clear the resolve cache so newly-installed binaries are found.
     crate::managed_agents::clear_resolve_cache();
+    // Clear the WSL resolution cache too, so a harness installed inside the
+    // default distro after a prior miss is discovered on the next forced run.
+    crate::managed_agents::wsl::clear_wsl_cache();
 
     // Prevent concurrent installs for the same runtime.
     {

@@ -12,6 +12,8 @@ mod auth_status_cache;
 mod bounded_command;
 mod login_shell;
 mod presets;
+#[cfg(windows)]
+pub(crate) use bounded_command::output_with_timeout;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
@@ -1100,6 +1102,18 @@ pub fn discover_acp_runtimes_from(
     } else {
         resolve_command_cached
     };
+    // WSL fallback (Windows hosts only): harnesses installed inside the default
+    // WSL distro (Hermes, Codex, etc.) are invisible to the Windows PATH. Try
+    // the PATH/force-cached resolver first, then probe the default distro only
+    // when the host resolution came up empty. Resolutions are cached for the
+    // spawn path; `clear_wsl_cache`/`clear_resolve_cache` both run on forced
+    // discovery so a newly-installed WSL command is found on refresh.
+    let resolve_with_wsl = |command: &str| {
+        resolve(command).or_else(|| {
+            crate::managed_agents::wsl::probe_wsl_command(command)
+                .map(|resolution| crate::managed_agents::wsl::wsl_display_path(&resolution))
+        })
+    };
 
     // Phase 1: build all builtin entries (fast — no probes yet).
     let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
@@ -1131,6 +1145,11 @@ pub fn discover_acp_runtimes_from(
     let mut seen_ids: std::collections::HashSet<String> =
         entries.iter().map(|e| e.id.clone()).collect();
 
+    // Resolver shared by the preset and custom phases: Windows PATH first,
+    // then — on Windows hosts — the default WSL distribution, so harnesses
+    // that only exist inside WSL (common for Hermes Agent) still surface as
+    // Available. The WSL probe caches its resolution for the spawn path.
+
     // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
     for def in PRESET_HARNESSES {
         if seen_ids.contains(def.id) {
@@ -1139,7 +1158,7 @@ pub fn discover_acp_runtimes_from(
         }
         seen_ids.insert(def.id.to_string());
 
-        entries.push(preset_catalog_entry(def, resolve));
+        entries.push(preset_catalog_entry(def, resolve_with_wsl));
     }
 
     // Phase 3: load and append custom harness definitions.
@@ -1154,8 +1173,9 @@ pub fn discover_acp_runtimes_from(
                 continue;
             }
 
-            // Availability: command resolves → Available, else NotInstalled.
-            let (availability, command, binary_path) = match resolve(&def.command) {
+            // Availability: command on PATH (or inside the default WSL
+            // distribution on Windows) → Available, else NotInstalled.
+            let (availability, command, binary_path) = match resolve_with_wsl(&def.command) {
                 Some(path) => (
                     AcpAvailabilityStatus::Available,
                     Some(def.command.clone()),

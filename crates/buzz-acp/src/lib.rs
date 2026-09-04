@@ -2785,7 +2785,7 @@ async fn tokio_main() -> Result<()> {
             )
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd,
+        cwd: crate::acp::session_cwd_for_wsl(&cwd),
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,

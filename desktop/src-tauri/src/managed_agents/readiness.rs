@@ -433,7 +433,9 @@ fn collect_missing_requirements(
     let Some(rt) = runtime else {
         // Unknown/custom command — check that the binary is actually resolvable.
         // No known requirement set beyond the PATH check.
-        if crate::managed_agents::resolve_command(&effective.effective_command).is_none() {
+        if crate::managed_agents::resolve_command(&effective.effective_command).is_none()
+            && crate::managed_agents::wsl::probe_wsl_command(&effective.effective_command).is_none()
+        {
             return vec![Requirement::MissingBinary {
                 command: effective.effective_command.clone(),
             }];

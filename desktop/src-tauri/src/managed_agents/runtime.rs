@@ -536,9 +536,25 @@ pub fn spawn_agent_child(
         }
     };
     // Resolve agent command to a full path (DMG launches have minimal PATH).
-    let resolved_agent_command = resolve_command(effective_command)
+    let host_resolution = resolve_command(effective_command);
+    let host_resolved = host_resolution.is_some();
+    let resolved_agent_command = host_resolution
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
+
+    // WSL fallback: when the command does not exist on the host PATH but
+    // discovery located it inside the default WSL distribution, hand the
+    // in-distro path to buzz-acp so it can wrap the agent spawn through
+    // wsl.exe. BUZZ_ACP_AGENT_COMMAND keeps the original bare identity so
+    // buzz-acp's per-runtime defaults (e.g. Hermes MCP-startup isolation)
+    // still apply; WSLENV forwarding happens on the buzz-acp side, where the
+    // injected key set is known. The probe is cache-first, so this is free
+    // when discovery already ran.
+    let wsl_resolution = if host_resolved {
+        None
+    } else {
+        crate::managed_agents::wsl::probe_wsl_command(effective_command)
+    };
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
@@ -583,6 +599,12 @@ pub fn spawn_agent_child(
     command.env_remove(REPLAY_FLOOR_ENV_VAR);
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+    if let Some(resolution) = &wsl_resolution {
+        command.env("BUZZ_ACP_AGENT_WSL_PATH", &resolution.linux_path);
+        if let Some(distro) = &resolution.distro {
+            command.env("BUZZ_ACP_AGENT_WSL_DISTRO", distro);
+        }
+    }
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
             command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
