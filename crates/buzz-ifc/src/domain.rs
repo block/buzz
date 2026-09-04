@@ -50,6 +50,26 @@ impl DomainContext {
         }
     }
 
+    /// Whether this retained-state context may admit a resource from `source`.
+    ///
+    /// Public community data may enter any context in that community. A
+    /// conversation admits only its own retained data. Owner-private work may
+    /// also narrow conversation data to the owner when the separate audience
+    /// check permits that flow; it never admits another owner's private state.
+    pub(crate) fn permits(&self, source: &Self) -> bool {
+        if self.community() != source.community() {
+            return false;
+        }
+
+        match source {
+            Self::CommunityPublic(_) => true,
+            Self::Conversation { .. } => {
+                self == source || matches!(self, Self::OwnerPrivate { .. })
+            }
+            Self::OwnerPrivate { .. } => self == source,
+        }
+    }
+
     pub(crate) fn stable_hash(&self, hasher: &mut Sha256) {
         match self {
             Self::CommunityPublic(community) => {
@@ -77,9 +97,9 @@ impl DomainContext {
 /// execution boundary.
 ///
 /// This classification belongs to trusted policy configuration, not to the
-/// agent's call request. Publication operations require both capability
-/// admission and an information-flow decision before the broker may execute
-/// them. Concrete destination policy remains the broker's responsibility.
+/// agent's call request. Publication operations must go through
+/// [`crate::IfcSession::publish`], where the destination receives an
+/// information-flow check before the broker may execute the operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationEffect {
@@ -162,6 +182,10 @@ impl CapabilitySet {
             );
         }
         Self(effective)
+    }
+
+    pub(crate) fn effect(&self, operation: &str) -> Option<OperationEffect> {
+        self.0.get(operation).copied()
     }
 
     fn stable_hash(&self, hasher: &mut Sha256) {
