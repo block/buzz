@@ -226,14 +226,19 @@ fn assert_accounting(events: &[Value]) {
         assert_eq!(event["schema_version"], 1);
         assert_eq!(event["sequence"], u64::try_from(index + 1).unwrap());
         assert_eq!(event["process_boot_id"], boot_id);
-        assert_eq!(event["track"], "startup");
-        let count = counts
-            .entry(event["phase"].as_str().expect("phase").to_owned())
-            .or_default();
-        match event["edge"].as_str() {
-            Some("started") => count.0 += 1,
-            Some("terminal") => count.1 += 1,
-            other => panic!("unexpected lifecycle edge: {other:?}"),
+        match event["track"].as_str() {
+            Some("startup") => {
+                let count = counts
+                    .entry(event["phase"].as_str().expect("phase").to_owned())
+                    .or_default();
+                match event["edge"].as_str() {
+                    Some("started") => count.0 += 1,
+                    Some("terminal") => count.1 += 1,
+                    other => panic!("unexpected startup lifecycle edge: {other:?}"),
+                }
+            }
+            Some("database") => assert_database_schema(event),
+            other => panic!("unexpected lifecycle track: {other:?}"),
         }
     }
     assert!(
@@ -242,6 +247,28 @@ fn assert_accounting(events: &[Value]) {
             .all(|(started, terminal)| *started == 1 && *terminal == 1),
         "every started phase must have one terminal: {counts:?}"
     );
+}
+
+fn assert_database_schema(event: &Value) {
+    assert!(
+        [
+            "db_writer_pool",
+            "db_physical_connect",
+            "db_created_at_floor",
+            "db_session_timeouts",
+            "db_isolation",
+            "db_ready",
+        ]
+        .contains(&event["phase"].as_str().expect("database phase")),
+        "unexpected database phase: {}",
+        event["phase"],
+    );
+    assert!(
+        matches!(event["edge"].as_str(), Some("started" | "terminal")),
+        "unexpected database edge: {}",
+        event["edge"],
+    );
+    assert_eq!(event["pool_role"], "writer");
 }
 
 fn assert_terminal(events: &[Value], phase: &str, status: &str, reason: Option<&str>) {
