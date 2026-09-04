@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Buzz execution-domain derivation for information-flow control"
+description = "Buzz execution domains and broker-side information-flow checks"
 
 [dependencies]
 buzz-core = { workspace = true }
