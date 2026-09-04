@@ -50,11 +50,25 @@ pub(super) fn synthesize_streaming(
     playback: StreamingPlayback<'_>,
     append_audio: &mut dyn FnMut(PreparedModelAudio) -> bool,
 ) -> Option<&'static str> {
+    drive_streaming(
+        |on_audio| engine.synth_chunk_streaming(text, style, emit_frames, on_audio),
+        signals,
+        playback,
+        append_audio,
+    )
+}
+
+fn drive_streaming(
+    synthesize: impl FnOnce(&mut dyn FnMut(Vec<f32>) -> bool) -> Result<bool, String>,
+    signals: (&AtomicBool, &AtomicBool, &AtomicBool),
+    playback: StreamingPlayback<'_>,
+    append_audio: &mut dyn FnMut(PreparedModelAudio) -> bool,
+) -> Option<&'static str> {
     let (cancel, voice_cancel, shutdown) = signals;
     let StreamingPlayback { playback, route_id } = playback;
     let mut playback_audio = PlaybackChunkAudio::new();
     let mut delta_index = 0usize;
-    let stream_result = engine.synth_chunk_streaming(text, style, emit_frames, &mut |samples| {
+    let stream_result = synthesize(&mut |samples| {
         if cancel.load(Ordering::Acquire)
             || voice_cancel.load(Ordering::Acquire)
             || shutdown.load(Ordering::Acquire)
@@ -88,10 +102,151 @@ pub(super) fn synthesize_streaming(
             Some("cancelled")
         }
         Err(_) => {
+            // Preserve earlier queued speech, but finish the retained tail so
+            // a partial phrase ends with the same fade as a completed stream.
+            if let Some(prepared) = playback_audio.finish(first_append, player.empty()) {
+                if !append_audio(prepared) {
+                    *first_append = true;
+                    return Some("cancelled");
+                }
+            }
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=failed reason=inference route_id={route_id}"
             );
             Some("failed")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inference_failure_fades_the_retained_final_block() {
+        let cancel = AtomicBool::new(false);
+        let voice_cancel = AtomicBool::new(false);
+        let shutdown = AtomicBool::new(false);
+        let mut first_append = true;
+        let (player, _output) = rodio::Player::new();
+        let mut appended = Vec::new();
+
+        let outcome = drive_streaming(
+            |on_audio| {
+                assert!(on_audio(vec![0.4; 16]));
+                assert!(on_audio(vec![0.5; 16]));
+                Err("inference failed after output".into())
+            },
+            (&cancel, &voice_cancel, &shutdown),
+            StreamingPlayback {
+                player: &player,
+                first_append: &mut first_append,
+                route_id: 7,
+            },
+            &mut |prepared| {
+                appended.push(prepared);
+                true
+            },
+        );
+
+        assert_eq!(outcome, Some("failed"));
+        assert_eq!(appended.len(), 2);
+        assert!(appended[0].buffer.ends_with(&[0.4; 16]));
+        let final_samples = &appended[1].buffer[appended[1].buffer.len() - 16..];
+        assert_eq!(final_samples.first(), Some(&0.5));
+        assert_eq!(final_samples.last(), Some(&0.0));
+        assert!(!first_append, "the partial phrase remains queued");
+    }
+
+    #[test]
+    fn inference_failure_before_output_preserves_existing_playback() {
+        let cancel = AtomicBool::new(false);
+        let voice_cancel = AtomicBool::new(false);
+        let shutdown = AtomicBool::new(false);
+        let mut first_append = false;
+        let (player, _output) = rodio::Player::new();
+
+        let outcome = drive_streaming(
+            |_| Err("inference failed before output".into()),
+            (&cancel, &voice_cancel, &shutdown),
+            StreamingPlayback {
+                player: &player,
+                first_append: &mut first_append,
+                route_id: 7,
+            },
+            &mut |_| panic!("no audio should be appended"),
+        );
+
+        assert_eq!(outcome, Some("failed"));
+        assert!(!first_append, "the existing utterance still owns playback");
+    }
+
+    #[test]
+    fn each_stop_signal_prevents_later_stream_output() {
+        for signal_index in 0..3 {
+            let signals = [
+                AtomicBool::new(false),
+                AtomicBool::new(false),
+                AtomicBool::new(false),
+            ];
+            let mut first_append = true;
+            let (player, _output) = rodio::Player::new();
+            let mut appended = 0;
+
+            let outcome = drive_streaming(
+                |on_audio| {
+                    assert!(on_audio(vec![0.4; 16]));
+                    signals[signal_index].store(true, Ordering::Release);
+                    assert!(!on_audio(vec![0.5; 16]));
+                    Ok(false)
+                },
+                (&signals[0], &signals[1], &signals[2]),
+                StreamingPlayback {
+                    player: &player,
+                    first_append: &mut first_append,
+                    route_id: 7,
+                },
+                &mut |_| {
+                    appended += 1;
+                    true
+                },
+            );
+
+            assert_eq!(outcome, Some("cancelled"));
+            assert_eq!(appended, 0, "no retained block may escape after Stop");
+            assert!(first_append);
+        }
+    }
+
+    #[test]
+    fn rejected_append_never_flushes_the_retained_final_block() {
+        let cancel = AtomicBool::new(false);
+        let voice_cancel = AtomicBool::new(false);
+        let shutdown = AtomicBool::new(false);
+        let mut first_append = true;
+        let (player, _output) = rodio::Player::new();
+        let mut append_attempts = 0;
+
+        let outcome = drive_streaming(
+            |on_audio| {
+                assert!(on_audio(vec![0.4; 16]));
+                assert!(!on_audio(vec![0.5; 16]));
+                Ok(false)
+            },
+            (&cancel, &voice_cancel, &shutdown),
+            StreamingPlayback {
+                player: &player,
+                first_append: &mut first_append,
+                route_id: 7,
+            },
+            &mut |_| {
+                append_attempts += 1;
+                false
+            },
+        );
+
+        assert_eq!(outcome, Some("cancelled"));
+        assert_eq!(append_attempts, 1);
+        assert!(first_append);
     }
 }

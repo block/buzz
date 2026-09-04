@@ -132,4 +132,27 @@ mod tests {
             .iter()
             .all(|sample| *sample == 0.0));
     }
+
+    #[test]
+    fn only_the_final_stream_block_receives_a_fade() {
+        let mut chunk = PlaybackChunkAudio::new();
+        let mut first_append = true;
+        let first_samples = vec![0.5; FADE_OUT_SAMPLES * 2];
+        let final_samples = vec![0.75; FADE_OUT_SAMPLES * 2];
+
+        assert!(chunk
+            .push(first_samples.clone(), 0, &mut first_append, false)
+            .is_none());
+        let first = chunk
+            .push(final_samples.clone(), 1, &mut first_append, false)
+            .expect("first stream block");
+        let final_block = chunk
+            .finish(&mut first_append, false)
+            .expect("final stream block");
+
+        assert_eq!(first.buffer, first_samples);
+        assert_eq!(final_block.buffer[0], 0.75);
+        assert_eq!(final_block.buffer.last(), Some(&0.0));
+        assert_ne!(final_block.buffer, final_samples);
+    }
 }
