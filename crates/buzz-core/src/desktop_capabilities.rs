@@ -75,6 +75,11 @@ impl DesktopCapabilities {
 
     /// Encrypt/sign once, then persist these exact bytes for retries.
     pub fn sign(&self, keys: &Keys) -> Result<Event, String> {
+        self.sign_at(keys, nostr::Timestamp::now())
+    }
+
+    /// Sign at an observed wall-clock second, never a synthesized logical time.
+    pub fn sign_at(&self, keys: &Keys, observed: nostr::Timestamp) -> Result<Event, String> {
         self.validate()?;
         let content = nip44::encrypt(
             keys.secret_key(),
@@ -85,6 +90,7 @@ impl DesktopCapabilities {
         .map_err(|e| e.to_string())?;
         let event = EventBuilder::new(Kind::Custom(KIND_DESKTOP_CAPABILITIES as u16), content)
             .tag(Tag::identifier(&self.id))
+            .custom_created_at(observed)
             .sign_with_keys(keys)
             .map_err(|e| e.to_string())?;
         validate_envelope(&event)?;

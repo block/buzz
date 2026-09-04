@@ -80,6 +80,34 @@ test("unchanged accepted report does not republish; failed publish retries exact
   await assert.rejects(f.refresh(), /unavailable/);
 });
 
+test("deferred preparation settles with prior relay facts, never publishes, and honors cancellation", async () => {
+  const f = fixture();
+  const ipc = f.ipc;
+  let active = true;
+  let cancel = false;
+  f.ipc = async (command, args) => {
+    if (command === "prepare_desktop_capabilities") {
+      if (cancel) active = false;
+      throw Error("Desktop capability facts deferred until the clock advances");
+    }
+    return ipc(command, args);
+  };
+  const deferred = await f.refresh(() => active);
+  assert.deepEqual(deferred.rows, [row]);
+  assert.match(deferred.warning, /Will retry/);
+  assert.ok(!f.calls.includes(event));
+  cancel = true;
+  await assert.rejects(
+    f.refresh(() => active),
+    /scope changed/,
+  );
+  assert.ok(!f.calls.includes(event));
+  // A later, active attempt prepares afresh; no held promise or queued event.
+  f.ipc = ipc;
+  assert.equal((await f.refresh()).warning, "");
+  assert.equal(f.calls.filter((c) => c === event).length, 1);
+});
+
 test("all async boundaries fence cancellation, account/community switches and late ACK", async () => {
   for (const boundary of ["prepare", "read", "fetch", "transport", "ack"]) {
     const f = fixture(boundary);

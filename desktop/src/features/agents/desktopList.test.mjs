@@ -202,6 +202,9 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
   const originalReconnect = relayClient.subscribeToReconnects;
   let reconnect;
   let pulses = 0;
+  let reports = 0;
+  let publishedReports = 0;
+  let deferReport = true;
   relayClient.subscribeToReconnects = (callback) => {
     reconnect = callback;
     return () => {
@@ -210,6 +213,17 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
   };
   window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
+      if (command === "prepare_desktop_capabilities") {
+        reports++;
+        if (deferReport) throw Error("clock has not advanced");
+        return { event: { ...first, kind: 30182 } };
+      }
+      if (command === "read_desktop_capabilities")
+        return args.events.map(() => ({
+          id: "desktop-a",
+          reported: 100,
+          runtimes: [],
+        }));
       if (command === "prepare_desktop_observation")
         return { event: { ...first, kind: 30181 } };
       if (command === "read_desktop_observations")
@@ -237,7 +251,7 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
   };
   relayClient.fetchEvents = async (filter) => {
     if (fail) throw Error("unavailable");
-    if (filter.kinds[0] === 30181) return [];
+    if ([30181, 30182].includes(filter.kinds[0])) return [];
     if (filter["#d"]) return [current];
     const rows = [current];
     if (hold) {
@@ -249,6 +263,10 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
     return rows;
   };
   relayClient.publishEvent = async (event) => {
+    if (event.kind === 30182) {
+      publishedReports++;
+      return;
+    }
     assert.equal(event.kind, 30181, "no profile heartbeat rewrite");
     pulses++;
   };
@@ -285,14 +303,28 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
     await settle();
     assert.match(text(), /owner-a-wss:\/\/a.example/);
     assert.match(text(), /Last heard: Recent/);
+    assert.match(text(), /could not synchronize capability facts/);
     const beforeReconnect = pulses;
+    const reportsBeforeReconnect = reports;
     await React.act(async () => reconnect());
     await settle();
     assert.ok(pulses > beforeReconnect, "reconnect reports a fresh pulse");
+    assert.ok(
+      reports > reportsBeforeReconnect,
+      "reconnect retries deferred facts",
+    );
     const beforeTimer = pulses;
+    const reportsBeforeTimer = reports;
     await React.act(async () => t.mock.timers.tick(60_000));
     await settle();
     assert.ok(pulses > beforeTimer, "bounded periodic publisher runs");
+    assert.ok(reports > reportsBeforeTimer, "periodic retry survives deferral");
+    assert.equal(publishedReports, 0, "deferred facts are not published");
+    deferReport = false;
+    await React.act(async () => t.mock.timers.tick(60_000));
+    await settle();
+    assert.equal(publishedReports, 1, "later preparation is published");
+    assert.doesNotMatch(text(), /could not synchronize capability facts/);
     hold = true;
     await React.act(async () => {
       void client.refetchQueries({ queryKey: ["desktop-profiles"] });
