@@ -620,10 +620,10 @@ packages:
     dependency: "direct main"
     description:
       name: gpt_markdown
-      sha256: "5c565a438e569b3b546023d0d4eccccf87e260a3289a17c4e241c41d5e7545df"
+      sha256: "42887afaf5c7a71348221048a6c1e34c9836703ee0e6b4865e789253fcaa204a"
       url: "https://pub.dev"
     source: hosted
-    version: "1.1.6"
+    version: "1.2.1"
   gtk:
     dependency: transitive
     description:
