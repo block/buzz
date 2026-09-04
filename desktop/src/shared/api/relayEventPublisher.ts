@@ -19,9 +19,11 @@ export async function publishSessionEvent(
   event: RelayEvent,
   timeoutMessage: string,
   sendErrorMessage: string,
+  assertActive: () => void = () => {},
 ): Promise<RelayEvent> {
   const publishOwnership = session.ownership();
   await waitForRateLimit();
+  assertActive();
   if (publishOwnership !== session.ownership()) {
     throw new Error("Relay disconnected for community switch.");
   }
@@ -48,6 +50,14 @@ export async function publishSessionEvent(
           return;
         }
 
+        try {
+          assertActive();
+        } catch (error) {
+          window.clearTimeout(timeout);
+          session.pendingEvents.delete(event.id);
+          reject(error);
+          return;
+        }
         // Expected socket recovery must not reject the operation being retried.
         session.pendingEvents.delete(event.id);
         const sendError = session.recoverSocketFailure(error, sendErrorMessage);
@@ -55,7 +65,9 @@ export async function publishSessionEvent(
         let retryGeneration: number | null = null;
 
         try {
-          retryGeneration = await session.reconnect();
+          const reconnected = await session.reconnect();
+          assertActive();
+          retryGeneration = reconnected;
           if (
             publishOwnership !== session.ownership() ||
             session.generation() !== retryGeneration ||

@@ -101,3 +101,25 @@ test("bounded/invalid reads are not silently authoritative, clocks and staleness
   ])
     assert.ok(desktopFreshness(heard, now).startsWith(expected));
 });
+
+test("history/live replacement races select newest signed time and lower ID, not arrival", async () => {
+  const f = fixture();
+  const events = [
+    { id: "old", created_at: 10 },
+    { id: "b", created_at: 20 },
+    { id: "a", created_at: 20 },
+  ];
+  const ipc = f.ipc;
+  f.ipc = async (command, args) => {
+    if (command === "read_desktop_observations")
+      assert.deepEqual(
+        args.events.map((e) => e.id),
+        ["a", "b", "old"],
+      );
+    return ipc(command, args);
+  };
+  for (const batch of [events, [...events].reverse()]) {
+    f.relay.fetchEvents = async () => batch;
+    await f.refresh();
+  }
+});
