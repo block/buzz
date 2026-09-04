@@ -989,3 +989,29 @@ fn databricks_static_token_error_redacts_echoed_token() {
         "error lost its remediation: {error}"
     );
 }
+
+#[test]
+fn agent_model_normalization_accepts_acp_name_field() {
+    let raw = serde_json::json!({
+        "agent": {"name": "Cursor", "version": "1"},
+        "stable": {
+            "configOptions": [{
+                "category": "model",
+                "options": [
+                    {"value": "default[]", "name": "Auto"},
+                    {"value": "z-ai/glm-5", "displayName": "GLM 5"}
+                ]
+            }]
+        },
+        "unstable": {
+            "currentModelId": "default[]",
+            "availableModels": [{"modelId": "default[]", "name": "Duplicate"}]
+        }
+    });
+
+    let result = normalize_agent_models(&raw, None);
+
+    assert_eq!(result.models.len(), 2);
+    assert_eq!(result.models[0].name.as_deref(), Some("Auto"));
+    assert_eq!(result.models[1].name.as_deref(), Some("GLM 5"));
+}

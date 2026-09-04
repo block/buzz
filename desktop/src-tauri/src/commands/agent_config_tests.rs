@@ -769,3 +769,25 @@ fn live_switch_null_models_parses_to_no_current_model() {
     );
     assert!(available.is_empty());
 }
+
+#[test]
+fn config_options_accept_acp_name_labels() {
+    let raw = serde_json::json!([{
+        "id": "model",
+        "name": "Model",
+        "currentValue": "default[]",
+        "options": [
+            {"value": "default[]", "name": "Auto"},
+            {"value": "legacy", "displayName": "Legacy label", "name": "ACP label"}
+        ]
+    }]);
+
+    let parsed = parse_config_options(Some(&raw));
+
+    assert_eq!(parsed[0].display_name.as_deref(), Some("Model"));
+    assert_eq!(parsed[0].options[0].display_name.as_deref(), Some("Auto"));
+    assert_eq!(
+        parsed[0].options[1].display_name.as_deref(),
+        Some("Legacy label")
+    );
+}
