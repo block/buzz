@@ -1,4 +1,4 @@
-import type { MentionAction } from "./mentionPresentation";
+import type { MentionAction, MentionPresence } from "./mentionPresentation";
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import type {
   AgentPersona,
@@ -34,8 +34,6 @@ export type TeamMentionMember = {
 };
 
 export type MentionCandidate = {
-  action?: MentionAction;
-  hasNameCollision?: boolean;
   kind: "identity" | "persona" | "team";
   pubkey?: string;
   personaId?: string;
@@ -52,6 +50,13 @@ export type MentionCandidate = {
   isActiveAgent?: boolean;
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
+  action?: MentionAction;
+  unavailableReason?: string;
+  presence?: MentionPresence;
+  localLifecycle?: string;
+  localError?: boolean;
+  isOwned?: boolean;
+  hasNameCollision?: boolean;
 };
 
 export function mentionCandidateLabel(candidate: MentionCandidate) {

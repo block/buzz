@@ -438,8 +438,8 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect(relayProvenanceMarker).toBeVisible();
   await expect(relayProvenanceMarker).toHaveText("");
   await expect(relayProvenanceMarker.locator("svg")).toBeVisible();
-  await expect(managedRow).not.toContainText("managed by you");
-  await expect(relayRow).not.toContainText("managed by you");
+  await expect(managedRow).toContainText("managed by you");
+  await expect(relayRow).toContainText("managed by you");
 
   await page.setViewportSize({ width: 760, height: 640 });
   await expect(relayProvenanceMarker).toBeVisible();
@@ -1539,7 +1539,7 @@ test("managed relay-profile agents with member roles can be addressed explicitly
   ).toBeVisible();
 });
 
-test("other-owned agents without a shared channel are hidden from mentions", async ({
+test("other-owned agents without a shared channel remain unavailable", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1560,17 +1560,24 @@ test("other-owned agents without a shared channel are hidden from mentions", asy
   const input = page.getByTestId("message-input");
   await input.fill("@mira");
 
-  const dropdown = autocomplete(page);
   await expect(
-    page.getByRole("status").filter({ hasText: "No mentions found" }),
-  ).toBeVisible();
-  await expect(
-    dropdown.locator("[data-testid^=mention-suggestion-]"),
-  ).toHaveCount(0);
+    autocomplete(page).getByRole("button", {
+      name: "Checking mira",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  const action = autocomplete(page).getByRole("button", {
+    name: "Unavailable mira",
+    exact: true,
+  });
+  // The product intentionally gives unknown evidence a five-second window.
+  await expect(action).toBeDisabled({ timeout: 7000 });
+  await input.press("Tab");
+  await expect(input).toHaveText("@mira");
   await expect(input.locator(".mention-chip")).toHaveCount(0);
 });
 
-test("stale channel-member agents absent from managed and relay directories stay hidden", async ({
+test("stale channel-member agents absent from managed and relay directories remain unavailable", async ({
   page,
 }) => {
   await installMockBridge(page, { userSearchDelayMs: 1_000 });
@@ -1582,11 +1589,19 @@ test("stale channel-member agents absent from managed and relay directories stay
   await input.fill("@mira");
 
   await expect(
-    page.getByRole("status").filter({ hasText: "No mentions found" }),
-  ).toBeVisible();
-  await expect(
-    autocomplete(page).locator("[data-testid^=mention-suggestion-]"),
-  ).toHaveCount(0);
+    autocomplete(page).getByRole("button", {
+      name: "Checking mira",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  const action = autocomplete(page).getByRole("button", {
+    name: "Unavailable mira",
+    exact: true,
+  });
+  // The product intentionally gives unknown evidence a five-second window.
+  await expect(action).toBeDisabled({ timeout: 7000 });
+  await input.press("Tab");
+  await expect(input).toHaveText("@mira");
 });
 
 test("managed relay agents are visible in channel mentions regardless of relay policy", async ({
@@ -1621,7 +1636,7 @@ test("managed relay agents are visible in channel mentions regardless of relay p
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
-test("relay-only shared agents stay hidden from DM mentions", async ({
+test("relay-only shared agents remain unavailable from DM mentions", async ({
   page,
 }) => {
   await page.goto("/");
@@ -1630,15 +1645,16 @@ test("relay-only shared agents stay hidden from DM mentions", async ({
 
   await page.getByTestId("message-input").fill("@alice");
 
-  await expect(
-    page.getByRole("status").filter({ hasText: "No mentions found" }),
-  ).toBeVisible();
-  await expect(
-    autocomplete(page).locator("[data-testid^=mention-suggestion-]"),
-  ).toHaveCount(0);
+  const action = autocomplete(page).getByRole("button", {
+    name: "Unavailable alice",
+    exact: true,
+  });
+  await expect(action).toBeDisabled();
+  await page.getByTestId("message-input").press("Tab");
+  await expect(page.getByTestId("message-input")).toHaveText("@alice");
 });
 
-test("cached relay-agent choices cannot insert when channel authorization disappears", async ({
+test("cached relay-agent members become unavailable when channel authorization disappears", async ({
   page,
 }) => {
   await installMockBridge(page, { userSearchDelayMs: 100 });
@@ -1674,9 +1690,24 @@ test("cached relay-agent choices cannot insert when channel authorization disapp
     await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   }, GENERAL_CHANNEL_ID);
 
-  await expect(aliceSuggestion).toBeVisible();
-  await input.press("Tab");
+  const action = aliceSuggestion.getByRole("button", {
+    name: "Unavailable alice",
+    exact: true,
+  });
+  await expect(action).toBeDisabled();
+  await expect(
+    aliceSuggestion.getByRole("button", { name: "Retry" }),
+  ).toBeEnabled();
+  await expect(
+    aliceSuggestion.getByRole("button", { name: /automatic/i }),
+  ).toHaveCount(0);
+  await action.dispatchEvent("click");
+  for (const key of ["Tab", "Enter"]) await input.press(key);
   await expect(input).toHaveText("@alice");
+  await expect(
+    page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.alice.pubkey}`),
+  ).toHaveCount(0);
+  expect(await readOutgoingMentionPubkeys(page, "@alice")).toBeNull();
 });
 
 test("relay-only shared agents appear in forum mentions", async ({ page }) => {
@@ -1829,6 +1860,9 @@ test("managed agents use the channel roster for membership labels", async ({
         queryKey: ["channels"],
         exact: true,
       });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels", channelId, "members"],
+      });
     },
     {
       channelId: GENERAL_CHANNEL_ID,
@@ -1843,12 +1877,21 @@ test("managed agents use the channel roster for membership labels", async ({
   await expect(carlRow).toBeVisible();
   await expect(carlRow.getByText("agent")).toBeVisible();
   await expect(carlRow.getByText("not in channel")).toHaveCount(0);
+  await expect(carlRow).toContainText("Member · Mention");
+  await expect(carlRow).not.toContainText("Invite");
 });
 
 test("relay-agent directory errors fail closed and recover after a fresh fetch", async ({
   page,
 }) => {
   await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        displayName: "quinn",
+        isAgent: true,
+      },
+    ],
     relayAgentListErrors: Array(20).fill("mock directory unavailable"),
     relayAgents: [
       {
@@ -1862,21 +1905,44 @@ test("relay-agent directory errors fail closed and recover after a fresh fetch",
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
+  // Failed discovery cannot disclose an unknown directory-only identity.
+  // Seed a known channel member independently, so Retry has an existing row.
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels", channelId, "members"],
+      });
+    },
+    { channelId: GENERAL_CHANNEL_ID, pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY },
+  );
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
   await expect(
-    page.getByRole("status").filter({ hasText: "No mentions found" }),
-  ).toBeVisible();
+    autocomplete(page).getByRole("button", {
+      name: "Unavailable quinn",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await input.press("Tab");
+  await expect(input).toHaveText("@quinn");
+  await expect(input.locator(".mention-chip")).toHaveCount(0);
 
   await page.evaluate(async () => {
     window.__BUZZ_E2E__.mock!.relayAgentListErrors = [];
-    await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
-      queryKey: ["relay-agents"],
-    });
   });
-  await input.press("Escape");
-  await input.fill("@quin");
-  await expect(autocomplete(page).getByText("quinn")).toBeVisible();
+  await autocomplete(page)
+    .getByRole("button", { name: "Retry access check for quinn", exact: true })
+    .click();
+  await expect(
+    autocomplete(page).getByRole("button", {
+      name: /^(Mention|Invite) quinn$/,
+    }),
+  ).toBeEnabled();
 
   await page.evaluate(() => {
     window.__BUZZ_E2E__.mock ??= {};
@@ -2108,7 +2174,10 @@ test("selected relay agents are invited as bots before sending", async ({
   await input.fill("@quinn");
   const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
   await expect(quinnRow).toBeVisible();
-  await expect(quinnRow.getByText("not in channel")).toHaveCount(0);
+  await expect(quinnRow.getByText("not in channel")).toBeVisible();
+  await expect(quinnRow).toContainText("Invite");
+  await expect(quinnRow).not.toContainText("Member · Mention");
+  await expect(quinnRow).toBeEnabled();
   await quinnRow.click();
   await page.keyboard.type("hello");
 
@@ -2119,11 +2188,17 @@ test("selected relay agents are invited as bots before sending", async ({
     exact: true,
   });
   await expect(inviteButton).toBeVisible();
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
+  expect(
+    (await readCommandPayloadLog(page))
+      .slice(baselinePayloadCount)
+      .some((entry) => entry.command === "add_channel_members"),
+  ).toBe(false);
   await inviteButton.click();
 
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+    .toEqual([ALLOWLIST_RELAY_AGENT_PUBKEY]);
   const sendCommands = (await readCommandPayloadLog(page)).slice(
     baselinePayloadCount,
   );

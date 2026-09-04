@@ -1,9 +1,5 @@
+import { relayAgentIsSharedWithUser } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { markMentionCollisions } from "./mentionPresentation";
-import {
-  coalesceAgentAutocompleteCandidates,
-  coalesceAutocompleteCandidatesByKey,
-  shouldHideAgentFromMentions,
-} from "@/features/agents/lib/agentAutocompleteEligibility";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
   AgentPersona,
@@ -16,14 +12,15 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   formatSearchUserDisplayName,
   formatSearchUserSecondaryLabel,
-  globalSearchIdentityKey,
   type MentionCandidate,
-  mentionCandidateLabel,
 } from "./mentionCandidates";
 
 /** Directories and rosters the mention picker merges into one candidate list. */
 export type BuildMentionCandidatesInput = {
   activeAgentPubkeys: ReadonlySet<string>;
+  knownAgentPubkeys?: ReadonlySet<string>;
+  verificationFailed?: boolean;
+  presenceFresh?: boolean;
   activePersonaById: ReadonlyMap<string, AgentPersona>;
   /** Already narrowed to `isActive` personas. */
   activePersonas: readonly AgentPersona[];
@@ -56,6 +53,9 @@ export type BuildMentionCandidatesInput = {
  */
 export function buildMentionCandidates({
   activeAgentPubkeys,
+  knownAgentPubkeys = new Set(),
+  verificationFailed = false,
+  presenceFresh = true,
   activePersonaById,
   activePersonas,
   canSearchGlobalUsers,
@@ -81,19 +81,6 @@ export function buildMentionCandidates({
   const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
     const pubkey = normalizePubkey(candidate.pubkey);
     if (isArchived(pubkey)) {
-      return;
-    }
-    if (
-      shouldHideAgentFromMentions({
-        isAgent: candidate.isAgent === true,
-        pubkey,
-        mentionableAgentPubkeys,
-        directoryReady:
-          candidate.isManagedAgent === true
-            ? managedAgentDirectoryReady
-            : relayAgentDirectoryReady,
-      })
-    ) {
       return;
     }
     const current = candidatesByPubkey.get(pubkey);
@@ -174,9 +161,9 @@ export function buildMentionCandidates({
       // is filtered by access policy, so its channel ids can legitimately omit
       // a room where this identity is already a member.
       isMember:
-        memberPubkeys.has(pubkey) ||
-        (mentionChannelId !== null &&
-          agent.channelIds.includes(mentionChannelId)),
+        members !== undefined
+          ? members.some((member) => normalizePubkey(member.pubkey) === pubkey)
+          : memberPubkeys.has(pubkey),
       personaId:
         managedAgentPersonaIdsByPubkey.get(pubkey) ??
         (activePersonaById.has(pubkey) ? pubkey : undefined),
@@ -236,17 +223,90 @@ export function buildMentionCandidates({
       isAgent: true,
     }))
     .filter((candidate) => candidate.displayName.trim().length > 0);
-  return markMentionCollisions(
-    coalesceAgentAutocompleteCandidates(
-      coalesceAutocompleteCandidatesByKey(
-        [...candidatesByPubkey.values(), ...personaCandidates],
-        globalSearchIdentityKey,
-      ),
-      {
+  // Classify the exact-key union BEFORE admission. A known agent returned by
+  // people search must never bypass policy as a human.
+  const relayByKey = new Map(
+    (relayAgents ?? []).map((a) => [normalizePubkey(a.pubkey), a]),
+  );
+  const managedByKey = new Map(
+    (managedAgents ?? []).map((a) => [normalizePubkey(a.pubkey), a]),
+  );
+  const roster =
+    members === undefined
+      ? memberPubkeys
+      : new Set(members.map((m) => normalizePubkey(m.pubkey)));
+  const union = [...candidatesByPubkey.values()].map((candidate) => {
+    const key = candidate.pubkey ?? "";
+    const relay = relayByKey.get(key);
+    const managed = managedByKey.get(key);
+    const isAgent =
+      candidate.isAgent || !!relay || !!managed || knownAgentPubkeys.has(key);
+    // Profiles/search may classify an agent, but do not verify ownership.
+    const ownerPubkey = relay?.ownerPubkey ?? (managed ? currentPubkey : null);
+    const ready = managed
+      ? managedAgentDirectoryReady
+      : relayAgentDirectoryReady;
+    const hasEvidence = !!managed || !!relay;
+    const isMember = roster.has(key);
+    const memberPolicyAllows =
+      relay &&
+      isMember &&
+      mentionChannelId &&
+      relayAgentIsSharedWithUser(
+        { ...relay, channelIds: [mentionChannelId] },
+        new Set([mentionChannelId]),
         currentPubkey,
-        getLabel: mentionCandidateLabel,
-        preferredPubkeys: memberPubkeys,
-      },
-    ),
+      );
+    const allowed =
+      ready &&
+      hasEvidence &&
+      (mentionableAgentPubkeys.has(key) || memberPolicyAllows);
+    const action =
+      !isAgent || allowed
+        ? isMember
+          ? "mention"
+          : "invite"
+        : ready && hasEvidence
+          ? "unavailable"
+          : verificationFailed
+            ? "unavailable"
+            : "checking";
+    return {
+      ...candidate,
+      isAgent,
+      isMember,
+      ownerPubkey,
+      isOwned:
+        !!ownerPubkey &&
+        !!currentPubkey &&
+        normalizePubkey(ownerPubkey) === normalizePubkey(currentPubkey),
+      action,
+      unavailableReason:
+        action === "unavailable"
+          ? ready && hasEvidence
+            ? "This agent does not permit you to mention it here."
+            : "Could not verify access. Retry to check again."
+          : action === "checking"
+            ? "Checking access…"
+            : undefined,
+      presence:
+        isAgent && relay && presenceFresh && relayAgentDirectoryReady
+          ? relay.status
+          : "unknown",
+      localLifecycle: managed?.status,
+      localError: Boolean(managed?.lastError),
+    } satisfies MentionCandidate;
+  });
+  // No new disclosure: unverified/denied directory-only nonmembers remain
+  // hidden. Current roster identities and local managed identities are already
+  // visible and can explain an unavailable action without granting one.
+  const marked = markMentionCollisions([...union, ...personaCandidates]);
+  return marked.filter(
+    (candidate) =>
+      !candidate.isAgent ||
+      candidate.kind !== "identity" ||
+      candidate.isMember ||
+      candidate.action === "invite" ||
+      (candidate.isManagedAgent && candidate.action === "checking"),
   );
 }
