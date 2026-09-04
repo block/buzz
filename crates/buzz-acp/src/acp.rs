@@ -508,8 +508,7 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            let parent_has_value = std::env::var_os(key).is_some();
-            if !parent_has_value {
+            if std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
         }
