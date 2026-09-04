@@ -42,7 +42,7 @@ pub struct StopResult {
     pub outcome: StopOutcome,
 }
 
-fn hex(value: &str, len: usize) -> bool {
+pub(crate) fn hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value
             .bytes()
@@ -67,7 +67,12 @@ pub fn validate_envelope(event: &Event) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn sign<T: Serialize>(value: &T, keys: &Keys, kind: u32, tags: Vec<Tag>) -> Result<Event, String> {
+pub(crate) fn sign<T: Serialize>(
+    value: &T,
+    keys: &Keys,
+    kind: u32,
+    tags: Vec<Tag>,
+) -> Result<Event, String> {
     let ciphertext = nip44::encrypt(
         keys.secret_key(),
         &keys.public_key(),
@@ -81,12 +86,16 @@ fn sign<T: Serialize>(value: &T, keys: &Keys, kind: u32, tags: Vec<Tag>) -> Resu
         .map_err(|e| e.to_string())
 }
 
-fn read<T: serde::de::DeserializeOwned>(
+pub(crate) fn read<T: serde::de::DeserializeOwned>(
     event: &Event,
     keys: &Keys,
     kind: u32,
 ) -> Result<T, String> {
-    validate_envelope(event)?;
+    if matches!(kind, KIND_DESKTOP_STOP | KIND_DESKTOP_STOP_RESULT) {
+        validate_envelope(event)?;
+    } else {
+        crate::desktop_lifecycle::validate_envelope(event)?;
+    }
     event
         .verify()
         .map_err(|_| "invalid Desktop Stop signature")?;
