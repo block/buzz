@@ -394,7 +394,10 @@ export function useRichTextEditor({
           addKeyboardShortcuts() {
             return {
               Enter: ({ editor: ed }) => {
-                if (isAutocompleteOpen?.current) return false;
+                // The wrapper owns autocomplete Enter. Suppress splitBlock
+                // before the event bubbles there, so its current-document
+                // check sees the query the user actually chose.
+                if (isAutocompleteOpen?.current) return true;
                 if (!onSubmitRef.current) return false;
 
                 const fenceResult = handleCodeFenceEnter(ed);

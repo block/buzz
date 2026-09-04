@@ -1365,8 +1365,8 @@ test("an authored duplicate leading mention survives draft restoration", async (
   await openGeneral(page);
 
   await expect(input).toHaveText("@Morgarita @Morgarita authored duplicate");
-  // Exact typed mentions now resolve on Space, so both the automatic prefix and
-  // the authored duplicate retain mention identity after restoration.
+  // Both occurrences use the already registered exact label. Decoration must
+  // not depend on raw Space completing a picker query or refreshing the names.
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(2);
 
   await page.goto(`/#/channels/${RANDOM_CHANNEL_ID}`, {

@@ -563,3 +563,86 @@ test("full-name boundaries preserve internal spaces and intentional caret moves"
     1 + "@Scout (ed12) ".length,
   );
 });
+
+test("team separator survives qualified-label refresh and immediate typing", () => {
+  // Long enough that the boundary scan must include the wrapper and delimiter.
+  const label = `Remote Scout (${"b".repeat(64)})`;
+  const names = ["Remote Scout", label];
+  const inserted = `Scouts(@Remote Scout @${label}) `;
+  const edge = inserted.length;
+  const storage = { names: [], agentNames: [], channelNames: [] };
+  const plugins = MentionHighlightExtension.config.addProseMirrorPlugins.call({
+    storage,
+  });
+  const state = EditorState.create({
+    doc: document(paragraph(text("@Scouts"))),
+    schema,
+    plugins,
+  });
+  const tr = state.tr.insertText(inserted, 1, 8);
+  tr.setSelection(TextSelection.create(tr.doc, edge + 1));
+  settleAutocompleteMentionInsert(
+    { storage: { mentionHighlight: storage } },
+    tr,
+    inserted,
+  );
+  const picked = state.apply(tr);
+  assignMentionHighlightNames(storage, names, [], []);
+  const refreshed = picked.apply(picked.tr.setMeta(mentionHighlightKey, true));
+  assert.equal(
+    selectionAfterMentionTrailingSpace(refreshed.doc, edge, names),
+    edge + 1,
+  );
+  const typed = textInput(refreshed, edge, edge + 1, "\u00a0h");
+  assert.equal(
+    typeAt(typed, typed.selection.from, "ello").doc.textContent,
+    `${inserted}hello`,
+  );
+  // Wrapper recognition must not consume arbitrary suffixes.
+  for (const suffix of ["", ")", "))", "x)"]) {
+    const doc = document(
+      paragraph(text(`Scouts(@Remote Scout @${label}${suffix} `)),
+    );
+    const pos = doc.textContent.length;
+    assert.equal(
+      selectionAfterMentionTrailingSpace(doc, pos, names),
+      pos + Number(suffix === "" || suffix === ")"),
+    );
+  }
+});
+
+// Registration is label/key intent; raw typing of another occurrence must not
+// depend on Space autocomplete succeeding or a later names-prop refresh.
+for (const name of ["Morgarita", "Remote Scout"]) {
+  test(`incremental typing decorates a second registered ${name} occurrence`, () => {
+    const prefix = `@${name} `;
+    const state = editorStateWithMentionHighlight(prefix, [name]);
+    const typed = typeAt(
+      state,
+      prefix.length + 1,
+      `@${name} authored duplicate`,
+    );
+    const decorations = mentionHighlightKey.getState(typed).find();
+    assert.equal(decorations.length, 4); // prefix + label for each occurrence
+    assert.equal(typed.doc.textContent, `${prefix}@${name} authored duplicate`);
+    assert.equal(typed.selection.from, typed.doc.textContent.length + 1);
+    assert.deepEqual(
+      decorations.map(({ from, to }) => typed.doc.textBetween(from, to)),
+      ["@", name, "@", name],
+    );
+  });
+}
+
+test("typing an unregistered name cannot create mention decoration", () => {
+  const state = editorStateWithMentionHighlight("@Morgarita ", ["Morgarita"]);
+  const typed = typeAt(state, 12, "@Vogue authored text");
+  assert.equal(mentionHighlightKey.getState(typed).find().length, 2);
+});
+
+test("deleting an unrecognized suffix exposes the registered mention again", () => {
+  const state = editorStateWithMentionHighlight("@MorgaritaX", ["Morgarita"]);
+  assert.equal(mentionHighlightKey.getState(state).find().length, 0);
+  const next = state.apply(state.tr.delete(11, 12));
+  assert.equal(next.doc.textContent, "@Morgarita");
+  assert.equal(mentionHighlightKey.getState(next).find().length, 2);
+});
