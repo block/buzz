@@ -143,6 +143,46 @@ impl AssertionKeySet {
     pub(crate) fn hard_deadline(&self) -> chrono::DateTime<chrono::Utc> {
         self.hard_deadline
     }
+
+    /// Construct a minimal `AssertionKeySet` for tests that only need a
+    /// `Some(_)` return from a mock source — the key material and issuer are
+    /// arbitrary and the set is not valid for actual token verification.
+    ///
+    /// Named `_for_test` to signal intent; not gated by `cfg(test)` so it is
+    /// visible to downstream crates' test builds.
+    #[doc(hidden)]
+    pub fn empty_for_test() -> Self {
+        use jsonwebtoken::jwk::{
+            AlgorithmParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, OctetKeyPairParameters,
+            OctetKeyPairType,
+        };
+        // A syntactically minimal OKP key — its x coordinate is not real key
+        // material, so this set cannot sign or verify any token. Only the
+        // `Some(_)` vs `None` distinction matters in cadence-state tests.
+        let jwk = Jwk {
+            common: jsonwebtoken::jwk::CommonParameters {
+                public_key_use: None,
+                key_operations: None,
+                key_algorithm: Some(KeyAlgorithm::EdDSA),
+                key_id: Some("test-kid".to_string()),
+                x509_url: None,
+                x509_chain: None,
+                x509_sha1_fingerprint: None,
+                x509_sha256_fingerprint: None,
+            },
+            algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
+                key_type: OctetKeyPairType::OctetKeyPair,
+                curve: EllipticCurve::Ed25519,
+                x: "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo".to_string(),
+            }),
+        };
+        Self {
+            issuer: "https://test.example".to_string(),
+            generation: 1,
+            jwks: JwkSet { keys: vec![jwk] },
+            hard_deadline: chrono::Utc::now() + chrono::Duration::hours(1),
+        }
+    }
 }
 
 impl fmt::Debug for AssertionKeySet {

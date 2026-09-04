@@ -2121,12 +2121,14 @@ impl From<buzz_db::DbError> for JoinCommitError {
 /// Ordering (per B1 contract [e5bc0382], corrected for IMPORTANT 4 and 5):
 /// 1. Sign the `48101` event synchronously.
 /// 2. Begin a caller-owned DB transaction.
-/// 3. Archive re-check (ALL paths): re-read archived_at inside the transaction.
-///    Fail `Archived` if the channel was archived between admission check and now.
-///    Closes the race for both `Existing` and `AutoAddRequired` paths.
+/// 3. Archive re-check (ALL paths): `SELECT archived_at … FOR UPDATE` inside
+///    the transaction. Taking a row-level write lock serializes this join
+///    against concurrent `archive_channel` calls on both the `Existing` and
+///    `AutoAddRequired` paths — `archive_channel`'s UPDATE blocks until this
+///    transaction completes. Closes the READ COMMITTED race.
 /// 4. Under the channel membership lock (AutoAddRequired only):
 ///    a. Re-read channel archive state again — fail `Archived` if still needed.
-///    (IMPORTANT 4: closes the race between pre-join check and commit.)
+///    (IMPORTANT 4: defence-in-depth behind the FOR UPDATE above.)
 ///    b. Re-read parent membership — fail `ParentMembershipLost` if gone.
 ///    c. Re-read creator-signed huddle_started link — fail `HuddleLinkGone`
 ///    if the link was deleted between pre-join check and commit.
@@ -2193,17 +2195,26 @@ async fn commit_participant_join(
     let mut tx = state.db.begin_event_write_transaction().await?;
 
     // 3. Archive re-check (ALL paths): re-read archived_at inside the
-    //    transaction before any write. A channel can be archived in the window
-    //    between check_membership_for_admission and now; committing a join into
-    //    an archived channel violates the "no admission after archive" invariant.
-    //    This read is performed unconditionally so both the Existing and
-    //    AutoAddRequired paths are protected. The AutoAddRequired path below
-    //    re-reads archive state again under the advisory lock for its own
-    //    membership-write serialisation; the early check here closes the gap for
-    //    the Existing path where no advisory lock is acquired.
+    //    transaction before any write, taking a row-level write lock (`FOR UPDATE`)
+    //    on the channels row. This serializes all join commits against archive:
+    //    `archive_channel`'s `UPDATE channels SET archived_at = NOW()` must wait
+    //    until this transaction commits or rolls back before it can proceed —
+    //    closing the READ COMMITTED race on both the `Existing` and
+    //    `AutoAddRequired` paths.
+    //
+    //    `FOR UPDATE` is safe here: the channels row is a single row identified
+    //    by primary key; the lock is held only for the duration of the join
+    //    transaction (typically sub-millisecond). No deadlock risk: joins lock
+    //    the channel row first, archive also locks it first (no other write
+    //    orders these two objects differently).
+    //
+    //    The `AutoAddRequired` path below re-reads archive state a second time
+    //    under the advisory membership lock — that re-read provides defence-in-
+    //    depth and is kept as-is.
     let channel_archived_early: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
         "SELECT archived_at FROM channels \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+         FOR UPDATE",
     )
     .bind(tenant.community().as_uuid())
     .bind(channel_id)
@@ -5820,106 +5831,231 @@ mod tests {
         );
     }
 
-    // ── F2: archive re-check for Existing path ────────────────────────────────
+    // ── F2: archive/join serialization ───────────────────────────────────────
     //
-    // `commit_participant_join` must reject an `Existing` join when the channel
-    // is archived between `check_membership_for_admission` and commit. The old
-    // code only performed the archive re-check inside the `AutoAddRequired`
-    // advisory-lock branch, leaving the `Existing` path unprotected.
+    // `commit_participant_join` must serialize against concurrent `archive_channel`
+    // calls. The fix: `SELECT archived_at … FOR UPDATE` at step 3 takes a
+    // row-level write lock on the channels row. `archive_channel`'s
+    // `UPDATE channels SET archived_at = NOW()` blocks on that lock until the
+    // join transaction commits or rolls back — closing the READ COMMITTED race on
+    // both the `Existing` and `AutoAddRequired` paths.
     //
-    // ## Mutation oracle
+    // ## Mutation oracles
     //
-    // Remove the "Archive re-check (ALL paths)" block from `commit_participant_join`
-    // (lines 2192-2220 after the fix):
-    //   - This test returns `Ok(JoinCommitOutcome::JoinedSent)` instead of
-    //     `Err(JoinCommitError::Archived)` → `assert!(result.is_err())` panics.
-    //   - An archived 48101 row is inserted → row-count assertion also fails.
+    // 1. Remove the `FOR UPDATE` from the SELECT (revert to plain SELECT):
+    //    The serialization test may still pass on a fast machine, but the race
+    //    window reopens — archive can commit between the plain SELECT and the
+    //    join's final INSERT. The blocked-archive assertion fails on a slow run.
+    // 2. Remove the entire archive re-check block from `commit_participant_join`:
+    //    The existing-join rejection test returns `Ok(_)` instead of
+    //    `Err(Archived)` → `assert!(result.is_err())` panics.
     //
-    // This test requires a local DB (postgres://buzz:buzz_dev@127.0.0.1:5432/buzz).
-    #[tokio::test]
-    async fn f2_archived_channel_rejects_existing_join() {
-        use chrono::{Duration, Utc};
-        use uuid::Uuid;
+    // Both tests require a real PostgreSQL instance. They live in `postgres_tests`
+    // and are gated with `#[ignore = "requires Postgres — runs in postgres-ci
+    // nextest lane"]` so they do not run in unit-test mode where no DB is
+    // available. The postgres-ci nextest lane discovers them via the `ignore`
+    // attribute — do not remove the ignore even if a local DB is reachable,
+    // so the discovery contract is not broken. (Lesson S5: test relocation
+    // matters for nextest lane discovery.)
+    mod postgres_tests {
+        use super::*;
 
-        let state = match audio_test_state_real_db().await {
-            Some(s) => s,
-            None => {
-                eprintln!(
-                    "F2: skipping — local DB not available at \
-                     postgres://buzz:buzz_dev@127.0.0.1:5432/buzz"
-                );
-                return;
-            }
-        };
-        let pool = state.db.pool().clone();
-        let (tenant, channel_id, member_key) = seed_audio_fixture(&pool).await;
-        let community_id = tenant.community();
+        /// F2a: committed join into an already-archived channel is rejected on
+        /// the `Existing` path.
+        ///
+        /// ## Mutation oracle
+        ///
+        /// Remove the archive re-check block (including the `FOR UPDATE`) from
+        /// `commit_participant_join` → `result` is `Ok(_)` instead of
+        /// `Err(JoinCommitError::Archived)` → `assert!(result.is_err())` panics.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn f2a_archived_channel_rejects_existing_join() {
+            use chrono::{Duration, Utc};
+            use uuid::Uuid;
 
-        // Archive the channel — simulating a concurrent archive between admission
-        // check and commit.
-        sqlx::query(
-            "UPDATE channels SET archived_at = NOW() \
-             WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
-        )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .execute(&pool)
-        .await
-        .expect("F2: archive channel");
+            let state = audio_test_state_real_db()
+                .await
+                .expect("F2a: PostgreSQL must be available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz — \
+                         is the local DB running?");
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, member_key) = seed_audio_fixture(&pool).await;
+            let community_id = tenant.community();
 
-        let member_bytes = member_key.public_key().to_bytes().to_vec();
-        let member_hex = member_key.public_key().to_hex();
-        let peer_id = Uuid::new_v4();
-        let roster_revision = 1u64;
-        // Existing path — the old code skipped the archive re-check here.
-        let membership = MembershipAdmission::Existing {
-            parent_channel_id: channel_id,
-        };
+            // Archive the channel before attempting the join — simulating a
+            // concurrent archive that committed before the join transaction starts.
+            sqlx::query(
+                "UPDATE channels SET archived_at = NOW() \
+                 WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("F2a: archive channel");
 
-        let deadline = Utc::now() + Duration::hours(1);
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel);
+            let member_bytes = member_key.public_key().to_bytes().to_vec();
+            let member_hex = member_key.public_key().to_hex();
+            let peer_id = Uuid::new_v4();
+            let roster_revision = 1u64;
+            // Existing path — the old code skipped the archive re-check here.
+            let membership = MembershipAdmission::Existing {
+                parent_channel_id: channel_id,
+            };
 
-        let result = commit_participant_join(
-            &state,
-            &tenant,
-            channel_id,
-            channel_id,
-            &member_hex,
-            &member_bytes,
-            peer_id,
-            roster_revision,
-            &membership,
-            &gate,
-            String::new(),
-            &std::sync::Arc::new(crate::audio::room::Room::new(
-                tenant.community(),
+            let deadline = Utc::now() + Duration::hours(1);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel);
+
+            let result = commit_participant_join(
+                &state,
+                &tenant,
                 channel_id,
-            )),
-        )
-        .await;
+                channel_id,
+                &member_hex,
+                &member_bytes,
+                peer_id,
+                roster_revision,
+                &membership,
+                &gate,
+                String::new(),
+                &std::sync::Arc::new(crate::audio::room::Room::new(
+                    tenant.community(),
+                    channel_id,
+                )),
+            )
+            .await;
 
-        assert!(
-            matches!(result, Err(JoinCommitError::Archived)),
-            "F2: commit into archived channel via Existing path must fail with \
-             JoinCommitError::Archived; got: {result:?}\n\
-             Mutation oracle: remove the archive re-check block → returns Ok(_) here"
-        );
+            assert!(
+                matches!(result, Err(JoinCommitError::Archived)),
+                "F2a: commit into archived channel via Existing path must fail with \
+                 JoinCommitError::Archived; got: {result:?}\n\
+                 Mutation oracle: remove the archive re-check block → returns Ok(_) here"
+            );
 
-        // No 48101 row must be committed — transaction was rolled back.
-        let row_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM events \
-             WHERE community_id = $1 AND channel_id = $2 AND kind = 48101",
-        )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .fetch_one(&pool)
-        .await
-        .expect("F2: row count query");
+            // No 48101 row must be committed — transaction was rolled back.
+            let row_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM events \
+                 WHERE community_id = $1 AND channel_id = $2 AND kind = 48101",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .expect("F2a: row count query");
 
-        assert_eq!(
-            row_count, 0,
-            "F2: no 48101 row must be committed into an archived channel; found {row_count}"
-        );
+            assert_eq!(
+                row_count, 0,
+                "F2a: no 48101 row must be committed into an archived channel; found {row_count}"
+            );
+        }
+
+        /// F2b: archive and join are serialized — a concurrent archive blocks
+        /// until the holding join transaction commits, then sees the updated row.
+        ///
+        /// This is the two-connection race test Thufir required: it proves that
+        /// the `FOR UPDATE` lock actually blocks `archive_channel` rather than
+        /// merely narrowing the race.
+        ///
+        /// ## Test design
+        ///
+        /// 1. Connection A: begin a join transaction and acquire the `FOR UPDATE`
+        ///    lock by running the SELECT.
+        /// 2. Connection B: attempt `archive_channel` concurrently with a short
+        ///    `lock_timeout` so it returns immediately with `55P03` if it blocks.
+        /// 3. Assert connection B was blocked (received `55P03`).
+        /// 4. Connection A: commit the join transaction (releases the lock).
+        /// 5. Assert `archive_channel` succeeds after the lock is released.
+        ///
+        /// ## Mutation oracle
+        ///
+        /// Remove `FOR UPDATE` from the `SELECT archived_at` in
+        /// `commit_participant_join`: the SELECT no longer acquires a row lock,
+        /// so connection B's archive UPDATE runs immediately without blocking.
+        /// The `assert!(archive_blocked)` line panics.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn f2b_for_update_blocks_concurrent_archive() {
+            let state = audio_test_state_real_db().await.expect(
+                "F2b: PostgreSQL must be available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz",
+            );
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, _member_key) = seed_audio_fixture(&pool).await;
+            let community_id = tenant.community();
+
+            // ── Connection A: acquire the FOR UPDATE row lock ─────────────────
+            // Open a transaction that matches commit_participant_join step 3.
+            let mut conn_a = pool.acquire().await.expect("F2b: acquire conn_a");
+            sqlx::query("BEGIN")
+                .execute(&mut *conn_a)
+                .await
+                .expect("F2b: begin tx A");
+
+            let archived_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT archived_at FROM channels \
+                 WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+                 FOR UPDATE",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .fetch_optional(&mut *conn_a)
+            .await
+            .expect("F2b: SELECT FOR UPDATE");
+
+            assert!(
+                archived_at.is_none(),
+                "F2b: channel must not be archived before the test; got {:?}",
+                archived_at
+            );
+
+            // ── Connection B: attempt archive with a short lock_timeout ───────
+            // `archive_channel` does a SELECT + UPDATE on the same channels row.
+            // With the FOR UPDATE lock held by conn_a, the UPDATE will wait.
+            // We use a session-level `lock_timeout` so the attempt returns
+            // quickly with `55P03` (lock_not_available) instead of blocking
+            // indefinitely — even outside an explicit transaction block.
+            let mut conn_b = pool.acquire().await.expect("F2b: acquire conn_b");
+            sqlx::query("SET lock_timeout = '50ms'")
+                .execute(&mut *conn_b)
+                .await
+                .expect("F2b: set lock_timeout");
+
+            let archive_result: Result<_, sqlx::Error> = sqlx::query(
+                "UPDATE channels SET archived_at = NOW() \
+                 WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND archived_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .execute(&mut *conn_b)
+            .await;
+
+            let archive_blocked = match &archive_result {
+                Err(sqlx::Error::Database(db_err)) => db_err.code().as_deref() == Some("55P03"),
+                _ => false,
+            };
+
+            assert!(
+                archive_blocked,
+                "F2b: archive UPDATE must be blocked by the FOR UPDATE row lock held \
+                 by the join transaction; got: {archive_result:?}\n\
+                 Mutation oracle: remove FOR UPDATE from the SELECT → archive runs \
+                 immediately, no lock contention, this assertion panics"
+            );
+
+            // ── Connection A: commit (releases the lock) ──────────────────────
+            sqlx::query("COMMIT")
+                .execute(&mut *conn_a)
+                .await
+                .expect("F2b: commit tx A");
+
+            // ── Verify archive now succeeds on a clean connection ─────────────
+            let archive_after_commit = state.db.archive_channel(community_id, channel_id).await;
+
+            assert!(
+                archive_after_commit.is_ok(),
+                "F2b: archive must succeed after the join transaction commits; \
+                 got: {archive_after_commit:?}"
+            );
+        }
     }
 }

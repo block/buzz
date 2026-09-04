@@ -336,24 +336,25 @@ async fn nip11_or_ws_handler(
 
     // NIP-FI assertion gate at WebSocket upgrade.
     //
-    // Strategy: belt-and-suspenders across both HTTP/1.1 WebSocket and
-    // HTTP/2 extended-CONNECT upgrade shapes.
+    // Strategy: belt-and-suspenders. Two fire-points cover the two ways an
+    // HTTP request can become a WebSocket upgrade request on this handler:
     //
-    // HTTP/1.1 path (RFC 6455): detected by the `Upgrade: websocket` +
-    // `Connection: Upgrade` header pair. The gate fires BEFORE
-    // `WebSocketUpgrade::from_request` so denial is returned on the raw HTTP
-    // connection. This also keeps the gate independently testable via tower
-    // `oneshot` (which provides no real hyper `OnUpgrade` extension and would
-    // cause the extractor to return `ConnectionNotUpgradable`).
+    // HTTP/1.1 path (RFC 6455, currently the only live WebSocket path):
+    // detected by the `Upgrade: websocket` + `Connection: Upgrade` header pair.
+    // The gate fires BEFORE `WebSocketUpgrade::from_request` so denial is
+    // returned on the raw HTTP connection. This also keeps the gate independently
+    // testable via tower `oneshot` (which provides no real hyper `OnUpgrade`
+    // extension and would cause the extractor to return
+    // `ConnectionNotUpgradable`).
     //
-    // HTTP/2 extended-CONNECT path: detected inside the `Ok(ws)` arm below.
-    // These requests carry `method = CONNECT` with no `Upgrade` header pair,
-    // so the pre-extractor block below does not fire; the gate inside
-    // `Ok(ws)` covers them. [F3-H2-GATE]
+    // HTTP/2 extended-CONNECT (latent — workspace Axum does not enable
+    // `http2`; the `/` route uses `get()` and Axum requires CONNECT routing
+    // for h2 WebSockets): not currently reachable. The gate inside `Ok(ws)`
+    // below is structural hardening for when `http2` is enabled. [F3-H2-GATE]
     //
-    // Together these two fire-points ensure that every request shape the
-    // extractor accepts is also gated — no hand-rolled predicate can diverge
-    // from the extractor's set of accepted shapes.
+    // Together these two fire-points ensure that every shape the extractor
+    // accepts is also gated — no hand-rolled predicate can diverge from the
+    // extractor's accepted shapes when `http2` is eventually enabled.
     //
     // Zero DB cost invariant: both fire-points run before `bind_community`,
     // so denied upgrades pay zero DB cost [FI-TRACE-TRANSPORT-CLOSED], and
@@ -425,13 +426,16 @@ async fn nip11_or_ws_handler(
 
     match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => {
-            // [F3-H2-GATE] HTTP/2 extended-CONNECT upgrades accepted by the
-            // extractor but not detected by the pre-extractor header predicate.
-            // Run the gate here to close the structural gap. For HTTP/1.1
-            // requests, `nip_fi_assertion` was already set above and this block
-            // is unreachable (`check_nip_fi_at_upgrade` would be called twice,
-            // but the pre-extractor `return` prevents this path from executing
-            // for h1 — the h1 denial is already returned before we get here).
+            // [F3-H2-GATE] Structural hardening for HTTP/2 extended-CONNECT
+            // WebSocket upgrades. H2 CONNECT is currently latent (workspace
+            // Axum does not enable `http2` and the route uses `get()` rather
+            // than CONNECT routing), but the gate here future-proofs against
+            // enabling h2: if the extractor ever accepts an h2 shape that the
+            // pre-extractor predicate missed (no `Upgrade` header on CONNECT),
+            // the gate fires here instead of admitting the upgrade silently.
+            // For HTTP/1.1 requests, `nip_fi_assertion` was already set above
+            // and this block is unreachable (the h1 denial is returned before
+            // we get here).
             let nip_fi_assertion = if nip_fi_assertion.is_none() {
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
@@ -1492,31 +1496,32 @@ mod tests {
     //
     // ## F3 structural proof
     //
-    // The NIP-FI gate uses a belt-and-suspenders approach across both upgrade shapes:
+    // The NIP-FI gate uses a belt-and-suspenders approach. The HTTP/1.1
+    // path is the only currently live WebSocket upgrade shape (workspace
+    // Axum does not enable `http2`; the route uses `get()` not CONNECT routing):
     //
-    // HTTP/1.1 WebSocket (RFC 6455): the gate fires BEFORE
+    // HTTP/1.1 WebSocket (RFC 6455, currently live): the gate fires BEFORE
     // `WebSocketUpgrade::from_request` using the `Upgrade: websocket` +
     // `Connection: Upgrade` header predicate. These tests drive this path via
     // tower `oneshot` — `oneshot` provides no real hyper `OnUpgrade` extension
     // so the extractor would return `ConnectionNotUpgradable`; the pre-extractor
     // gate catches the denial first and returns it before the extractor runs.
     //
-    // HTTP/2 extended-CONNECT: the pre-extractor predicate does not fire (no
-    // `Upgrade: websocket` header in h2 CONNECT), so the gate fires inside the
-    // `Ok(ws)` arm. Annotated [F3-H2-GATE] in the source. A live integration
-    // test for h2 CONNECT is not provided because (a) the workspace Axum
-    // dependency does not enable the `http2` feature and (b) the structural
-    // invariant is directly evident: any h2 CONNECT that the extractor accepts
-    // enters `Ok(ws)` where the gate runs unconditionally when
-    // `nip_fi_assertion.is_none()`.
+    // HTTP/2 extended-CONNECT (latent, future-proofing): Axum's `http2`
+    // feature is NOT currently enabled (workspace `axum = { features = ["ws",
+    // "macros"] }` — no `http2`). The `[F3-H2-GATE]` backstop inside `Ok(ws)`
+    // is structural hardening: if `http2` is ever enabled, any h2 CONNECT that
+    // the extractor accepts but the pre-extractor predicate misses (no `Upgrade`
+    // header) is caught at the backstop. A live integration test for h2 CONNECT
+    // is not provided because the path is currently latent.
     //
     // Mutation evidence:
     //   A) Delete the pre-extractor gate call in `nip11_or_ws_handler` → root
     //      request returns 404 (no community) instead of 401/503 → assert_eq
     //      panics.
-    //   B) Delete the [F3-H2-GATE] call in the `Ok(ws)` arm → h2 extended-CONNECT
-    //      upgrades bypass the gate; h1 tests still pass but structural coverage
-    //      is reduced.
+    //   B) Delete the [F3-H2-GATE] backstop in the `Ok(ws)` arm → h2 extended-
+    //      CONNECT upgrades would bypass the gate when `http2` is eventually
+    //      enabled; h1 tests still pass but the latent path loses its safety net.
     //   C) Delete the gate call in `ws_audio_handler` → audio request returns
     //      404 (no community) instead of 401/503 → assert_eq panics.
     //   D) Switch `Enforce` to `Off` in the test state → both ingresses skip

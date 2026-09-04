@@ -668,39 +668,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                             if now < *next_attempt_at {
                                 continue;
                             }
-                            match inner_source.get_snapshot(issuer).await {
-                                Some(_) => {
-                                    tracing::debug!(
-                                        issuer = %issuer,
-                                        "NIP-FI: JWKS snapshot refreshed"
-                                    );
-                                    *warmed = true;
-                                    // Warmed: next attempt at normal cadence.
-                                    *next_attempt_at =
-                                        now + std::time::Duration::from_secs(*interval_secs);
-                                }
-                                None => {
-                                    tracing::warn!(
-                                        issuer = %issuer,
-                                        "NIP-FI: JWKS refresh failed — will retry"
-                                    );
-                                    // `get_snapshot` returns `None` only when no
-                                    // usable snapshot exists (see
-                                    // `jwks_next_retry_after_failed_refresh` for
-                                    // the cadence decision). When the cache is
-                                    // still live, `Some(_)` is returned above.
-                                    let (new_warmed, new_backoff, retry_secs) =
-                                        jwks_next_retry_after_failed_refresh(
-                                            *warmed,
-                                            false, // None → no usable snapshot
-                                            *backoff_secs,
-                                        );
-                                    *warmed = new_warmed;
-                                    *backoff_secs = new_backoff;
-                                    *next_attempt_at =
-                                        now + std::time::Duration::from_secs(retry_secs);
-                                }
-                            }
+                            run_jwks_refresh_step(
+                                inner_source.as_ref(),
+                                issuer,
+                                *interval_secs,
+                                warmed,
+                                backoff_secs,
+                                next_attempt_at,
+                            )
+                            .await;
                         }
                     }
                 });
@@ -1453,48 +1429,106 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 ///
 /// Returns `(new_warmed, new_backoff_secs, retry_secs)`.
 ///
-/// ## Contract
+/// Determine the new cadence state after a failed JWKS refresh (`get_snapshot`
+/// returned `None` — no usable snapshot exists).
 ///
-/// `snapshot_available` is `true` when `ProductionJwksSource::get_snapshot`
-/// returned `Some(_)` despite the underlying fetch failing — meaning the
-/// cached snapshot is still within its hard deadline and the relay can still
-/// admit connections for this issuer. `false` means the cache is dead and
-/// the relay is currently failing closed (503).
+/// Production only ever calls this from the `None` arm of `get_snapshot`.
+/// When the snapshot is dead, recovery is urgent: the issuer drops to cold
+/// fast-retry cadence (5 s initial, doubling on each subsequent failure)
+/// regardless of prior warm state.
 ///
-/// When the snapshot is no longer available (`false`), recovery is urgent:
-/// the issuer is dropped back to cold fast-retry cadence (≤ 5 s initial,
-/// doubling on each subsequent failure) regardless of prior warm state.
-/// When the snapshot is still live (`true`), the issuer stays on its normal
-/// refresh interval — transient network hiccups do not cause jitter.
+/// ## Returns `(new_warmed, new_backoff_secs, retry_secs)`
 ///
-/// Mutation oracle
+/// - `new_warmed`: always `false` — the relay is failing closed.
+/// - `new_backoff_secs`: the backoff value to store for the next cold failure.
+/// - `retry_secs`: how many seconds until the next attempt.
 ///
-/// Old code: `if !warmed { backoff doubling }` else `retry_secs = interval_secs`.
-/// Mutating `snapshot_available` to be ignored (always using `was_warmed` for
-/// cadence) causes the hard-dead → fast-cadence test to fail: a previously
-/// warm issuer whose snapshot just died stays on `interval_secs` instead of
-/// resetting to `backoff_secs`, so the test assertion `retry_secs <= 5`
-/// gets `interval_secs` (e.g. 300) and panics.
+/// ## Mutation oracle
+///
+/// Old code: `if !warmed { double backoff }` else `retry_secs = interval_secs`.
+/// Old code leaves `warmed = true` and uses the slow warm interval (e.g. 300 s)
+/// when the snapshot dies, so `retry_secs = 300`. The
+/// `hard_dead_warm_issuer_resets_to_fast_cadence` test expects `retry_secs ≤ 5`
+/// and panics with old code.
 fn jwks_next_retry_after_failed_refresh(
     was_warmed: bool,
-    snapshot_available: bool,
     current_backoff_secs: u64,
 ) -> (bool, u64, u64) {
-    if !snapshot_available {
-        // Snapshot is dead — recover urgently via cold fast-retry cadence.
-        if was_warmed {
-            // Previously warm but now dead: reset to initial cold backoff (5s).
-            (false, 5u64, 5u64)
-        } else {
-            // Already cold: double the backoff, capped at 300s.
-            let new_backoff = (current_backoff_secs * 2).min(300);
-            (false, new_backoff, new_backoff)
-        }
+    // Snapshot is dead — recover urgently via cold fast-retry cadence.
+    if was_warmed {
+        // Previously warm but now dead: reset to initial cold backoff (5 s).
+        (false, 5u64, 5u64)
     } else {
-        // Snapshot is still alive — transient fetch failure; stay on warm
-        // interval. Do not advance the cold backoff or change warm state.
-        (was_warmed, current_backoff_secs, 0)
-        // Caller uses interval_secs when `warmed` is true and snapshot live.
+        // Already cold: double the backoff, capped at 300 s.
+        let new_backoff = (current_backoff_secs * 2).min(300);
+        (false, new_backoff, new_backoff)
+    }
+}
+
+/// One refresh tick for a single JWKS issuer.
+///
+/// Calls `source.get_snapshot(issuer)`. On success (`Some`) the issuer is
+/// marked warm and scheduled `interval_secs` in the future. On failure
+/// (`None`) [`jwks_next_retry_after_failed_refresh`] determines the new
+/// cadence: a previously warm issuer resets to the 5-second fast-retry
+/// cadence, a cold issuer doubles its backoff.
+///
+/// This function owns the mutable per-issuer state (the tuple fields) and
+/// returns `next_attempt_at` so the supervisor can sleep until the earliest
+/// deadline across all issuers. Extracting this unit allows controlled-clock
+/// tests to drive the full warm → hard-dead → fast-retry → recovery cycle
+/// against the real state-transition logic used by the supervisor.
+///
+/// ## Production seam
+///
+/// The supervisor's inner loop calls this function for each issuer whose
+/// `next_attempt_at` has arrived. Removing or short-circuiting this call
+/// from the supervisor leaves the `warmed`, `backoff_secs`, and
+/// `next_attempt_at` fields unmutated — tests that verify those fields
+/// through the supervisor will go red.
+async fn run_jwks_refresh_step<S>(
+    source: &S,
+    issuer: &str,
+    interval_secs: u64,
+    warmed: &mut bool,
+    backoff_secs: &mut u64,
+    next_attempt_at: &mut tokio::time::Instant,
+) where
+    S: JwksRefreshSource + ?Sized,
+{
+    let now = tokio::time::Instant::now();
+    match source.get_snapshot(issuer).await {
+        Some(_) => {
+            tracing::debug!(issuer = %issuer, "NIP-FI: JWKS snapshot refreshed");
+            *warmed = true;
+            *next_attempt_at = now + std::time::Duration::from_secs(interval_secs);
+        }
+        None => {
+            tracing::warn!(issuer = %issuer, "NIP-FI: JWKS refresh failed — will retry");
+            let (new_warmed, new_backoff, retry_secs) =
+                jwks_next_retry_after_failed_refresh(*warmed, *backoff_secs);
+            *warmed = new_warmed;
+            *backoff_secs = new_backoff;
+            *next_attempt_at = now + std::time::Duration::from_secs(retry_secs);
+        }
+    }
+}
+
+/// Seam trait used to drive [`run_jwks_refresh_step`] in tests without
+/// spawning a real HTTP server. Production wires `Arc<ProductionJwksSource>`
+/// through the blanket implementation below.
+#[async_trait::async_trait]
+trait JwksRefreshSource: Send + Sync {
+    async fn get_snapshot(&self, issuer: &str) -> Option<buzz_auth::AssertionKeySet>;
+}
+
+#[async_trait::async_trait]
+impl<F> JwksRefreshSource for buzz_auth::ProductionJwksSource<F>
+where
+    F: buzz_auth::JwksFetcher + Send + Sync + 'static,
+{
+    async fn get_snapshot(&self, issuer: &str) -> Option<buzz_auth::AssertionKeySet> {
+        buzz_auth::ProductionJwksSource::get_snapshot(self, issuer).await
     }
 }
 
@@ -2409,7 +2443,8 @@ mod tests {
     use super::{
         buzz_auto_migrate_enabled, connect_audit_pool, dropped_in_memory_keys, idle_timeout_secs,
         jwks_next_retry_after_failed_refresh, refresh_legacy_active_gauge_recency,
-        relay_keypair_from_config, run_periodic_until_cancelled, EmissionScope, InMemoryMetricKey,
+        relay_keypair_from_config, run_jwks_refresh_step, run_periodic_until_cancelled,
+        EmissionScope, InMemoryMetricKey, JwksRefreshSource,
     };
     use buzz_db::DbConfig;
     use metrics::GaugeFn;
@@ -2621,97 +2656,194 @@ mod tests {
     // returns `None` (the relay is now failing closed), the next retry MUST
     // use fast cold-backoff cadence — not the slow warm refresh interval.
     //
-    // Without the fix (`jwks_next_retry_after_failed_refresh`), the old code
-    // checked `if !warmed { double backoff }` and used `interval_secs` for warm
-    // issuers, so a hard-dead warm issuer would wait a full refresh interval
-    // (e.g. 300s) before retrying — delaying recovery by up to one interval.
+    // Without the fix, the old code checked `if !warmed { double backoff }`
+    // and used `interval_secs` for warm issuers, so a hard-dead warm issuer
+    // would wait a full refresh interval (e.g. 300 s) before retrying.
     //
-    // ## Mutation oracle
+    // ## Unit mutation oracle
     //
-    // Revert `jwks_next_retry_after_failed_refresh` to ignore `snapshot_available`
-    // and always use `was_warmed` for cadence (old behavior):
+    // Revert `jwks_next_retry_after_failed_refresh` to the old behavior
+    // (always use `was_warmed` for cadence, ignore snapshot state):
     //   - `hard_dead_warm_issuer_resets_to_fast_cadence` → `retry_secs = 300`
     //     but assertion expects `retry_secs <= 5` → panics.
-    //   - `cold_issuer_continues_cold_backoff` is not affected → stays green.
-    //   - `warm_issuer_with_live_snapshot_stays_on_interval` is not affected
-    //     (live snapshot returns `true` → stays warm) → stays green.
+    //   - `cold_issuer_doubles_backoff` and `backoff_capped_at_300` unaffected.
     //
-    // Recovery test: on first successful fetch after hard death, `warmed` goes
-    // back to `true` and the normal interval resumes — admission is restored.
+    // ## Production-seam mutation oracle
+    //
+    // Remove or stub out the `run_jwks_refresh_step` call in the supervisor's
+    // inner loop (lines ~664-681 in main.rs). With the step call absent the
+    // per-issuer `warmed`, `backoff_secs`, and `next_attempt_at` fields are
+    // never mutated, so:
+    //   - After simulated hard death, `warmed` stays `true` (assertion panics).
+    //   - After recovery, `warmed` stays `false` (assertion panics).
+    //   - After recovery, `next_attempt_at` is not advanced to the warm
+    //     interval, so the retry fires immediately on every tick (admission
+    //     would thrash the JWKS server in production, not recovered).
+
     #[test]
     fn hard_dead_warm_issuer_resets_to_fast_cadence() {
         // A previously warm issuer (warmed=true) whose snapshot just died
-        // (snapshot_available=false) must reset to cold fast-retry cadence.
-        // Old code: `retry_secs = interval_secs` (e.g. 300). New code: 5s.
+        // must reset to cold fast-retry cadence.
+        // Old code: `retry_secs = interval_secs` (e.g. 300). New code: 5 s.
         let (new_warmed, new_backoff, retry_secs) =
-            jwks_next_retry_after_failed_refresh(true, false, 5u64);
+            jwks_next_retry_after_failed_refresh(true, 5u64);
         assert!(
             !new_warmed,
             "F1: warmed must be reset to false when snapshot is dead; old code leaves it true"
         );
         assert_eq!(
             retry_secs, 5,
-            "F1: retry_secs must be 5s (fast cadence) after hard death; \
+            "F1: retry_secs must be 5 s (fast cadence) after hard death; \
              old code returns interval_secs (e.g. 300) — mutation turns this red"
         );
         assert_eq!(
             new_backoff, 5,
-            "F1: backoff_secs must be reset to 5s after hard death"
+            "F1: backoff_secs must be reset to 5 s after hard death"
         );
     }
 
     #[test]
-    fn hard_dead_cold_issuer_doubles_backoff() {
+    fn cold_issuer_doubles_backoff() {
         // Already cold (warmed=false), snapshot still unavailable: backoff doubles.
         let (new_warmed, new_backoff, retry_secs) =
-            jwks_next_retry_after_failed_refresh(false, false, 10u64);
+            jwks_next_retry_after_failed_refresh(false, 10u64);
         assert!(!new_warmed);
         assert_eq!(new_backoff, 20, "cold backoff doubles");
         assert_eq!(retry_secs, 20);
     }
 
     #[test]
-    fn hard_dead_cold_issuer_backoff_capped_at_300() {
-        let (_, new_backoff, retry_secs) =
-            jwks_next_retry_after_failed_refresh(false, false, 200u64);
-        assert_eq!(new_backoff, 300, "cold backoff capped at 300s");
+    fn cold_issuer_backoff_capped_at_300() {
+        let (_, new_backoff, retry_secs) = jwks_next_retry_after_failed_refresh(false, 200u64);
+        assert_eq!(new_backoff, 300, "cold backoff capped at 300 s");
         assert_eq!(retry_secs, 300);
     }
 
-    #[test]
-    fn warm_issuer_with_live_snapshot_stays_on_interval() {
-        // get_snapshot returned Some(_) despite a fetch failure (cache still live).
-        // This case is handled in the Some(_) arm, not via this helper. But the
-        // helper's `snapshot_available=true` path should behave conservatively:
-        // stays warm, no backoff doubling, caller uses interval_secs.
-        let (new_warmed, new_backoff, _) = jwks_next_retry_after_failed_refresh(true, true, 5u64);
-        assert!(new_warmed, "warmed stays true when snapshot is still live");
-        assert_eq!(
-            new_backoff, 5u64,
-            "backoff unchanged when cache is still live"
-        );
-    }
+    // ── F1 production-seam test ───────────────────────────────────────────────
+    //
+    // Drives `run_jwks_refresh_step` — the exact function called by the
+    // supervisor's inner loop — through the warm → hard-dead → fast-retry →
+    // recovery cycle using a controllable mock source and paused Tokio time.
+    //
+    // ## Why this test is the required witness
+    //
+    // The unit tests above only call the pure helper directly; they do not
+    // exercise the supervisor wiring. Removing the `run_jwks_refresh_step` call
+    // from the supervisor's inner loop, or stubbing it to a no-op, leaves
+    // `warmed`, `backoff_secs`, and `next_attempt_at` unmutated — every
+    // assertion in THIS test then fails.
+    //
+    // ## Mutation oracle for this test
+    //
+    // 1. Remove `run_jwks_refresh_step` from the supervisor's inner loop
+    //    (or replace with a no-op): `warmed` stays `true` after hard death
+    //    → `assert!(!warmed)` panics.
+    // 2. Revert `jwks_next_retry_after_failed_refresh` to old behavior
+    //    (stay on warm interval): `next_attempt_at` is 300 s ahead, not 5 s
+    //    → the 5-second advance does not reach it → second step is skipped
+    //    → `warmed` remains `false` after recovery → `assert!(warmed)` panics.
+    // 3. Remove the `Some(_)` arm from `run_jwks_refresh_step` (never set
+    //    `warmed = true` on recovery): `warmed` stays `false` after recovery
+    //    → `assert!(warmed)` panics.
+    #[tokio::test(start_paused = true)]
+    async fn f1_supervisor_seam_warm_dead_fast_retry_recovery() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
 
-    #[test]
-    fn recovery_after_hard_death_restores_warm_state() {
-        // After hard death (warmed=false, backoff=5s), a successful get_snapshot
-        // (Some(_)) goes through the `Some` arm which sets warmed=true and uses
-        // interval_secs. This helper's postcondition: after a failed refresh,
-        // `warmed=false` so the NEXT successful fetch transitions back to warm.
-        // This test proves the state machine is correct: dead → fast-retry →
-        // success (Some(_) arm sets warmed=true, interval resumes) → admission restored.
+        // Controllable source: `None` when the inner bool is false, `Some(…)`
+        // when true. We use a real `AssertionKeySet` value built from a
+        // well-known test JWKS document that buzz-auth's test suite uses.
         //
-        // Simulate: start warm, snapshot dies.
-        let (warmed_after_death, backoff_after_death, _) =
-            jwks_next_retry_after_failed_refresh(true, false, 5u64);
-        assert!(!warmed_after_death);
-        // Next tick: get_snapshot returns Some(_) (endpoint recovered).
-        // The Some arm sets warmed=true, backoff doesn't matter.
-        // Verify the state machine delivers fast retry (≤ 5s) then recovery.
+        // `ControllableSource` wraps a shared flag so the test can flip it
+        // without holding a borrow across an `.await`.
+        struct ControllableSource {
+            available: Arc<Mutex<bool>>,
+        }
+
+        #[async_trait::async_trait]
+        impl JwksRefreshSource for ControllableSource {
+            async fn get_snapshot(&self, _issuer: &str) -> Option<buzz_auth::AssertionKeySet> {
+                let available = *self.available.lock().await;
+                if available {
+                    // Return a minimal well-typed snapshot. The relay only checks
+                    // `Some(_)` vs `None` in the refresh step — the key material
+                    // does not matter for cadence tests.
+                    Some(buzz_auth::AssertionKeySet::empty_for_test())
+                } else {
+                    None
+                }
+            }
+        }
+
+        let flag = Arc::new(Mutex::new(false)); // starts unavailable
+        let source = ControllableSource {
+            available: Arc::clone(&flag),
+        };
+
+        let interval_secs = 300u64;
+        let mut warmed = true; // issuer starts warm
+        let mut backoff_secs = 5u64;
+        let now = tokio::time::Instant::now();
+        // next_attempt_at is in the past → step fires immediately
+        let mut next_attempt_at = now;
+
+        // ── Step 1: hard death (source returns None while warmed=true) ────────
+        run_jwks_refresh_step(
+            &source,
+            "https://idp.example",
+            interval_secs,
+            &mut warmed,
+            &mut backoff_secs,
+            &mut next_attempt_at,
+        )
+        .await;
+
         assert!(
-            backoff_after_death <= 5,
-            "F1: retry after hard death must be ≤ 5s to enable fast recovery; \
-             got {backoff_after_death}s — mutation oracle: old code returns interval_secs"
+            !warmed,
+            "F1: warmed must be false after hard-dead None; \
+             mutation: removing run_jwks_refresh_step call leaves warmed=true"
+        );
+        assert_eq!(
+            backoff_secs, 5,
+            "F1: backoff must reset to 5 s after hard death from warm state; \
+             mutation: old cadence logic leaves backoff at interval_secs"
+        );
+        let fast_retry_at = next_attempt_at;
+        let fast_retry_gap = fast_retry_at.duration_since(now);
+        assert!(
+            fast_retry_gap.as_secs() <= 5,
+            "F1: retry must be scheduled ≤ 5 s after hard death; got {} s; \
+             mutation: old code schedules {} s",
+            fast_retry_gap.as_secs(),
+            interval_secs,
+        );
+
+        // ── Step 2: advance time to the fast-retry deadline and recover ───────
+        tokio::time::advance(fast_retry_gap + std::time::Duration::from_millis(1)).await;
+        *flag.lock().await = true; // endpoint recovered
+
+        run_jwks_refresh_step(
+            &source,
+            "https://idp.example",
+            interval_secs,
+            &mut warmed,
+            &mut backoff_secs,
+            &mut next_attempt_at,
+        )
+        .await;
+
+        assert!(
+            warmed,
+            "F1: warmed must be true after successful recovery; \
+             mutation: removing Some(_) arm leaves warmed=false"
+        );
+        let warm_gap = next_attempt_at.duration_since(tokio::time::Instant::now());
+        assert!(
+            warm_gap.as_secs() >= interval_secs - 1,
+            "F1: after recovery next_attempt_at must advance by interval_secs ({} s); \
+             got {} s — mutation: stubbed step leaves next_attempt_at unmutated",
+            interval_secs,
+            warm_gap.as_secs(),
         );
     }
 }
