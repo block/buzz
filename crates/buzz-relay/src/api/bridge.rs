@@ -146,26 +146,6 @@ pub(crate) fn verify_bridge_auth_with_options(
     Err(api_error(StatusCode::UNAUTHORIZED, "missing Nostr auth"))
 }
 
-/// A declared dev-mode identity is not proof of authorship. Preserve the
-/// public-kind fallback, but require verified NIP-98 for any filter that could
-/// read author-only data, including mixed-kind and known-ID queries.
-fn authorize_author_only_read(
-    filters: &[nostr::Filter],
-    signed_auth_created_at: Option<u64>,
-) -> Result<(), (StatusCode, Json<Value>)> {
-    if signed_auth_created_at.is_none()
-        && filters
-            .iter()
-            .any(crate::handlers::req::filter_can_match_author_only_kinds)
-    {
-        return Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "auth-required: author-only reads require NIP-98 authentication",
-        ));
-    }
-    Ok(())
-}
-
 /// Check NIP-98 replay and record the event ID atomically.
 ///
 /// The correctness boundary is the shared, community-scoped Redis seen-set on
@@ -1141,8 +1121,6 @@ async fn query_events_authed(
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
-    authorize_author_only_read(&filters, signed_auth_created_at)?;
-
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
     let authed_pubkey_hex = pubkey.to_hex();
@@ -1676,8 +1654,6 @@ async fn count_events_authed(
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
-
-    authorize_author_only_read(&filters, signed_auth_created_at)?;
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();

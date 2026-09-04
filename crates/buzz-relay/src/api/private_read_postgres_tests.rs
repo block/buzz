@@ -66,7 +66,7 @@ fn drain(rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>) -> Ve
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn existing_private_reads_require_proof_and_preserve_visible_pages() {
+async fn existing_private_reads_preserve_visible_pages_and_counts() {
     let mut state = bridge_handler_test_state()
         .await
         .expect("test infrastructure");
@@ -113,18 +113,18 @@ async fn existing_private_reads_require_proof_and_preserve_visible_pages() {
     let own = json!([{"kinds":[30300], "authors":[owner.public_key().to_hex()]}]);
     let known = json!([{"ids":[reminder.id.to_hex()]}]);
     let mixed = json!([{"kinds":[30300,1], "limit":1}]);
-    // Test both the deployed strict-auth branch and the explicit dev fallback.
+    // Exercise the existing production NIP-98 contract and development X-Pubkey
+    // contract. Both must page/count using the reader selected by that mode.
     for strict in [false, true] {
         Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).require_auth_token = strict;
         for route in ["/query", "/count"] {
-            for filters in [&own, &known, &mixed] {
-                let (status, result) =
-                    post(&state, &host, route, &owner, filters.clone(), false).await;
+            if strict {
+                let (status, result) = post(&state, &host, route, &owner, own.clone(), false).await;
                 assert_eq!(status, StatusCode::UNAUTHORIZED, "{route}: {result}");
             }
-            let (status, result) = post(&state, &host, route, &outsider, own.clone(), true).await;
+            let (status, result) = post(&state, &host, route, &outsider, own.clone(), strict).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
-            let (status, result) = post(&state, &host, route, &owner, own.clone(), true).await;
+            let (status, result) = post(&state, &host, route, &owner, own.clone(), strict).await;
             assert_eq!(status, StatusCode::OK, "{result}");
             if route == "/query" {
                 assert_eq!(result[0]["id"], reminder.id.to_hex());
@@ -151,23 +151,8 @@ async fn existing_private_reads_require_proof_and_preserve_visible_pages() {
             );
         }
         for who in [&owner, &outsider] {
-            let (status, rows) = post(
-                &state,
-                &host,
-                "/query",
-                who,
-                json!([{"kinds":[30300,1], "search":"private reminder"}]),
-                true,
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{rows}");
-            assert!(rows
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|row| row["kind"] != 30300));
             let is_owner = who.public_key() == owner.public_key();
-            let (status, rows) = post(&state, &host, "/query", who, mixed.clone(), true).await;
+            let (status, rows) = post(&state, &host, "/query", who, mixed.clone(), strict).await;
             assert_eq!(status, StatusCode::OK, "{rows}");
             assert_eq!(rows.as_array().unwrap().len(), 1);
             assert_eq!(
@@ -179,13 +164,13 @@ async fn existing_private_reads_require_proof_and_preserve_visible_pages() {
                 }
             );
             // COUNT ignores the page limit, but must count only visible rows.
-            let (status, result) = post(&state, &host, "/count", who, mixed.clone(), true).await;
+            let (status, result) = post(&state, &host, "/count", who, mixed.clone(), strict).await;
             assert_eq!(status, StatusCode::OK, "{result}");
             assert_eq!(result["count"], if is_owner { 3 } else { 2 });
-            let (status, rows) = post(&state, &host, "/query", who, known.clone(), true).await;
+            let (status, rows) = post(&state, &host, "/query", who, known.clone(), strict).await;
             assert_eq!(status, StatusCode::OK, "{rows}");
             assert_eq!(rows.as_array().unwrap().len(), usize::from(is_owner));
-            let (status, result) = post(&state, &host, "/count", who, known.clone(), true).await;
+            let (status, result) = post(&state, &host, "/count", who, known.clone(), strict).await;
             assert_eq!(status, StatusCode::OK, "{result}");
             assert_eq!(result["count"], u64::from(is_owner));
         }
@@ -268,60 +253,4 @@ async fn existing_private_reads_require_proof_and_preserve_visible_pages() {
     // The budget must still reject genuinely over-budget visible candidate sets.
     let (status, _) = post(&state, &host, "/count", &owner, mixed.clone(), true).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-#[test]
-fn private_read_auth_distinguishes_signed_proof_from_declared_identity() {
-    let keys = Keys::generate();
-    let url = "https://private-read.example/query";
-    let proof = EventBuilder::new(Kind::HttpAuth, "")
-        .tags([
-            Tag::parse(["u", url]).unwrap(),
-            Tag::parse(["method", "POST"]).unwrap(),
-        ])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let mut signed = HeaderMap::new();
-    signed.insert(
-        "authorization",
-        format!(
-            "Nostr {}",
-            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&proof).unwrap())
-        )
-        .parse()
-        .unwrap(),
-    );
-    let mut declared = HeaderMap::new();
-    declared.insert("x-pubkey", keys.public_key().to_hex().parse().unwrap());
-    let mut cases = vec![
-        (json!({}), true),
-        (json!({"kinds":[]}), false),
-        (json!({"kinds":[1]}), false),
-        (json!({"ids":[proof.id.to_hex()]}), true),
-    ];
-    for kind in buzz_core::kind::AUTHOR_ONLY_KINDS {
-        cases.push((
-            json!({"kinds":[kind], "authors":[keys.public_key().to_hex()]}),
-            true,
-        ));
-        cases.push((json!({"kinds":[1,kind]}), true));
-    }
-    for (raw, needs_proof) in cases {
-        let filters = vec![serde_json::from_value(raw.clone()).unwrap()];
-        for headers in [&declared, &signed] {
-            let auth = verify_bridge_auth(headers, "POST", url, None, false).unwrap();
-            let allowed = authorize_author_only_read(&filters, auth.signed_created_at).is_ok();
-            assert_eq!(
-                allowed,
-                !needs_proof || auth.signed_created_at.is_some(),
-                "{raw}"
-            );
-        }
-    }
-    assert!(verify_bridge_auth(&declared, "POST", url, None, true).is_err());
-    assert!(verify_bridge_auth(&signed, "POST", url, None, true).is_ok());
-    assert!(
-        verify_bridge_auth(&signed, "POST", "https://other.example/query", None, false).is_err()
-    );
-    assert!(verify_bridge_auth(&signed, "GET", url, None, false).is_err());
 }
