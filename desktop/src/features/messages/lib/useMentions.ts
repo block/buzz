@@ -1,3 +1,4 @@
+import { isMentionActionable } from "./mentionPresentation";
 import * as React from "react";
 import {
   useManagedAgentsQuery,
@@ -58,6 +59,7 @@ import {
   appendUniqueName,
   buildTeamMentionCandidates,
   formatTeamMention,
+  sameTeamMentionRecipients,
   type MentionCandidate,
 } from "./mentionCandidates";
 import { buildMentionCandidates } from "./buildMentionCandidates";
@@ -447,12 +449,75 @@ export function useMentions(
   const { mentionSelectedIndex, setMentionSelectedIndex: setSelected } =
     mentionSelection;
   const isMentionOpen = mentionQuery !== null && suggestions.length > 0;
+  // Recheck against this render's exact-key evidence even if a child retained
+  // an older row/callback. A rejected selection must not establish draft intent.
+  const admissionScope = React.useMemo(
+    () => ({ currentPubkey, channelId }),
+    [currentPubkey, channelId],
+  );
+  const admissionRef = React.useRef({
+    scope: admissionScope,
+    candidates: mentionCandidatesWithTeams,
+  });
+  admissionRef.current = {
+    scope: admissionScope,
+    candidates: mentionCandidatesWithTeams,
+  };
+  const canSelectMention = React.useCallback(
+    (suggestion: MentionSuggestion) => {
+      const current = admissionRef.current.candidates.find((candidate) =>
+        suggestion.pubkey
+          ? candidate.pubkey === normalizePubkey(suggestion.pubkey)
+          : suggestion.teamId
+            ? candidate.teamId === suggestion.teamId
+            : !!suggestion.personaId &&
+              candidate.personaId === suggestion.personaId,
+      );
+      return (
+        admissionRef.current.scope === admissionScope &&
+        !!current &&
+        (current.kind !== "team" ||
+          (suggestion.kind === "team" &&
+            !!suggestion.teamMembers?.length &&
+            sameTeamMentionRecipients(
+              suggestion.teamMembers,
+              current.teamMembers,
+            ) &&
+            suggestion.teamMembers.every((member) => {
+              const matches = (target: {
+                pubkey?: string;
+                personaId?: string | null;
+              }) =>
+                member.pubkey
+                  ? target.pubkey === normalizePubkey(member.pubkey)
+                  : !!member.personaId &&
+                    !target.pubkey &&
+                    target.personaId === member.personaId;
+              return (
+                current.teamMembers?.some(matches) &&
+                admissionRef.current.candidates.some(
+                  (target) => matches(target) && isMentionActionable(target),
+                )
+              );
+            }))) &&
+        isMentionActionable(current) &&
+        isMentionActionable(suggestion)
+      );
+    },
+    [admissionScope],
+  );
   const insertMention = React.useCallback(
     (suggestion: MentionSuggestion, selectionEnd: number): AutocompleteEdit => {
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
+      if (!canSelectMention(suggestion))
+        return {
+          replaceFromOffset: selectionEnd,
+          replaceToOffset: selectionEnd,
+          insertText: "",
+        };
       const [boundSuggestion] = selectedMentionLabels(
         [suggestion],
         mentionMapRef.current,
@@ -525,7 +590,7 @@ export function useMentions(
         insertText,
       };
     },
-    [knownAgentPubkeys, mentionStartIndex, setSelected],
+    [canSelectMention, knownAgentPubkeys, mentionStartIndex, setSelected],
   );
   const registerMentionPubkey = React.useCallback(
     (displayName: string, pubkey: string, options?: { isAgent?: boolean }) => {
@@ -837,6 +902,7 @@ export function useMentions(
     ],
   );
   return {
+    canSelectMention,
     cancelMentionAutocomplete,
     clearMentions,
     getDefaultAgentSuggestion,
