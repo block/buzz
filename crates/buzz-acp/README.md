@@ -364,6 +364,15 @@ recovery. Healthy subscriptions are not swept. A failed write retains the pendin
 cursor and is paced as well; there is no retry-count cutoff that abandons loss.
 Actual connection loss still uses the existing reconnect/restore path.
 
+The five-second cooldown starts at the **end of an actual attempt**, including a
+failed write, not at an unsuccessful capacity check. Once cooldown and quota
+permit work, the socket owner's select waits on the consumer channel's capacity
+notification. It does not poll headroom on a timer. The first eligible attempt
+has no extra timer delay; draining between old timer ticks can trigger recovery.
+The select-local capacity reservation is released before any frame or command is
+handled, so it cannot take space away from live delivery. No capacity waiter or
+recovery timer runs without eligible pending loss.
+
 IDs, filters, five-second timestamp overlap and replay-attempt semantics are
 unchanged: a successful REQ write retires the pending drop cursor, **not because
 it proves delivery**. A new overflow records another cursor. EOSE is not a

@@ -1826,8 +1826,6 @@ async fn run_background_task(
     // resets this to `None`, allowing the pre-select drain to run again.
     let mut drain_pacing_next: Option<tokio::time::Instant> = None;
 
-    let mut recovery_next = tokio::time::Instant::now() + recovery::RECOVERY_INTERVAL;
-
     loop {
         // Drain pending subs, one REQ per pacing tick within the relay's
         // admission window.
@@ -1909,10 +1907,10 @@ async fn run_background_task(
             }
         }
 
+        let recovery_at = recovery::ready_at(&mut state);
         tokio::select! {
-                   _ = tokio::time::sleep_until(recovery_next) => {
+                   _ = recovery::ready(&event_tx, recovery_at) => {
                        recovery::recover_one(&mut ws, &mut state, &event_tx, &agent_pubkey_hex).await;
-                       recovery_next = tokio::time::Instant::now() + recovery::RECOVERY_INTERVAL;
                    }
                    raw = ws.next() => {
                        // Determine if the socket is lost.
