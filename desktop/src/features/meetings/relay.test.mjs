@@ -10,6 +10,7 @@ import {
   registerRoom,
   subscribe,
 } from "./relay.ts";
+import { participantActionPayload } from "./moderationPayloads.ts";
 
 const RELAY_WS = "wss://relay.example";
 const API_BASE = "https://premrelay.exe.xyz";
@@ -262,19 +263,27 @@ test("moderateRoom forwards a Bearer LiveKit JWT and no challenge header", async
     return new Response(null, { status: 204 });
   };
   try {
-    await moderateRoom(RELAY_WS, "kick-user", "livekit-jwt", {
-      room: "r",
-      identity: "bob",
-    });
+    // The payload comes from the same builder the host controls use — a
+    // literal here is what let this test pass on a shape HiveTalk rejects.
+    await moderateRoom(
+      RELAY_WS,
+      "kick-user",
+      "livekit-jwt",
+      participantActionPayload("buzz-meet-spike", "bob"),
+    );
     assert.ok(captured.url.endsWith("/meetings/kick-user"));
     assert.equal(
       captured.init.headers["X-Hivetalk-Authorization"],
       "Bearer livekit-jwt",
     );
     assert.equal(captured.init.headers["X-Hivetalk-Challenge"], undefined);
+    // HiveTalk's `ParticipantAction` schema, verbatim on the wire.
     assert.equal(
       captured.init.body,
-      JSON.stringify({ room: "r", identity: "bob" }),
+      JSON.stringify({
+        roomName: "buzz-meet-spike",
+        participantIdentity: "bob",
+      }),
     );
   } finally {
     teardown();

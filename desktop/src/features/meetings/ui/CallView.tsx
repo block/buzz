@@ -295,6 +295,7 @@ function CallStage(props: CallStageProps) {
         ) : null}
         <Button
           className="pointer-events-auto"
+          data-testid="meeting-leave"
           onClick={onLeave}
           size="sm"
           variant="secondary"

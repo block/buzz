@@ -1,5 +1,6 @@
 import { Activity, Bot, Folders, Inbox, Video, Zap } from "lucide-react";
 
+import { useMeetingsCapability } from "@/features/meetings/useMeetingsCapability";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
 import { FeatureGate } from "@/shared/features";
@@ -87,6 +88,43 @@ export function AppSidebarPinnedHeader({
         suggestionChannels={suggestionChannels}
       />
     </div>
+  );
+}
+
+/**
+ * The Meetings nav entry. Lives inside `<FeatureGate feature="meetings">` so the
+ * capability probe only runs when the preview flag is on, and hides itself when
+ * the active community's relay has settled on "no Meetings here" — matching the
+ * channel-header `StartMeetingButton`. Loading and probe errors keep the entry
+ * visible so it doesn't flicker on a relay blip; the route stays reachable and
+ * still renders its own "not available" panel for deep links.
+ */
+function MeetingsMenuItem({
+  isActive,
+  onSelect,
+}: {
+  isActive: boolean;
+  onSelect: () => void;
+}) {
+  const { isUnavailable } = useMeetingsCapability();
+
+  if (isUnavailable) {
+    return null;
+  }
+
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        data-testid="open-meetings-view"
+        isActive={isActive}
+        onClick={onSelect}
+        tooltip="Meetings"
+        type="button"
+      >
+        <Video className="h-4 w-4" />
+        <SidebarMenuLabel>Meetings</SidebarMenuLabel>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
   );
 }
 
@@ -185,18 +223,10 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuItem>
           </FeatureGate>
           <FeatureGate feature="meetings">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-meetings-view"
-                isActive={selectedView === "meetings"}
-                onClick={onSelectMeetings}
-                tooltip="Meetings"
-                type="button"
-              >
-                <Video className="h-4 w-4" />
-                <SidebarMenuLabel>Meetings</SidebarMenuLabel>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
+            <MeetingsMenuItem
+              isActive={selectedView === "meetings"}
+              onSelect={onSelectMeetings}
+            />
           </FeatureGate>
         </SidebarMenu>
       </SidebarHeader>

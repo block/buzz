@@ -3,6 +3,10 @@ import { Lock, MicOff, Shield, UserX } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import {
+  participantActionPayload,
+  roomTogglePayload,
+} from "@/features/meetings/moderationPayloads";
 import type { ModerationAction } from "@/features/meetings/relay";
 import { Button } from "@/shared/ui/button";
 import {
@@ -90,7 +94,7 @@ export function CallControlBar({
             setLocked(next);
             void run({
               action: "room/notify-lock",
-              payload: { roomName, enabled: next },
+              payload: roomTogglePayload(roomName, next),
             }).then((ok) => {
               if (!ok) setLocked(!next);
             });
@@ -105,7 +109,7 @@ export function CallControlBar({
             setMuteOnJoin(next);
             void run({
               action: "room/mute-on-join",
-              payload: { roomName, enabled: next },
+              payload: roomTogglePayload(roomName, next),
             }).then((ok) => {
               if (!ok) setMuteOnJoin(!next);
             });
@@ -128,10 +132,7 @@ export function CallControlBar({
                 onSelect={() =>
                   void run({
                     action: "mute-user",
-                    payload: {
-                      roomName,
-                      participantIdentity: p.identity,
-                    },
+                    payload: participantActionPayload(roomName, p.identity),
                   })
                 }
               >
@@ -153,10 +154,7 @@ export function CallControlBar({
                 onSelect={() =>
                   void run({
                     action: "kick-user",
-                    payload: {
-                      roomName,
-                      participantIdentity: p.identity,
-                    },
+                    payload: participantActionPayload(roomName, p.identity),
                   })
                 }
               >

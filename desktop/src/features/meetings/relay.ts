@@ -425,8 +425,23 @@ export type ModerationAction =
 
 /**
  * Call a moderation endpoint with the LiveKit JWT from `getMeetingToken`.
- * `payload` is forwarded as the raw JSON body; exact shapes per action are
- * pinned in Phase 4.3.
+ * `payload` is forwarded as the raw JSON body, byte for byte — the relay proxy
+ * cannot re-serialize it (HiveTalk signs `sha256(rawBody)`), so whatever the
+ * caller passes is exactly what HiveTalk validates.
+ *
+ * Shapes are pinned to HiveTalk's `openapi.yaml` (archived at
+ * `RESEARCH/HIVETALK_OPENAPI.yaml`), **not** to Phase 4.3, which specified
+ * endpoints and auth but no body fields:
+ *
+ * - `kick-user`, `mute-user` → `ParticipantAction`
+ *   `{ roomName, participantIdentity }` (both required)
+ * - `room/notify-lock`, `room/mute-on-join` → `RoomToggle`
+ *   `{ roomName, enabled }` (both required)
+ *
+ * camelCase here is correct and is not an oversight: these endpoints are
+ * LiveKit-backed, while the registry endpoints are snake_case (`registerRoom`
+ * sends `room_name`). Build the bodies with `moderationPayloads.ts` rather than
+ * inline object literals, so the shape has exactly one definition.
  */
 export function moderateRoom(
   relayWsUrl: string,

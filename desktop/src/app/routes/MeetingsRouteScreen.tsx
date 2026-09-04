@@ -33,6 +33,12 @@ export function MeetingsRouteScreen({
   const registerRoom = useRegisterRoomMutation();
 
   const [subscribeOpen, setSubscribeOpen] = React.useState(false);
+  /**
+   * The room whose start is waiting on a subscription purchase, if any.
+   * Single-use: set only by a start attempt that 402'd, cleared on every
+   * terminal outcome and consumed by the retry, so a later unrelated purchase
+   * (a renewal from the badge, "set up hosting") can never replay a stale room.
+   */
   const pendingRoomRef = React.useRef<string | null>(null);
 
   const view = selectMeetingsView({
@@ -49,6 +55,7 @@ export function MeetingsRouteScreen({
           if (isHostingSetupError(error)) {
             setSubscribeOpen(true);
           } else {
+            pendingRoomRef.current = null;
             toast.error(
               error instanceof Error
                 ? error.message
@@ -56,8 +63,10 @@ export function MeetingsRouteScreen({
             );
           }
         },
-        onSuccess: (registered) =>
-          void goMeetings({ action: "join", room: registered.room_name }),
+        onSuccess: (registered) => {
+          pendingRoomRef.current = null;
+          void goMeetings({ action: "join", room: registered.room_name });
+        },
       });
     },
     [goMeetings, registerRoom],
@@ -73,7 +82,10 @@ export function MeetingsRouteScreen({
         void roomsQuery.refetch();
         void myRoomsQuery.refetch();
       }}
-      onSetupHosting={() => setSubscribeOpen(true)}
+      onSetupHosting={() => {
+        pendingRoomRef.current = null;
+        setSubscribeOpen(true);
+      }}
       onStart={startMeeting}
       registerError={registerRoom.error}
       registerPending={registerRoom.isPending}
@@ -85,6 +97,7 @@ export function MeetingsRouteScreen({
           onSettled={() => {
             setSubscribeOpen(false);
             const target = pendingRoomRef.current;
+            pendingRoomRef.current = null;
             if (target) startMeeting(target);
           }}
           open={subscribeOpen}
@@ -92,7 +105,12 @@ export function MeetingsRouteScreen({
       }
       subscriptionBadge={
         capability !== null ? (
-          <SubscriptionStatusBadge onManage={() => setSubscribeOpen(true)} />
+          <SubscriptionStatusBadge
+            onManage={() => {
+              pendingRoomRef.current = null;
+              setSubscribeOpen(true);
+            }}
+          />
         ) : null
       }
       view={view}

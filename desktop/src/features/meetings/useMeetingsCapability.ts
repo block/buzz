@@ -10,10 +10,17 @@ import { useCommunities } from "@/features/communities/useCommunities";
  *
  * Phase 3 uses `capability === null` to hide the Meetings tab and sidebar
  * entry entirely.
+ *
+ * `isUnavailable` is the narrower signal for hiding navigation: it is true only
+ * once the probe has *settled* on "this relay has no Meetings" (`/info` answered
+ * and did not advertise the capability). A thrown probe — relay unreachable,
+ * query error — leaves it false so the nav entry stays put through a transient
+ * blip instead of flickering out and back.
  */
 export function useMeetingsCapability(): {
   capability: RelayMeetingsCapability | null;
   isLoading: boolean;
+  isUnavailable: boolean;
 } {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? "";
@@ -29,5 +36,6 @@ export function useMeetingsCapability(): {
   return {
     capability: query.data ?? null,
     isLoading: query.isLoading,
+    isUnavailable: query.isSuccess && query.data === null,
   };
 }
