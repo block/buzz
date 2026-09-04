@@ -121,6 +121,9 @@ async function setup(options = {}) {
     "@/features/messages/lib/normalizeMentionClipboard": {
       hasMentionClipboardHtml: () => false,
     },
+    "@/features/messages/lib/mentionClipboardPaste": {
+      handleMentionClipboardPaste: () => false,
+    },
     "@/features/messages/lib/useLinkEditor": { useLinkEditor: () => ({}) },
     "./useCompactComposerInteractions": {
       useCompactComposerInteractions: () => ({ shouldIgnoreBlur: () => false }),
@@ -131,6 +134,9 @@ async function setup(options = {}) {
         mentionState = state.current;
         return {
           knownNames: {},
+          settlePendingMentionBindings: async () => {
+            if (control.settle) await control.settle.promise;
+          },
           cancelMentionAutocomplete: noop,
           updateMentionQuery: noop,
           clearMentions: () => {
@@ -542,5 +548,28 @@ for (const result of ["failure", "success"]) {
     assert.deepEqual(Array.from(s.imeta), result === "failure" ? MEDIA : []);
     assert.equal(s.calls.filter((c) => c[0] === "send").length, 1);
     assert.equal(s.calls.filter((c) => c[0] === "add").length, 1);
+  });
+}
+
+for (const action of ["navigation", "return", "edit", "unmount"]) {
+  test(`clipboard settlement after ${action} cannot prepare another forum draft`, async () => {
+    const s = await setup();
+    s.edit();
+    const gate = deferred();
+    s.control.settle = gate;
+    await s.submit();
+    if (action === "navigation" || action === "return") {
+      s.navigate("b");
+      s.edit("B draft", []);
+      if (action === "return") s.navigate("a");
+    }
+    if (action === "edit") s.edit("new authored draft", []);
+    if (action === "unmount") s.unmount();
+    await s.finish(gate);
+    assert.equal(s.calls.length, 0);
+    assert.equal(s.prompt.open, false);
+    if (action === "navigation") assert.equal(s.text, "B draft");
+    if (action === "return") assert.equal(s.text, TEXT);
+    if (action === "edit") assert.equal(s.text, "new authored draft");
   });
 }

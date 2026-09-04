@@ -340,6 +340,7 @@ function ForumComposerVisit({
       }
 
       claimDraftSend(draftKey);
+      const composerRevision = draftLifecycle.getComposerRevision();
       isSubmissionPendingRef.current = true;
       setIsSubmissionPending(true);
       mentions.cancelMentionAutocomplete();
@@ -349,6 +350,12 @@ function ForumComposerVisit({
         // A pasted mention's identity check can still be in flight; extracting
         // first would publish the label with no `p` tag. Bounded internally.
         await mentions.settlePendingMentionBindings();
+        // This await precedes the preparation adapter's own visit fence.
+        if (
+          !mountedRef.current ||
+          draftLifecycle.getComposerRevision() !== composerRevision
+        )
+          return;
         const pubkeys = await prepareMentionPubkeys(
           mentions.extractMentionPubkeys(trimmed),
           trimmed,
@@ -406,6 +413,7 @@ function ForumComposerVisit({
       draftKey,
       drafts.clearDraft,
       draftLifecycle.runComposerUpdate,
+      draftLifecycle.getComposerRevision,
       mentions.getDraftMentionRefs,
       captureRecovery,
       media.pendingImetaRef,
