@@ -155,10 +155,11 @@ test("rendered list distinguishes current, partial, unavailable and empty withou
     render({ ...list, rows: [], partial: false }),
     /No Desktop profiles found/,
   );
-  assert.doesNotMatch(html, /Last heard|Online|Offline/);
+  assert.match(html, /Last heard: Unknown/);
+  assert.doesNotMatch(html, /Online|Offline/);
 });
 
-test("mounted cache clears both scopes, fences late reads and retains rows on failure", async () => {
+test("mounted cache clears both scopes, fences late reads and retains rows on failure", async (t) => {
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM("<div id='root'></div>", {
     url: "https://desktop.test",
@@ -198,8 +199,26 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
   let current;
   const originalFetch = relayClient.fetchEvents;
   const originalPublish = relayClient.publishEvent;
+  const originalReconnect = relayClient.subscribeToReconnects;
+  let reconnect;
+  let pulses = 0;
+  relayClient.subscribeToReconnects = (callback) => {
+    reconnect = callback;
+    return () => {
+      reconnect = undefined;
+    };
+  };
   window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
+      if (command === "prepare_desktop_observation")
+        return { event: { ...first, kind: 30181 } };
+      if (command === "read_desktop_observations")
+        return [
+          {
+            id: `${args.owner}-${args.community}`,
+            heard: Math.floor(Date.now() / 1000),
+          },
+        ];
       if (command === "prepare_desktop_profile") {
         current = {
           ...first,
@@ -218,6 +237,7 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
   };
   relayClient.fetchEvents = async (filter) => {
     if (fail) throw Error("unavailable");
+    if (filter.kinds[0] === 30181) return [];
     if (filter["#d"]) return [current];
     const rows = [current];
     if (hold) {
@@ -228,8 +248,9 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
     }
     return rows;
   };
-  relayClient.publishEvent = async () => {
-    throw Error("unexpected rewrite");
+  relayClient.publishEvent = async (event) => {
+    assert.equal(event.kind, 30181, "no profile heartbeat rewrite");
+    pulses++;
   };
   function Screen() {
     controls = useCommunities();
@@ -246,6 +267,7 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
   const text = () => document.body.textContent;
+  t.mock.timers.enable({ apis: ["setInterval"] });
   try {
     await React.act(async () =>
       root.render(
@@ -262,6 +284,15 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
     );
     await settle();
     assert.match(text(), /owner-a-wss:\/\/a.example/);
+    assert.match(text(), /Last heard: Recent/);
+    const beforeReconnect = pulses;
+    await React.act(async () => reconnect());
+    await settle();
+    assert.ok(pulses > beforeReconnect, "reconnect reports a fresh pulse");
+    const beforeTimer = pulses;
+    await React.act(async () => t.mock.timers.tick(60_000));
+    await settle();
+    assert.ok(pulses > beforeTimer, "bounded periodic publisher runs");
     hold = true;
     await React.act(async () => {
       void client.refetchQueries({ queryKey: ["desktop-profiles"] });
@@ -283,8 +314,11 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
     fail = true;
     await React.act(async () => {
       await client.refetchQueries({ queryKey: ["desktop-profiles"] });
+      await client.refetchQueries({ queryKey: ["desktop-observations"] });
     });
     await settle();
+    assert.match(text(), /Last-heard refresh unavailable/);
+    assert.match(text(), /Last heard: Recent/);
     assert.match(text(), /unavailable/);
     assert.match(text(), /owner-b-wss:\/\/a.example/);
     await React.act(async () => controls.switchCommunity("b"));
@@ -293,6 +327,7 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
     fail = false;
     await React.act(async () => {
       await client.refetchQueries({ queryKey: ["desktop-profiles"] });
+      await client.refetchQueries({ queryKey: ["desktop-observations"] });
     });
     await settle();
     assert.match(text(), /owner-b-wss:\/\/b.example/);
@@ -301,6 +336,13 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
     client.clear();
     relayClient.fetchEvents = originalFetch;
     relayClient.publishEvent = originalPublish;
+    relayClient.subscribeToReconnects = originalReconnect;
+    assert.equal(
+      reconnect,
+      undefined,
+      "reconnect producer unsubscribed on unmount",
+    );
+    t.mock.timers.reset();
     dom.window.close();
   }
 });
