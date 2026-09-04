@@ -52,7 +52,7 @@ impl Publisher for RelayPublisher {
                         .map_err(|e| format!("tag [{name:?}, {value:?}]: {e}"))
                 })
                 .collect::<Result<_, _>>()?;
-            let event = buzz_sdk::build_message(channel, content, None, &[], false, &[])
+            let event = buzz_sdk::build_message(channel, content, None, &[], false, &[], &[])
                 .map_err(|e| format!("building message: {e}"))?
                 .tags(extra)
                 .sign_with_keys(&self.keys)
