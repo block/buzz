@@ -8,12 +8,23 @@ import {
 
 export const TRIGGER_TYPES = [
   "message_posted",
+  "slash_command",
   "reaction_added",
   "diff_posted",
   "webhook",
   "schedule",
 ] as const;
 export type TriggerType = (typeof TRIGGER_TYPES)[number];
+
+export const SLASH_COMMAND_NAME_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+
+export function isTriggerConfigValid(trigger: TriggerConfig): boolean {
+  return (
+    trigger.on !== "slash_command" ||
+    SLASH_COMMAND_NAME_PATTERN.test(trigger.command ?? "")
+  );
+}
 
 export function supportsMessageTextCondition(
   triggerType: TriggerType,
@@ -23,6 +34,7 @@ export function supportsMessageTextCondition(
 
 export const SELECTABLE_TRIGGER_TYPES = [
   "message_posted",
+  "slash_command",
   "reaction_added",
   "diff_posted",
   "webhook",
@@ -52,6 +64,7 @@ export type TriggerConfig = {
   emoji?: string;
   cron?: string;
   interval?: string;
+  command?: string;
 };
 
 export type HeaderFormState = {
@@ -100,6 +113,7 @@ export const DEFAULT_FORM_STATE: WorkflowFormState = {
 
 export const TRIGGER_LABELS: Record<TriggerType, string> = {
   message_posted: "Message Posted",
+  slash_command: "Slash Command",
   reaction_added: "Reaction Added",
   diff_posted: "Diff Posted",
   webhook: "Webhook",
@@ -206,7 +220,10 @@ export function withTriggerType(
 ): WorkflowFormState {
   return {
     ...state,
-    trigger: { on: triggerType },
+    trigger:
+      triggerType === "slash_command"
+        ? { on: triggerType, command: "new-task" }
+        : { on: triggerType },
     // Clear threaded-reply state on every step, not just send_message ones:
     // a hidden `replyInThread` on a step whose action was changed away from
     // send_message would otherwise resurrect when the action is switched back.
@@ -227,6 +244,9 @@ export function formStateToYaml(state: WorkflowFormState): string {
     state.trigger.filter
   ) {
     trigger.filter = state.trigger.filter;
+  }
+  if (state.trigger.on === "slash_command" && state.trigger.command) {
+    trigger.command = state.trigger.command;
   }
   if (state.trigger.on === "reaction_added" && state.trigger.emoji) {
     trigger.emoji = state.trigger.emoji;
@@ -284,6 +304,7 @@ const TOP_LEVEL_KEYS = new Set([
 ]);
 const TRIGGER_KEYS: Record<TriggerType, ReadonlySet<string>> = {
   message_posted: new Set(["on", "filter"]),
+  slash_command: new Set(["on", "command"]),
   reaction_added: new Set(["on", "emoji", "filter"]),
   diff_posted: new Set(["on", "filter"]),
   webhook: new Set(["on"]),
@@ -431,7 +452,13 @@ export function yamlToFormState(
         error: `Unsupported ${triggerOn} trigger field "${triggerUnknown}" — use the YAML editor`,
       };
     }
-    for (const key of ["filter", "emoji", "cron", "interval"] as const) {
+    for (const key of [
+      "filter",
+      "emoji",
+      "cron",
+      "interval",
+      "command",
+    ] as const) {
       const error = optionalOwnedStringError(rawTrigger, key, `trigger.${key}`);
       if (error) {
         return {
@@ -464,12 +491,26 @@ export function yamlToFormState(
         }
       }
     }
+    if (triggerOn === "slash_command") {
+      const command = rawTrigger.command;
+      if (
+        typeof command !== "string" ||
+        !SLASH_COMMAND_NAME_PATTERN.test(command)
+      ) {
+        return {
+          ok: false,
+          error:
+            "trigger.command must be 1–64 lowercase letters or digits with optional internal hyphens",
+        };
+      }
+    }
     const trigger: TriggerConfig = {
       on: triggerOn,
       filter: rawTrigger.filter as string | undefined,
       emoji: rawTrigger.emoji as string | undefined,
       cron: rawTrigger.cron as string | undefined,
       interval: rawTrigger.interval as string | undefined,
+      command: rawTrigger.command as string | undefined,
     };
 
     if (!Array.isArray(parsed.steps)) {
