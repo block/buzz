@@ -37,6 +37,7 @@ clients_call=$(extract_job clients "$orchestrator")
 mobile_swift_call=$(extract_job mobile-swift-domain "$orchestrator")
 desktop_gate=$(extract_job desktop "$orchestrator")
 macos_gate=$(extract_job desktop-build-macos "$orchestrator")
+relay_e2e_job=$(extract_job relay-e2e "$relay_workflow")
 
 [[ "$desktop_call" == *'uses: ./.github/workflows/_ci-desktop.yml'* ]] ||
   fail "Desktop Domain must call _ci-desktop.yml"
@@ -68,6 +69,8 @@ grep -Fq "inputs.lane == 'postgres'" "$relay_workflow" ||
   fail "PostgreSQL tests must be selected by their isolated lane"
 grep -Fq "inputs.lane == 'artifacts'" "$relay_workflow" ||
   fail "relay artifacts must be selected by their isolated lane"
+[[ "$relay_e2e_job" == *'cargo test -p buzz-test-client --test e2e_relay nip29_departure_wire -- --ignored --nocapture'* ]] ||
+  fail "Relay E2E must select the NIP-29 departure wire tests"
 grep -Fq "inputs.lane == 'mobile-swift'" "$clients_workflow" ||
   fail "Mobile Swift must be selected by its isolated lane"
 
