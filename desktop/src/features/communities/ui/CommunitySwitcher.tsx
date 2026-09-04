@@ -404,7 +404,10 @@ export function CommunitySwitcher({
         {communities.map((community) => (
           <DropdownMenuItem
             key={community.id}
-            className="group flex items-center gap-2 pr-1"
+            className={cn(
+              "group flex items-center gap-2 pr-1",
+              activeCommunity?.id === community.id && "bg-accent font-medium",
+            )}
             onSelect={() => {
               onSwitchCommunity(community.id);
             }}
