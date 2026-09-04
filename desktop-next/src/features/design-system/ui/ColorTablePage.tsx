@@ -122,79 +122,93 @@ function TokenTable({
   let lastGroup: string | null = null;
 
   return (
-    /* Scrolls horizontally rather than wrapping cells: a table of values is
-       unreadable once a hex breaks across two lines. */
-    <div className="-mx-1 overflow-x-auto px-1">
-      <table className="w-full min-w-[34rem] border-collapse text-left">
-        <caption className="sr-only">
-          Colour tokens, the base token each resolves through, and the value it
-          paints
-        </caption>
-        <thead>
-          <tr className="border-tertiary border-b">
-            <th scope="col" className="py-2 pr-4 text-label text-tertiary">
-              Token
-            </th>
-            <th scope="col" className="py-2 pr-4 text-label text-tertiary">
-              Base
-            </th>
-            <th scope="col" className="py-2 text-label text-tertiary">
-              Value
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const token = resolved.get(row.variable);
-            const headingRow =
-              showGroups && row.group !== lastGroup ? row.group : null;
-            lastGroup = row.group;
+    /* `table-fixed` with three equal columns: the natural `auto` layout gives
+       the value column most of the width, because one gradient literal is longer
+       than every other cell in the table combined. Fixed makes the thirds hold
+       regardless of content, and cells wrap instead of scrolling. */
+    <table className="w-full table-fixed border-collapse text-left">
+      <caption className="sr-only">
+        Colour tokens, the base token each resolves through, and the value it
+        paints
+      </caption>
+      <colgroup>
+        <col className="w-1/3" />
+        <col className="w-1/3" />
+        <col className="w-1/3" />
+      </colgroup>
+      <thead>
+        <tr className="border-tertiary border-b">
+          <th scope="col" className="py-2 pr-4 text-label text-tertiary">
+            Token
+          </th>
+          <th scope="col" className="py-2 pr-4 text-label text-tertiary">
+            Base
+          </th>
+          <th scope="col" className="py-2 text-label text-tertiary">
+            Value
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => {
+          const token = resolved.get(row.variable);
+          const headingRow =
+            showGroups && row.group !== lastGroup ? row.group : null;
+          lastGroup = row.group;
 
-            return (
-              <Fragment key={row.variable}>
-                {headingRow ? (
-                  <tr>
-                    <th
-                      scope="colgroup"
-                      colSpan={3}
-                      className="pt-6 pb-1 text-meta text-tertiary"
-                    >
-                      {headingRow}
-                    </th>
-                  </tr>
-                ) : null}
-                <tr className="border-tertiary border-b">
-                  <td className="py-2.5 pr-4 align-top whitespace-nowrap">
-                    <code className="text-code text-primary">{row.token}</code>
-                  </td>
-                  <td className="py-2.5 pr-4 align-top whitespace-nowrap">
-                    {token?.pointsAtVariable ? (
-                      <code className="text-code text-secondary">
-                        {humanizeVariable(token.pointsAtVariable)}
-                      </code>
-                    ) : (
-                      <span className="text-caption text-tertiary">—</span>
-                    )}
-                  </td>
-                  <td className="py-2.5 align-top">
-                    <span className="flex min-w-0 items-center gap-2">
+          return (
+            <Fragment key={row.variable}>
+              {headingRow ? (
+                <tr>
+                  <th
+                    scope="colgroup"
+                    colSpan={3}
+                    className="pt-6 pb-1 text-meta text-tertiary"
+                  >
+                    {headingRow}
+                  </th>
+                </tr>
+              ) : null}
+              <tr className="border-tertiary border-b">
+                <td className="py-2.5 pr-4 align-top">
+                  <code className="break-words text-code text-primary">
+                    {row.token}
+                  </code>
+                </td>
+                <td className="py-2.5 pr-4 align-top">
+                  {token?.pointsAtVariable ? (
+                    <code className="break-words text-code text-secondary">
+                      {humanizeVariable(token.pointsAtVariable)}
+                    </code>
+                  ) : (
+                    <span className="text-caption text-tertiary">—</span>
+                  )}
+                </td>
+                <td className="py-2.5 align-top">
+                  <span className="flex min-w-0 items-start gap-2">
+                    <span className="mt-0.5 shrink-0">
                       <ValueSwatch value={token?.value ?? "transparent"} />
-                      <code className="truncate text-code text-secondary">
+                    </span>
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      {/* `break-all`, not `break-words`: a gradient literal is
+                            one unbroken token with no spaces to break at, so
+                            word-boundary wrapping would overflow the column. */}
+                      <code className="break-all text-code text-secondary">
                         {token?.value ?? "…"}
                       </code>
                       {token && !isHex(token.value) ? (
-                        <span className="shrink-0 text-meta text-tertiary">
+                        <span className="text-meta text-tertiary">
                           {describeValueKind(token.value)}
                         </span>
                       ) : null}
                     </span>
-                  </td>
-                </tr>
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+                  </span>
+                </td>
+              </tr>
+            </Fragment>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
