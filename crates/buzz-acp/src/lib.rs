@@ -62,8 +62,38 @@ fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
 }
 
-/// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
-const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default timeout for lightweight helper subcommands (spawn + initialize +
+/// model/method probes).
+///
+/// These probes are only "lightweight" once the adapter is running: a cold
+/// probe boots Node plus the vendor app server before `initialize` is answered.
+/// Measured cold probes on Windows span an order of magnitude across shipped
+/// harnesses: `codex-acp` 9-12s, `claude-agent-acp` 29-31s, `opencode acp` 58s.
+/// The previous 10s budget failed for all but the fastest, surfacing as an
+/// empty model picker indistinguishable from a broken install. The default
+/// must clear the slowest known harness with margin, because a false timeout
+/// is a worse failure than a slow success: it is silent and misdiagnosed.
+/// Override via `BUZZ_ACP_MODELS_TIMEOUT` (whole seconds).
+const DEFAULT_MODELS_TIMEOUT_SECS: u64 = 120;
+
+/// Parse `BUZZ_ACP_MODELS_TIMEOUT` (whole seconds), falling back to
+/// [`DEFAULT_MODELS_TIMEOUT_SECS`]. A malformed or zero value falls back
+/// rather than failing the probe: an unusable override must not be a harder
+/// failure than no override.
+fn models_timeout_from_env(raw: Option<&str>) -> Duration {
+    let secs = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_MODELS_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Timeout for lightweight helper subcommands. See [`DEFAULT_MODELS_TIMEOUT_SECS`].
+fn models_timeout() -> Duration {
+    models_timeout_from_env(std::env::var("BUZZ_ACP_MODELS_TIMEOUT").ok().as_deref())
+}
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
@@ -5497,7 +5527,8 @@ async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
         }
     };
 
-    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+    let models_timeout = models_timeout();
+    let init_result = match tokio::time::timeout(models_timeout, client.initialize()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -5506,7 +5537,7 @@ async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent timed out ({models_timeout:?})");
             std::process::exit(1);
         }
     };
@@ -5545,7 +5576,8 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
         }
     };
 
-    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+    let models_timeout = models_timeout();
+    let init_result = match tokio::time::timeout(models_timeout, client.initialize()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -5554,7 +5586,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent initialize timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent initialize timed out ({models_timeout:?})");
             std::process::exit(1);
         }
     };
@@ -5613,7 +5645,8 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
     // Initialize + session/new under a timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).
-    let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
+    let models_timeout = models_timeout();
+    let protocol_result = tokio::time::timeout(models_timeout, async {
         let init = client.initialize().await?;
         let session = client.session_new_full(&cwd, vec![], None, None).await?;
         Ok::<_, acp::AcpError>((init, session))
@@ -5629,7 +5662,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent timed out ({models_timeout:?})");
             std::process::exit(1);
         }
     };
@@ -11082,5 +11115,44 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod models_timeout_tests {
+    use super::{models_timeout_from_env, DEFAULT_MODELS_TIMEOUT_SECS};
+    use std::time::Duration;
+
+    #[test]
+    fn defaults_when_unset_or_blank() {
+        let expected = Duration::from_secs(DEFAULT_MODELS_TIMEOUT_SECS);
+        assert_eq!(models_timeout_from_env(None), expected);
+        assert_eq!(models_timeout_from_env(Some("")), expected);
+        assert_eq!(models_timeout_from_env(Some("   ")), expected);
+    }
+
+    #[test]
+    fn default_clears_observed_windows_cold_start() {
+        // Slowest measured shipped harness is `opencode acp` at 58s cold on
+        // Windows; the default must clear it with margin so a future edit
+        // cannot silently reintroduce a too-tight budget.
+        assert!(DEFAULT_MODELS_TIMEOUT_SECS >= 90);
+    }
+
+    #[test]
+    fn parses_whole_seconds() {
+        assert_eq!(models_timeout_from_env(Some("20")), Duration::from_secs(20));
+        assert_eq!(
+            models_timeout_from_env(Some("  90  ")),
+            Duration::from_secs(90)
+        );
+    }
+
+    #[test]
+    fn unusable_values_fall_back_instead_of_failing_the_probe() {
+        let expected = Duration::from_secs(DEFAULT_MODELS_TIMEOUT_SECS);
+        for raw in ["0", "-5", "abc", "12.5", "9999999999999999999999"] {
+            assert_eq!(models_timeout_from_env(Some(raw)), expected, "raw={raw}");
+        }
     }
 }
