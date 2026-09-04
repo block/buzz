@@ -2705,6 +2705,34 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   expect(samples.at(-1)?.width).toBeCloseTo(activeDotSize, 0);
   expect(samples.at(-1)?.height).toBeCloseTo(activeDotSize, 0);
   expect(samples.at(-1)?.backgroundColor).not.toBe(samples[0]?.backgroundColor);
+  // The runtime transition must morph the badge without inventing availability.
+  const availabilityDot = page.getByTestId(`agent-runtime-active-${pubkey}`);
+  await expect(availabilityDot).toHaveAttribute(
+    "aria-label",
+    "Motion Auditor: Offline",
+  );
+  await expect(availabilityDot.locator("xpath=../..")).not.toHaveClass(
+    /bg-emerald-500/,
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+          channelName: "agents",
+          kind: 20001,
+        }),
+      ),
+    )
+    .toBe(true);
+  await page.evaluate((pubkey) => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_PRESENCE__;
+    if (!emit) throw new Error("Mock presence emitter is unavailable.");
+    emit({ pubkey, status: "online" });
+  }, pubkey);
+  await expect(availabilityDot).toHaveAttribute(
+    "aria-label",
+    "Motion Auditor: Online",
+  );
   await expect(
     page.getByTestId(`agent-runtime-active-${pubkey}`).locator("xpath=../.."),
   ).toHaveClass(/bg-emerald-500/);

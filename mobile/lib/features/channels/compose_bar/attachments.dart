@@ -1,5 +1,75 @@
 part of '../compose_bar.dart';
 
+bool _rejectsNonVoiceAttachment(
+  _ComposerVoiceNote voiceNote,
+  List<_PendingAttachment> attachments,
+  ValueNotifier<String?> uploadError,
+) {
+  if (!voiceNote.isPreparing &&
+      voiceNote.recorder == null &&
+      !attachments.any(
+        (attachment) => attachment.kind == _PendingAttachmentKind.voiceNote,
+      )) {
+    return false;
+  }
+  uploadError.value = voiceNote.recorder != null || voiceNote.isPreparing
+      ? 'Finish or discard the voice note before attaching a file.'
+      : 'A voice note must be the only attachment.';
+  return true;
+}
+
+bool _queueComposerAttachment(
+  XFile file,
+  _PendingAttachmentKind kind,
+  ObjectRef<_ComposerVoiceNote> voiceNote,
+  ValueNotifier<List<_PendingAttachment>> attachments,
+  ValueNotifier<String?> uploadError,
+  ObjectRef<int> draftRevision, {
+  bool deleteAfterUse = false,
+}) {
+  if (kind != _PendingAttachmentKind.voiceNote &&
+      _rejectsNonVoiceAttachment(
+        voiceNote.value,
+        attachments.value,
+        uploadError,
+      )) {
+    return false;
+  }
+  draftRevision.value += 1;
+  uploadError.value = null;
+  attachments.value = [
+    ...attachments.value,
+    _PendingAttachment(file: file, kind: kind, deleteAfterUse: deleteAfterUse),
+  ];
+  return true;
+}
+
+bool _queueComposerImages(
+  List<XFile> images,
+  _ComposerVoiceNote voiceNote,
+  ValueNotifier<List<_PendingAttachment>> attachments,
+  ValueNotifier<String?> uploadError,
+  ObjectRef<int> draftRevision,
+  bool deleteAfterUse,
+) {
+  if (images.isEmpty ||
+      _rejectsNonVoiceAttachment(voiceNote, attachments.value, uploadError)) {
+    return false;
+  }
+  draftRevision.value += 1;
+  uploadError.value = null;
+  attachments.value = [
+    ...attachments.value,
+    for (final image in images)
+      _PendingAttachment(
+        file: image,
+        kind: _PendingAttachmentKind.image,
+        deleteAfterUse: deleteAfterUse,
+      ),
+  ];
+  return true;
+}
+
 enum _AttachmentSurface { closed, menu, camera, photos }
 
 const _attachmentMenuWidth = 216.0;
@@ -36,8 +106,8 @@ class _AttachmentMenuLayout {
     textPainter.dispose();
     final contentHeight =
         (_attachmentMenuPadding * 2) +
-        (itemHeight * 4) +
-        (_attachmentMenuItemSpacing * 3);
+        (itemHeight * 5) +
+        (_attachmentMenuItemSpacing * 4);
 
     return _AttachmentMenuLayout(
       itemHeight: itemHeight,
@@ -56,6 +126,7 @@ class _AttachmentSurfacePanel extends HookWidget {
   final VoidCallback onCamera;
   final VoidCallback onPhotos;
   final VoidCallback onVideo;
+  final VoidCallback onVoiceNote;
   final VoidCallback onFiles;
   final Future<void> Function(XFile image) onCapture;
   final Future<List<XFile>> Function() onPickAllPhotos;
@@ -70,6 +141,7 @@ class _AttachmentSurfacePanel extends HookWidget {
     required this.onCamera,
     required this.onPhotos,
     required this.onVideo,
+    required this.onVoiceNote,
     required this.onFiles,
     required this.onCapture,
     required this.onPickAllPhotos,
@@ -218,6 +290,7 @@ class _AttachmentSurfacePanel extends HookWidget {
                           onCamera: onCamera,
                           onPhotos: onPhotos,
                           onVideo: onVideo,
+                          onVoiceNote: onVoiceNote,
                           onFiles: onFiles,
                         ),
                       ),
@@ -269,7 +342,7 @@ class _ComposeDraftPayload {
   }
 }
 
-enum _PendingAttachmentKind { image, video, file }
+enum _PendingAttachmentKind { image, video, voiceNote, file }
 
 @immutable
 class _PendingAttachment {
@@ -279,11 +352,15 @@ class _PendingAttachment {
   final XFile file;
   final _PendingAttachmentKind kind;
   final bool deleteAfterUse;
+  final Duration? duration;
+  final List<double> waveform;
 
   _PendingAttachment({
     required this.file,
     required this.kind,
     this.deleteAfterUse = false,
+    this.duration,
+    this.waveform = const [],
   }) : id = _nextId++;
 }
 
@@ -329,16 +406,14 @@ void _removePendingAttachment(
 Future<void> _retainAndQueueImages(
   BuildContext context,
   List<XFile> images,
-  void Function(List<XFile>, {bool deleteAfterUse}) queueImages,
+  bool Function(List<XFile>, {bool deleteAfterUse}) queueImages,
 ) async {
   final retained = await retainTemporaryImages(images);
-  if (!context.mounted) {
+  if (!context.mounted || !queueImages(retained, deleteAfterUse: true)) {
     for (final image in retained) {
       await _deleteXFile(image);
     }
-    return;
   }
-  queueImages(retained, deleteAfterUse: true);
 }
 
 Future<BlobDescriptor> _uploadPendingAttachment(
@@ -354,6 +429,12 @@ Future<BlobDescriptor> _uploadPendingAttachment(
   ),
   _PendingAttachmentKind.video => service.uploadVideo(
     attachment.file,
+    onProgress: onProgress,
+    cancellationToken: cancellationToken,
+  ),
+  _PendingAttachmentKind.voiceNote => service.uploadVoiceNote(
+    attachment.file,
+    duration: attachment.duration ?? Duration.zero,
     onProgress: onProgress,
     cancellationToken: cancellationToken,
   ),
@@ -444,6 +525,7 @@ class _AttachmentMenu extends StatelessWidget {
   final VoidCallback onCamera;
   final VoidCallback onPhotos;
   final VoidCallback onVideo;
+  final VoidCallback onVoiceNote;
   final VoidCallback onFiles;
 
   const _AttachmentMenu({
@@ -451,11 +533,19 @@ class _AttachmentMenu extends StatelessWidget {
     required this.onCamera,
     required this.onPhotos,
     required this.onVideo,
+    required this.onVoiceNote,
     required this.onFiles,
   });
 
   @override
   Widget build(BuildContext context) {
+    final items = <(IconData, String, VoidCallback)>[
+      (LucideIcons.camera, 'Camera', onCamera),
+      (LucideIcons.images, 'Photos', onPhotos),
+      (LucideIcons.video, 'Video', onVideo),
+      (LucideIcons.mic, 'Voice note', onVoiceNote),
+      (LucideIcons.file, 'Files', onFiles),
+    ];
     return SizedBox(
       key: const ValueKey('attachment-menu'),
       width: _attachmentMenuWidth,
@@ -466,16 +556,11 @@ class _AttachmentMenu extends StatelessWidget {
         physics: layout.isScrollable
             ? null
             : const NeverScrollableScrollPhysics(),
-        itemCount: 4,
+        itemCount: items.length,
         separatorBuilder: (_, _) =>
             const SizedBox(height: _attachmentMenuItemSpacing),
         itemBuilder: (context, index) {
-          final (icon, label, onTap) = switch (index) {
-            0 => (LucideIcons.camera, 'Camera', onCamera),
-            1 => (LucideIcons.images, 'Photos', onPhotos),
-            2 => (LucideIcons.video, 'Video', onVideo),
-            _ => (LucideIcons.file, 'Files', onFiles),
-          };
+          final (icon, label, onTap) = items[index];
           return _AttachmentMenuItem(
             height: layout.itemHeight,
             icon: icon,
@@ -572,110 +657,126 @@ class _AttachmentStrip extends StatelessWidget {
 
     return SizedBox(
       height: thumbHeight,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: attachments.length,
-        separatorBuilder: (_, _) => const SizedBox(width: Grid.half),
-        itemBuilder: (context, index) {
-          final attachment = attachments[index];
-          return Container(
-            key: ValueKey('compose-attachment:${attachment.id}'),
-            width: thumbWidth,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(Radii.md),
-              border: Border.all(color: context.colors.outlineVariant),
-            ),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(Radii.md),
-                  child: attachment.kind == _PendingAttachmentKind.video
-                      ? ColoredBox(
-                          color: Colors.black,
-                          child: Center(
-                            child: Icon(
-                              LucideIcons.video,
-                              color: Colors.white,
-                              size: 24,
+      child: LayoutBuilder(
+        builder: (context, constraints) => ListView.separated(
+          scrollDirection: Axis.horizontal,
+          itemCount: attachments.length,
+          separatorBuilder: (_, _) => const SizedBox(width: Grid.half),
+          itemBuilder: (context, index) {
+            final attachment = attachments[index];
+            if (attachment.kind == _PendingAttachmentKind.voiceNote) {
+              return SizedBox(
+                width: constraints.maxWidth,
+                child: VoiceNoteAttachment.local(
+                  path: attachment.file.path,
+                  duration: attachment.duration ?? Duration.zero,
+                  waveform: attachment.waveform,
+                  onRemove: () =>
+                      _runComposerAction(() => onRemove(attachment.id)),
+                ),
+              );
+            }
+            return Container(
+              key: ValueKey('compose-attachment:${attachment.id}'),
+              width: thumbWidth,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(Radii.md),
+                border: Border.all(color: context.colors.outlineVariant),
+              ),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(Radii.md),
+                    child: attachment.kind == _PendingAttachmentKind.video
+                        ? ColoredBox(
+                            color: Colors.black,
+                            child: Center(
+                              child: Icon(
+                                LucideIcons.video,
+                                color: Colors.white,
+                                size: 24,
+                              ),
                             ),
-                          ),
-                        )
-                      : attachment.kind == _PendingAttachmentKind.image &&
-                            attachment.file.path.isNotEmpty
-                      ? Image.file(
-                          File(attachment.file.path),
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => ColoredBox(
+                          )
+                        : attachment.kind == _PendingAttachmentKind.image &&
+                              attachment.file.path.isNotEmpty
+                        ? Image.file(
+                            File(attachment.file.path),
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => ColoredBox(
+                              color: context.colors.surface,
+                              child: Icon(
+                                LucideIcons.image,
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
+                          )
+                        : attachment.kind == _PendingAttachmentKind.image
+                        ? _MemoryAttachmentImage(file: attachment.file)
+                        : ColoredBox(
                             color: context.colors.surface,
-                            child: Icon(
-                              LucideIcons.image,
-                              color: context.colors.onSurfaceVariant,
-                            ),
-                          ),
-                        )
-                      : attachment.kind == _PendingAttachmentKind.image
-                      ? _MemoryAttachmentImage(file: attachment.file)
-                      : ColoredBox(
-                          color: context.colors.surface,
-                          child: Padding(
-                            padding: const EdgeInsets.all(Grid.xxs),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(
-                                  LucideIcons.file,
-                                  color: context.colors.onSurfaceVariant,
-                                ),
-                                const SizedBox(height: Grid.quarter),
-                                Text(
-                                  attachment.file.name.isEmpty
-                                      ? 'File'
-                                      : attachment.file.name,
-                                  maxLines: 2,
-                                  textAlign: TextAlign.center,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: context.textTheme.labelSmall?.copyWith(
+                            child: Padding(
+                              padding: const EdgeInsets.all(Grid.xxs),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    LucideIcons.file,
                                     color: context.colors.onSurfaceVariant,
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(height: Grid.quarter),
+                                  Text(
+                                    attachment.file.name.isEmpty
+                                        ? 'File'
+                                        : attachment.file.name,
+                                    maxLines: 2,
+                                    textAlign: TextAlign.center,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: context.textTheme.labelSmall
+                                        ?.copyWith(
+                                          color:
+                                              context.colors.onSurfaceVariant,
+                                        ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
+                  ),
+                  Positioned(
+                    top: Grid.quarter,
+                    right: Grid.quarter,
+                    child: SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: IconButton(
+                        onPressed: () =>
+                            _runComposerAction(() => onRemove(attachment.id)),
+                        tooltip: 'Remove attachment',
+                        visualDensity: VisualDensity.compact,
+                        style: IconButton.styleFrom(
+                          backgroundColor: context.colors.surface.withValues(
+                            alpha: 0.92,
+                          ),
+                          minimumSize: const Size(24, 24),
+                          maximumSize: const Size(24, 24),
+                          padding: EdgeInsets.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
-                ),
-                Positioned(
-                  top: Grid.quarter,
-                  right: Grid.quarter,
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: IconButton(
-                      onPressed: () =>
-                          _runComposerAction(() => onRemove(attachment.id)),
-                      tooltip: 'Remove attachment',
-                      visualDensity: VisualDensity.compact,
-                      style: IconButton.styleFrom(
-                        backgroundColor: context.colors.surface.withValues(
-                          alpha: 0.92,
+                        icon: Icon(
+                          LucideIcons.x,
+                          size: 14,
+                          color: context.colors.onSurface,
                         ),
-                        minimumSize: const Size(24, 24),
-                        maximumSize: const Size(24, 24),
-                        padding: EdgeInsets.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      icon: Icon(
-                        LucideIcons.x,
-                        size: 14,
-                        color: context.colors.onSurface,
                       ),
                     ),
                   ),
-                ),
-              ],
-            ),
-          );
-        },
+                ],
+              ),
+            );
+          },
+        ),
       ),
     );
   }

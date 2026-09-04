@@ -41,6 +41,7 @@ let createElement;
 let QueryClient;
 let QueryClientProvider;
 let UnifiedAgentsSection;
+let useAgentAvailabilityLookup;
 
 const ipcHandlers = new Map();
 
@@ -109,16 +110,26 @@ function baseProps(overrides = {}) {
   };
 }
 
+function Surface(props) {
+  const { getAvailability } = useAgentAvailabilityLookup(
+    props.agents.map((a) => a.pubkey),
+  );
+  return createElement(UnifiedAgentsSection, { ...props, getAvailability });
+}
+
 function renderSection(props) {
   const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
   });
   clients.push(client);
   return render(
     createElement(
       QueryClientProvider,
       { client },
-      createElement(UnifiedAgentsSection, props),
+      createElement(Surface, props),
     ),
   );
 }
@@ -157,6 +168,9 @@ before(async () => {
     "@tanstack/react-query"
   ));
   ({ UnifiedAgentsSection } = await import("./UnifiedAgentsSection.tsx"));
+  ({ useAgentAvailabilityLookup } = await import(
+    "../lib/useAgentAvailability.ts"
+  ));
 });
 
 afterEach(() => {
@@ -292,4 +306,301 @@ test("errored avatar affordance still opens the explicit pubkey on the runtime t
   fireEvent.click(screen.getByTestId(`agent-runtime-error-${LIVE_PK}`));
 
   assert.deepEqual(opened, [{ pubkey: LIVE_PK, options: { tab: "runtime" } }]);
+});
+
+for (const kind of ["persona", "custom", "unknown"]) {
+  test(`${kind} stopped card uses exact-key presence without inventing lifecycle controls`, async () => {
+    installFailOpenIpc();
+    const { relayClient } = await import("../../../shared/api/relayClient.ts");
+    const originalConnection = relayClient.getConnectionState;
+    const originalSubscribe = relayClient.subscribeToConnectionState;
+    relayClient.getConnectionState = () => "connected";
+    relayClient.subscribeToConnectionState = () => () => {};
+    let snapshot = { [ARCHIVED_PK]: "online" };
+    ipcHandlers.set("get_presence", () => Promise.resolve(snapshot));
+    const starts = [];
+    const props = baseProps({
+      agents: [
+        agent({
+          personaId:
+            kind === "custom"
+              ? null
+              : kind === "unknown"
+                ? "missing"
+                : "persona-1",
+        }),
+      ],
+      personas: kind === "persona" ? [persona()] : [],
+      onStartAgent: (key) => starts.push(key),
+      onRestartAgent: () => {
+        throw new Error("presence must not cause Restart");
+      },
+    });
+    try {
+      await act(async () => renderSection(props));
+      const client = clients.at(-1);
+      const refresh = async () => {
+        await act(async () => {
+          await client.invalidateQueries({ queryKey: ["presence"] });
+        });
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+      };
+      await refresh();
+      // Different-key Online must not suppress this identity's ordinary Start.
+      fireEvent.click(screen.getByTestId(`agent-runtime-start-${LIVE_PK}`));
+      assert.deepEqual(starts, [LIVE_PK]);
+      starts.length = 0;
+      for (const status of ["online", "away", "offline", "online"]) {
+        snapshot = { [LIVE_PK]: status };
+        await refresh();
+        const start = screen.queryByTestId(`agent-runtime-start-${LIVE_PK}`);
+        if (status === "offline") {
+          assert.ok(start);
+          fireEvent.click(start);
+          assert.deepEqual(starts, [LIVE_PK]);
+          starts.length = 0;
+        } else {
+          assert.equal(
+            Boolean(start),
+            false,
+            "active exact-key presence must remove Start",
+          );
+          const dot = screen.getByTestId(`agent-runtime-active-${LIVE_PK}`);
+          assert.match(
+            dot.getAttribute("aria-label"),
+            new RegExp(status === "online" ? "Online$" : "Away$"),
+          );
+          fireEvent.click(dot);
+          fireEvent.keyDown(dot, { key: "Enter" });
+          fireEvent.keyDown(dot, { key: " " });
+          assert.deepEqual(starts, []);
+          assert.equal(
+            Boolean(screen.queryByRole("button", { name: /Stop/ })),
+            false,
+          );
+        }
+      }
+      // A successful omitted entry is the existing relay expiry/missing path.
+      snapshot = {};
+      await refresh();
+      fireEvent.click(screen.getByTestId(`agent-runtime-start-${LIVE_PK}`));
+      assert.deepEqual(starts, [LIVE_PK]);
+    } finally {
+      relayClient.getConnectionState = originalConnection;
+      relayClient.subscribeToConnectionState = originalSubscribe;
+    }
+  });
+}
+
+test("N cards share a snapshot, one poll, failure recovery and live subscription lifecycle", async (t) => {
+  installFailOpenIpc();
+  const { relayClient } = await import("../../../shared/api/relayClient.ts");
+  const { usePresenceSubscription, useSetPresenceMutation } = await import(
+    "../../presence/hooks.ts"
+  );
+  const original = {
+    getConnectionState: relayClient.getConnectionState,
+    subscribeToConnectionState: relayClient.subscribeToConnectionState,
+    subscribeToReconnects: relayClient.subscribeToReconnects,
+    subscribeLive: relayClient.subscribeLive,
+    sendPresence: relayClient.sendPresence,
+  };
+  const subscriptions = [];
+  const requests = [];
+  let fail = false;
+  let finishSnapshot;
+  ipcHandlers.set("get_presence", ({ pubkeys }) => {
+    requests.push(pubkeys);
+    if (fail) return Promise.reject("relay unreachable: request timed out");
+    return new Promise((resolve) => {
+      finishSnapshot = resolve;
+    });
+  });
+  relayClient.sendPresence = async () => {};
+  relayClient.getConnectionState = () => "connected";
+  relayClient.subscribeToConnectionState = () => () => {};
+  relayClient.subscribeToReconnects = () => () => {};
+  relayClient.subscribeLive = async (filter, onEvent, onReady) => {
+    const sub = { filter, onEvent, closed: false };
+    subscriptions.push(sub);
+    onReady("eose");
+    return async () => {
+      sub.closed = true;
+    };
+  };
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    configurable: true,
+    value: "visible",
+  });
+  const originalFocus = dom.window.document.hasFocus;
+  dom.window.document.hasFocus = () => true;
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let setPresence;
+  function SubscribedSurface(props) {
+    setPresence = useSetPresenceMutation(SELF_PK);
+    usePresenceSubscription();
+    return createElement(Surface, props);
+  }
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
+  });
+  clients.push(client);
+  const props = baseProps({
+    agents: [
+      agent({ pubkey: LIVE_PK, status: "running" }),
+      agent({ pubkey: ARCHIVED_PK, personaId: null, status: "running" }),
+      agent({ pubkey: SELF_PK, personaId: "missing", status: "running" }),
+    ],
+    personas: [persona()],
+  });
+  const tree = (next) =>
+    createElement(
+      QueryClientProvider,
+      { client },
+      createElement(SubscribedSurface, next),
+    );
+  const settle = async () =>
+    act(async () => {
+      await new Promise((r) => setTimeout(r, 120));
+    });
+  try {
+    let view;
+    await act(async () => {
+      view = render(tree(props));
+    });
+    assert.equal(
+      requests.length,
+      1,
+      "one in-flight request for persona/custom/unknown rows",
+    );
+    await act(async () => {
+      view.rerender(tree({ ...props, agents: [...props.agents].reverse() }));
+    });
+    assert.equal(
+      requests.length,
+      1,
+      "reordering while the snapshot is pending does not refetch",
+    );
+    await act(async () => {
+      finishSnapshot({});
+    });
+    await settle();
+    assert.deepEqual(requests[0], [ARCHIVED_PK, LIVE_PK, SELF_PK]);
+    assert.equal(subscriptions.length, 1);
+    assert.deepEqual(subscriptions[0].filter.authors, requests[0]);
+    assert.equal(
+      client
+        .getQueryCache()
+        .find({ queryKey: ["presence", ...requests[0]] })
+        .getObserversCount(),
+      1,
+    );
+    await act(async () => {
+      subscriptions[0].onEvent({ pubkey: LIVE_PK, content: "away" });
+    });
+    await settle();
+    assert.match(
+      screen
+        .getByTestId(`agent-runtime-active-${LIVE_PK}`)
+        .getAttribute("aria-label"),
+      /Away$/,
+    );
+    assert.match(
+      screen
+        .getByTestId(`agent-runtime-active-${ARCHIVED_PK}`)
+        .getAttribute("aria-label"),
+      /Offline$/,
+    );
+    assert.equal(
+      requests.length,
+      1,
+      "live exact-key update makes no snapshot requests",
+    );
+    fail = true;
+    await act(async () => {
+      t.mock.timers.tick(60000);
+    });
+    await settle();
+    assert.equal(requests.length, 2, "one backstop poll, not one per card");
+    for (const { pubkey } of props.agents) {
+      assert.match(
+        screen
+          .getByTestId(`agent-runtime-active-${pubkey}`)
+          .getAttribute("aria-label"),
+        /Availability unknown$/,
+      );
+    }
+    await act(async () => {
+      subscriptions[0].onEvent({ pubkey: ARCHIVED_PK, content: "online" });
+    });
+    await settle();
+    for (const { pubkey } of props.agents) {
+      assert.match(
+        screen
+          .getByTestId(`agent-runtime-active-${pubkey}`)
+          .getAttribute("aria-label"),
+        /Availability unknown$/,
+        "one live author must not resurrect a failed aggregate's cached siblings",
+      );
+    }
+    await act(async () => {
+      await setPresence.mutateAsync("online");
+    });
+    await settle();
+    for (const { pubkey } of props.agents) {
+      assert.match(
+        screen
+          .getByTestId(`agent-runtime-active-${pubkey}`)
+          .getAttribute("aria-label"),
+        /Availability unknown$/,
+        "a successful self heartbeat must not heal a failed aggregate snapshot",
+      );
+    }
+    fail = false;
+    await act(async () => {
+      t.mock.timers.tick(60000);
+    });
+    await act(async () => {
+      finishSnapshot({});
+    });
+    await settle();
+    assert.equal(requests.length, 3);
+    assert.match(
+      screen
+        .getByTestId(`agent-runtime-active-${LIVE_PK}`)
+        .getAttribute("aria-label"),
+      /Offline$/,
+    );
+    await act(async () => {
+      view.rerender(tree({ ...props, agents: [props.agents[0]] }));
+    });
+    await act(async () => {
+      finishSnapshot({});
+    });
+    await settle();
+    assert.deepEqual(subscriptions[1].filter.authors, [LIVE_PK]);
+    assert.equal(subscriptions[0].closed, true);
+    await act(async () => {
+      view.unmount();
+    });
+    assert.equal(
+      subscriptions[1].closed,
+      true,
+      "last surface removes its live subscription",
+    );
+    const count = requests.length;
+    await act(async () => {
+      t.mock.timers.tick(120000);
+    });
+    assert.equal(requests.length, count, "unmounted surfaces do not poll");
+  } finally {
+    t.mock.timers.reset();
+    dom.window.document.hasFocus = originalFocus;
+    Object.assign(relayClient, original);
+  }
 });

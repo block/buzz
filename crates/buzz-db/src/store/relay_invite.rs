@@ -116,7 +116,12 @@ pub async fn mint_relay_invite(
     // community-scoped database write. The trigger remains the final backstop,
     // but this typed guard keeps a quiescing community from surfacing as an
     // opaque SQLSTATE/HTTP 500 at the API boundary.
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
     crate::deletion::DeletionStore::new(pool.clone())
         .guard_transaction(&mut tx, community)
         .await?;
@@ -172,6 +177,11 @@ const RETENTION_SWEEP_BATCH_SIZE: i64 = 1_000;
 /// expiry index makes old rows drain first without turning cleanup into an
 /// unbounded transaction.
 pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<u64> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
     let result = sqlx::query(
         "DELETE FROM relay_invites \
          WHERE (community_id, id) IN (\
@@ -184,7 +194,7 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
     )
     .bind(cutoff)
     .bind(RETENTION_SWEEP_BATCH_SIZE)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     Ok(result.rows_affected())
@@ -216,7 +226,12 @@ pub async fn claim_relay_invite(
     claimer_pubkey: &str,
     policy_version: Option<&str>,
 ) -> Result<ClaimOutcome> {
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
     let row = sqlx::query(

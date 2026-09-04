@@ -40,6 +40,7 @@ type UserAvatarProps = {
   shape?: "circle" | "squircle";
   className?: string;
   fallbackDelayMs?: number;
+  imageDraggable?: boolean;
   testId?: string;
 };
 
@@ -51,6 +52,7 @@ export function UserAvatar({
   shape,
   className,
   fallbackDelayMs = 200,
+  imageDraggable,
   testId,
 }: UserAvatarProps) {
   const initials = getInitials(displayName);
@@ -86,6 +88,7 @@ export function UserAvatar({
           alt={`${displayName} avatar`}
           className={cn("object-cover", !animated && "bg-secondary")}
           data-testid={testId ? `${testId}-image` : undefined}
+          draggable={imageDraggable}
           referrerPolicy="no-referrer"
           src={src}
         />

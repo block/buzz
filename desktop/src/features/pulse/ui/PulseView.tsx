@@ -128,7 +128,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     [agentPubkeys],
   );
   const agentStatusMap = React.useMemo(() => {
-    const map: Record<string, "online" | "away" | "offline"> = {};
+    const map: Record<string, "online" | "away" | "offline" | "unknown"> = {};
     for (const a of relayAgents) {
       map[a.pubkey] = a.status;
     }

@@ -8,7 +8,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use buzz_db::{Db, DbReadinessOutcome};
+use buzz_db::{Db, DbError, DbReadinessOutcome};
 use tokio::time::Instant;
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -327,13 +327,20 @@ async fn redis_check(pool: &deadpool_redis::Pool, deadline: Instant) -> RedisOut
 }
 
 async fn deletion_catalog_check(db: &Db, deadline: Instant) -> DeletionCatalogOutcome {
-    match tokio::time::timeout_at(deadline, db.validate_deletion_serving_catalog()).await {
-        Err(_) => DeletionCatalogOutcome::OperationTimeout,
-        Ok(Err(error)) => {
+    classify_deletion_catalog_result(
+        db.validate_deletion_serving_catalog_for_readiness(deadline)
+            .await,
+    )
+}
+
+fn classify_deletion_catalog_result(result: buzz_db::Result<()>) -> DeletionCatalogOutcome {
+    match result {
+        Err(DbError::Sqlx(sqlx::Error::PoolTimedOut)) => DeletionCatalogOutcome::OperationTimeout,
+        Err(error) => {
             tracing::debug!(error = %error, "Deletion catalog readiness validation failed");
             DeletionCatalogOutcome::OperationError
         }
-        Ok(Ok(())) => DeletionCatalogOutcome::Success,
+        Ok(()) => DeletionCatalogOutcome::Success,
     }
 }
 
@@ -690,6 +697,18 @@ mod tests {
             ["success", "operation_timeout", "operation_error"]
         );
         assert_eq!(READINESS_RAW_SERIES_PER_POD, 99);
+    }
+
+    #[test]
+    fn deletion_catalog_deadline_is_a_timeout_not_an_operation_error() {
+        assert_eq!(
+            classify_deletion_catalog_result(Err(DbError::Sqlx(sqlx::Error::PoolTimedOut))),
+            DeletionCatalogOutcome::OperationTimeout
+        );
+        assert_eq!(
+            classify_deletion_catalog_result(Err(DbError::InvalidData("catalog".into()))),
+            DeletionCatalogOutcome::OperationError
+        );
     }
 
     #[test]

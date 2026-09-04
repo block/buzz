@@ -53,6 +53,17 @@ buzz channels topic --channel <uuid> --topic "New topic"
 buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
 
+# GIFs (requires relay to advertise buzz-gif / KLIPY)
+buzz gifs search                              # trending GIFs
+buzz gifs search --query "celebration"        # search GIFs
+buzz gifs share --slug <slug>                 # report selection to provider Recents
+# Paste the `cdn_url` from a search result directly into messages send --content
+
+# Custom emoji in messages
+# buzz messages send scans outgoing content for :shortcode: patterns and
+# automatically attaches NIP-30 ["emoji", shortcode, url] tags from the
+# workspace palette — identical to the desktop composer behavior.
+
 # Users & Presence
 buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
@@ -130,6 +141,8 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
+| `gifs` | `search` | Search or browse trending GIFs (requires relay buzz-gif support) |
+| | `share` | Report a selected GIF to the provider's Recents |
 | `dms` | `list` | List DM conversations |
 | | `open` | Open a DM (1–8 pubkeys) |
 | | `add-member` | Add member to DM group |

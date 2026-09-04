@@ -16,6 +16,11 @@ const PARTITIONED_TABLES: &[&str] = &["events", "delivery_log"];
 /// Ensures monthly partition tables exist for the next `months_ahead` months.
 pub async fn ensure_future_partitions(pool: &PgPool, months_ahead: u32) -> Result<()> {
     let now = Utc::now();
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?;
 
     for i in 0..=(months_ahead as i32) {
         let year = now.year();
@@ -50,7 +55,7 @@ pub async fn ensure_future_partitions(pool: &PgPool, months_ahead: u32) -> Resul
         let end_str = end.format("%Y-%m-%d").to_string();
 
         for table in PARTITIONED_TABLES {
-            ensure_partition(pool, table, &start_str, &end_str, &suffix).await?;
+            ensure_partition(&mut connection, table, &start_str, &end_str, &suffix).await?;
         }
     }
 
@@ -82,7 +87,7 @@ fn validate_date_str(s: &str) -> bool {
 }
 
 async fn ensure_partition(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     table_name: &str,
     start_date_str: &str,
     end_date_str: &str,
@@ -123,7 +128,7 @@ async fn ensure_partition(
         "#,
     )
     .bind(&partition_name)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
 
     let cnt: i64 = row.try_get("cnt")?;
@@ -137,7 +142,10 @@ async fn ensure_partition(
          FOR VALUES FROM ('{start_date_str}') TO ('{end_date_str}')"
     );
 
-    match sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await {
+    match sqlx::query(sqlx::AssertSqlSafe(sql))
+        .execute(&mut *connection)
+        .await
+    {
         Ok(_) => {
             info!("added partition {partition_name}");
             Ok(())

@@ -20,6 +20,98 @@ async fn setup_db() -> Db {
 }
 
 #[tokio::test]
+async fn begin_transaction_compatibility_alias_is_preserved() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy(&crate::test_support::database_url())
+        .expect("construct lazy compatibility pool");
+    pool.close().await;
+    let db = Db::from_pool(pool);
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    #[allow(deprecated)]
+    let result = db.begin_transaction().await;
+    assert!(matches!(
+        result,
+        Err(DbError::Sqlx(sqlx::Error::PoolClosed))
+    ));
+
+    let counters = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter_map(|(key, _, _, value)| {
+            let name = key.key().name();
+            if ![
+                "buzz_db_pool_acquire_attempts_total",
+                "buzz_db_pool_acquisitions_total",
+            ]
+            .contains(&name)
+            {
+                return None;
+            }
+            let DebugValue::Counter(value) = value else {
+                panic!("pool acquisition terminals must be counters");
+            };
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            Some(((name.to_owned(), labels), value))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected = [
+        (
+            (
+                "buzz_db_pool_acquire_attempts_total".to_owned(),
+                [
+                    ("operation".to_owned(), "event_write".to_owned()),
+                    ("outcome".to_owned(), "error".to_owned()),
+                    ("pool_role".to_owned(), "writer".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            1,
+        ),
+        (
+            (
+                "buzz_db_pool_acquisitions_total".to_owned(),
+                [
+                    ("outcome".to_owned(), "error".to_owned()),
+                    ("pool_role".to_owned(), "writer".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            1,
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(counters, expected);
+}
+
+#[test]
+fn nip43_reconciliation_compatibility_alias_is_preserved() {
+    #[allow(deprecated)]
+    async fn call(
+        db: &Db,
+        community_id: CommunityId,
+        relay_pubkey: &nostr::PublicKey,
+    ) -> crate::Result<bool> {
+        db.nip43_membership_snapshot_needs_reconciliation(community_id, relay_pubkey)
+            .await
+    }
+
+    let _ = call;
+}
+
+#[tokio::test]
 #[ignore = "requires Postgres"]
 async fn readiness_check_distinguishes_pool_exhaustion_from_success() {
     let database_url = crate::test_support::database_url();

@@ -316,6 +316,11 @@ type E2eConfig = {
     addAgentToHuddleError?: string;
     /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
     huddleStateReadDelayMs?: number;
+    /** Delay (ms) for `sync_agents_to_active_huddle` so e2e tests can hold the
+     *  send path open across a leg that writes nothing to the relay (no active
+     *  huddle) and revoke a mention mid-hold.
+     *  Releasable early via `__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__()`. */
+    syncAgentsToActiveHuddleDelayMs?: number;
     /** Delay companion creation to expose the newly-started huddle handoff state. */
     openHuddleWindowDelayMs?: number;
     /** Delay the native start result after membership arrives in the channel list. */
@@ -374,7 +379,8 @@ type E2eConfig = {
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
     /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
-     *  community mid-startup and observe the fail-closed scope check. */
+     *  community mid-startup and observe the fail-closed scope check.
+     *  Releasable early via `__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__()`. */
     startManagedAgentDelayMs?: number;
     /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
     mediaProxyInitiallyUnavailable?: boolean;
@@ -922,7 +928,7 @@ type RawRelayAgent = {
   channels: string[];
   channel_ids: string[];
   capabilities: string[];
-  status: PresenceStatus;
+  status: PresenceStatus | "unknown";
   respond_to?: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist?: string[];
 };
@@ -1073,7 +1079,7 @@ type WsHandler = (message: unknown) => void;
 const GLOBAL_MOCK_SUBSCRIPTION = "*";
 
 type MockSubscription = {
-  channelId: string;
+  channelIds: string[];
   kinds: number[] | null;
   /** `#p` values from the REQ filters, if any — lets specs assert an
    *  owner-scoped live subscription (e.g. the observer-archive `24200`
@@ -1192,9 +1198,46 @@ function updateMockRelayMembershipFromAdminEvent(event: RelayEvent): boolean {
   return false;
 }
 
+/**
+ * Mirror the native clipboard command's dual-flavor write.
+ *
+ * `navigator.clipboard.writeText` can only carry the plain flavor, so specs
+ * asserting on the identity sidecar read the captured payload instead. The
+ * rich write is still attempted so real paste round-trips work.
+ */
+async function writeClipboardFlavors({
+  html,
+  text,
+}: {
+  html?: string;
+  text: string;
+}): Promise<void> {
+  window.__BUZZ_E2E_LAST_CLIPBOARD__ = { html: html ?? null, text };
+  if (
+    html &&
+    typeof ClipboardItem !== "undefined" &&
+    navigator.clipboard?.write
+  ) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // Fall back to the plain flavor; headless permissions vary by browser.
+    }
+  }
+  await navigator.clipboard.writeText(text);
+}
+
 declare global {
   interface Window {
     __BUZZ_E2E__?: E2eConfig;
+    /** Last payload written through the native clipboard command. */
+    __BUZZ_E2E_LAST_CLIPBOARD__?: { html: string | null; text: string };
     __BUZZ_E2E_COMMANDS__?: string[];
     __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
       command: string;
@@ -1230,6 +1273,18 @@ declare global {
       ownerPubkey: string;
       kind: number;
     }) => boolean;
+    __BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__?: (kind: number) => boolean;
+    __BUZZ_E2E_SET_MOCK_USER_STATUS__?: (input: {
+      text: string;
+      emoji?: string;
+      expiresAt?: number;
+      createdAt?: number;
+    }) => RelayEvent;
+    /** Explicit presence evidence; independent of managed-agent runtime state. */
+    __BUZZ_E2E_EMIT_MOCK_PRESENCE__?: (input: {
+      pubkey: string;
+      status: PresenceStatus;
+    }) => void;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
       content: string;
@@ -1508,6 +1563,15 @@ declare global {
     /** Count of `get_event` invocations for the current defer-target ID since
      *  the last time `__BUZZ_E2E_DEFER_GET_EVENT__` was set. */
     __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number;
+    /** Release every `start_managed_agent` currently held behind
+     *  `startManagedAgentDelayMs`, letting it settle (scope checks, then any
+     *  armed `startManagedAgentErrors` rejection) without waiting out the
+     *  delay. Returns the number of holds flushed. */
+    __BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__?: () => number;
+    /** Release every `sync_agents_to_active_huddle` currently held behind
+     *  `syncAgentsToActiveHuddleDelayMs`, letting it resolve without waiting
+     *  out the delay. Returns the number of holds flushed. */
+    __BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__?: () => number;
     /** Hold the next channel read until released. */
     __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
     /** Disarm the latch and release the held channel read, if any. */
@@ -1524,6 +1588,12 @@ declare global {
     /** Number of `get_thread_replies` calls currently held by
      *  `deferThreadReplies`. */
     __BUZZ_E2E_THREAD_REPLIES_PENDING__?: () => number;
+    /** Start or stop holding `get_users_batch` responses. Turning the hold off
+     *  flushes everything held; either call returns the number released, so a
+     *  spec can prove a relay identity lookup was genuinely pinned open. */
+    __BUZZ_E2E_HOLD_USERS_BATCH__?: (hold: boolean) => number;
+    /** Number of `get_users_batch` calls currently held. */
+    __BUZZ_E2E_USERS_BATCH_PENDING__?: () => number;
     /** Uploads that passed mock-native registration and began relay work. */
     __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
     /** Hold renderer-owned media fetches until their cancellation command. */
@@ -1601,6 +1671,11 @@ const CHARLIE_PUBKEY =
   "554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea";
 const OUTSIDER_PUBKEY =
   "df8e91b86fda13a9a67896df77232f7bdab2ba9c3e165378e1ba3d24c13a328e";
+// A non-member human whose display name has a space in it. Multi-word names are
+// the case a plain-text copy cannot recover — "@John Smith" is indistinguishable
+// from "@John" followed by a word — so the clipboard round-trip fixtures use it.
+const MULTI_WORD_NON_MEMBER_PUBKEY =
+  "7c1f2ad0b4e93856a1d0c2f4e6b8093a5d7f1c3e5a79b1d3f5072a4c6e80931b";
 const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
 // A relay-classified bot agent whose declared NIP-OA owner is the mock viewer,
@@ -1640,6 +1715,24 @@ let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
 let deferredLinkPreviewUploadQueue: Array<() => void> = [];
 let deferredThreadRepliesQueue: Array<() => void> = [];
+// ── get_users_batch hold seam ───────────────────────────────────────────────
+// Toggled at runtime by `__BUZZ_E2E_HOLD_USERS_BATCH__(hold)` rather than fixed
+// at boot by a mock-config flag, because a mention-identity spec needs both
+// sides of the hold in one page: profiles resolved normally first (so one paste
+// verifies instantly from local state), then the relay lookup pinned open (so a
+// second paste of the same label is provably still deciding).
+let holdUsersBatch = false;
+let heldUsersBatchReleases: Array<() => void> = [];
+// Starts currently held behind `startManagedAgentDelayMs`, releasable early
+// via `__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__()`: a spec that holds a
+// start across a community round-trip needs the hold long enough to be
+// deterministic AND a way to settle it on demand afterwards.
+let heldManagedAgentStartReleases: Array<() => void> = [];
+// Huddle agent syncs currently held behind `syncAgentsToActiveHuddleDelayMs`,
+// releasable early via `__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__()`. The hold
+// must outlast the mid-send mutation a spec injects, then settle on demand
+// rather than on a timer, so the publish never races the injection.
+let heldHuddleAgentSyncReleases: Array<() => void> = [];
 let cancelledMediaUploadIds = new Set<string>();
 let cancelledMediaFetchIds = new Set<string>();
 let mockMediaFetchControllers = new Map<string, AbortController>();
@@ -1654,6 +1747,7 @@ const mockDisplayNames = new Map<string, string>([
   [PROFILE_ONLY_AGENT_PUBKEY, "mira"],
   [OWNED_RELAY_AGENT_PUBKEY, "nadia"],
   [OUTSIDER_PUBKEY, "outsider"],
+  [MULTI_WORD_NON_MEMBER_PUBKEY, "John Smith"],
   [DEFAULT_REAL_IDENTITY.pubkey, DEFAULT_REAL_IDENTITY.username],
 ]);
 const mockAgentPubkeys = new Set([
@@ -2475,6 +2569,7 @@ function resetMockRelayAgents(config?: E2eConfig) {
 
 function resetMockManagedAgents(config?: E2eConfig) {
   mockManagedAgents = [];
+  mockBestieAssignment = null;
   mockManagedAgentRuntimes = (config?.mock?.managedAgentRuntimes ?? []).map(
     (seed) => ({
       pubkey: seed.pubkey,
@@ -3225,6 +3320,9 @@ let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
+let mockBestieAssignment: {
+  agent_pubkey: string;
+} | null = null;
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -4115,6 +4213,7 @@ const mockPresence = new Map<string, PresenceStatus>([
   [PROFILE_ONLY_AGENT_PUBKEY, "online"],
   [OWNED_RELAY_AGENT_PUBKEY, "online"],
   [OUTSIDER_PUBKEY, "offline"],
+  [MULTI_WORD_NON_MEMBER_PUBKEY, "offline"],
 ]);
 const mockFeedOverrides: RawHomeFeedResponse["feed"] = {
   mentions: [],
@@ -4790,10 +4889,11 @@ function prependMockHistory(input: {
 function emitMockHistory(
   socket: MockSocket,
   subId: string,
-  channelId: string,
+  channelIds: string[],
   filter: MockFilter,
 ) {
-  const events = getMockMessageStore(channelId)
+  const events = channelIds
+    .flatMap((channelId) => getMockMessageStore(channelId))
     .filter((event) => {
       if (filter.kinds && !filter.kinds.includes(event.kind)) {
         return false;
@@ -4837,8 +4937,8 @@ function emitMockLiveEvent(channelId: string, event: RelayEvent) {
   for (const socket of mockSockets.values()) {
     for (const [subId, subscription] of socket.subscriptions) {
       if (
-        (subscription.channelId === channelId ||
-          subscription.channelId === GLOBAL_MOCK_SUBSCRIPTION) &&
+        (subscription.channelIds.includes(channelId) ||
+          subscription.channelIds.includes(GLOBAL_MOCK_SUBSCRIPTION)) &&
         (!subscription.kinds || subscription.kinds.includes(event.kind))
       ) {
         sendWsText(socket.handler, ["EVENT", subId, event]);
@@ -4937,8 +5037,8 @@ function hasMockLiveSubscription(channelId: string, kind?: number) {
   for (const socket of mockSockets.values()) {
     for (const subscription of socket.subscriptions.values()) {
       if (
-        (subscription.channelId === channelId ||
-          subscription.channelId === GLOBAL_MOCK_SUBSCRIPTION) &&
+        (subscription.channelIds.includes(channelId) ||
+          subscription.channelIds.includes(GLOBAL_MOCK_SUBSCRIPTION)) &&
         (kind === undefined ||
           !subscription.kinds ||
           subscription.kinds.includes(kind))
@@ -6822,6 +6922,11 @@ async function handleGetUsersBatch(
   if (usersBatchDelayMs > 0) {
     await new Promise<void>((resolve) => {
       window.setTimeout(resolve, usersBatchDelayMs);
+    });
+  }
+  if (holdUsersBatch) {
+    await new Promise<void>((resolve) => {
+      heldUsersBatchReleases.push(resolve);
     });
   }
 
@@ -9594,7 +9699,20 @@ async function handleStartManagedAgent(
 ): Promise<RawManagedAgent> {
   const delayMs = config?.mock?.startManagedAgentDelayMs ?? 0;
   if (delayMs > 0) {
-    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const release = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        heldManagedAgentStartReleases = heldManagedAgentStartReleases.filter(
+          (held) => held !== release,
+        );
+        resolve();
+      };
+      const timer = window.setTimeout(release, delayMs);
+      heldManagedAgentStartReleases.push(release);
+    });
   }
   // After the injected delay, like the real command's checks before any
   // spawn/deploy side effect: a caller-captured tenant scope and signer
@@ -9640,7 +9758,7 @@ async function handleStartManagedAgent(
   agent.updated_at = now;
   agent.last_started_at = now;
   agent.last_error = null;
-  setMockPresenceStatus(agent.pubkey, "online");
+  // Lifecycle is not presence; scenarios publish explicit relay evidence.
   agent.log_lines.push(
     agent.backend.type === "provider"
       ? `deployed mock provider harness at ${now}`
@@ -9668,7 +9786,7 @@ async function handleStopManagedAgent(args: {
       row.pid = null;
     }
   }
-  setMockPresenceStatus(agent.pubkey, "offline");
+  // A stop result alone is not an authored offline presence event.
   agent.log_lines.push(`stopped mock harness at ${now}`);
   syncMockRelayAgentsFromManagedAgents();
   return cloneManagedAgent(agent);
@@ -9694,6 +9812,9 @@ async function handleDeleteManagedAgent(args: {
   mockManagedAgents = mockManagedAgents.filter(
     (candidate) => candidate.pubkey !== args.pubkey,
   );
+  if (mockBestieAssignment?.agent_pubkey === args.pubkey) {
+    mockBestieAssignment = null;
+  }
   syncMockRelayAgentsFromManagedAgents();
 }
 
@@ -10722,8 +10843,7 @@ function sendToMockSocket(args: {
       const kinds = new Set<number>();
       const ownerPubkeys = new Set<string>();
       for (const f of filters) {
-        const cid = f["#h"]?.[0];
-        if (cid) channelIds.add(cid);
+        for (const channelId of f["#h"] ?? []) channelIds.add(channelId);
         for (const kind of f.kinds ?? []) {
           kinds.add(kind);
         }
@@ -10746,7 +10866,8 @@ function sendToMockSocket(args: {
         return;
       }
       socket.subscriptions.set(subId, {
-        channelId: onlyChannelId ?? GLOBAL_MOCK_SUBSCRIPTION,
+        channelIds:
+          channelIds.size > 0 ? [...channelIds] : [GLOBAL_MOCK_SUBSCRIPTION],
         kinds: kinds.size > 0 ? [...kinds] : null,
         ownerPubkeys: [...ownerPubkeys],
       });
@@ -10884,15 +11005,15 @@ function sendToMockSocket(args: {
       return;
     }
 
-    const channelId = filter["#h"]?.[0];
-    if (channelId && subId.startsWith("history-")) {
+    const channelIds = filter["#h"] ?? [];
+    if (channelIds.length > 0 && subId.startsWith("history-")) {
       const closeReason = mockChannelHistoryCloses.shift();
       if (closeReason) {
         sendWsText(socket.handler, ["CLOSED", subId, closeReason]);
         return;
       }
     }
-    if (!channelId) {
+    if (channelIds.length === 0) {
       // Aux-backfill filters (reactions/deletions) are `#e`-keyed with no
       // channel tag — serve them across all channel stores like the relay.
       const referencedIds = filter["#e"];
@@ -10917,7 +11038,7 @@ function sendToMockSocket(args: {
       return;
     }
 
-    emitMockHistory(socket, subId, channelId, filter);
+    emitMockHistory(socket, subId, channelIds, filter);
     return;
   }
 
@@ -11198,6 +11319,8 @@ export function maybeInstallE2eTauriMocks() {
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
   deferredThreadRepliesQueue = [];
+  holdUsersBatch = false;
+  heldUsersBatchReleases = [];
   cancelledMediaUploadIds = new Set<string>();
   for (const controller of mockMediaFetchControllers.values()) {
     controller.abort();
@@ -11223,6 +11346,15 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_THREAD_REPLIES_PENDING__ = () =>
     deferredThreadRepliesQueue.length;
+  window.__BUZZ_E2E_HOLD_USERS_BATCH__ = (hold: boolean) => {
+    holdUsersBatch = hold;
+    // Releasing on the way out of the hold, not on the way in, is what lets a
+    // spec keep one lookup pinned while another resolves from local state.
+    const queued = hold ? [] : heldUsersBatchReleases.splice(0);
+    for (const release of queued) release();
+    return queued.length;
+  };
+  window.__BUZZ_E2E_USERS_BATCH_PENDING__ = () => heldUsersBatchReleases.length;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -11401,6 +11533,26 @@ export function maybeInstallE2eTauriMocks() {
       id,
     );
   };
+  window.__BUZZ_E2E_SET_MOCK_USER_STATUS__ = ({
+    text,
+    emoji,
+    expiresAt,
+    createdAt,
+  }) => {
+    const tags = [["d", "general"]];
+    if (emoji) tags.push(["emoji", emoji]);
+    if (expiresAt) tags.push(["expiration", String(expiresAt)]);
+    const event = createMockEvent(
+      KIND_USER_STATUS,
+      text,
+      tags,
+      DEFAULT_MOCK_IDENTITY.pubkey,
+      createdAt,
+    );
+    recordMockUserStatus(event);
+    emitMockGlobalEvent(event);
+    return event;
+  };
   window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;
   window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({
     channelName,
@@ -11436,6 +11588,13 @@ export function maybeInstallE2eTauriMocks() {
     ownerPubkey,
     kind,
   }) => hasMockOwnerKindSubscription(ownerPubkey, kind);
+  window.__BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__ = (kind) =>
+    hasMockLiveSubscription(GLOBAL_MOCK_SUBSCRIPTION, kind);
+  window.__BUZZ_E2E_EMIT_MOCK_PRESENCE__ = ({ pubkey, status }) => {
+    const author = pubkey.toLowerCase();
+    setMockPresenceStatus(author, status);
+    emitMockGlobalEvent(createMockEvent(20001, status, [], author));
+  };
   window.__BUZZ_E2E_REPLACE_MOCK_TEAM_CATALOG_HEAD__ = (event) => {
     const dTag = event.tags.find((tag) => tag[0] === "d")?.[1];
     const existingIndex = mockTeamCatalogEvents.findIndex(
@@ -11510,6 +11669,18 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ = 0;
   window.__BUZZ_E2E_DEFER_GET_EVENT__ = null;
   deferredGetEventQueue = [];
+  heldManagedAgentStartReleases = [];
+  window.__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__ = () => {
+    const held = heldManagedAgentStartReleases.splice(0);
+    for (const release of held) release();
+    return held.length;
+  };
+  heldHuddleAgentSyncReleases = [];
+  window.__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__ = () => {
+    const held = heldHuddleAgentSyncReleases.splice(0);
+    for (const release of held) release();
+    return held.length;
+  };
   deferNextChannelsRead = false;
   deferredChannelsReadResolve = null;
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
@@ -11944,6 +12115,24 @@ export function maybeInstallE2eTauriMocks() {
           channelId?: string;
           agentPubkeys?: string[];
         };
+        const syncDelayMs =
+          activeConfig?.mock?.syncAgentsToActiveHuddleDelayMs ?? 0;
+        if (syncDelayMs > 0) {
+          await new Promise<void>((resolve) => {
+            let settled = false;
+            const release = () => {
+              if (settled) return;
+              settled = true;
+              window.clearTimeout(timer);
+              heldHuddleAgentSyncReleases = heldHuddleAgentSyncReleases.filter(
+                (held) => held !== release,
+              );
+              resolve();
+            };
+            const timer = window.setTimeout(release, syncDelayMs);
+            heldHuddleAgentSyncReleases.push(release);
+          });
+        }
         if (
           !mockHuddle ||
           !request.channelId ||
@@ -13724,16 +13913,50 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "start_managed_agent":
+        // The settled marker (distinct from the invocation entry, so exact-
+        // match commandCount("start_managed_agent") is unaffected) lets a
+        // spec wait deterministically for a delayed start to resolve or
+        // reject — required to assert the *absence* of the failure toast,
+        // which is only falsifiable once the rejection is known to have
+        // landed.
         return handleStartManagedAgent(
           payload as Parameters<typeof handleStartManagedAgent>[0],
           activeConfig,
-        );
+        ).finally(() => {
+          window.__BUZZ_E2E_COMMANDS__?.push("start_managed_agent:settled");
+        });
       case "stop_managed_agent":
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],
         );
       case "list_managed_agent_runtimes":
         return mockManagedAgentRuntimes.map((row) => ({ ...row }));
+      case "get_bestie_assignment":
+        return mockBestieAssignment ? { ...mockBestieAssignment } : null;
+      case "assign_bestie": {
+        const agentPubkey = (payload as { agentPubkey: string }).agentPubkey;
+        const agent = getMockManagedAgent(agentPubkey);
+        if (agent.backend.type !== "local") {
+          throw new Error("only a local managed agent can be your Bestie");
+        }
+        mockBestieAssignment = {
+          agent_pubkey: agent.pubkey,
+        };
+        return { ...mockBestieAssignment };
+      }
+      case "clear_bestie_assignment":
+        mockBestieAssignment = null;
+        return undefined;
+      case "resolve_bestie_conversation": {
+        if (!mockBestieAssignment) {
+          throw new Error("choose an agent before opening Bestie");
+        }
+        const channel = await handleOpenDm(
+          { pubkeys: [mockBestieAssignment.agent_pubkey] },
+          activeConfig,
+        );
+        return channel;
+      }
       case "start_managed_agent_runtime":
         return handleManagedAgentRuntimeAction(
           "start",
@@ -14270,7 +14493,7 @@ export function maybeInstallE2eTauriMocks() {
       case "copy_image_to_clipboard":
         return;
       case "copy_text_to_clipboard":
-        await navigator.clipboard.writeText((payload as { text: string }).text);
+        await writeClipboardFlavors(payload as { html?: string; text: string });
         return;
       case "read_clipboard_text":
         return navigator.clipboard.readText();

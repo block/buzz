@@ -4989,14 +4989,21 @@ pub(crate) async fn post_failure_notice(
             parent_event_id: parent_id,
         })
     });
-    let builder =
-        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
-                return;
-            }
-        };
+    let builder = match buzz_sdk::build_message(
+        channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+        &[],
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+            return;
+        }
+    };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {

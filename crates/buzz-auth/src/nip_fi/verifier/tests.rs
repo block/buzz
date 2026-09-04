@@ -27,6 +27,9 @@ const TEST_JWK_Y: &str = "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA";
 const TEST_KID: &str = "test-key-1";
 const ISSUER: &str = "https://issuer.example";
 const AUDIENCE: &str = "https://relay.example";
+/// A canonical lowercase-hex nostr pubkey for tokens that are not testing
+/// the nostr_pubkey claim specifically. Spec v2 requires the claim unconditionally.
+const TEST_NOSTR_PUBKEY: &str = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
 
 /// A canonical JWKS contract for the default test issuer. Used wherever a
 /// `JwksSourceContract` is required but JWKS behavior is not under test.
@@ -109,7 +112,6 @@ fn access_token_policy_with(subject_class: SubjectClassContract) -> IssuerPolicy
         TokenClass::AccessTokenAtJwt { subject_class },
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
@@ -131,7 +133,6 @@ fn dedicated_policy(issuer: &str) -> IssuerPolicy {
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
@@ -147,7 +148,6 @@ fn dedicated_policy_with_audiences(audiences: Vec<String>) -> IssuerPolicy {
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
@@ -163,7 +163,6 @@ fn dedicated_policy_with_algorithms(algorithms: Vec<Algorithm>) -> IssuerPolicy 
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         algorithms,
-        false,
         60,
         3600,
         None,
@@ -198,11 +197,35 @@ fn mint_signed_by(pkcs8_pem: &str, typ: Option<&str>, kid: &str, mut claims: Val
         obj.entry("aud").or_insert(json!(AUDIENCE));
         obj.entry("iat").or_insert(json!(now()));
         obj.entry("exp").or_insert(json!(now() + 600));
+        // Spec v2 requires nostr_pubkey unconditionally; inject a canonical
+        // test pubkey so tokens that test other behaviours pass the claim check.
+        obj.entry(NOSTR_PUBKEY_CLAIM)
+            .or_insert(json!(TEST_NOSTR_PUBKEY));
     }
     let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(kid.to_owned());
     header.typ = typ.map(str::to_owned);
     let key = EncodingKey::from_ec_pem(pkcs8_pem.as_bytes()).expect("valid EC PEM");
+    jsonwebtoken::encode(&header, &claims, &key).expect("sign")
+}
+
+/// Mint a valid, signed token that deliberately omits `nostr_pubkey`.  Used
+/// only to exercise the unconditional missing-claim rejection path; the normal
+/// `mint`/`mint_signed_by` helpers always inject the claim via `or_insert` so
+/// they cannot produce an absent-claim token.
+fn mint_no_pubkey(typ: Option<&str>, kid: &str, mut claims: Value) -> String {
+    {
+        let obj = claims.as_object_mut().expect("claims object");
+        obj.entry("iss").or_insert(json!(ISSUER));
+        obj.entry("aud").or_insert(json!(AUDIENCE));
+        obj.entry("iat").or_insert(json!(now()));
+        obj.entry("exp").or_insert(json!(now() + 600));
+        // Intentionally does NOT inject nostr_pubkey.
+    }
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(kid.to_owned());
+    header.typ = typ.map(str::to_owned);
+    let key = EncodingKey::from_ec_pem(TEST_EC_PKCS8_PEM.as_bytes()).expect("valid EC PEM");
     jsonwebtoken::encode(&header, &claims, &key).expect("sign")
 }
 
@@ -240,7 +263,8 @@ fn valid_access_token_verifies() {
     let assertion = verifier.verify(&token).expect("verifies");
     assert_eq!(assertion.identity().issuer(), ISSUER);
     assert_eq!(assertion.identity().subject(), "user-123");
-    assert!(assertion.asserted_key().is_none());
+    // Spec v2: nostr_pubkey is injected by mint() and unconditionally required.
+    assert!(assertion.asserted_key().is_some());
     assert!(!assertion.authority_deadlines().is_empty());
     assert_eq!(assertion.assertion_policy_id(), access_token_policy().id());
 }
@@ -698,22 +722,18 @@ fn uppercase_nostr_pubkey_denies() {
 }
 
 #[test]
-fn missing_nostr_pubkey_denies_under_attested_key_policy() {
-    let policy = IssuerPolicy::new(
-        ISSUER.to_owned(),
-        vec![AUDIENCE.to_owned()],
-        TokenClass::DedicatedNipFi,
-        FreshnessClass::OfflineJwt,
-        vec![Algorithm::ES256],
-        true, // require attested key
-        60,
-        3600,
-        None,
-        test_jwks_contract(),
-    )
-    .unwrap();
-    let verifier = verifier_with(policy);
-    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+fn absent_nostr_pubkey_claim_denies() {
+    // `nostr_pubkey` absence must unconditionally reject — NIP-FI v2 dropped
+    // the per-issuer `require_attested_key` knob that previously made it
+    // optional.  This is a direct falsifiable regression test: removing the
+    // `None => Err(VerifierError::ClaimRejected)` arm from
+    // `parse_nostr_pubkey_claim` must turn this test red.
+    let verifier = verifier_with(access_token_policy());
+    let token = mint_no_pubkey(
+        Some("at+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "client_id": "a", "sub_type": "user" }),
+    );
     assert_eq!(
         verifier.verify(&token).unwrap_err(),
         VerifierError::ClaimRejected
@@ -1105,7 +1125,6 @@ fn current_status_policy() -> IssuerPolicy {
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         Some(120), // maximum_status_age required for current-status
@@ -1385,7 +1404,6 @@ fn assertion_policy_id_is_deterministic_and_semantic() {
         changed.token_class().clone(),
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         120, // different skew => different semantics
         3600,
         None,
@@ -1411,7 +1429,6 @@ fn offline_policy_rejects_inapplicable_maximum_status_age() {
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         Some(120),
@@ -1430,7 +1447,6 @@ fn offline_policy_accepts_absent_maximum_status_age() {
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
@@ -1449,7 +1465,6 @@ fn current_status_policy_still_requires_positive_maximum_status_age() {
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
@@ -1463,7 +1478,6 @@ fn current_status_policy_still_requires_positive_maximum_status_age() {
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         Some(0),
@@ -1579,7 +1593,6 @@ fn policy_with_contract(contract: crate::nip_fi::jwks::JwksSourceContract) -> Is
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,

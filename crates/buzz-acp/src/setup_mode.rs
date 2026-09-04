@@ -669,6 +669,7 @@ async fn publish_setup_nudge(
         &[recipient_hex], // p-tag the verified effective asker
         false,
         &[],
+        &[],
     )
     .map_err(|e| anyhow::anyhow!("failed to build setup nudge: {e}"))?;
 

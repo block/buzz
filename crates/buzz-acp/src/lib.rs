@@ -2387,6 +2387,63 @@ mod idle_pool_sleep_tests {
     }
 }
 
+/// Oldest a caller-supplied replay floor may reach back from startup. Bounds
+/// the stale-event burst when a spawn request sat around (e.g. the desktop
+/// slept between the send and this spawn actually running).
+const REPLAY_FLOOR_MAX_AGE_SECS: u64 = 15 * 60;
+
+/// Resolve the startup watermark from process-start time and an optional
+/// replay floor (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`).
+///
+/// A publish-first mention send publishes the triggering message BEFORE this
+/// harness spawns, so the watermark must reach back to the send timestamp for
+/// the first REQ (`since = watermark − 5s`) to replay that message. Floors
+/// older than [`REPLAY_FLOOR_MAX_AGE_SECS`] clamp to that bound; floors in
+/// the future clamp to `now` (a skewed sender must not push the watermark
+/// forward past startup and re-open the blind spot the watermark closes).
+fn startup_watermark_with_floor(now_unix: u64, replay_floor: Option<u64>) -> u64 {
+    match replay_floor {
+        Some(floor) => floor.clamp(now_unix.saturating_sub(REPLAY_FLOOR_MAX_AGE_SECS), now_unix),
+        None => now_unix,
+    }
+}
+
+#[cfg(test)]
+mod replay_floor_tests {
+    use super::{startup_watermark_with_floor, REPLAY_FLOOR_MAX_AGE_SECS};
+
+    const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn no_floor_keeps_startup_time() {
+        assert_eq!(startup_watermark_with_floor(NOW, None), NOW);
+    }
+
+    #[test]
+    fn recent_floor_moves_watermark_back_to_the_send_timestamp() {
+        // The publish-first case: message sent 4s before the harness booted.
+        assert_eq!(startup_watermark_with_floor(NOW, Some(NOW - 4)), NOW - 4);
+    }
+
+    #[test]
+    fn stale_floor_clamps_to_the_max_age_bound() {
+        assert_eq!(
+            startup_watermark_with_floor(NOW, Some(NOW - REPLAY_FLOOR_MAX_AGE_SECS - 1)),
+            NOW - REPLAY_FLOOR_MAX_AGE_SECS
+        );
+    }
+
+    #[test]
+    fn future_floor_is_ignored() {
+        assert_eq!(startup_watermark_with_floor(NOW, Some(NOW + 60)), NOW);
+    }
+
+    #[test]
+    fn early_epoch_now_does_not_underflow() {
+        assert_eq!(startup_watermark_with_floor(10, Some(0)), 0);
+    }
+}
+
 pub fn run() -> Result<()> {
     config::propagate_legacy_env_vars();
     tokio_main()
@@ -2484,10 +2541,24 @@ async fn tokio_main() -> Result<()> {
     // the initial subscribe_since for channels discovered at startup. The Subscribe
     // handler falls back to subscribe_since when last_seen is None, closing the
     // blind spot between "agents ready" and "first REQ sent".
-    let startup_watermark: u64 = std::time::SystemTime::now()
+    //
+    // A publish-first mention send passes the triggering message's send
+    // timestamp as a replay floor (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`):
+    // the message is already on the relay when this process spawns, so the
+    // watermark must reach back to it for the first REQ to replay it — however
+    // long the spawn took.
+    let now_unix: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let startup_watermark = startup_watermark_with_floor(now_unix, config.replay_floor_unix);
+    if let Some(floor) = config.replay_floor_unix {
+        tracing::info!(
+            floor,
+            startup_watermark,
+            "applying replay floor to startup watermark"
+        );
+    }
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
@@ -8862,6 +8933,7 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -9087,6 +9159,7 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,

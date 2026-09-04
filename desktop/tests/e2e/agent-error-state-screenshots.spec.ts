@@ -3,7 +3,8 @@
  *
  * Exercises the two visible surfaces where friendly error copy appears:
  *   - Agent card avatar badge (CircleAlert icon + tooltip) for stopped agents
- *     with a lastError / lastErrorCode.
+ *     with a lastError / lastErrorCode and explicit Offline presence.
+ *   - Online/Away presence taking precedence over a stopped record's error.
  *
  * ManagedAgentRow (StatusBlock text) is also exercised here even though it is
  * not yet wired into a reachable route in the main app — it will be connected
@@ -49,6 +50,33 @@ async function gotoAgentsView(page: import("@playwright/test").Page) {
   });
 }
 
+// Alice/Bob are Online/Away in the shared bridge, regardless of lifecycle.
+// Publish scenario-owned presence through the real query's live subscription.
+async function setAgentPresence(
+  page: import("@playwright/test").Page,
+  pubkeys: string[],
+  status: "online" | "away" | "offline",
+) {
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+          channelName: "agents",
+          kind: 20001,
+        }),
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(
+    ({ pubkeys, status }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_PRESENCE__;
+      if (!emit) throw new Error("Mock presence emitter is unavailable.");
+      for (const pubkey of pubkeys) emit({ pubkey, status });
+    },
+    { pubkeys, status },
+  );
+}
+
 test.describe("agent error state screenshots", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
@@ -71,12 +99,17 @@ test.describe("agent error state screenshots", () => {
     });
 
     await gotoAgentsView(page);
+    await setAgentPresence(page, [MODEL_NOT_FOUND_AGENT.pubkey], "offline");
 
     // Wait for the error badge to appear (stopped agent with error).
     const errorBadge = page.getByTestId(
       `agent-runtime-error-${MODEL_NOT_FOUND_AGENT.pubkey}`,
     );
     await expect(errorBadge).toBeVisible({ timeout: 10_000 });
+    await expect(errorBadge).toHaveAttribute(
+      "title",
+      "The configured model is not available — open agent settings and select a different one from the dropdown.",
+    );
     await waitForAnimations(page);
 
     // Capture the agent card element.
@@ -98,11 +131,16 @@ test.describe("agent error state screenshots", () => {
     });
 
     await gotoAgentsView(page);
+    await setAgentPresence(page, [GENERIC_ERROR_AGENT.pubkey], "offline");
 
     const errorBadge = page.getByTestId(
       `agent-runtime-error-${GENERIC_ERROR_AGENT.pubkey}`,
     );
     await expect(errorBadge).toBeVisible({ timeout: 10_000 });
+    await expect(errorBadge).toHaveAttribute(
+      "title",
+      GENERIC_ERROR_AGENT.lastError,
+    );
     await waitForAnimations(page);
 
     const agentCard = page.getByTestId(
@@ -121,6 +159,11 @@ test.describe("agent error state screenshots", () => {
     });
 
     await gotoAgentsView(page);
+    await setAgentPresence(
+      page,
+      [MODEL_NOT_FOUND_AGENT.pubkey, GENERIC_ERROR_AGENT.pubkey],
+      "offline",
+    );
 
     // Wait for both error badges to be present.
     await expect(
@@ -135,6 +178,38 @@ test.describe("agent error state screenshots", () => {
     const section = page.getByTestId("agents-library-personas");
     await section.screenshot({
       path: `${SHOTS}/03-agents-section-both-errors.png`,
+    });
+  });
+
+  test("04-positive-presence-supersedes-stopped-errors", async ({ page }) => {
+    await installMockBridge(page, {
+      managedAgents: [MODEL_NOT_FOUND_AGENT, GENERIC_ERROR_AGENT],
+    });
+    await gotoAgentsView(page);
+    await setAgentPresence(page, [MODEL_NOT_FOUND_AGENT.pubkey], "online");
+    await setAgentPresence(page, [GENERIC_ERROR_AGENT.pubkey], "away");
+
+    for (const [agent, label] of [
+      [MODEL_NOT_FOUND_AGENT, "Online"],
+      [GENERIC_ERROR_AGENT, "Away"],
+    ] as const) {
+      const presence = page.getByTestId(`agent-runtime-active-${agent.pubkey}`);
+      await expect(presence).toBeVisible();
+      await expect(presence).toHaveAttribute("role", "img");
+      await expect(presence).toHaveAttribute(
+        "aria-label",
+        `${agent.name}: ${label}`,
+      );
+      await expect(
+        page.getByTestId(`agent-runtime-error-${agent.pubkey}`),
+      ).toHaveCount(0);
+      await expect(
+        page.getByTestId(`agent-runtime-start-${agent.pubkey}`),
+      ).toHaveCount(0);
+    }
+    await waitForAnimations(page);
+    await page.getByTestId("agents-library-personas").screenshot({
+      path: `${SHOTS}/04-positive-presence-supersedes-stopped-errors.png`,
     });
   });
 });

@@ -668,6 +668,12 @@ pub struct AppState {
     pub workflow_engine: Arc<WorkflowEngine>,
     /// Relay signing keypair — used to sign system messages (kind 40099).
     pub relay_keypair: nostr::Keys,
+    /// Process-local generation advertised for non-mesh huddle liveness.
+    ///
+    /// A fresh value on every relay start lets desktop clients retire persisted
+    /// admissions when an in-memory audio room is recreated at the same roster
+    /// revision after a restart. Mesh rooms use their Redis-fenced generation.
+    pub huddle_liveness_generation: Uuid,
 
     /// Recently-published event IDs for local-echo deduplication, keyed by
     /// `(community_id, event_id)`. Events fanned out in-process are added here;
@@ -879,6 +885,7 @@ impl AppState {
             media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
             workflow_engine,
             relay_keypair,
+            huddle_liveness_generation: Uuid::new_v4(),
 
             local_event_ids: Arc::new(
                 moka::sync::Cache::builder()
@@ -1244,7 +1251,7 @@ impl AppState {
     pub async fn revalidate_live_communities(&self) -> usize {
         let (closed, failures) =
             revalidate_registered_communities(&self.community_connections, |community_id| {
-                self.db.is_community_active(community_id)
+                self.db.is_community_active_for_maintenance(community_id)
             })
             .await;
         for (community_id, error) in failures {

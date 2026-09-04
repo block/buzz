@@ -14,6 +14,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
+import { MessageAuthorWithIndicators } from "@/features/messages/ui/MessageAuthorWithIndicators";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -594,6 +595,7 @@ export const MessageRow = React.memo(
               : undefined
           }
           onUnfollowThread={onUnfollowThread}
+          profiles={profiles}
           reactionErrorMessage={reactionErrorMessage}
           reactions={reactions}
         />
@@ -647,18 +649,14 @@ export const MessageRow = React.memo(
     const headerNode = isDisplayedAsContinuation ? null : (
       <MessageHeaderRow>
         {message.pubkey ? (
-          <UserProfilePopover
+          <MessageAuthorWithIndicators
+            authorName={message.author}
+            ownerPubkey={message.ownerPubkey}
             pubkey={message.pubkey}
             role={profilePopoverRole}
-            botIdenticonValue={message.author}
           >
-            <button
-              className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              {authorNode}
-            </button>
-          </UserProfilePopover>
+            {authorNode}
+          </MessageAuthorWithIndicators>
         ) : (
           authorNode
         )}

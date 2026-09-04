@@ -733,3 +733,10 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+### Mention editor contract
+
+Autocomplete inserts a literal full label and a separator, including multi-word
+names. Only autocomplete settlement may move the caret past that separator;
+internal label spaces and deliberate ArrowLeft/click movement must be respected.
+See `docs/mention-editor.md` and `desktop/tests/e2e/mention-spacing.spec.ts`.

@@ -12,6 +12,7 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
+import { ProtectedBestieSidebarEntry } from "@protected-feature-components";
 
 type SidebarSelectedView =
   | "home"
@@ -167,6 +168,7 @@ export function AppSidebarPrimaryMenu({
               <SidebarMenuLabel>Agents</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          <ProtectedBestieSidebarEntry />
           <FeatureGate feature="workflows">
             <SidebarMenuItem>
               <SidebarMenuButton

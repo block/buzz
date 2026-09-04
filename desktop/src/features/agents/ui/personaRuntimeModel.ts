@@ -91,6 +91,37 @@ export function resolveAgentCommandUpdate(input: {
 }
 
 /**
+ * Decide whether Save should persist the effort picker's selection, and with
+ * what value. Effort is embedded in the locked `update_managed_agent` payload
+ * (PR #4625) — this runs only inside the submit path, so Cancel and a failed
+ * Save never reach it, and no write is dispatched independently of the dialog
+ * outcome.
+ *
+ * `inheritTransition` is the pin→inherit case (the empty-command sentinel
+ * `resolveAgentCommandUpdate` returns). The locked `update_managed_agent` save
+ * already clears the record effort column AND its env aliases on that
+ * transition; re-persisting the picker value here would restore the very pin
+ * the transition just cleared — the r8 race. So the transition suppresses the
+ * effort write entirely, regardless of the picked value.
+ *
+ * Otherwise persist only a real change: an unchanged selection is a no-op, so
+ * a name-only edit never rewrites the effort column.
+ */
+export function resolveEffortSubmission(input: {
+  effortLevel: string | null;
+  originalEffortLevel: string | null;
+  inheritTransition: boolean;
+}): { persist: boolean; level: string | null } {
+  if (
+    input.inheritTransition ||
+    input.effortLevel === input.originalEffortLevel
+  ) {
+    return { persist: false, level: null };
+  }
+  return { persist: true, level: input.effortLevel };
+}
+
+/**
  * Whether any of the runtime/provider-required credential keys is unset.
  *
  * A key counts as missing when its env value is absent or an empty string

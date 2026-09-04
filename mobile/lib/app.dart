@@ -21,6 +21,7 @@ import 'features/pairing/pairing_page.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'features/channels/deep_link_dispatcher.dart';
+import 'features/channels/voice_note_recording.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
 import 'features/profile/profile_edit_page.dart';
@@ -359,6 +360,7 @@ class App extends HookConsumerWidget {
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
+      navigatorObservers: [voiceNoteRouteObserver],
       title: 'Buzz',
       theme: AppTheme.light(
         colorScheme: lightScheme,

@@ -9,10 +9,8 @@ import { useComposerFocusOwnership } from "@/features/messages/lib/useComposerFo
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
-import {
-  hasMentionClipboardHtml,
-  normalizeMentionClipboardHtml,
-} from "@/features/messages/lib/normalizeMentionClipboard";
+import { hasMentionClipboardHtml } from "@/features/messages/lib/normalizeMentionClipboard";
+import { handleMentionClipboardPaste } from "@/features/messages/lib/mentionClipboardPaste";
 import {
   type LinkSelectionInfo,
   useRichTextEditor,
@@ -121,6 +119,7 @@ export function ForumComposer({
     mentionNames: mentions.knownNames,
     channelNames: channelLinks.knownChannelNames,
     messageLinkChannels: channelLinks.channels,
+    getMentionIdentities: mentions.getMentionIdentities,
     onSubmit: () => submitMessageRef.current(),
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
@@ -242,6 +241,9 @@ export function ForumComposer({
       channelLinks.clearChannels();
       setIsEmojiPickerOpen(false);
       try {
+        // A pasted mention's identity check can still be in flight; extracting
+        // first would publish the label with no `p` tag. Bounded internally.
+        await mentions.settlePendingMentionBindings();
         const pubkeys = await mentions.revalidateMentionPubkeys(
           mentions.extractMentionPubkeys(trimmed),
         );
@@ -292,6 +294,7 @@ export function ForumComposer({
       mentions.cancelMentionAutocomplete,
       mentions.extractMentionPubkeys,
       mentions.revalidateMentionPubkeys,
+      mentions.settlePendingMentionBindings,
       mentions.clearMentions,
       channelLinks.clearChannels,
       richText.clearContent,
@@ -359,6 +362,10 @@ export function ForumComposer({
   // ── Media paste ─────────────────────────────────────────────────────
   const uploadFileRef = React.useRef(media.uploadFile);
   uploadFileRef.current = media.uploadFile;
+  const bindMentionIdentitiesRef = React.useRef(
+    mentions.bindPastedMentionIdentities,
+  );
+  bindMentionIdentitiesRef.current = mentions.bindPastedMentionIdentities;
 
   React.useEffect(() => {
     if (!richText.editor) return;
@@ -379,12 +386,15 @@ export function ForumComposer({
             return true;
           }
 
-          const html = event.clipboardData?.getData("text/html");
-          if (html && hasMentionClipboardHtml(html)) {
-            const cleanHtml = normalizeMentionClipboardHtml(html);
-            event.preventDefault();
-            _view.pasteHTML(cleanHtml);
-            return true;
+          const clipboardData = event.clipboardData;
+          const html = clipboardData?.getData("text/html");
+          if (clipboardData && html && hasMentionClipboardHtml(html)) {
+            return handleMentionClipboardPaste({
+              bindMentionIdentities: bindMentionIdentitiesRef.current,
+              clipboardData,
+              preventDefault: () => event.preventDefault(),
+              view: _view,
+            });
           }
 
           return false;

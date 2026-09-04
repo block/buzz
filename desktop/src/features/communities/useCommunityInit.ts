@@ -26,6 +26,10 @@ import { resetBackgroundMediaUploads } from "@/features/messages/lib/backgroundM
 import { resetLinkPreviewPreparations } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { resetPersistentAgentAudienceStore } from "@/features/messages/lib/persistentAgentAudience";
 import {
+  resetDetachedToastScope,
+  setDetachedToastScope,
+} from "@/features/messages/lib/detachedToastScope";
+import {
   resetActiveAgentTurnsStore,
   saveActiveAgentTurnsForCommunity,
   restoreActiveAgentTurnsForCommunity,
@@ -80,6 +84,15 @@ async function resetCommunityState({
   resetBackgroundMediaUploads();
   resetLinkPreviewPreparations();
   resetPersistentAgentAudienceStore();
+  // Intentionally NOT reset: the in-flight detached agent-start map
+  // (`useDetachedAgentStart`). Its entries are keyed by the scope each start
+  // asserts (relay URL + signer + agent pubkey), so they cannot leak into the
+  // new community, and they self-clean when the start settles. Clearing them
+  // here is what permitted the A→B→A duplicate provider deploy: the backend's
+  // scope assertion is a current-state check, so a start held across a
+  // round-trip is valid again once A is re-applied — the map entry is its only
+  // duplicate guard.
+  resetDetachedToastScope();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
   resetMessageLinkMetadataCache();
@@ -344,6 +357,12 @@ export function useCommunityInit(
         // trip). This runs after applyCommunity succeeds and before the app
         // renders so components see the restored timers on first render.
         restoreActiveAgentTurnsForCommunity(activeCommunity.id);
+        // From here this community's UI is what renders, so warnings from
+        // detached agent wakes captured under this scope may deliver again.
+        setDetachedToastScope({
+          relayUrl: activeCommunity.relayUrl,
+          signerPubkey: identityPubkey,
+        });
         // Prime the ref so the NEXT switch saves this community's state.
         prevCommunityIdRef.current = activeCommunity.id;
         setResult({

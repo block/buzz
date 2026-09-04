@@ -73,6 +73,7 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/shared/ui/sidebar";
+import { useProtectedVisibleDirectMessages } from "@protected-feature-components";
 
 export function AppSidebar({
   addCommunityPrefill,
@@ -367,9 +368,13 @@ export function AppSidebar({
       ),
     [channels, sortModeFor],
   );
-  const directMessages = React.useMemo(
+  const allDirectMessages = React.useMemo(
     () => channels.filter((channel) => channel.channelType === "dm"),
     [channels],
+  );
+  const directMessages = useProtectedVisibleDirectMessages(
+    allDirectMessages,
+    currentPubkey,
   );
   const isSelectedDirectMessage =
     selectedView === "channel" &&

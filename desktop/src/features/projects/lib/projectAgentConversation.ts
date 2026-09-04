@@ -194,7 +194,7 @@ export async function submitProjectAgentMessage<Ch extends { id: string }>({
   openDm,
   send,
 }: {
-  agent: { pubkey: string; isManaged: boolean; isActive: boolean };
+  agent: { pubkey: string; isManaged: boolean; isActive: boolean | null };
   conversation: { channel: Ch; opener: ProjectsConversationOpener } | null;
   content: string;
   mentionPubkeys: string[];

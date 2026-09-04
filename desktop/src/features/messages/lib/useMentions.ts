@@ -39,6 +39,12 @@ import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
 import { flushMentionDebounce, isPlainSpace } from "./flushMentionDebounce";
 import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
 import { extractMentionPubkeys } from "./extractMentionPubkeys";
+import type { MentionIdentity } from "./mentionClipboard";
+import {
+  useMentionPasteBinding,
+  type RegisterMentionPubkey,
+} from "./mentionPasteBinding";
+import { useVerifyMentionIdentities } from "./useVerifyMentionIdentities";
 import {
   extractMentionPersonasFromMaps,
   type PersonaMentionTarget,
@@ -443,6 +449,40 @@ export function useMentions(
   const { mentionSelectedIndex, setMentionSelectedIndex: setSelected } =
     mentionSelection;
   const isMentionOpen = mentionQuery !== null && suggestions.length > 0;
+  // Untrusted clipboard records only become bindable identities once trusted
+  // Buzz state confirms the pair — see `mentionIdentityTrust`.
+  const verifyMentionIdentities = useVerifyMentionIdentities({
+    mentionCandidates,
+    profiles,
+  });
+  // The map write a settled paste uses: it records a decision the user made
+  // earlier, so it must not outrank intent expressed since.
+  const writeMentionPubkey = React.useCallback<RegisterMentionPubkey>(
+    (displayName, pubkey, options) => {
+      const trimmedName = displayName.trim();
+      if (!trimmedName) {
+        return;
+      }
+      mentionMapRef.current.set(trimmedName, pubkey);
+      personaMentionMapRef.current.delete(trimmedName);
+      trimMapToSize(mentionMapRef.current, 200);
+      setSelectedMentionNames((current) =>
+        appendUniqueName(current, trimmedName),
+      );
+      if (options?.isAgent) {
+        selectedAgentMentionNamesRef.current = appendUniqueName(
+          selectedAgentMentionNamesRef.current,
+          trimmedName,
+        );
+        setSelectedAgentMentionNames(selectedAgentMentionNamesRef.current);
+      }
+    },
+    [],
+  );
+  const pasteBinding = useMentionPasteBinding({
+    registerVerifiedMentionPubkey: writeMentionPubkey,
+    verifyMentionIdentities,
+  });
   const insertMention = React.useCallback(
     (suggestion: MentionSuggestion, selectionEnd: number): AutocompleteEdit => {
       if (debounceTimerRef.current !== null) {
@@ -459,6 +499,10 @@ export function useMentions(
       const personaMentions = personaMentionMapRef.current;
       const selectedMentions = teamMembers ?? [suggestion];
       for (const selected of selectedMentions) {
+        // A picked name is the user's newest word on that label, so it retires
+        // any pasted identity still being verified for it — persona routing
+        // included, since a settled paste would delete that entry.
+        pasteBinding.claimMentionIntent(selected.displayName);
         if (selected.kind === "persona" && selected.personaId) {
           personaMentions.set(selected.displayName, selected.personaId);
           mentions.delete(selected.displayName);
@@ -515,30 +559,55 @@ export function useMentions(
         insertText,
       };
     },
-    [knownAgentPubkeys, mentionStartIndex, setSelected],
+    [
+      knownAgentPubkeys,
+      mentionStartIndex,
+      pasteBinding.claimMentionIntent,
+      setSelected,
+    ],
   );
-  const registerMentionPubkey = React.useCallback(
-    (displayName: string, pubkey: string, options?: { isAgent?: boolean }) => {
-      const trimmedName = displayName.trim();
-      if (!trimmedName) {
-        return;
-      }
-      mentionMapRef.current.set(trimmedName, pubkey);
-      personaMentionMapRef.current.delete(trimmedName);
-      trimMapToSize(mentionMapRef.current, 200);
-      setSelectedMentionNames((current) =>
-        appendUniqueName(current, trimmedName),
-      );
-      if (options?.isAgent) {
-        selectedAgentMentionNamesRef.current = appendUniqueName(
-          selectedAgentMentionNamesRef.current,
-          trimmedName,
-        );
-        setSelectedAgentMentionNames(selectedAgentMentionNamesRef.current);
-      }
+  // Every caller is explicit user intent — a resolved insert, an agent-address
+  // lock, a persona created at send time — so this claims the label before
+  // writing it, and a paste still verifying that name settles into nothing.
+  const registerMentionPubkey = React.useCallback<RegisterMentionPubkey>(
+    (displayName, pubkey, options) => {
+      pasteBinding.claimMentionIntent(displayName);
+      writeMentionPubkey(displayName, pubkey, options);
     },
-    [],
+    [pasteBinding.claimMentionIntent, writeMentionPubkey],
   );
+  const getMentionIdentities = React.useCallback((): MentionIdentity[] => {
+    const agentNames = new Set(
+      selectedAgentMentionNamesRef.current.map((name) =>
+        name.trim().toLowerCase(),
+      ),
+    );
+    const identities: MentionIdentity[] = [];
+    const claimed = new Set<string>();
+    const add = (label: string, pubkey: string, isAgent: boolean) => {
+      const trimmed = label.trim();
+      const key = trimmed.toLowerCase();
+      if (!trimmed || !pubkey || claimed.has(key)) return;
+      claimed.add(key);
+      identities.push({ isAgent, label: trimmed, pubkey });
+    };
+    // Explicitly picked mentions first: they are authoritative when a manually
+    // typed member name collides with one the user selected from the picker.
+    for (const [label, pubkey] of mentionMapRef.current) {
+      add(label, pubkey, agentNames.has(label.trim().toLowerCase()));
+    }
+    for (const candidate of mentionCandidates) {
+      if (!candidate.isMember || !candidate.pubkey || !candidate.displayName) {
+        continue;
+      }
+      add(
+        candidate.displayName,
+        candidate.pubkey,
+        knownAgentPubkeys.has(normalizePubkey(candidate.pubkey)),
+      );
+    }
+    return identities;
+  }, [knownAgentPubkeys, mentionCandidates]);
   const insertResolvedMention = React.useCallback(
     ({
       displayName,
@@ -715,7 +784,10 @@ export function useMentions(
     selectedAgentMentionPubkeysRef.current.clear();
     setSelectedMentionNames([]);
     setSelectedAgentMentionNames([]);
-  }, [cancelMentionAutocomplete]);
+    // Belt to the occurrence fence's braces: a paste still verifying when the
+    // composer is cleared holds a claim nothing can match afterwards.
+    pasteBinding.clearMentionIntents();
+  }, [cancelMentionAutocomplete, pasteBinding.clearMentionIntents]);
   const { getDraftMentionRefs, restoreDraftMentionRefs } =
     useDraftMentionRouting({
       mentionMapRef,
@@ -817,6 +889,7 @@ export function useMentions(
     ],
   );
   return {
+    bindPastedMentionIdentities: pasteBinding.bindPastedMentionIdentities,
     cancelMentionAutocomplete,
     clearMentions,
     getDefaultAgentSuggestion,
@@ -824,6 +897,7 @@ export function useMentions(
     extractMentionPubkeys: extractMentionPubkeysForCurrentMentions,
     revalidateMentionPubkeys,
     getDraftMentionRefs,
+    getMentionIdentities,
     getMentionDisplayName,
     handleMentionKeyDown,
     hasResolvedMembers: members !== undefined,
@@ -841,6 +915,7 @@ export function useMentions(
     openMentionPicker,
     registerMentionPubkey,
     restoreDraftMentionRefs,
+    settlePendingMentionBindings: pasteBinding.settlePendingMentionBindings,
     suggestions,
     fetchMoreSuggestions,
     hasMoreSuggestions: Boolean(userSearchQuery.hasNextPage),

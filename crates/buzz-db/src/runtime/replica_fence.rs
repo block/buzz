@@ -395,7 +395,12 @@ pub async fn verify_floor_guard_behavior(pool: &PgPool) -> crate::Result<()> {
         }
     };
 
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // 1. Pool arming (Perci: assert the effective value, not the intent).
     let armed: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
@@ -552,7 +557,11 @@ pub enum ProbeError {
 /// a single SELECT would not guarantee evaluation order across the
 /// subexpressions, reopening the race this ordering exists to close.
 async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
-    let mut conn = writer.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        writer,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
 
     // 1. S first.
     let sampled_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -671,11 +680,16 @@ pub async fn probe_once(writer: &PgPool, fence: &ReplicaFence) -> Result<TokenEn
             // so the same three-bucket argument (and the same wall) holds
             // for the rotated token.
             let committed_at = Instant::now();
+            let mut connection = crate::observability::acquire_writer(
+                writer,
+                crate::observability::WriterOperation::Maintenance,
+            )
+            .await?;
             let row = sqlx::query(
                 "UPDATE replica_heartbeat SET epoch = gen_random_uuid(), token = token + 1 \
                  WHERE id = 1 RETURNING token, epoch",
             )
-            .fetch_optional(writer)
+            .fetch_optional(&mut *connection)
             .await?
             .ok_or(ProbeError::HeartbeatRowMissing)?;
             let token: i64 = row.get("token");

@@ -200,25 +200,46 @@ with a TypeScript lookup table or an id comparison in a component.
    agent from Agents, a DM, or a channel must expose the same actions, tabs,
    fields, and profile-wide activity selection. Caller context may control the
    panel shell or return navigation, but must not filter or replace profile
-   content.
+   content. Explicit public-key targets are always exact, including stopped,
+   archived, and relay-only identities. Only explicit persona navigation may
+   select a representative or offer persona Start; a relay persona link cannot
+   borrow a local sibling's management controls. See
+   [the identity contract](../../../../docs/agent-profile-identity.md).
+   Availability dots read relay presence, never a saved deployment
+   receipt or runtime status. Failed/disconnected reads are unknown; lifecycle
+   actions retain their separate routing. Current exact-key Online/Away presence
+   suppresses Start for an inactive local record without granting Stop authority;
+   list/profile/member startup guards must not interpret Offline as proof of safe
+   startup. Deletion also consumes that same exact-key availability reader:
+   unknown requests shutdown when a channel exists, request failure retains the
+   record, and only established Offline keeps the intentional no-request path.
+   Unqueried persona siblings are unknown. No presence state grants deletion or
+   Stop authority; native local stop-before-remove remains independent. See
+   [the availability contract](../../../../docs/agent-availability.md).
+   The shared cloud marker means “Not managed on this device” only
+   after ownership and successful local inventory are known. It does not imply
+   hosting location, availability, or permission. Keep all identity surfaces on
+   the shared provenance context, without per-row directory subscriptions. See
+   [the provenance contract](../../../../docs/agent-management-provenance.md).
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
-   `AgentInstanceEditDialog` beside the Model block. It is direct-write, not
-   part of the frozen `UpdateManagedAgentInput` shape: each selection calls
-   `persistAgentEffortLevel` and invalidates the config-surface query, mirroring
-   the `setManagedAgentAutoRestart` standalone-setter precedent. Its gating and
-   option compute live in the pure helper `ui/effortPicker.ts`
-   (`effortPickerState`): the picker renders only when
-   `agent.backend.type === "local"` **AND** a `thought_level` `effortConfigId`
-   has been discovered from the running session (absent pre-first-session and
-   for runtimes/models without effort support). Local-only is load-bearing, not
-   cosmetic — the Rust command rejects non-local backends because remote effort
-   is set at deploy time via `policy_env`. Because it reads its inputs from the
-   config surface the dialog already fetches (`useAgentConfigSurface`) and owns
-   its own mutation, it does **not** thread new props through the dialog (see
-   rule 11): keep effort state inside the section component, never as
-   dialog-level props. The read-only display is the `thinkingEffort`
+   `AgentInstanceEditDialog` beside the Model block. It is **Save-gated, not
+   direct-write**: the control is fully controlled by the parent dialog
+   (`value`/`onChange`) and owns no mutation. The dialog persists the selection
+   by embedding `effortLevel` in the locked `update_managed_agent` IPC call, so
+   the effort write is atomic with any access-policy change and can never race
+   or survive a Cancel or failed Save. There is no standalone
+   `persistAgentEffortLevel` setter. Its gating and option compute live in the
+   pure helper `ui/effortPicker.ts` (`effortPickerState`): the picker renders
+   only when `agent.backend.type === "local"` **AND** a `thought_level`
+   `effortConfigId` has been discovered from the running session (absent
+   pre-first-session and for runtimes/models without effort support). Local-only
+   is load-bearing, not cosmetic — the Rust command rejects non-local backends
+   because remote effort is set at deploy time via `policy_env`. Because the
+   control reads its inputs from the config surface the dialog already fetches
+   (`useAgentConfigSurface`), it integrates into the dialog's existing field
+   group without additional IPC. The read-only display is the `thinkingEffort`
    normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
    already shows both facts — `field.value` (canonical, the effort the next
    spawn will launch with) and, when a running ACP session differs,

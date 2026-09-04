@@ -1,6 +1,7 @@
 import { ArrowLeft, MessageSquare } from "lucide-react";
 import * as React from "react";
 
+import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -238,6 +239,7 @@ export function ForumThreadPanel({
       <div
         className="flex-1 overflow-y-auto"
         data-scroll-restoration-id={`forum-thread:${channelId}`}
+        onCopy={handleTimelineMentionCopy}
         ref={scrollRef}
       >
         <div

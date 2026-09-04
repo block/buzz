@@ -8,9 +8,7 @@ import {
   useManagedAgentsQuery,
   usePersonasQuery,
   useProvisionChannelManagedAgentMutation,
-  useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
-import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { useCanAddChannelMembers } from "@/features/channels/useCanAddChannelMembers";
@@ -25,19 +23,22 @@ import {
   type ImetaMedia,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
+import { useDetachedAgentStart } from "./useDetachedAgentStart";
+import { useEnsureAgentMentionsReady } from "./useEnsureAgentMentionsReady";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
+  dedupeQueuedAgentWakes,
+  enqueueAgentWake,
   formatMessageSendError,
   getErrorMessage,
-  isManagedAgentRunning,
-  isProviderBackedAgent,
   mergeMentionRecipients,
   MENTION_REFERENCE_TAG,
   mergeOutgoingTagsWithReferenceMentions,
   type PendingNonMemberMentionSend,
+  type QueuedAgentWake,
   type SendMessageWithMentionFlowInput,
   resolvePreviewTags,
   uniqueNormalizedPubkeys,
@@ -99,7 +100,14 @@ export function useMentionSendFlow({
   const availableRuntimesQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const personasQuery = usePersonasQuery();
-  const startAgentMutation = useStartManagedAgentMutation();
+  // Detached (publish-first) agent wake, bound to the community and identity
+  // active at this render so a start that outlives a community switch fails
+  // closed instead of spawning against the new tenant. The send path never
+  // calls it while preparing a message: wakes are queued during preparation
+  // and flushed through this callback only after the relay accepts the
+  // publish, so a start failure can never toast "your message was sent"
+  // before the publish outcome is known.
+  const startAgentDetached = useDetachedAgentStart();
   const getManagedAgentsByPubkey = React.useCallback(async () => {
     const agents =
       managedAgentsQuery.data ??
@@ -131,79 +139,12 @@ export function useMentionSendFlow({
     availableRuntimesQuery.isLoading,
     availableRuntimesQuery.refetch,
   ]);
-  const ensureManagedAgentMentionsReady = React.useCallback(
-    async (
-      mentionPubkeys: string[],
-      capturedChannelId: string,
-      preparedParticipantPubkeys: string[] = [],
-      preparedManagedAgents: ManagedAgent[] = [],
-    ) => {
-      if (!capturedChannelId || mentionPubkeys.length === 0) {
-        return {
-          errors: [] as string[],
-          pubkeys: [] as string[],
-        };
-      }
-      const [managedAgentsByPubkey, personas] = await Promise.all([
-        getManagedAgentsByPubkey(),
-        getPersonas(),
-      ]);
-      for (const agent of preparedManagedAgents) {
-        managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
-      }
-      const existingMembers = new Set(
-        [...mentions.memberPubkeys].map(normalizePubkey),
-      );
-      const participants = new Set([
-        ...existingMembers,
-        ...preparedParticipantPubkeys.map(normalizePubkey),
-      ]);
-      const errors: string[] = [];
-      const pubkeys: string[] = [];
-      for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
-        const agent = managedAgentsByPubkey.get(pubkey);
-        if (!agent) continue;
-        try {
-          const readyAgent = existingMembers.has(pubkey)
-            ? agent
-            : await applyReusableAgentAccessPolicy(
-                agent,
-                {},
-                personas.find((persona) => persona.id === agent.personaId),
-              );
-          if (participants.has(pubkey)) {
-            if (
-              (isProviderBackedAgent(readyAgent) &&
-                readyAgent.status !== "deployed") ||
-              (!isProviderBackedAgent(readyAgent) &&
-                !isManagedAgentRunning(readyAgent))
-            ) {
-              await startAgentMutation.mutateAsync(readyAgent.pubkey);
-            }
-          } else {
-            await attachAgentMutation.mutateAsync({
-              channelId: capturedChannelId,
-              agent: readyAgent,
-              role: "bot",
-            });
-          }
-          pubkeys.push(pubkey);
-        } catch (error) {
-          errors.push(
-            `${agent.name}: ${getErrorMessage(error, "Could not prepare agent.")}`,
-          );
-        }
-      }
-      return { errors, pubkeys: uniqueNormalizedPubkeys(pubkeys) };
-    },
-    [
-      attachAgentMutation,
-      getManagedAgentsByPubkey,
-      getPersonas,
-      mentions.memberPubkeys,
-      startAgentMutation,
-    ],
-  );
+  const ensureManagedAgentMentionsReady = useEnsureAgentMentionsReady({
+    attachAgentToChannel: attachAgentMutation.mutateAsync,
+    getManagedAgentsByPubkey,
+    getPersonas,
+    memberPubkeys: mentions.memberPubkeys,
+  });
   const createMentionedPersonaAgents = React.useCallback(
     async (trimmed: string, capturedChannelId: string) => {
       const personaMentions = mentions.extractMentionPersonas(trimmed);
@@ -212,6 +153,7 @@ export function useMentionSendFlow({
           errors: [] as string[],
           agents: [] as ManagedAgent[],
           pubkeys: [] as string[],
+          agentsToWake: [] as QueuedAgentWake[],
         };
       }
       const runtimes = await getAvailableRuntimes();
@@ -219,6 +161,10 @@ export function useMentionSendFlow({
       const errors: string[] = [];
       const agents: ManagedAgent[] = [];
       const pubkeys: string[] = [];
+      // Queued, not fired: the wakes ride the pending draft and flush only
+      // after the publish succeeds, so a persona created for a send the
+      // non-member prompt later cancels never wakes at all.
+      const agentsToWake: QueuedAgentWake[] = [];
       const seenPersonaIds = new Set<string>();
       const shouldProvisionForDm =
         channelType === "dm" && Boolean(onPrepareSendChannel);
@@ -249,6 +195,8 @@ export function useMentionSendFlow({
             model: persona.model ?? undefined,
             role: "bot",
             ensureRunning: true,
+            detachedStart: (agentToWake) =>
+              enqueueAgentWake(agentsToWake, agentToWake),
           };
           const result = shouldProvisionForDm
             ? await provisionPersonaAgentMutation.mutateAsync(input)
@@ -272,6 +220,7 @@ export function useMentionSendFlow({
         agents,
         errors,
         pubkeys: uniqueNormalizedPubkeys(pubkeys),
+        agentsToWake,
       };
     },
     [
@@ -480,6 +429,17 @@ export function useMentionSendFlow({
           onPrepareSendChannel ? preparedAgentPubkeys : [],
           [...managedAgentsByPubkey.values()],
         );
+        // Every wake this send queued: persona creates carried on the draft
+        // (enqueued before the non-member prompt could defer us here), then
+        // the readiness pass's. Flushed only after the relay accepts the
+        // publish — every abort path between here and there just drops them,
+        // so no wake (or "your message was sent" failure toast) can exist for
+        // a message that never landed. First entry wins the dedupe because it
+        // carries the earliest replay floor, and the floor is a lower bound.
+        const agentsToWake = dedupeQueuedAgentWakes([
+          ...(draft.queuedAgentWakes ?? []),
+          ...agentReadiness.agentsToWake,
+        ]);
         if (isSendCancelled()) return restoreComposerAfterFailure();
         if (!isMountedRef.current) {
           persistPreflightDraft();
@@ -488,8 +448,8 @@ export function useMentionSendFlow({
         if (agentReadiness.errors.length > 0) {
           const message =
             agentReadiness.errors.length === 1
-              ? `Could not start agent mention: ${agentReadiness.errors[0]}`
-              : `Could not start agent mentions: ${agentReadiness.errors.join(
+              ? `Could not prepare agent mention: ${agentReadiness.errors[0]}`
+              : `Could not prepare agent mentions: ${agentReadiness.errors.join(
                   "; ",
                 )}`;
           setNonMemberPromptError(message);
@@ -538,6 +498,10 @@ export function useMentionSendFlow({
           );
           if (!finalOutgoingTags || signal?.aborted || isSendCancelled())
             return;
+          // The pass immediately before signing/publish is always fresh:
+          // mention authorization is re-validated here unconditionally,
+          // whatever did or did not separate it from the admission pass
+          // above (#5681).
           const revalidatedMentionPubkeys =
             await mentions.revalidateMentionPubkeys(mentionPubkeys);
           if (signal?.aborted || isSendCancelled()) return;
@@ -556,6 +520,15 @@ export function useMentionSendFlow({
             draft.capturedThreadContext,
             draft.preparedLinkPreviews != null,
           );
+          // The relay accepted the publish: flush the queued wakes now,
+          // before the post-send cancellation check — a cancellation racing
+          // a successful publish must not drop the wake for a message that
+          // did land. Fire-and-forget: the send awaits nothing here, and
+          // each wake carries its enqueue-time replay floor so the spawned
+          // harness replays back past this message however late the flush.
+          for (const wake of agentsToWake) {
+            startAgentDetached(wake.agent, wake.replayFloorUnix);
+          }
           if (signal?.aborted || isSendCancelled()) return;
           const sentMentionPubkeys = new Set(
             revalidatedMentionPubkeys.map(normalizePubkey),
@@ -659,6 +632,7 @@ export function useMentionSendFlow({
       onSendRef,
       richText.setContent,
       setContent,
+      startAgentDetached,
       setPendingImeta,
       restoreQueuedAttachments,
       setSpoileredAttachmentUrls,
@@ -693,6 +667,13 @@ export function useMentionSendFlow({
         activePreparedLinkPreviews.add(preparedLinkPreviews);
       }
       try {
+        if (isSendCancelled()) return;
+        // Every extraction below reads the mention map, and a pasted identity
+        // can still be verifying — the relay round trip for a non-member is
+        // exactly the case this feature exists for. Sending first would
+        // publish a readable `@Label` with no `p` tag. Bounded inside, so a
+        // lookup that never answers delays the send rather than blocking it.
+        await mentions.settlePendingMentionBindings();
         if (isSendCancelled()) return;
         const dmThreadAgentMentionErrorMessage = dmThreadAgentMentionError({
           trimmed,
@@ -791,6 +772,7 @@ export function useMentionSendFlow({
           outgoingTags,
           preparedLinkPreviews,
           preparedManagedAgents: personaMentionResult.agents,
+          queuedAgentWakes: personaMentionResult.agentsToWake,
           readyAgentPubkeys:
             channelType === "dm" && onPrepareSendChannel
               ? []
@@ -834,6 +816,7 @@ export function useMentionSendFlow({
       mentions.isManagedAgentPubkey,
       mentions.memberPubkeys,
       mentions.getDraftMentionRefs,
+      mentions.settlePendingMentionBindings,
       onPrepareSendChannel,
       activePreparedLinkPreviews,
     ],
@@ -950,12 +933,14 @@ export function useMentionSendFlow({
     setNonMemberPromptError(null);
   }, []);
   return {
+    // Agent starts are detached (publish-first), so useDetachedAgentStart's
+    // in-flight state deliberately does not gate the composer — a background
+    // start must not block the next send.
     isPreparingMentionSend:
       isMentionSendPending ||
       isCompleteSendPending ||
       attachAgentMutation.isPending ||
-      createPersonaAgentMutation.isPending ||
-      startAgentMutation.isPending,
+      createPersonaAgentMutation.isPending,
     nonMemberPromptProps: {
       canInvite: canInviteNonMembers,
       error: nonMemberPromptError,
@@ -964,8 +949,7 @@ export function useMentionSendFlow({
         isCompleteSendPending ||
         addMembersMutation.isPending ||
         attachAgentMutation.isPending ||
-        createPersonaAgentMutation.isPending ||
-        startAgentMutation.isPending,
+        createPersonaAgentMutation.isPending,
       names: pendingNonMemberNames,
       onDismiss: dismissNonMemberPrompt,
       onDoNothing: handleSendWithoutInviting,
