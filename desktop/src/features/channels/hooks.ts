@@ -11,7 +11,6 @@ import {
   archiveChannel,
   createChannel,
   deleteChannel,
-  getCanvas,
   getChannelDetails,
   getChannelMembers,
   getChannels,
@@ -21,7 +20,6 @@ import {
   openDm,
   invokeTauri,
   removeChannelMember,
-  setCanvas,
   setChannelPurpose,
   setChannelTopic,
   unarchiveChannel,
@@ -963,35 +961,11 @@ export function useSelectedChannel(
 }
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
-export function useCanvasQuery(channelId: string | null, enabled = true) {
-  return useQuery({
-    queryKey: ["channel-canvas", channelId],
-    queryFn: () => {
-      if (!channelId) {
-        return Promise.reject(new Error("No channel selected"));
-      }
-      return getCanvas(channelId);
-    },
-    enabled: enabled && channelId !== null,
-  });
-}
-
-export function useSetCanvasMutation(channelId: string | null) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (content: string) => {
-      if (!channelId) {
-        return Promise.reject(new Error("No channel selected"));
-      }
-      return setCanvas({ channelId, content });
-    },
-    onSuccess: () => {
-      if (channelId) {
-        void queryClient.invalidateQueries({
-          queryKey: ["channel-canvas", channelId],
-        });
-      }
-    },
-  });
-}
+// Canvas query/mutation hooks live in their own module to keep this file under
+// the desktop file-size ratchet; re-exported here so existing import paths
+// (`@/features/channels/hooks`) keep working.
+export {
+  useCanvasHistoryQuery,
+  useCanvasQuery,
+  useSetCanvasMutation,
+} from "@/features/channels/canvasHooks";

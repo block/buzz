@@ -61,6 +61,7 @@ pub use community::{
     UnarchivedCommunityRecord,
 };
 pub use error::{DbError, Result};
+pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;

@@ -416,9 +416,23 @@ pub fn build_remove_reaction(reaction_event_id: EventId) -> Result<EventBuilder,
 // ── Canvas ───────────────────────────────────────────────────────────────────
 
 /// Kind 40100 — set canvas.
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, String> {
+///
+/// When `expected_revision` is `Some`, an `["expected-revision", <event-id>]`
+/// tag is attached. The relay enforces this tag as a compare-and-swap (CAS):
+/// it reads the canonical live head under an advisory lock and rejects writes
+/// whose precondition no longer matches. Client-side checks (stale-edit before
+/// submit and `canvas_write_survived` after) are secondary confirmations.
+/// Omitting the tag preserves the historical unconditional-append behavior.
+pub fn build_set_canvas(
+    channel_id: Uuid,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<EventBuilder, String> {
     check_content(content)?;
-    let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
+    let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
+    if let Some(revision) = expected_revision {
+        tags.push(tag(vec!["expected-revision", revision])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
 

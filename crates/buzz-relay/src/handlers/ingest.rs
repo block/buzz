@@ -191,6 +191,60 @@ fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError
     Ok(())
 }
 
+/// A validated canvas `expected-revision` precondition.
+///
+/// The tag value is either the literal `none` (expect no canvas head yet) or a
+/// 64-hex event ID (expect the live head to match it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CanvasRevisionSpec {
+    /// Literal `none` — the writer expects no canvas head to exist.
+    NoHead,
+    /// A 32-byte event ID the live canvas head must equal.
+    Head(Vec<u8>),
+}
+
+/// Parse the optional canvas `expected-revision` precondition from an event.
+///
+/// Returns `Ok(None)` when the tag is absent (backward-compatible unconditional
+/// append). The tag shape is exactly `["expected-revision", value]`: a
+/// one-element `["expected-revision"]` or any three-or-more-element form is
+/// malformed and rejects `invalid:` — it is never treated as absent. At most
+/// one `expected-revision` tag may be present. A single well-formed tag yields
+/// `Some(spec)`.
+pub(crate) fn parse_canvas_expected_revision(
+    event: &Event,
+) -> Result<Option<CanvasRevisionSpec>, IngestError> {
+    let mut tags = event
+        .tags
+        .iter()
+        .map(nostr::Tag::as_slice)
+        .filter(|parts| parts.first().map(String::as_str) == Some("expected-revision"));
+
+    let Some(tag) = tags.next() else {
+        return Ok(None);
+    };
+    if tags.next().is_some() {
+        return Err(IngestError::Rejected(
+            "invalid: duplicate expected-revision tag".into(),
+        ));
+    }
+    if tag.len() != 2 {
+        return Err(IngestError::Rejected(
+            "invalid: expected-revision tag must have exactly one value".into(),
+        ));
+    }
+    let value = tag[1].as_str();
+
+    if value == "none" {
+        return Ok(Some(CanvasRevisionSpec::NoHead));
+    }
+    let bytes = hex::decode(value)
+        .ok()
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or_else(|| IngestError::Rejected("invalid: bad expected canvas revision".into()))?;
+    Ok(Some(CanvasRevisionSpec::Head(bytes)))
+}
+
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
 pub enum HttpAuthMethod {
@@ -2167,6 +2221,26 @@ pub async fn ingest_event(
     result
 }
 
+/// Maximum seconds in the future a kind:40100 canvas event may be timestamped.
+/// Tighter than the general ±900 s drift window to prevent a ceiling-timestamped
+/// head from producing a write at `head + 1` that the relay would accept (the
+/// boundary head itself is within ±900 s) but that permanently stalls all later
+/// legitimate writes behind an inflated floor. Invariant:
+///   client ceiling (60 s, CANVAS_MAX_FUTURE_SKEW_SECS) < canvas relay bound (300 s) < relay general bound (900 s)
+const CANVAS_MAX_INGEST_FUTURE_SECS: i64 = 300;
+
+/// Returns `Ok(())` if the canvas event timestamp is within the allowed future
+/// window, or `Err` with a rejection message otherwise.
+///
+/// Extracted as a pure function so the boundary can be regression-tested without
+/// a live database or HTTP stack.
+fn validate_canvas_future_timestamp(event_ts: i64, now: i64) -> Result<(), &'static str> {
+    if event_ts - now > CANVAS_MAX_INGEST_FUTURE_SECS {
+        return Err("invalid: canvas event timestamp too far in the future");
+    }
+    Ok(())
+}
+
 async fn ingest_event_inner(
     state: &Arc<AppState>,
     tracer: &Arc<dyn buzz_conformance::Tracer>,
@@ -2238,6 +2312,14 @@ async fn ingest_event_inner(
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
+    }
+
+    // kind:40100 canvas events carry a tighter future ceiling — see
+    // `validate_canvas_future_timestamp` for the rationale and invariant.
+    if kind_u32 == KIND_CANVAS {
+        if let Err(msg) = validate_canvas_future_timestamp(event_ts, now) {
+            return Err(IngestError::Rejected(msg.into()));
+        }
     }
 
     const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
@@ -3144,6 +3226,15 @@ async fn ingest_event_inner(
         });
     }
 
+    // Parse a canvas `expected-revision` precondition once, ahead of the write
+    // dispatch. Malformed or duplicate tags reject here (never reaching the DB);
+    // an absent tag yields `None`, routing canvas writes to the generic append.
+    let canvas_revision_spec = if kind_u32 == KIND_CANVAS {
+        parse_canvas_expected_revision(&event)?
+    } else {
+        None
+    };
+
     let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
@@ -3167,6 +3258,42 @@ async fn ingest_event_inner(
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+    } else if let Some(spec) = canvas_revision_spec.as_ref() {
+        // Canvas write carrying an optimistic-concurrency precondition. Plain
+        // canvas writes (no `expected-revision` tag) fall through to the generic
+        // append path below, preserving unconditional behavior. The channel is
+        // guaranteed present here: KIND_CANVAS requires an `h` tag and step 5b
+        // resolved it into `channel_id`.
+        let channel = channel_id
+            .ok_or_else(|| IngestError::Rejected("invalid: canvas event missing channel".into()))?;
+        let precondition = match spec {
+            CanvasRevisionSpec::NoHead => buzz_db::ChannelHeadPrecondition::ExpectNoHead,
+            CanvasRevisionSpec::Head(id) => buzz_db::ChannelHeadPrecondition::ExpectedHead(id),
+        };
+        let (stored_event, status) = state
+            .db
+            .insert_channel_head_checked(tenant.community(), &event, channel, precondition)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+        match status {
+            buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
+                return Err(IngestError::Rejected(
+                    "conflict: canvas revision does not exist".into(),
+                ));
+            }
+            buzz_db::ChannelHeadWriteStatus::RevisionMismatch => {
+                return Err(IngestError::Rejected(
+                    "conflict: canvas changed since it was loaded".into(),
+                ));
+            }
+            buzz_db::ChannelHeadWriteStatus::SupersedeFailed => {
+                return Err(IngestError::Rejected(
+                    "conflict: canvas write does not supersede the current head".into(),
+                ));
+            }
+            buzz_db::ChannelHeadWriteStatus::Inserted => (stored_event, true),
+            buzz_db::ChannelHeadWriteStatus::Duplicate => (stored_event, false),
+        }
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
@@ -5536,5 +5663,605 @@ mod postgres_tests {
             counts.get(&("ws".to_owned(), "invalid".to_owned())),
             Some(&1)
         );
+    }
+
+    /// Boundary regression for the canvas-specific ingest future-timestamp guard.
+    /// `validate_canvas_future_timestamp` is the pure seam; mutation: changing
+    /// `CANVAS_MAX_INGEST_FUTURE_SECS` to 900 or removing the guard makes the
+    /// "at ceiling + 1" case pass when it must not.
+    ///
+    /// Fixed-literal contract (pinned so constant mutations go red): the relay
+    /// canvas bound IS 300 s; now+300 accepted, now+301 rejected. The relay
+    /// general bound is 900 s (a separate guard); the client ceiling is 60 s
+    /// (CANVAS_MAX_FUTURE_SKEW_SECS in buzz-sdk). Mutating the 300 s constant
+    /// back to 900 makes the numeric assertions below fail.
+    #[test]
+    fn canvas_ingest_future_timestamp_boundary() {
+        let now = 1_700_000_000i64;
+
+        // Exactly at the ceiling: accepted.
+        assert!(
+            validate_canvas_future_timestamp(now + CANVAS_MAX_INGEST_FUTURE_SECS, now).is_ok(),
+            "canvas event at now+300 is within the relay canvas future bound"
+        );
+
+        // One second past the ceiling: rejected.
+        assert!(
+            validate_canvas_future_timestamp(now + CANVAS_MAX_INGEST_FUTURE_SECS + 1, now).is_err(),
+            "canvas event at now+301 exceeds the relay canvas future bound and must be rejected"
+        );
+
+        // Past the general ±900 s window: also rejected (guard fires first).
+        assert!(
+            validate_canvas_future_timestamp(now + 901, now).is_err(),
+            "canvas event at now+901 exceeds both the canvas bound and the general drift window"
+        );
+
+        // In the past: accepted (canvas guard is future-only; general past check is separate).
+        assert!(
+            validate_canvas_future_timestamp(now - 1, now).is_ok(),
+            "canvas event in the past is not affected by the future-timestamp guard"
+        );
+
+        // Fixed-literal contract: relay canvas bound IS 300 s, NOT 900 s.
+        // Mutating CANVAS_MAX_INGEST_FUTURE_SECS back to 900 makes these fail.
+        assert!(
+            validate_canvas_future_timestamp(now + 300, now).is_ok(),
+            "now+300: accepted at the 300 s relay canvas ceiling"
+        );
+        assert!(
+            validate_canvas_future_timestamp(now + 301, now).is_err(),
+            "now+301: rejected one second past the 300 s relay canvas ceiling"
+        );
+        // The old 900 s value must be rejected by this guard.
+        assert!(
+            validate_canvas_future_timestamp(now + 900, now).is_err(),
+            "now+900 must be rejected by the 300 s relay canvas ceiling"
+        );
+    }
+
+    /// Standalone numeric contract for the relay-side canvas ingest guard.
+    ///
+    /// No constants used — if CANVAS_MAX_INGEST_FUTURE_SECS changes, this test
+    /// catches it regardless of whether constant-based assertions remain
+    /// self-consistent. The relay canvas ceiling IS 300 s: now+300 is the last
+    /// accepted timestamp; now+301 is the first rejected timestamp.
+    #[test]
+    fn canvas_ingest_numeric_contract() {
+        let now = 1_700_000_000i64;
+        // These assertions use only fixed numeric literals; they cannot be
+        // self-referential regardless of what CANVAS_MAX_INGEST_FUTURE_SECS holds.
+        assert!(
+            validate_canvas_future_timestamp(now + 300, now).is_ok(),
+            "now+300 must be accepted: relay canvas ceiling is 300 s",
+        );
+        assert!(
+            validate_canvas_future_timestamp(now + 301, now).is_err(),
+            "now+301 must be rejected: one second past the 300 s relay canvas ceiling",
+        );
+        // Old 900 s value must also be rejected (prevents silent reversion to
+        // the general drift bound).
+        assert!(
+            validate_canvas_future_timestamp(now + 900, now).is_err(),
+            "now+900 must be rejected: the general 900 s bound does not apply to canvas events",
+        );
+    }
+
+    /// Ingest-path wiring regression: the kind-40100 canvas future-timestamp
+    /// guard in `ingest_event_inner` must be exercised through the real ingest
+    /// path, not only the pure `validate_canvas_future_timestamp` helper.
+    ///
+    /// A signed kind-40100 event with `created_at = relay_now + 600` is
+    /// submitted through `ingest_event_inner`. The offset is chosen to be
+    /// well inside the guard's rejection zone (300 s ceiling) so that
+    /// scheduler latency between test setup and production's `Utc::now()`
+    /// re-sample cannot shrink the apparent offset to within 300 s and
+    /// accidentally let the event through. Exact 300/301 boundary coverage
+    /// lives in `canvas_ingest_numeric_contract` and
+    /// `canvas_ingest_future_timestamp_boundary`, which exercise the pure
+    /// `validate_canvas_future_timestamp` helper with fixed arguments.
+    ///
+    /// Mutation oracle: deleting the `if kind_u32 == KIND_CANVAS { … }` call
+    /// site in `ingest_event_inner` changes the rejection reason to the h-tag
+    /// check ("channel-scoped events must include an h tag"), causing this
+    /// assertion to fail.
+    ///
+    /// Infrastructure: a real Postgres is required to pass the community
+    /// deletion-fence check that precedes the canvas guard. Redis is not
+    /// needed — the canvas guard fires before any Redis-backed path.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn canvas_ingest_guard_wired_through_ingest_event_inner() {
+        use buzz_auth::Nip98ReplayGuard;
+        use nostr::{Keys, Kind, Timestamp};
+
+        const FAKE_REDIS_URL: &str = "redis://127.0.0.1:1"; // no Redis needed for this path
+
+        // ── Postgres connection ──────────────────────────────────────────────
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&db_url).await.expect(
+            "connect test Postgres — start local Postgres before running ignored ingest tests",
+        );
+        let db = buzz_db::Db::from_pool(pool.clone());
+        // Do not call db.migrate() here: CI migrates the schema before running
+        // integration tests; calling migrate() locally risks version conflicts
+        // if the DB was provisioned via a different path.
+
+        // ── AppState ─────────────────────────────────────────────────────────
+        // Redis is lazy and never actually contacted on this rejection path.
+        let redis_pool = deadpool_redis::Config::from_url(FAKE_REDIS_URL)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("deadpool redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(FAKE_REDIS_URL, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let mut config = crate::config::Config::from_env().expect("relay config from env");
+        config.database_url = db_url.clone();
+        config.redis_url = FAKE_REDIS_URL.to_string();
+        config.require_relay_membership = false;
+
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth_svc = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+
+        let (mut state, _audit_shutdown) = crate::state::AppState::new(
+            config,
+            db.clone(),
+            redis_pool,
+            audit,
+            pubsub,
+            auth_svc,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+
+        // Replace the NIP-98 replay guard so no live Redis is required.
+        struct AlwaysFreshReplayGuard;
+        impl Nip98ReplayGuard for AlwaysFreshReplayGuard {
+            fn try_mark_in_scope<'a>(
+                &'a self,
+                _scope: &'a str,
+                _event_id: &'a nostr::EventId,
+                _ttl_secs: u64,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async { Ok(true) })
+            }
+        }
+        state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
+        let state = Arc::new(state);
+
+        // ── Provision a fresh community so the deletion fence allows writes ──
+        let host = format!("canvas-ts-guard-{}.test", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+
+        // ── Build a kind-40100 event 600 seconds in the future ───────────────
+        // +600 is well inside the guard's rejection zone (>300 s), so scheduler
+        // latency between this Utc::now() call and production's independent
+        // Utc::now() re-sample inside ingest_event_inner cannot close the gap
+        // to within 300 s. Exact 300/301 boundary assertions live in the pure
+        // `validate_canvas_future_timestamp` tests which have no clock race.
+        let keys = Keys::generate();
+        let relay_now = chrono::Utc::now().timestamp() as u64;
+        let event = nostr::EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "")
+            .custom_created_at(Timestamp::from(relay_now + 600))
+            .sign_with_keys(&keys)
+            .expect("sign canvas event");
+
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::ChannelsWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+
+        // ── Submit through the real ingest path ───────────────────────────────
+        let result = ingest_event_inner(&state, &tracer, &tenant, event, auth).await;
+
+        // The canvas-specific guard must fire before the h-tag check.
+        // created_at = relay_now + 600 is 300 s above the canvas ceiling, so
+        // even under heavy load the guard fires and rejects with this message.
+        //
+        // Mutation oracle: delete `if kind_u32 == KIND_CANVAS { … }` in
+        // ingest_event_inner → no canvas guard fires → the event reaches the
+        // h-tag check → Rejected("invalid: channel-scoped events must include
+        // an h tag") → assert! below fails.
+        let err = match result {
+            Ok(_) => panic!(
+                "kind-40100 event at now+600 must be rejected, but ingest_event_inner returned Ok"
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(&err, IngestError::Rejected(msg) if msg.contains("canvas event timestamp too far in the future")),
+            "rejection must be the canvas guard, not the h-tag check; \
+             deleting the guard call site changes this error to the h-tag rejection. \
+             Got: {err:?}",
+        );
+    }
+
+    // ── parse_canvas_expected_revision unit tests ─────────────────────────
+    //
+    // These cover every branch in the parser without requiring Postgres or
+    // Redis.  A helper builds a signed kind-40100 event from a tag-list so the
+    // tests only state the tags they care about.
+
+    /// Build a signed kind-40100 event carrying the given tags.  The event is
+    /// fully signed so the nostr library populates `tags` correctly; content
+    /// and timestamp are irrelevant for the parser.
+    fn canvas_event_with_tags(tags: impl IntoIterator<Item = nostr::Tag>) -> nostr::Event {
+        use nostr::{EventBuilder, Keys, Kind};
+        EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign canvas event for parser test")
+    }
+
+    /// No `expected-revision` tag → `Ok(None)` (backward-compatible unconditional
+    /// append; mutation: adding a spurious tag-match makes the call return
+    /// `Some`, changing the Ok(None) assertion to fail).
+    #[test]
+    fn parse_canvas_revision_absent_returns_none() {
+        let event = canvas_event_with_tags([nostr::Tag::parse(["h", "chan-uuid"]).unwrap()]);
+        let result = parse_canvas_expected_revision(&event);
+        assert_eq!(result.unwrap(), None);
+    }
+
+    /// `expected-revision = "none"` → `Ok(Some(NoHead))` (first-create
+    /// precondition; mutation: changing `"none"` check to `"NONE"` makes the
+    /// parser fall through to the hex decoder and return `Rejected`).
+    #[test]
+    fn parse_canvas_revision_none_literal_yields_no_head() {
+        let event =
+            canvas_event_with_tags([nostr::Tag::parse(["expected-revision", "none"]).unwrap()]);
+        assert_eq!(
+            parse_canvas_expected_revision(&event).unwrap(),
+            Some(CanvasRevisionSpec::NoHead),
+        );
+    }
+
+    /// A well-formed 64-hex event ID → `Ok(Some(Head(bytes)))` where the
+    /// bytes equal the decoded hex (mutation: changing `bytes.len() == 32`
+    /// to `!= 32` makes this return `Rejected`).
+    #[test]
+    fn parse_canvas_revision_valid_hex_yields_head() {
+        let hex_id = "a".repeat(64);
+        let event =
+            canvas_event_with_tags([nostr::Tag::parse(["expected-revision", &hex_id]).unwrap()]);
+        let spec = parse_canvas_expected_revision(&event)
+            .expect("valid hex must parse")
+            .expect("must be Some");
+        assert_eq!(spec, CanvasRevisionSpec::Head(vec![0xaa; 32]));
+    }
+
+    /// Two `expected-revision` tags → `Rejected("invalid: duplicate …")`.
+    /// Mutation: removing the `tags.next().is_some()` guard makes this return
+    /// `Ok(Some(…))` instead.
+    #[test]
+    fn parse_canvas_revision_duplicate_tag_rejects() {
+        let hex_id = "b".repeat(64);
+        let event = canvas_event_with_tags([
+            nostr::Tag::parse(["expected-revision", &hex_id]).unwrap(),
+            nostr::Tag::parse(["expected-revision", &hex_id]).unwrap(),
+        ]);
+        assert!(
+            matches!(
+                parse_canvas_expected_revision(&event),
+                Err(IngestError::Rejected(msg)) if msg.contains("duplicate expected-revision tag")
+            ),
+            "duplicate tags must be rejected",
+        );
+    }
+
+    /// A one-element `["expected-revision"]` tag (no value) → `Rejected`.
+    /// Mutation: changing `tag.len() != 2` to `< 2` also catches zero-element
+    /// forms but not three-element; this case specifically exercises the
+    /// `len == 1` branch.
+    #[test]
+    fn parse_canvas_revision_missing_value_rejects() {
+        // nostr::Tag::parse requires ≥1 element; build a tag with only the key.
+        let event = canvas_event_with_tags([nostr::Tag::parse(["expected-revision"]).unwrap()]);
+        assert!(
+            matches!(
+                parse_canvas_expected_revision(&event),
+                Err(IngestError::Rejected(msg)) if msg.contains("expected-revision tag must have exactly one value")
+            ),
+            "tag with no value must be rejected",
+        );
+    }
+
+    /// A three-element `["expected-revision", value, extra]` tag → `Rejected`.
+    /// Mutation: changing `tag.len() != 2` to `tag.len() < 2` lets three-element
+    /// tags through; this test catches that.
+    #[test]
+    fn parse_canvas_revision_extra_value_rejects() {
+        let hex_id = "c".repeat(64);
+        let event =
+            canvas_event_with_tags([
+                nostr::Tag::parse(["expected-revision", &hex_id, "extra"]).unwrap()
+            ]);
+        assert!(
+            matches!(
+                parse_canvas_expected_revision(&event),
+                Err(IngestError::Rejected(msg)) if msg.contains("expected-revision tag must have exactly one value")
+            ),
+            "tag with extra value must be rejected",
+        );
+    }
+
+    /// A 62-character hex string (too short — not a 32-byte id) → `Rejected`.
+    /// Mutation: removing the `bytes.len() == 32` length check makes this return
+    /// `Ok(Some(Head(…)))` with 31 bytes instead of rejecting.
+    #[test]
+    fn parse_canvas_revision_too_short_hex_rejects() {
+        let short_hex = "d".repeat(62);
+        let event =
+            canvas_event_with_tags([nostr::Tag::parse(["expected-revision", &short_hex]).unwrap()]);
+        assert!(
+            matches!(
+                parse_canvas_expected_revision(&event),
+                Err(IngestError::Rejected(msg)) if msg.contains("bad expected canvas revision")
+            ),
+            "too-short hex must be rejected",
+        );
+    }
+
+    /// A non-hex value → `Rejected("invalid: bad expected canvas revision")`.
+    /// Mutation: removing `hex::decode(value).ok()` makes this panic instead.
+    #[test]
+    fn parse_canvas_revision_non_hex_rejects() {
+        let not_hex = "g".repeat(64); // 'g' is not a valid hex digit
+        let event =
+            canvas_event_with_tags([nostr::Tag::parse(["expected-revision", &not_hex]).unwrap()]);
+        assert!(
+            matches!(
+                parse_canvas_expected_revision(&event),
+                Err(IngestError::Rejected(msg)) if msg.contains("bad expected canvas revision")
+            ),
+            "non-hex value must be rejected",
+        );
+    }
+
+    // ── CAS ingest-path wiring test ───────────────────────────────────────
+    //
+    // Proves that the `expected-revision` parser → dispatch → DB transaction
+    // round-trip is wired end-to-end through `ingest_event_inner`. Deletng or
+    // bypassing the CAS dispatch block (the `} else if let Some(spec) =
+    // canvas_revision_spec.as_ref() {` branch) must turn this test red.
+    //
+    // Mutation oracle for the dispatch:
+    //   - Removing the `canvas_revision_spec` branch makes tagged writes fall
+    //     through to the generic append; the stale-head step no longer returns
+    //     a conflict: rejection, causing the assert! below to fail.
+    //   - Replacing `insert_channel_head_checked` with `insert_event_with_thread_metadata`
+    //     has the same effect — no conflict is surfaced.
+    //
+    // Requires Postgres (and does NOT need Redis — the fake replay guard fires
+    // before any Redis-backed path, and the CAS path never touches Redis).
+
+    /// Build the minimal AppState for an ingest-path CAS test.
+    ///
+    /// Replaces the NIP-98 replay guard with an always-fresh stub so that no
+    /// live Redis is needed. The returned `AppState` is ready for
+    /// `ingest_event_inner` calls.
+    async fn build_canvas_ingest_state(
+        db_url: &str,
+        pool: &sqlx::PgPool,
+    ) -> Arc<crate::state::AppState> {
+        use buzz_auth::Nip98ReplayGuard;
+        use nostr::Keys;
+
+        const FAKE_REDIS_URL: &str = "redis://127.0.0.1:1"; // never contacted
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(FAKE_REDIS_URL)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("deadpool redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(FAKE_REDIS_URL, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let mut config = crate::config::Config::from_env().expect("relay config from env");
+        config.database_url = db_url.to_owned();
+        config.redis_url = FAKE_REDIS_URL.to_string();
+        config.require_relay_membership = false;
+
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth_svc = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+
+        let (mut state, _audit_shutdown) = crate::state::AppState::new(
+            config,
+            db.clone(),
+            redis_pool,
+            audit,
+            pubsub,
+            auth_svc,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+
+        struct AlwaysFresh;
+        impl Nip98ReplayGuard for AlwaysFresh {
+            fn try_mark_in_scope<'a>(
+                &'a self,
+                _scope: &'a str,
+                _event_id: &'a nostr::EventId,
+                _ttl_secs: u64,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async { Ok(true) })
+            }
+        }
+        state.nip98_replay = Arc::new(AlwaysFresh);
+        Arc::new(state)
+    }
+
+    /// End-to-end CAS dispatch wiring: a tagged write inserts, a stale same-head
+    /// competitor returns the exact conflict: rejection, the loser is absent from
+    /// the DB, and an untagged write still appends unconditionally.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn canvas_cas_dispatch_wired_through_ingest_event_inner() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use nostr::{Keys, Kind, Tag, Timestamp};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&db_url).await.expect(
+            "connect test Postgres — start local Postgres before running ignored ingest tests",
+        );
+        let state = build_canvas_ingest_state(&db_url, &pool).await;
+
+        // Provision a fresh community + channel so each test run is isolated.
+        let host = format!("canvas-cas-wiring-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+
+        let channel_id = Uuid::new_v4();
+        let creator_keys = Keys::generate();
+        state
+            .db
+            .create_channel_with_id(
+                community,
+                channel_id,
+                &format!("canvas-cas-wiring-{}", channel_id.simple()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                creator_keys.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create test channel");
+
+        let now = chrono::Utc::now().timestamp() as u64;
+        let channel_uuid_str = channel_id.to_string();
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+
+        let make_auth = |keys: &Keys| IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::ChannelsWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+
+        // ── Step 1: first write with expected-revision=none → Inserted ────────
+        let author = Keys::generate();
+        let first = nostr::EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# v1")
+            .custom_created_at(Timestamp::from(now))
+            .tags([
+                Tag::parse(["h", &channel_uuid_str]).unwrap(),
+                Tag::parse(["expected-revision", "none"]).unwrap(),
+            ])
+            .sign_with_keys(&author)
+            .expect("sign first canvas");
+        let first_id_hex = first.id.to_hex();
+
+        ingest_event_inner(&state, &tracer, &tenant, first, make_auth(&author))
+            .await
+            .expect("first canvas write must succeed");
+
+        // ── Step 2: advance with expected-revision=<first id> → Inserted ──────
+        let second = nostr::EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# v2")
+            .custom_created_at(Timestamp::from(now + 1))
+            .tags([
+                Tag::parse(["h", &channel_uuid_str]).unwrap(),
+                Tag::parse(["expected-revision", &first_id_hex]).unwrap(),
+            ])
+            .sign_with_keys(&author)
+            .expect("sign second canvas");
+
+        ingest_event_inner(&state, &tracer, &tenant, second, make_auth(&author))
+            .await
+            .expect("second canvas write must succeed");
+
+        // ── Step 3: stale competitor — same first-id precondition → conflict ──
+        // The head is now the second event, so expected-revision=<first_id> is stale.
+        // Mutation oracle: deleting the `canvas_revision_spec` dispatch block makes
+        // this return Ok instead of the conflict: rejection below.
+        let stale = nostr::EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# stale")
+            .custom_created_at(Timestamp::from(now + 2))
+            .tags([
+                Tag::parse(["h", &channel_uuid_str]).unwrap(),
+                Tag::parse(["expected-revision", &first_id_hex]).unwrap(),
+            ])
+            .sign_with_keys(&author)
+            .expect("sign stale canvas");
+        let stale_id_bytes = stale.id.as_bytes().to_vec();
+
+        let err =
+            match ingest_event_inner(&state, &tracer, &tenant, stale, make_auth(&author)).await {
+                Ok(_) => panic!("stale precondition must be rejected, but ingest returned Ok"),
+                Err(e) => e,
+            };
+        assert!(
+            matches!(&err, IngestError::Rejected(msg) if msg.starts_with("conflict:")),
+            "stale write must return a conflict: rejection; got {:?}",
+            err,
+        );
+
+        // The losing write must not be persisted.
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(stale_id_bytes.as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count stale canvas row");
+        assert_eq!(persisted, 0, "losing CAS write must not be stored");
+
+        // ── Step 4: untagged write still appends unconditionally ──────────────
+        // No expected-revision tag → the event is routed through the generic
+        // append path, NOT through insert_channel_head_checked. It must succeed
+        // regardless of the current head state.
+        let untagged =
+            nostr::EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# unconditional")
+                .custom_created_at(Timestamp::from(now + 3))
+                .tags([Tag::parse(["h", &channel_uuid_str]).unwrap()])
+                .sign_with_keys(&author)
+                .expect("sign untagged canvas");
+
+        ingest_event_inner(&state, &tracer, &tenant, untagged, make_auth(&author))
+            .await
+            .expect("untagged canvas write must append unconditionally");
     }
 }

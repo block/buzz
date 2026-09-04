@@ -293,6 +293,60 @@ fn extract_before_id(raw: &Value) -> BeforeId {
     }
 }
 
+/// The `consistency` extension field: a read-your-writes opt-in. A
+/// write-influencing read (a canvas save's head precondition or its post-write
+/// ancestry verification) sets `"consistency": "strong"` so the relay serves it
+/// from the writer pool, never a replica that may lag behind the caller's own
+/// just-accepted write. Absent = the default routed path (replica-eligible when
+/// `BUZZ_REPLICA_READ_MAX_AGE_MS` is set).
+///
+/// This only ever forces the *writer*, which is always the sound direction (a
+/// replica can be stale, the writer never is), so it cannot be abused to skip
+/// data — there is deliberately no inverse "force replica" value. Any value
+/// other than the single accepted `"strong"` is rejected, so a typo fails loud
+/// rather than silently degrading to routed.
+enum Consistency {
+    /// Absent: route normally (replica-eligible under the read budget).
+    Default,
+    /// `"strong"`: pin this filter's read to the writer pool.
+    Strong,
+    /// Present but not `"strong"`: reject the request.
+    Malformed,
+}
+
+fn extract_consistency(raw: &Value) -> Consistency {
+    let Some(value) = raw.get("consistency") else {
+        return Consistency::Default;
+    };
+    match value.as_str() {
+        Some("strong") => Consistency::Strong,
+        _ => Consistency::Malformed,
+    }
+}
+
+/// Which pool a catchall filter's read is dispatched to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadRoute {
+    /// The default replica-eligible path (`query_events_routed`).
+    Routed,
+    /// The writer pool (`query_events`), pinned by `"consistency": "strong"`.
+    Writer,
+}
+
+/// Resolve the pool a filter reads from, folding the `consistency` extension
+/// into a routing direction. `"strong"` pins the writer; absent routes
+/// normally; any other value is a client error (`Err`), rejected before any DB
+/// work. This is the single seam that maps client-carried intent to a pool, so
+/// a refactor that drops the field flips the mapping this function returns and
+/// its tests fail.
+fn resolve_read_route(raw: &Value) -> Result<ReadRoute, ()> {
+    match extract_consistency(raw) {
+        Consistency::Default => Ok(ReadRoute::Routed),
+        Consistency::Strong => Ok(ReadRoute::Writer),
+        Consistency::Malformed => Err(()),
+    }
+}
+
 fn extract_buzz_channel(raw: &Value) -> Option<&str> {
     raw.get("#buzz-channel")
         .and_then(Value::as_array)
@@ -1401,7 +1455,7 @@ async fn query_events_authed(
     // skips and the `before_id` BAD_REQUEST are decided here, before any DB
     // work is issued (validation errors are deterministic client mistakes, so
     // surfacing them ahead of transient DB errors is strictly more predictable).
-    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery)> = Vec::new();
+    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery, ReadRoute)> = Vec::new();
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
             continue;
@@ -1412,6 +1466,17 @@ async fn query_events_authed(
                 continue;
             }
         }
+
+        // Read-your-writes opt-in: a write-influencing read pins to the writer
+        // pool so a lagging replica cannot hide the caller's own just-accepted
+        // write. Rejected before any DB work, like the `before_id` grammar
+        // error below — a malformed value is a deterministic client mistake.
+        let read_route = resolve_read_route(raw).map_err(|()| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "consistency must be \"strong\" when present",
+            )
+        })?;
 
         let mut query = crate::handlers::req::build_event_query_from_filter(
             filter,
@@ -1466,7 +1531,7 @@ async fn query_events_authed(
             query.offset = Some(offset);
         }
 
-        catchall_queries.push((idx, query));
+        catchall_queries.push((idx, query, read_route));
     }
 
     // Phase 2 — DB reads, bounded-concurrent, order-preserving (`buffered`).
@@ -1474,10 +1539,23 @@ async fn query_events_authed(
     // and error semantics match the previous serial loop.
     use futures_util::stream::{self, StreamExt};
     let db = state.db.clone();
-    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
-        let db = db.clone();
-        async move { (idx, db.query_events_routed("bridge_query", &query).await) }
-    }))
+    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(
+        |(idx, query, read_route)| {
+            let db = db.clone();
+            async move {
+                // The route was resolved from client-carried `consistency`
+                // intent in phase 1 (`resolve_read_route`). `Writer` pins the
+                // read to the writer pool (`query_events`); `Routed` takes the
+                // replica-eligible path. Only these two directions exist — the
+                // inverse "force replica" is deliberately unrepresentable.
+                let result = match read_route {
+                    ReadRoute::Writer => db.query_events(&query).await,
+                    ReadRoute::Routed => db.query_events_routed("bridge_query", &query).await,
+                };
+                (idx, result)
+            }
+        },
+    ))
     .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
     // Phase 3 — post-processing, strictly in filter order.
@@ -3462,6 +3540,76 @@ mod postgres_tests {
         assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
     }
 
+    #[test]
+    fn extract_consistency_strong_pins_to_writer() {
+        let raw = serde_json::json!({ "consistency": "strong" });
+        assert!(matches!(extract_consistency(&raw), Consistency::Strong));
+    }
+
+    #[test]
+    fn extract_consistency_absent_is_default_routed() {
+        let raw = serde_json::json!({ "kinds": [40100] });
+        assert!(matches!(extract_consistency(&raw), Consistency::Default));
+    }
+
+    #[test]
+    fn extract_consistency_unknown_value_is_malformed() {
+        // A typo or an attempt to name the inverse "force replica" direction
+        // must reject the request, never silently degrade to routed.
+        for bad in [
+            serde_json::json!({ "consistency": "weak" }),
+            serde_json::json!({ "consistency": "replica" }),
+            serde_json::json!({ "consistency": "eventual" }),
+            serde_json::json!({ "consistency": "STRONG" }),
+            serde_json::json!({ "consistency": true }),
+            serde_json::json!({ "consistency": 1 }),
+        ] {
+            assert!(
+                matches!(extract_consistency(&bad), Consistency::Malformed),
+                "{bad} must be rejected as malformed"
+            );
+        }
+    }
+
+    /// The routing direction the catchall loop dispatches on. A filter carrying
+    /// `"consistency": "strong"` MUST resolve to the writer pool
+    /// (`ReadRoute::Writer` → `query_events`); one without MUST resolve to the
+    /// replica-eligible path (`ReadRoute::Routed` → `query_events_routed`).
+    /// Both directions are pinned here so a refactor that drops the field on
+    /// the floor — reading every filter from one pool — flips one of these and
+    /// fails. The writer-vs-replica pool divergence itself is exercised by the
+    /// two-pool `routed_reads_are_confined_to_the_requested_community` test in
+    /// buzz-db (`#[ignore]`, requires Postgres).
+    #[test]
+    fn resolve_read_route_pins_strong_to_writer() {
+        let strong = serde_json::json!({ "consistency": "strong" });
+        assert_eq!(resolve_read_route(&strong), Ok(ReadRoute::Writer));
+    }
+
+    #[test]
+    fn resolve_read_route_defaults_to_routed_replica() {
+        let absent = serde_json::json!({ "kinds": [40100], "limit": 1 });
+        assert_eq!(resolve_read_route(&absent), Ok(ReadRoute::Routed));
+    }
+
+    #[test]
+    fn resolve_read_route_rejects_unknown_values() {
+        // Malformed never degrades to a pool — it is a client error, so the
+        // catchall loop turns this `Err` into a BAD_REQUEST before any DB work.
+        for bad in [
+            serde_json::json!({ "consistency": "weak" }),
+            serde_json::json!({ "consistency": "replica" }),
+            serde_json::json!({ "consistency": "STRONG" }),
+            serde_json::json!({ "consistency": true }),
+        ] {
+            assert_eq!(
+                resolve_read_route(&bad),
+                Err(()),
+                "{bad} must be a client error, never a pool"
+            );
+        }
+    }
+
     /// Extension flags opt in only on a literal JSON `true` — absent,
     /// non-boolean, and truthy-but-not-bool values all read as false, so a
     /// malformed filter degrades to a normal query instead of a wrong window.
@@ -3913,6 +4061,36 @@ mod postgres_tests {
             .status()
     }
 
+    /// Like `post_events` but also returns the UTF-8 response body.
+    async fn post_events_with_body(
+        state: Arc<crate::state::AppState>,
+        host: &str,
+        pubkey_hex: &str,
+        body: &[u8],
+    ) -> (axum::http::StatusCode, String) {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let resp = crate::router::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/events")
+                    .header(header::HOST, host)
+                    .header("x-pubkey", pubkey_hex)
+                    .body(Body::from(body.to_vec()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("router oneshot");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// Collect buzz_events_rejected_total with (transport, reason) labels from
     /// a DebuggingRecorder snapshot.
     fn http_reject_counts(
@@ -4053,6 +4231,97 @@ mod postgres_tests {
             counts.get(&("http".to_owned(), "invalid".to_owned())),
             Some(&1),
             "IngestError::Rejected arm must increment transport=http,reason=invalid"
+        );
+    }
+
+    /// Canvas ingest wiring regression: the kind-40100-specific future-timestamp
+    /// guard in `ingest_event_inner` is actually wired to the shipping call path.
+    ///
+    /// Calls `post_events_with_body` → router → `submit_event` → `ingest_event_inner`:
+    /// - A canvas event with `created_at = relay_now + 600` is rejected 400 with
+    ///   the canvas-specific error "canvas event timestamp too far in the future".
+    ///
+    /// The +600 offset sits 300 s above the canvas ceiling (300 s) and 300 s
+    /// below the general drift bound (900 s). Scheduler latency between test
+    /// setup and production's independent `Utc::now()` re-sample would need to
+    /// exceed 300 s to erode the margin — not possible under any realistic load.
+    /// Exact 300/301 boundary coverage lives in the pure `validate_canvas_future_timestamp`
+    /// tests (`canvas_ingest_numeric_contract`, `canvas_ingest_future_timestamp_boundary`),
+    /// which pass fixed arguments and have no clock race.
+    ///
+    /// Discriminating: deleting the `if kind_u32 == KIND_CANVAS { … }` call in
+    /// `ingest_event_inner` removes the guard. The event then passes the general
+    /// ±900 s drift check (600 s < 900 s) and reaches the channel membership
+    /// check (no h-tag channel exists → "restricted: not a channel member"),
+    /// making the message assertion below fail with a different body.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn canvas_ingest_future_timestamp_guard_is_wired() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        let Some(state) = rt.block_on(bridge_handler_test_state()) else {
+            panic!("local Postgres not reachable — start Postgres on 127.0.0.1:5432 before running ignored bridge handler tests");
+        };
+
+        let host = {
+            let h = format!(
+                "canvas-ingest-wiring-{}.local",
+                uuid::Uuid::new_v4().simple()
+            );
+            rt.block_on(state.db.ensure_configured_community(&h))
+                .expect("ensure community");
+            h
+        };
+
+        let client_keys = Keys::generate();
+        let pubkey_hex = client_keys.public_key().to_hex();
+
+        // A canvas event 600 s in the future. The +600 offset sits 300 s above
+        // the canvas ceiling and 300 s below the general ±900 s drift bound, so
+        // only the canvas guard can produce a rejection here. Scheduler latency
+        // between this Utc::now() call and production's independent re-sample
+        // would need to exceed 300 s to erode the margin — impossible in practice.
+        // Exact 300/301 boundary assertions live in the pure fixed-literal tests.
+        let relay_now = chrono::Utc::now().timestamp();
+        // Use a random channel UUID that does NOT exist in the DB. If the canvas
+        // guard is correctly wired, it fires first; if deleted, the event passes
+        // the general ±900 s check (600 < 900) and reaches the membership check,
+        // producing "not a channel member" instead of the canvas rejection.
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let event_past_ceiling =
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "")
+                .tag(Tag::parse(["h", channel_id.as_str()]).expect("h tag"))
+                .custom_created_at(nostr::Timestamp::from(
+                    (relay_now + 600).try_into().unwrap_or(0u64),
+                ))
+                .sign_with_keys(&client_keys)
+                .expect("sign canvas event past ceiling");
+        let body_bytes =
+            serde_json::to_vec(&event_past_ceiling).expect("serialize event past ceiling");
+
+        let (status, body) = rt.block_on(post_events_with_body(
+            state.clone(),
+            &host,
+            &pubkey_hex,
+            &body_bytes,
+        ));
+
+        // Must be 400 AND the body must name the canvas guard (not the membership check).
+        // Mutation oracle: deleting the `if kind_u32 == KIND_CANVAS { … }` guard
+        // makes the body say "not a channel member" instead, failing both assertions.
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "canvas event at relay_now+600 must be rejected 400; body: {body}",
+        );
+        assert!(
+            body.contains("canvas event timestamp too far in the future"),
+            "rejection body must name the canvas guard (not the membership check). \
+             Got: {body}; mutation oracle: delete the guard call site → body becomes \
+             'not a channel member'",
         );
     }
 
@@ -4237,5 +4506,308 @@ mod postgres_tests {
             log.contains(&pubkey_hex[..16]),
             "attribution line must carry the pubkey;\nlog:\n{log}"
         );
+    }
+
+    /// Drive a single POST /query request through the router and return the
+    /// HTTP status code + body bytes.
+    async fn post_query(
+        state: Arc<crate::state::AppState>,
+        host: &str,
+        pubkey_hex: &str,
+        body: &[u8],
+    ) -> (axum::http::StatusCode, axum::body::Bytes) {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let resp = crate::router::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query")
+                    .header(header::HOST, host)
+                    .header("x-pubkey", pubkey_hex)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_vec()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("router oneshot");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        (status, bytes)
+    }
+
+    // ── Bridge dispatch test: writer-pin routes to the writer pool ────────────
+    //
+    // Exercises the catchall dispatch loop's `ReadRoute` match at the shipping
+    // seam — the production `match read_route { Writer => db.query_events(...),
+    // Routed => db.query_events_routed(...) }` block.
+    //
+    // The test stages divergent data: a kind-40100 canvas event is inserted into
+    // the writer pool only. The replica pool starts empty for that channel. With
+    // the fence open and a bounded-staleness budget set, `query_events_routed`
+    // routes to the replica and sees nothing. `query_events` reads the writer
+    // and sees the event.
+    //
+    // DoD sequence:
+    //   1. Routed read (no consistency field) → replica → event absent. This
+    //      proves the replica path is genuinely live in this harness; otherwise
+    //      the strong-read probe proves nothing.
+    //   2. Strong read (consistency=strong) → writer → event present.
+    //   3. Malformed consistency value → 400.
+    //
+    // Mutation oracle: changing the `ReadRoute::Writer` arm to call
+    // `db.query_events_routed` makes probe 2 return empty (same as probe 1) →
+    // the `assert_eq!(strong_events.len(), 1)` assertion fails. This is the
+    // direct evidence Thufir required: the dispatch IS the seam, and breaking
+    // the arm breaks this test.
+    //
+    // Infrastructure: two scratch Postgres databases on the local instance.
+    // Requires the same local Postgres as the other `#[ignore]` bridge tests.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn strong_consistency_dispatches_to_writer_pool_not_replica() {
+        use buzz_core::CommunityId;
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use sqlx::PgPool;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .unwrap_or_else(|_| crate::test_support::database_url());
+
+        // Create a scratch database and run migrations on it.
+        async fn scratch_db(admin: &PgPool, admin_url: &str, suffix: &str) -> (PgPool, String) {
+            let name = format!(
+                "bridge_dispatch_{}_{}",
+                suffix,
+                uuid::Uuid::new_v4().simple()
+            );
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+                .execute(admin)
+                .await
+                .unwrap_or_else(|e| panic!("create scratch db {name}: {e}"));
+            let slash = admin_url
+                .rfind('/')
+                .expect("URL must have a path component");
+            let url = format!("{}/{name}", &admin_url[..slash]);
+            let pool = PgPool::connect(&url)
+                .await
+                .unwrap_or_else(|e| panic!("connect scratch db {name}: {e}"));
+            buzz_db::migration::run_migrations(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("migrate scratch db {name}: {e}"));
+            (pool, name)
+        }
+
+        async fn drop_scratch(admin: &PgPool, pool: PgPool, name: &str) {
+            drop(pool);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+            )))
+            .execute(admin)
+            .await;
+        }
+
+        // --- setup -----------------------------------------------------------
+        let admin = rt.block_on(PgPool::connect(&admin_url)).expect(
+            "connect admin pool — start local Postgres before running ignored bridge tests",
+        );
+
+        let (writer_pool, writer_name) = rt.block_on(scratch_db(&admin, &admin_url, "w"));
+        let (replica_pool, replica_name) = rt.block_on(scratch_db(&admin, &admin_url, "r"));
+
+        let community = uuid::Uuid::new_v4();
+        let channel_id = uuid::Uuid::new_v4();
+        let host = format!("dispatch-test-{}.local", community.simple());
+        let author = Keys::generate();
+
+        // Seed community + open channel on both writer and replica.
+        rt.block_on(async {
+            for pool in [&writer_pool, &replica_pool] {
+                sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                    .bind(community)
+                    .bind(&host)
+                    .execute(pool)
+                    .await
+                    .expect("seed community");
+                buzz_db::channel::create_channel_with_id(
+                    pool,
+                    CommunityId::from_uuid(community),
+                    channel_id,
+                    &format!("canvas-{}", channel_id.simple()),
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    author.public_key().to_bytes().as_slice(),
+                    None,
+                )
+                .await
+                .expect("create channel");
+            }
+        });
+
+        // Writer-only canvas event: inserted on writer, NOT replicated.
+        let canvas_ev = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_CANVAS as u16),
+            "writer-only canvas content",
+        )
+        .tag(Tag::custom(
+            nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+            [channel_id.to_string()],
+        ))
+        .sign_with_keys(&author)
+        .expect("sign canvas event");
+
+        rt.block_on(async {
+            let db_w = buzz_db::Db::from_pool(writer_pool.clone());
+            db_w.insert_event(
+                CommunityId::from_uuid(community),
+                &canvas_ev,
+                Some(channel_id),
+            )
+            .await
+            .expect("insert canvas event on writer");
+            // replica_pool deliberately receives no canvas events.
+        });
+
+        // --- build AppState with two-pool Db ---------------------------------
+        let state = rt.block_on(async {
+            let mut config = crate::config::Config::from_env()
+                .expect("Config::from_env required — set DATABASE_URL, REDIS_URL, etc.");
+            config.database_url = crate::test_support::database_url();
+            config.redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            config.relay_url = "wss://dispatch-test.local".to_string();
+            config.require_auth_token = false;
+            config.require_relay_membership = false;
+
+            let mut db = buzz_db::Db::from_pools(writer_pool.clone(), replica_pool.clone());
+            // Open the freshness fence and set a bounded-staleness budget so
+            // `query_events_routed` actually routes to the replica pool.
+            db.fence().force_open_for_tests(chrono::Utc::now());
+            db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub manager"),
+            );
+            let audit = buzz_audit::AuditService::new(writer_pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(writer_pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+
+            let (mut state, _audit_shutdown) = crate::state::AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                Keys::generate(),
+                media_storage,
+            );
+            state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
+            Arc::new(state)
+        });
+
+        let pubkey_hex = author.public_key().to_hex();
+        let channel_str = channel_id.to_string();
+
+        // Probe 1: routed read (no consistency) → replica → event absent.
+        // This proves the replica path is genuinely live in this harness.
+        let body = serde_json::to_vec(&serde_json::json!([{
+            "kinds": [buzz_core::kind::KIND_CANVAS as u64],
+            "#h": [&channel_str],
+            "limit": 10,
+        }]))
+        .expect("serialize routed filter");
+        let (status, resp_body) = rt.block_on(post_query(state.clone(), &host, &pubkey_hex, &body));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "Probe 1: routed query must return 200: {}",
+            String::from_utf8_lossy(&resp_body)
+        );
+        let routed_events: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp_body).expect("parse routed response");
+        assert!(
+            routed_events.is_empty(),
+            "Probe 1 FAIL — routed read must NOT see writer-only canvas event \
+             (replica pool is empty for this channel): {routed_events:?}"
+        );
+
+        // Probe 2: writer-pinned read (consistency=strong) → writer pool → event present.
+        // Mutation oracle: changing Writer arm to query_events_routed → probe 2 returns
+        // empty → assertion fails.
+        let body = serde_json::to_vec(&serde_json::json!([{
+            "kinds": [buzz_core::kind::KIND_CANVAS as u64],
+            "#h": [&channel_str],
+            "limit": 10,
+            "consistency": "strong",
+        }]))
+        .expect("serialize strong filter");
+        let (status, resp_body) = rt.block_on(post_query(state.clone(), &host, &pubkey_hex, &body));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "Probe 2: strong query must return 200: {}",
+            String::from_utf8_lossy(&resp_body)
+        );
+        let strong_events: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp_body).expect("parse strong response");
+        assert_eq!(
+            strong_events.len(),
+            1,
+            "Probe 2 FAIL — strong-consistency read MUST see the writer-only canvas event. \
+             Mutation oracle: if ReadRoute::Writer dispatches to query_events_routed instead \
+             of query_events, this returns empty and this assertion fails: {strong_events:?}"
+        );
+        assert_eq!(
+            strong_events[0].get("content").and_then(|v| v.as_str()),
+            Some("writer-only canvas content"),
+            "strong read must return the canvas event inserted into the writer pool"
+        );
+
+        // Probe 3: malformed consistency value must 400.
+        let body = serde_json::to_vec(&serde_json::json!([{
+            "kinds": [buzz_core::kind::KIND_CANVAS as u64],
+            "#h": [&channel_str],
+            "consistency": "weak",
+        }]))
+        .expect("serialize bad filter");
+        let (status, _) = rt.block_on(post_query(state.clone(), &host, &pubkey_hex, &body));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "Probe 3 FAIL — unknown consistency value must be rejected with 400"
+        );
+
+        // --- teardown --------------------------------------------------------
+        rt.block_on(async {
+            let admin2 = PgPool::connect(&admin_url)
+                .await
+                .expect("reconnect admin for teardown");
+            drop_scratch(&admin2, writer_pool, &writer_name).await;
+            drop_scratch(&admin2, replica_pool, &replica_name).await;
+        });
     }
 }

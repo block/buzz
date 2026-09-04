@@ -21,6 +21,7 @@ import {
   useUnarchiveChannelMutation,
   useUpdateChannelMutation,
 } from "@/features/channels/hooks";
+import { canvasIngressOpen } from "./canvasIngress";
 import { compareMembersByRole } from "@/features/channels/lib/memberUtils";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelWorkflowsQuery } from "@/features/workflows/hooks";
@@ -56,7 +57,7 @@ import {
   PANEL_ENTER_MOTION_CLASS,
   PANEL_OVERLAY_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
-import { ChannelCanvas } from "./ChannelCanvas";
+import { KeyedChannelCanvas } from "./KeyedChannelCanvas";
 import { ChannelWorkflowsSection } from "./ChannelWorkflowsSection";
 import {
   CHANNEL_FORM_FIELD_CONTROL_CLASS,
@@ -309,7 +310,10 @@ export function ChannelManagementSheet({
   const canvasPreview = hasCanvas
     ? getMarkdownPreviewText(canvasContent)
     : undefined;
-  const canOpenCanvas = hasCanvas || canEditNarrative;
+  const canOpenCanvas = canvasIngressOpen(
+    canvasQuery.data?.eventId,
+    canEditNarrative,
+  );
 
   function handleEditDialogOpenChange(next: boolean) {
     if (next) {
@@ -972,7 +976,7 @@ function ChannelManagementPanelContent({
           </div>
         ) : activeView === "canvas" ? (
           <div data-testid="channel-canvas-section">
-            <ChannelCanvas
+            <KeyedChannelCanvas
               canEdit={canEditNarrative}
               channelId={channelId}
               isArchived={isArchived}
