@@ -2668,17 +2668,16 @@ mod tests {
     //     but assertion expects `retry_secs <= 5` → panics.
     //   - `cold_issuer_doubles_backoff` and `backoff_capped_at_300` unaffected.
     //
-    // ## Production-seam mutation oracle
+    // ## Production-seam coverage note
     //
-    // Remove or stub out the `run_jwks_refresh_step` call in the supervisor's
-    // inner loop (lines ~664-681 in main.rs). With the step call absent the
-    // per-issuer `warmed`, `backoff_secs`, and `next_attempt_at` fields are
-    // never mutated, so:
-    //   - After simulated hard death, `warmed` stays `true` (assertion panics).
-    //   - After recovery, `warmed` stays `false` (assertion panics).
-    //   - After recovery, `next_attempt_at` is not advanced to the warm
-    //     interval, so the retry fires immediately on every tick (admission
-    //     would thrash the JWKS server in production, not recovered).
+    // These unit tests call `jwks_next_retry_after_failed_refresh` directly and
+    // do not go through the supervisor. Removing the `run_jwks_refresh_step`
+    // call from the supervisor's inner loop does NOT affect these tests.
+    // The production-seam test below (`f1_supervisor_seam_warm_dead_fast_retry_recovery`)
+    // covers `run_jwks_refresh_step` — the exact function the supervisor calls —
+    // but also drives it directly rather than through the supervisor loop.
+    // The remaining uncovered seam is the single supervisor call site at
+    // lines ~671-680 of main.rs; removing it there leaves all tests green.
 
     #[test]
     fn hard_dead_warm_issuer_resets_to_fast_cadence() {
@@ -2725,26 +2724,35 @@ mod tests {
     // supervisor's inner loop — through the warm → hard-dead → fast-retry →
     // recovery cycle using a controllable mock source and paused Tokio time.
     //
-    // ## Why this test is the required witness
+    // ## What this test proves
     //
-    // The unit tests above only call the pure helper directly; they do not
-    // exercise the supervisor wiring. Removing the `run_jwks_refresh_step` call
-    // from the supervisor's inner loop, or stubbing it to a no-op, leaves
-    // `warmed`, `backoff_secs`, and `next_attempt_at` unmutated — every
-    // assertion in THIS test then fails.
+    // `run_jwks_refresh_step` (the production function the supervisor delegates
+    // to for each issuer) correctly implements:
+    //   - warm + dead snapshot → `warmed=false`, fast retry (≤ 5 s)
+    //   - fast retry + recovered snapshot → `warmed=true`, normal cadence
+    //
+    // This test drives the function directly. It does NOT go through the
+    // supervisor loop. Removing `run_jwks_refresh_step` from the supervisor's
+    // inner loop does not affect this test.
+    //
+    // ## Remaining uncovered seam
+    //
+    // The supervisor call site at lines ~671-680 of main.rs (where
+    // `run_jwks_refresh_step` is actually invoked in production) is not covered
+    // by any test. Removing that call leaves all tests green. This is a known
+    // gap; a paused-time supervisor-loop integration test could close it.
     //
     // ## Mutation oracle for this test
     //
-    // 1. Remove `run_jwks_refresh_step` from the supervisor's inner loop
-    //    (or replace with a no-op): `warmed` stays `true` after hard death
-    //    → `assert!(!warmed)` panics.
-    // 2. Revert `jwks_next_retry_after_failed_refresh` to old behavior
-    //    (stay on warm interval): `next_attempt_at` is 300 s ahead, not 5 s
-    //    → the 5-second advance does not reach it → second step is skipped
-    //    → `warmed` remains `false` after recovery → `assert!(warmed)` panics.
-    // 3. Remove the `Some(_)` arm from `run_jwks_refresh_step` (never set
+    // 1. Revert `jwks_next_retry_after_failed_refresh` to old behavior
+    //    (stay on warm interval after hard death): `next_attempt_at` is 300 s
+    //    ahead, not 5 s → time-advance of 5 s does not reach it → second step
+    //    is skipped → `warmed` remains `false` after recovery → `assert!(warmed)` panics.
+    // 2. Remove the `Some(_)` arm from `run_jwks_refresh_step` (never set
     //    `warmed = true` on recovery): `warmed` stays `false` after recovery
     //    → `assert!(warmed)` panics.
+    // 3. Remove the `None` arm cadence reset from `run_jwks_refresh_step`:
+    //    `backoff_secs` stays at `interval_secs` → `assert_eq!(backoff_secs, 5)` panics.
     #[tokio::test(start_paused = true)]
     async fn f1_supervisor_seam_warm_dead_fast_retry_recovery() {
         use std::sync::Arc;

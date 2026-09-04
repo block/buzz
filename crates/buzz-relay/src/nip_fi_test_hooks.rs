@@ -194,6 +194,13 @@ make_hook!(audio_membership_lock_hook, before_membership_lock);
 make_hook!(audio_participant_commit_hook, before_participant_commit);
 make_hook!(audio_participant_fanout_hook, after_participant_fanout);
 make_hook!(audio_add_peer_hook, after_add_peer);
+// `before_archive_recheck`: fires in `commit_participant_join` immediately
+// after the `SELECT archived_at ... FOR UPDATE` row lock is acquired and the
+// snapshot value is read, but before the archived check / any write. At this
+// point the channels row is locked in the active transaction. A test can
+// attempt a concurrent archive UPDATE here to prove it blocks (55P03) and is
+// serialized against the join commit.
+make_hook!(audio_archive_recheck_hook, before_archive_recheck);
 
 // ── Publication-attempt counter ────────────────────────────────────────────
 // `before_event_publish`: fires immediately before `state.pubsub.publish_event`
