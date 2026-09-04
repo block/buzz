@@ -193,6 +193,11 @@ pub const REDIS_BOOTSTRAP_FAILURE: &str = "Redis command path unavailable at sta
 /// than exiting.
 const REDIS_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Keep the Redis driver's per-command timeout outside the relay-owned startup
+/// budget so [`REDIS_BOOTSTRAP_TIMEOUT`] remains the one authoritative bound.
+const REDIS_BOOTSTRAP_DRIVER_TIMEOUT: std::time::Duration =
+    REDIS_BOOTSTRAP_TIMEOUT.saturating_mul(2);
+
 /// Proves once, during startup, that the Redis command path this pod will serve
 /// from can actually be reached.
 ///
@@ -205,10 +210,15 @@ const REDIS_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// dependency failure and must never change readiness.
 pub async fn verify_redis_command_path(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
     let ping = async {
-        let mut connection = pool
+        let connection = pool
             .get()
             .await
             .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))?;
+        // This one-shot connection is removed from the pool so extending its
+        // driver timeout cannot leak into normal serving traffic. The relay's
+        // outer timeout below must bound both lazy checkout and PING.
+        let mut connection = deadpool_redis::Connection::take(connection);
+        connection.set_response_timeout(REDIS_BOOTSTRAP_DRIVER_TIMEOUT);
         redis::cmd("PING")
             .query_async::<String>(&mut connection)
             .await
