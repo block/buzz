@@ -18,7 +18,7 @@ A feed that answers these instantly converts a stream of events into a sense of 
 
 ## Conversation and Inspection
 
-The [agent](VISION_AGENT.md#the-collaborator) is the human-facing collaborator.
+The [agent](VISION_AGENT_COLLABORATION.md#the-collaborator) is the human-facing collaborator.
 Conversation foregrounds its contributions: decisions, meaningful progress,
 results, and escalations that need a person. Internal orchestration across
 hosts, sessions, and runtime-local workers belongs in an on-demand inspection

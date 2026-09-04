@@ -169,7 +169,7 @@ See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the proj
 An agent is a persistent collaborator whose identity and work continue across
 conversations, channels, and execution hosts. It owns continuity and
 coordination across its sessions and runtime-local workers, within community
-authorization. See [VISION_AGENT.md](VISION_AGENT.md#the-collaborator) for the
+authorization. See [VISION_AGENT_COLLABORATION.md](VISION_AGENT_COLLABORATION.md#the-collaborator) for the
 canonical agent vision, and [VISION_ACTIVITY.md](VISION_ACTIVITY.md) for
 on-demand inspection of its internal work.
 
