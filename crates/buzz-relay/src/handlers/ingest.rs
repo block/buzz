@@ -2169,6 +2169,17 @@ pub async fn ingest_event(
     result
 }
 
+// Profiles are durable display records, not freshness signals. A Desktop may
+// first publish its immutable signed record long after an offline startup.
+// Only their past-age bound is waived; future drift and all other admission
+// checks still apply. Observation/presence kinds must retain their own window.
+fn timestamp_within_ingest_window(kind: u32, event_ts: u64, now: u64) -> bool {
+    const MAX_TIMESTAMP_DRIFT_SECS: u64 = 900;
+    event_ts <= now.saturating_add(MAX_TIMESTAMP_DRIFT_SECS)
+        && (kind == KIND_DESKTOP_PROFILE
+            || now.saturating_sub(event_ts) <= MAX_TIMESTAMP_DRIFT_SECS)
+}
+
 async fn ingest_event_inner(
     state: &Arc<AppState>,
     tracer: &Arc<dyn buzz_conformance::Tracer>,
@@ -2233,10 +2244,8 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
-    let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    if !timestamp_within_ingest_window(kind_u32, event.created_at.as_secs(), now as u64) {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -3315,6 +3324,40 @@ mod postgres_tests {
             map_huddle_backing_channel_error(buzz_db::DbError::ChannelNotFound(channel_id)),
             IngestError::Rejected(message) if message.contains("backing channel not found")
         ));
+    }
+
+    #[test]
+    fn immutable_profile_age_exception_is_past_only_and_kind_specific() {
+        let now = 1_800_000_000;
+        // Include the next observation kind explicitly: freshness is not profile age.
+        for kind in [
+            KIND_DESKTOP_PROFILE,
+            30181,
+            KIND_PROFILE,
+            KIND_EVENT_REMINDER,
+            1,
+        ] {
+            for (timestamp, ordinary, profile) in [
+                (0, false, true),
+                (now - 86_400, false, true),
+                (now - 901, false, true),
+                (now - 900, true, true),
+                (now, true, true),
+                (now + 900, true, true),
+                (now + 901, false, false),
+                (u64::MAX, false, false),
+            ] {
+                assert_eq!(
+                    timestamp_within_ingest_window(kind, timestamp, now),
+                    if kind == KIND_DESKTOP_PROFILE {
+                        profile
+                    } else {
+                        ordinary
+                    },
+                    "kind={kind} timestamp={timestamp}"
+                );
+            }
+        }
     }
 
     #[test]

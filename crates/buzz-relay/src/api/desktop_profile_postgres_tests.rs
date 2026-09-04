@@ -165,3 +165,94 @@ async fn desktop_profile_authenticated_owner_query_and_private_storage() {
         }
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn aged_desktop_profile_retries_through_production_ingest_without_resigning() {
+    let mut state = bridge_handler_test_state()
+        .await
+        .expect("test infrastructure");
+    Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).require_auth_token = true;
+    let host = format!("desktop-retry-{}.example", uuid::Uuid::new_v4().simple());
+    state.db.ensure_configured_community(&host).await.unwrap();
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let profile = buzz_core::desktop_profile::DesktopProfile::new(
+        format!("wss://{host}"),
+        uuid::Uuid::new_v4().simple().to_string(),
+    )
+    .unwrap();
+    let prepared = profile.sign(&owner).unwrap();
+    // Model bytes committed during yesterday's offline first launch. Neither
+    // the first submission nor its duplicate is re-dated or re-signed below.
+    let now = Timestamp::now().as_secs();
+    let aged = EventBuilder::new(prepared.kind, &prepared.content)
+        .tags(prepared.tags.iter().cloned())
+        .custom_created_at(Timestamp::from(now - 86_400))
+        .sign_with_keys(&owner)
+        .unwrap();
+    let raw = json!(aged);
+    for _ in 0..2 {
+        let (status, result) = post(&state, &host, "/events", &owner, raw.clone(), true).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["accepted"], true, "{result}");
+        let (status, rows) = post(
+            &state,
+            &host,
+            "/query",
+            &owner,
+            json!([{"kinds":[KIND_DESKTOP_PROFILE], "authors":[owner.public_key().to_hex()], "ids":[aged.id.to_hex()]}]),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        for field in [
+            "id",
+            "pubkey",
+            "kind",
+            "created_at",
+            "tags",
+            "content",
+            "sig",
+        ] {
+            assert_eq!(rows[0][field], raw[field], "stored {field} changed");
+        }
+        let stored: nostr::Event = serde_json::from_value(rows[0].clone()).unwrap();
+        assert_eq!(
+            buzz_core::desktop_profile::DesktopProfile::read(
+                &stored,
+                &owner,
+                &format!("wss://{host}")
+            )
+            .unwrap(),
+            profile
+        );
+    }
+    // The age exception grants no signer authority and bypasses no envelope or
+    // signature checks. These calls use the real HTTP -> shared ingest path.
+    let (status, result) = post(&state, &host, "/events", &outsider, raw.clone(), true).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
+    let mut corrupt = raw.clone();
+    corrupt["content"] = json!(format!("{}x", aged.content));
+    let (status, result) = post(&state, &host, "/events", &owner, corrupt, true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+    let invalid = EventBuilder::new(aged.kind, &aged.content)
+        .tag(Tag::identifier("invalid-coordinate"))
+        .custom_created_at(aged.created_at)
+        .sign_with_keys(&owner)
+        .unwrap();
+    let future = EventBuilder::new(aged.kind, &aged.content)
+        .tags(aged.tags.iter().cloned())
+        .custom_created_at(Timestamp::from(now + 86_400))
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ordinary = EventBuilder::text_note("old ordinary event")
+        .custom_created_at(aged.created_at)
+        .sign_with_keys(&owner)
+        .unwrap();
+    for rejected in [invalid, future, ordinary] {
+        let (status, result) = post(&state, &host, "/events", &owner, json!(rejected), true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+    }
+}
