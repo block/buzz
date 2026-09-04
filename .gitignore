@@ -15,6 +15,12 @@ __pycache__/
 .env.local
 .env.*.local
 
+# Compose deployment: every .env variant except the example, plus the secrets
+# mount dir. Real values live in coffer, never in git.
+deploy/compose/.env*
+!deploy/compose/.env.example
+deploy/compose/secrets/
+
 # Editor / IDE
 .idea/
 .vscode/*
