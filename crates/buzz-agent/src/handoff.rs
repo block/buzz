@@ -410,6 +410,7 @@ fn push_history_snippet(out: &mut String, item: &HistoryItem) {
         HistoryItem::Assistant {
             text,
             tool_calls,
+            reasoning: _,
             reasoning_details: _,
         } => {
             out.push_str("[assistant] ");

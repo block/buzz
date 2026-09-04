@@ -62,6 +62,7 @@ pub enum HistoryItem {
     Assistant {
         text: String,
         tool_calls: Vec<ToolCall>,
+        reasoning: String,
         reasoning_details: Option<Value>,
     },
     ToolResult(ToolResult),
@@ -87,6 +88,7 @@ impl HistoryItem {
             Self::Assistant {
                 text,
                 tool_calls,
+                reasoning,
                 reasoning_details,
             } => {
                 text.len()
@@ -107,6 +109,7 @@ impl HistoryItem {
                                     .unwrap_or(0)
                         })
                         .sum::<usize>()
+                    + reasoning.len()
                     + reasoning_details
                         .as_ref()
                         .and_then(|v| serde_json::to_vec(v).ok())
@@ -717,6 +720,7 @@ mod tests {
                 arguments: Value::Null,
                 provider_extra: extra,
             }],
+            reasoning: String::new(),
             reasoning_details: None,
         };
         let without_extra = HistoryItem::Assistant {
@@ -727,6 +731,7 @@ mod tests {
                 arguments: Value::Null,
                 provider_extra: Map::new(),
             }],
+            reasoning: String::new(),
             reasoning_details: None,
         };
         assert!(with_extra.estimated_bytes() > without_extra.estimated_bytes() + 500);

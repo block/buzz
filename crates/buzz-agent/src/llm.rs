@@ -588,6 +588,7 @@ fn anthropic_body(
             HistoryItem::Assistant {
                 text,
                 tool_calls,
+                reasoning: _,
                 reasoning_details: _,
             } => {
                 flush(&mut messages, &mut pending);
@@ -740,12 +741,19 @@ fn openai_body(
             HistoryItem::Assistant {
                 text,
                 tool_calls,
+                reasoning,
                 reasoning_details,
             } => {
                 flush_images(&mut messages, &mut pending_images);
                 let mut msg = serde_json::Map::new();
                 msg.insert("role".into(), json!("assistant"));
                 msg.insert("content".into(), json!(text.as_str()));
+                // DeepSeek thinking mode requires reasoning_content echoed on subsequent
+                // requests that carry tools (and ignores it harmlessly on plain multi-turn).
+                // https://api-docs.deepseek.com/guides/thinking_mode
+                if !reasoning.is_empty() {
+                    msg.insert("reasoning_content".into(), json!(reasoning.as_str()));
+                }
                 if let Some(details) = reasoning_details {
                     msg.insert("reasoning_details".into(), details.clone());
                 }
@@ -859,6 +867,7 @@ fn responses_body(
             HistoryItem::Assistant {
                 text,
                 tool_calls,
+                reasoning: _,
                 reasoning_details: _,
             } => {
                 if !text.is_empty() {
@@ -2860,6 +2869,7 @@ mod tests {
                     arguments: serde_json::json!({"source":"x.png"}),
                     provider_extra: Default::default(),
                 }],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
@@ -2912,6 +2922,7 @@ mod tests {
                     arguments: serde_json::json!({"command": "ls"}),
                     provider_extra: Default::default(),
                 }],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
@@ -3012,6 +3023,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     provider_extra: Default::default(),
                 }],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
         ];
@@ -3432,6 +3444,7 @@ mod tests {
                         provider_extra: Default::default(),
                     },
                 ],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
@@ -3494,6 +3507,7 @@ mod tests {
                 HistoryItem::Assistant {
                     text: "hi".into(),
                     tool_calls: vec![],
+                    reasoning: String::new(),
                     reasoning_details: None,
                 },
                 HistoryItem::User("more".into()),
@@ -5364,6 +5378,7 @@ mod tests {
         let history = vec![HistoryItem::Assistant {
             text: r.text.clone(),
             tool_calls: r.tool_calls.clone(),
+            reasoning: String::new(),
             reasoning_details: None,
         }];
         let body = openai_body(
@@ -6546,6 +6561,7 @@ mod tests {
                     arguments: serde_json::json!({"source": "x.png"}),
                     provider_extra: Default::default(),
                 }],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
@@ -6646,6 +6662,7 @@ mod tests {
                     arguments: serde_json::json!({"source": "x.png"}),
                     provider_extra: Default::default(),
                 }],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
@@ -6812,6 +6829,7 @@ mod tests {
             HistoryItem::Assistant {
                 text: String::new(),
                 tool_calls: r1.tool_calls,
+                reasoning: String::new(),
                 reasoning_details: r1.reasoning_details,
             },
             HistoryItem::ToolResult(ToolResult {
@@ -6864,6 +6882,7 @@ mod tests {
             HistoryItem::Assistant {
                 text: "hi back".into(),
                 tool_calls: Vec::new(),
+                reasoning: String::new(),
                 reasoning_details: None,
             },
         ];
@@ -6894,11 +6913,13 @@ mod tests {
         let with = HistoryItem::Assistant {
             text: "text".into(),
             tool_calls: Vec::new(),
+            reasoning: String::new(),
             reasoning_details: Some(details.clone()),
         };
         let without = HistoryItem::Assistant {
             text: "text".into(),
             tool_calls: Vec::new(),
+            reasoning: String::new(),
             reasoning_details: None,
         };
         assert!(
@@ -6924,6 +6945,7 @@ mod tests {
             HistoryItem::Assistant {
                 text: "ok".into(),
                 tool_calls: Vec::new(),
+                reasoning: String::new(),
                 reasoning_details: Some(
                     serde_json::json!([{"type": "thinking", "content": "hmm"}]),
                 ),
@@ -6956,6 +6978,7 @@ mod tests {
             HistoryItem::Assistant {
                 text: "ok".into(),
                 tool_calls: Vec::new(),
+                reasoning: String::new(),
                 reasoning_details: Some(
                     serde_json::json!([{"type": "thinking", "content": "hmm"}]),
                 ),
@@ -6967,6 +6990,129 @@ mod tests {
             !body_str.contains("reasoning_details"),
             "responses_body must not replay reasoning_details"
         );
+    }
+
+    // ---- DeepSeek reasoning_content replay (#5399) ----
+
+    #[test]
+    fn openai_body_replays_reasoning_content_on_tool_call_assistant() {
+        // With tools on the request (buzz-agent always can send them), DeepSeek
+        // thinking mode 400s unless prior assistant reasoning_content is echoed.
+        let history = vec![
+            HistoryItem::User("run ls".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call_1".into(),
+                    name: "dev__shell".into(),
+                    arguments: serde_json::json!({"command": "ls"}),
+                    provider_extra: Default::default(),
+                }],
+                reasoning: "think…".into(),
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call_1".into(),
+                content: vec![ToolResultContent::Text("file.txt".into())],
+                is_error: false,
+            }),
+        ];
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &history,
+            &tools_vec(),
+            "deepseek-reasoner",
+            None,
+        );
+        let assistant = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .expect("assistant message must exist");
+        assert_eq!(assistant["reasoning_content"], "think…");
+        assert!(
+            assistant.get("tool_calls").and_then(Value::as_array).is_some(),
+            "tool_calls must still be present alongside reasoning_content"
+        );
+    }
+
+    #[test]
+    fn openai_body_replays_reasoning_content_on_plain_assistant_when_present() {
+        // Harmless on plain multi-turn per DeepSeek docs; required once tools
+        // are on the request body.
+        let history = vec![
+            HistoryItem::User("hi".into()),
+            HistoryItem::Assistant {
+                text: "hello".into(),
+                tool_calls: Vec::new(),
+                reasoning: "brief thought".into(),
+                reasoning_details: None,
+            },
+        ];
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &history,
+            &tools_vec(),
+            "deepseek-reasoner",
+            None,
+        );
+        let assistant = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .expect("assistant message must exist");
+        assert_eq!(assistant["reasoning_content"], "brief thought");
+    }
+
+    #[test]
+    fn openai_body_omits_reasoning_content_when_empty() {
+        let history = vec![
+            HistoryItem::User("hi".into()),
+            HistoryItem::Assistant {
+                text: "hello".into(),
+                tool_calls: Vec::new(),
+                reasoning: String::new(),
+                reasoning_details: None,
+            },
+        ];
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &history,
+            &[],
+            "model",
+            None,
+        );
+        let assistant = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .expect("assistant message must exist");
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "empty reasoning must not emit reasoning_content"
+        );
+    }
+
+    #[test]
+    fn parse_openai_captures_reasoning_content() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "answer",
+                    "reasoning_content": "step by step…"
+                }
+            }]
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.reasoning, "step by step…");
+        assert_eq!(r.text, "answer");
     }
 
     // ---- T4: openrouter_post transport-level regressions ----
