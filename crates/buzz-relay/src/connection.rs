@@ -445,7 +445,7 @@ async fn handle_active_connection(
             Arc::clone(&nip_fi_gate),
             conn.terminal_ctrl_tx.clone(),
             crate::nip_fi_session::NipFiWsRoute::Root,
-            conn.nip_fi_reason_tx.clone(),
+            control.clone(),
         )
     });
 
@@ -1451,12 +1451,13 @@ pub(crate) mod tests {
         let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
 
         // Invoke the production shared constructor — Root route.
+        let control = crate::state::CommunityConnectionControl::new(cancel.clone());
         let expiry_task = crate::nip_fi_session::spawn_nip_fi_expiry_task(
             deadline,
             gate,
             terminal_ctrl_tx,
             crate::nip_fi_session::NipFiWsRoute::Root,
-            tokio::sync::watch::channel(None).0,
+            control,
         );
 
         tokio::time::timeout(std::time::Duration::from_secs(2), expiry_task)
@@ -1663,12 +1664,13 @@ pub(crate) mod tests {
         // cancel the token.
         let already_expired = Utc::now() - chrono::Duration::seconds(1);
         let gate = crate::nip_fi_gate::SessionAdmissionGate::new(already_expired, cancel.clone());
+        let control = crate::state::CommunityConnectionControl::new(cancel.clone());
         let expiry_handle = spawn_nip_fi_expiry_task(
             already_expired,
             gate,
             terminal_ctrl_tx,
             NipFiWsRoute::Root,
-            tokio::sync::watch::channel(None).0,
+            control,
         );
         // Wait for the expiry task to fire before we run the send_loop.
         expiry_handle.await.expect("expiry task must complete");

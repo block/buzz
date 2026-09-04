@@ -447,7 +447,7 @@ pub(crate) async fn handle_active_audio_connection(
             std::sync::Arc::clone(&audio_gate),
             terminal_ctrl_tx.clone(),
             crate::nip_fi_session::NipFiWsRoute::Audio,
-            control.disconnect_reason_sender(),
+            control.clone(),
         )
     });
 
@@ -3456,7 +3456,7 @@ mod tests {
         use std::pin::Pin;
         use std::sync::Arc;
         use std::task::{Context, Poll};
-        use tokio::sync::{mpsc, watch};
+        use tokio::sync::mpsc;
 
         // Recording sink that stores every message in order.
         struct RecordSink(Arc<tokio::sync::Mutex<Vec<WsMessage>>>);
@@ -3497,7 +3497,10 @@ mod tests {
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<WsMessage>(8);
         let (terminal_tx, terminal_rx) = mpsc::channel::<WsMessage>(1);
         let cancel = CancellationToken::new();
-        let (disconnect_tx, disconnect_rx) = watch::channel(None);
+        // Share the control's reason watch with the send_loop so the expiry
+        // task's AuthorizationDenied write is observed as the 1008 close code.
+        let control = crate::state::CommunityConnectionControl::new(cancel.clone());
+        let disconnect_rx = control.disconnect_reason();
 
         // Step 1: spawn audio send_loop and yield so it parks in its select.
         let send_cancel = cancel.clone();
@@ -3521,7 +3524,7 @@ mod tests {
             gate,
             terminal_tx,
             crate::nip_fi_session::NipFiWsRoute::Audio,
-            disconnect_tx,
+            control,
         );
         expiry_handle.await.expect("expiry task must complete");
         drop(ctrl_tx); // satisfy the unused-variable lint

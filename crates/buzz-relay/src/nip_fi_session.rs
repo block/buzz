@@ -196,7 +196,7 @@ pub(crate) fn spawn_nip_fi_expiry_task(
     gate: std::sync::Arc<crate::nip_fi_gate::SessionAdmissionGate>,
     terminal_ctrl_tx: mpsc::Sender<WsMessage>,
     route: NipFiWsRoute,
-    deny_reason_tx: tokio::sync::watch::Sender<Option<crate::state::CommunityDisconnectReason>>,
+    control: crate::state::CommunityConnectionControl,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let now = chrono::Utc::now();
@@ -220,20 +220,13 @@ pub(crate) fn spawn_nip_fi_expiry_task(
                 // handle before remove_connection) cannot start until pre-expiry
                 // effects have finished their bounded commits.
                 gate.expire(|| {
-                    // Publish reason first-writer-wins so the send loop's
-                    // cancel branch reads AuthorizationDenied and emits 1008;
-                    // a concurrent CommunityDeleted must not be clobbered.
-                    // [FI-TRACE-CLOSE-CODE]
-                    let _ = deny_reason_tx.send_if_modified(|current| match current {
-                        None => {
-                            *current = Some(
-                                crate::state::CommunityDisconnectReason::AuthorizationDenied,
-                            );
-                            true
-                        }
-                        Some(_) => false,
-                    });
-                    let _ = terminal_ctrl_tx.try_send(authorization_denied_frame(route));
+                    // Acquire the transition lock so a concurrent disconnect_community
+                    // that loses reason publication cannot fire cancel.cancel() until
+                    // this call's winning try_send completes.  Without the lock,
+                    // community's cancel could wake the consumer before the denial
+                    // frame is enqueued — reproducing the original close-only defect
+                    // for an expiry/delete race.  [FI-TRACE-CANCEL-RACE]
+                    control.expiry_deny_terminal(&terminal_ctrl_tx, route);
                     metrics::counter!("buzz_nip_fi_lease_expirations_total").increment(1);
                     warn!(
                         route = ?route,
@@ -371,12 +364,15 @@ mod tests {
         let already_expired = Utc::now() - chrono::Duration::seconds(1);
 
         let gate = crate::nip_fi_gate::SessionAdmissionGate::new(already_expired, cancel.clone());
+        // Build a minimal control for the expiry task — its transition lock
+        // serializes the terminal enqueue vs. concurrent community deletes.
+        let control = crate::state::CommunityConnectionControl::new(cancel.clone());
         let handle = spawn_nip_fi_expiry_task(
             already_expired,
             gate,
             terminal_tx,
             NipFiWsRoute::Root,
-            tokio::sync::watch::channel(None).0,
+            control,
         );
         handle.await.expect("expiry task must complete");
 
