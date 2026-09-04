@@ -3,7 +3,10 @@ import type * as React from "react";
 import { motion } from "motion/react";
 
 import { cn } from "@/shared/lib/cn";
-import { sampleAgentAvatarSquircle } from "@/shared/ui/AvatarClipPaths";
+import {
+  AGENT_AVATAR_SQUIRCLE_PATH,
+  sampleAgentAvatarSquircle,
+} from "@/shared/ui/AvatarClipPaths";
 
 export type AvatarBadgeCircle = {
   cx: number;
@@ -52,9 +55,10 @@ type MaskedAvatarBadgeFrameProps = {
   curve?: AvatarBadgeCurve;
   cutout?: AvatarBadgeCircle;
   cutoutWidth?: number;
-  maskMode?: "clip-path" | "radial";
+  maskMode?: "clip-path" | "radial" | "shape";
   maskTransition?: React.ComponentProps<typeof motion.path>["transition"];
   shape?: "circle" | "squircle";
+  cutoutShape?: "circle" | "squircle";
   size: number;
 };
 
@@ -562,6 +566,20 @@ function getRoundedAvatarCapsuleMaskPolygon(
   return `polygon(${alignedPoints.map((point) => toPolygonPoint(point, size)).join(", ")})`;
 }
 
+function getShapeCutoutMask(
+  size: number,
+  cutout: AvatarBadgeCircle,
+  cutoutShape: "circle" | "squircle",
+) {
+  const path =
+    cutoutShape === "squircle"
+      ? AGENT_AVATAR_SQUIRCLE_PATH
+      : "M .5 0 A .5 .5 0 1 1 .5 1 A .5 .5 0 1 1 .5 0 Z";
+  const cutoutSize = cutout.r * 2;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><mask id="cutout" maskUnits="userSpaceOnUse"><rect width="100%" height="100%" fill="white"/><g transform="translate(${cutout.cx - cutout.r} ${cutout.cy - cutout.r}) scale(${cutoutSize})"><path d="${path}" fill="black"/></g></mask><rect width="100%" height="100%" fill="white" mask="url(#cutout)"/></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
 function getSquircleMaskPolygon(size: number, cutout: AvatarBadgeCircle) {
   const points = sampleAgentAvatarSquircle(size, 32);
   const distanceFromCutout = (point: Point) =>
@@ -740,6 +758,7 @@ export function MaskedAvatarBadgeFrame({
   cornerRadius,
   curve,
   cutout,
+  cutoutShape = "circle",
   cutoutWidth,
   maskMode = "clip-path",
   maskTransition,
@@ -747,7 +766,8 @@ export function MaskedAvatarBadgeFrame({
   size,
 }: MaskedAvatarBadgeFrameProps) {
   const shouldMask = Boolean(
-    cutout && (maskMode === "radial" || (badge && badgeBox)),
+    cutout &&
+      (maskMode === "radial" || maskMode === "shape" || (badge && badgeBox)),
   );
   const stabilizeOuterBoundary = Boolean(maskTransition);
   const maskPolygon = cutout
@@ -778,6 +798,11 @@ export function MaskedAvatarBadgeFrame({
           cutout.cy,
         )}, transparent calc(100% - 0.03125rem), black 100%)`
       : undefined;
+  const shapeMask =
+    maskMode === "shape" && cutout
+      ? getShapeCutoutMask(size, cutout, cutoutShape)
+      : undefined;
+  const imageMask = radialMask ?? shapeMask;
   const sizeStyle = { height: toRem(size), width: toRem(size) };
   const badgeMotionTarget =
     badgeBox && cutout
@@ -799,7 +824,7 @@ export function MaskedAvatarBadgeFrame({
     <div className={cn("relative shrink-0", className)} style={sizeStyle}>
       <motion.div
         animate={
-          maskTransition && !radialMask ? { clipPath: maskPolygon } : undefined
+          maskTransition && !imageMask ? { clipPath: maskPolygon } : undefined
         }
         className="h-full w-full"
         data-testid={clipTestId}
@@ -807,16 +832,20 @@ export function MaskedAvatarBadgeFrame({
         style={{
           // WebKit otherwise applies the prefixed path immediately while the
           // unprefixed path is still animating, which briefly tears the avatar.
-          WebkitClipPath:
-            radialMask || maskTransition ? undefined : maskPolygon,
-          WebkitMaskImage: radialMask,
+          WebkitClipPath: imageMask || maskTransition ? undefined : maskPolygon,
+          WebkitMaskImage: imageMask,
+          WebkitMaskPosition: imageMask ? "0 0" : undefined,
+          WebkitMaskRepeat: imageMask ? "no-repeat" : undefined,
+          WebkitMaskSize: imageMask ? "100% 100%" : undefined,
           backfaceVisibility:
-            maskTransition && !radialMask ? "hidden" : undefined,
-          clipPath: radialMask ? undefined : maskPolygon,
-          maskImage: radialMask,
-          transform:
-            maskTransition && !radialMask ? "translateZ(0)" : undefined,
-          willChange: maskTransition && !radialMask ? "clip-path" : undefined,
+            maskTransition && !imageMask ? "hidden" : undefined,
+          clipPath: imageMask ? undefined : maskPolygon,
+          maskImage: imageMask,
+          maskPosition: imageMask ? "0 0" : undefined,
+          maskRepeat: imageMask ? "no-repeat" : undefined,
+          maskSize: imageMask ? "100% 100%" : undefined,
+          transform: maskTransition && !imageMask ? "translateZ(0)" : undefined,
+          willChange: maskTransition && !imageMask ? "clip-path" : undefined,
         }}
         transition={maskTransition}
       >
