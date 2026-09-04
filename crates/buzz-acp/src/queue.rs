@@ -782,6 +782,22 @@ impl EventQueue {
         self.queues.len()
     }
 
+    /// Whether `scope` still has work that can be reconstructed into a batch.
+    ///
+    /// Busy-owner hold timestamps are derived from pending queue state. Queue
+    /// cap eviction can retire a scope without going through a pool cleanup
+    /// path, so the dispatch loop uses this seam to prune orphaned holds before
+    /// scheduling their deadline wakeups.
+    pub(crate) fn has_pending_scope(&self, scope: &SessionScope) -> bool {
+        self.queues
+            .get(scope)
+            .is_some_and(|queue| !queue.is_empty())
+            || self
+                .cancelled_batches
+                .get(scope)
+                .is_some_and(|events| !events.is_empty())
+    }
+
     /// Number of queued events for a specific scope (or channel, treated as its
     /// conversation scope). Test-only.
     #[cfg(test)]

@@ -904,10 +904,12 @@ impl AgentPool {
     }
 
     /// Decide whether to hold `scope`'s batch for its busy session owner, fork it
-    /// after a bounded hold, or dispatch immediately. Stamps and clears the
-    /// first-held time internally so the bounded window survives across dispatch
-    /// cycles without a dedicated timer; `now` and `timeout` are injected for
-    /// testability.
+    /// after a bounded hold, or dispatch immediately. Stamps the first-held time
+    /// so the bounded window survives across dispatch cycles; `now` and
+    /// `timeout` are injected for testability. An expired
+    /// stamp remains sticky until [`clear_hold`](Self::clear_hold) confirms a
+    /// worker was successfully claimed, so pool exhaustion cannot restart the
+    /// bounded window.
     ///
     /// Gated on the scope variant, not the session policy: `Conversation` scopes
     /// (channel-policy channels and all DMs) never hold — a busy owner there means
@@ -932,7 +934,6 @@ impl AgentPool {
         let first = *self.held_since.entry(scope.clone()).or_insert(now);
         let held_for = now.saturating_duration_since(first);
         if held_for >= timeout {
-            self.held_since.remove(scope);
             HoldDecision::ForkAfterHold {
                 held_for,
                 owner_index,
@@ -1013,6 +1014,22 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
+    /// Confirm that pending work for `scope` successfully claimed a worker.
+    ///
+    /// In particular, an expired busy-owner hold must not be consumed until
+    /// this point: `try_claim` can fail while every worker remains checked out.
+    pub(crate) fn clear_hold(&mut self, scope: &SessionScope) {
+        self.held_since.remove(scope);
+    }
+
+    /// Remove derived hold stamps for scopes that no longer have pending work.
+    pub(crate) fn retain_held_scopes(
+        &mut self,
+        mut has_pending_work: impl FnMut(&SessionScope) -> bool,
+    ) {
+        self.held_since.retain(|scope, _| has_pending_work(scope));
+    }
+
     /// Whether any idle agent already has a session for `scope`.
     /// Used to compute `affinity_hit` before calling `try_claim`.
     pub fn has_session_for(&self, scope: &SessionScope) -> bool {
@@ -1032,8 +1049,13 @@ impl AgentPool {
             && agent.state.sessions.contains_key(scope)
     }
 
-    /// Earliest scheduled wake for a currently held scope.
+    /// Earliest scheduled wake for a currently held scope that can claim a
+    /// worker. A worker return wakes the main loop independently, so arming an
+    /// already-expired timer while every slot is checked out would only spin.
     pub(crate) fn next_hold_deadline(&self, timeout: Duration) -> Option<tokio::time::Instant> {
+        if !self.any_idle() {
+            return None;
+        }
         self.held_since
             .values()
             .map(|held_since| *held_since + timeout)
@@ -7757,8 +7779,12 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 _ => panic!("{}: expected {:?}, got {decision:?}", row.name, row.expect),
             }
 
-            // held_since holds the scope only while a Hold is outstanding.
-            if matches!(decision, HoldDecision::Hold { .. }) {
+            // An expired hold remains sticky until a worker is successfully
+            // claimed; only immediate dispatch clears it here.
+            if matches!(
+                decision,
+                HoldDecision::Hold { .. } | HoldDecision::ForkAfterHold { .. }
+            ) {
                 assert!(
                     pool.held_since.contains_key(&scope),
                     "{}: hold stamps held_since",
@@ -7776,11 +7802,13 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
     #[tokio::test(start_paused = true)]
     async fn held_scope_deadline_wakes_a_quiet_dispatch_loop() {
-        let mut pool = AgentPool::from_slots(vec![]);
         let channel_id = Uuid::new_v4();
         let scope = thread_scope(channel_id, &"a".repeat(64));
-        pool.record_scope_owner(scope.clone(), 0);
-        mark_agent_busy(&mut pool, 0, thread_scope(channel_id, &"b".repeat(64)));
+        let idle_scope = thread_scope(channel_id, &"c".repeat(64));
+        let idle_agent = idle_agent_with_session(0, idle_scope).await;
+        let mut pool = AgentPool::from_slots(vec![Some(idle_agent)]);
+        pool.record_scope_owner(scope.clone(), 1);
+        mark_agent_busy(&mut pool, 1, thread_scope(channel_id, &"b".repeat(64)));
 
         let started = tokio::time::Instant::now();
         assert!(matches!(
@@ -7807,6 +7835,56 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pool.hold_decision(&scope, tokio::time::Instant::now(), HOLD_BUSY_OWNER_TIMEOUT),
             HoldDecision::ForkAfterHold { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn expired_hold_survives_pool_exhaustion_until_a_worker_is_claimable() {
+        let channel_id = Uuid::new_v4();
+        let scope = thread_scope(channel_id, &"a".repeat(64));
+        let mut pool = AgentPool::from_slots(vec![None]);
+        pool.record_scope_owner(scope.clone(), 1);
+        mark_agent_busy(&mut pool, 1, thread_scope(channel_id, &"b".repeat(64)));
+
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            pool.hold_decision(&scope, started, HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::Hold { .. }
+        ));
+        assert!(matches!(
+            pool.hold_decision(
+                &scope,
+                started + HOLD_BUSY_OWNER_TIMEOUT,
+                HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+        assert!(
+            pool.held_since.contains_key(&scope),
+            "failed claim must not restart the timeout"
+        );
+        assert_eq!(
+            pool.next_hold_deadline(HOLD_BUSY_OWNER_TIMEOUT),
+            None,
+            "an expired hold cannot spin while all workers are checked out"
+        );
+
+        let idle_scope = thread_scope(channel_id, &"c".repeat(64));
+        pool.agents[0] = Some(idle_agent_with_session(0, idle_scope).await);
+        assert_eq!(
+            pool.next_hold_deadline(HOLD_BUSY_OWNER_TIMEOUT),
+            Some(started + HOLD_BUSY_OWNER_TIMEOUT),
+            "worker availability immediately re-arms the expired deadline"
+        );
+        assert!(matches!(
+            pool.hold_decision(
+                &scope,
+                started + HOLD_BUSY_OWNER_TIMEOUT + Duration::from_secs(1),
+                HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+        pool.clear_hold(&scope);
+        assert!(!pool.held_since.contains_key(&scope));
     }
 
     #[tokio::test]
@@ -7842,6 +7920,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let mut replacement = pool
             .try_claim(Some(&scope))
             .expect("idle worker receives forked scope");
+        pool.clear_hold(&scope);
         assert_eq!(replacement.index, 1);
         replacement
             .state
