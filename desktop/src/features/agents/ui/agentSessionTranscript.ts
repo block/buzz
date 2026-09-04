@@ -896,6 +896,32 @@ export function processTranscriptEvent(
       }
     } else if (
       event.kind === "acp_write" &&
+      method === "_goose/unstable/session/system-prompt/set"
+    ) {
+      // Goose takes its system prompt through a separate request sent just
+      // after session/new (`session_set_goose_system_prompt`, buzz-acp
+      // acp.rs), not a field on it — so without this branch a goose agent
+      // showed no System prompt card at all, while every other runtime did.
+      // The request lands before the session's first turn, so reusing acpSource
+      // "session/new" puts the card in the same standalone slot as theirs.
+      const params = asRecord(payload.params);
+      const systemPrompt = asString(params.text);
+      if (systemPrompt) {
+        const sections = parseSystemPromptSections(systemPrompt);
+        if (sections.length > 0) {
+          upsertMetadata(
+            d,
+            `system-prompt:${ch}:${event.seq}:${event.timestamp}`,
+            "System prompt",
+            sections,
+            event.timestamp,
+            { ...ctx, turnId: null },
+            "session/new",
+          );
+        }
+      }
+    } else if (
+      event.kind === "acp_write" &&
       method === "_goose/unstable/session/steer"
     ) {
       const promptBlocks = extractPromptBlocks(payload);
