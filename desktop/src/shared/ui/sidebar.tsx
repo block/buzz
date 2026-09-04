@@ -350,7 +350,7 @@ const Sidebar = React.forwardRef<
         {/* Sidebar gap on desktop; the offcanvas sibling below also goes invisible, else it paints over the community rail past the overflow-visible shell. */}
         <div
           className={cn(
-            "relative w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear",
+            "relative w-(--sidebar-width) bg-transparent transition-[width] duration-[var(--motion-duration-standard)] ease-[var(--motion-ease-standard)]",
             "group-data-[resizing=true]:transition-none",
             "group-data-[collapsible=offcanvas]:w-0",
             "group-data-[side=right]:rotate-180",
@@ -361,7 +361,7 @@ const Sidebar = React.forwardRef<
         />
         <div
           className={cn(
-            "absolute inset-y-0 z-10 hidden h-full w-(--sidebar-width) transition-[left,right,width,visibility] duration-200 ease-linear md:flex",
+            "absolute inset-y-0 z-10 hidden h-full w-(--sidebar-width) transition-[left,right,width,visibility] duration-[var(--motion-duration-standard)] ease-[var(--motion-ease-standard)] md:flex",
             "group-data-[resizing=true]:transition-none group-data-[collapsible=offcanvas]:invisible",
             side === "left"
               ? "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]"
@@ -379,7 +379,7 @@ const Sidebar = React.forwardRef<
             className="flex h-full w-full flex-col bg-sidebar group-data-[variant=sidebar]:pr-px group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow"
           >
             <div
-              className="flex h-full w-full origin-top flex-col transition-[opacity,scale,translate] duration-200 ease-linear motion-reduce:transition-none motion-reduce:duration-0 group-data-[collapsible=offcanvas]:translate-x-6 group-data-[collapsible=offcanvas]:scale-95 group-data-[collapsible=offcanvas]:opacity-0"
+              className="flex h-full w-full flex-col transition-opacity duration-[var(--motion-duration-standard)] ease-[var(--motion-ease-standard)] motion-reduce:transition-none motion-reduce:duration-0 group-data-[collapsible=offcanvas]:opacity-0"
               data-sidebar-transition-content
             >
               {children}
