@@ -34,6 +34,8 @@ pub mod observer;
 pub mod pairing;
 /// Arrival-independent desired placement, separate from lifecycle execution.
 pub mod placement;
+/// Owner-private authenticated wire binding for placement projection.
+pub mod placement_wire;
 /// Presence status types shared across crates.
 pub mod presence;
 /// NIP-PMA owner-encrypted private managed-agent wire codec.

@@ -633,6 +633,11 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
 
+/// Immutable owner-self-encrypted placement intent (not NIP-33).
+/// Reserved codec only: relay ingest remains disabled until private transport
+/// authorization and history are implemented. See [`crate::placement_wire`].
+pub const KIND_PLACEMENT_INTENT: u32 = 50003;
+
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
     KIND_PROFILE,
@@ -659,6 +664,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MANAGED_AGENT,
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
+    KIND_PLACEMENT_INTENT,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
