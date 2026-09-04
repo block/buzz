@@ -60,20 +60,39 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
-
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Largest file `upload_file` will buffer in memory (500 MB).
+///
+/// This is a *client process-resource* bound, not relay policy. `upload_file`
+/// reads the whole file into RAM and `with_retry_body` keeps that buffer alive
+/// across retry attempts, so an unbounded read is a memory hazard regardless of
+/// what the relay would accept.
+///
+/// It deliberately does not alias `MAX_VIDEO_BYTES` even though the two start at
+/// the same value: `MAX_VIDEO_BYTES` is a media policy cap, this is a memory
+/// ceiling, and they diverge as soon as uploads are streamed instead of buffered.
+const MAX_BUFFERED_UPLOAD_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Client-side size cap for the media types whose CLI and relay semantics are
+/// established, or `None` when the relay is the sole authority on size.
+///
+/// Every other type — documents, archives, opaque bytes — is deliberately
+/// uncapped here. The relay's limit is `max_file_bytes`, per-deployment
+/// configuration that the client cannot currently discover, so guessing a value
+/// would reject files the relay would have accepted. `MAX_BUFFERED_UPLOAD_BYTES`
+/// still applies as a memory bound.
+fn media_size_cap(mime: &str) -> Option<u64> {
+    match mime {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" => Some(MAX_IMAGE_BYTES),
+        "video/mp4" => Some(MAX_VIDEO_BYTES),
+        _ => None,
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1159,39 +1178,51 @@ impl BuzzClient {
 
     /// Upload a file to the relay's Blossom endpoint.
     /// Returns a BlobDescriptor on success.
+    ///
+    /// The relay is the authority on which content it accepts: `PUT /upload`
+    /// sniffs the body, routes media and generic files to their own validators,
+    /// and enforces its configured size limit. The client therefore does not
+    /// second-guess the type — a stale client-side allowlist rejects files a
+    /// newer relay supports — and only applies bounds it owns itself: the
+    /// established media caps and a memory ceiling on what it will buffer.
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
-        // 1. Read file — validate it exists and is a regular file
+        // 1. Validate the path exists and is a regular file
         let metadata = std::fs::metadata(file_path)
             .map_err(|e| CliError::Other(format!("cannot access {file_path}: {e}")))?;
         if !metadata.is_file() {
             return Err(CliError::Usage(format!("{file_path} is not a file")));
         }
+        let file_len = metadata.len();
 
-        let bytes = std::fs::read(file_path)
-            .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
-
-        // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
+        // 2. Detect MIME from magic bytes. `get_from_path` reads a bounded prefix
+        // (8 KiB) rather than the whole file, so every size check below runs before
+        // the file is buffered. The result selects client resource behaviour only —
+        // size cap and timeout — and is sent as an advisory `Content-Type`; the relay
+        // re-sniffs the body and ignores the header for routing.
+        let mime = infer::get_from_path(file_path)
+            .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+        // 3. Size preflight, against the metadata length so an oversized file is
+        // rejected without being read.
+        if let Some(max) = media_size_cap(&mime) {
+            if file_len > max {
+                return Err(CliError::Usage(format!(
+                    "file too large: {file_len} bytes (max {max})"
+                )));
+            }
         }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
-        if bytes.len() as u64 > max {
+        if file_len > MAX_BUFFERED_UPLOAD_BYTES {
             return Err(CliError::Usage(format!(
-                "file too large: {} bytes (max {})",
-                bytes.len(),
-                max
+                "file too large to buffer safely: {file_len} bytes \
+                 (client memory limit {MAX_BUFFERED_UPLOAD_BYTES}); \
+                 this is a limit of this CLI, not a relay policy limit"
             )));
         }
+
+        let bytes = std::fs::read(file_path)
+            .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
         // 4. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
@@ -2593,5 +2624,349 @@ mod tests {
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
         );
+    }
+}
+
+/// Upload acceptance-policy tests.
+///
+/// The relay decides what content it accepts; the CLI only enforces bounds it
+/// owns (the established media caps and its own buffering ceiling). These tests
+/// drive `upload_file` against a mock Blossom server and assert on observable
+/// behaviour: which endpoint was called, what bytes arrived, and which failures
+/// happen before any request is made.
+#[cfg(test)]
+mod upload_policy_tests {
+    use std::io::Write;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::{Body, Bytes};
+    use axum::extract::{DefaultBodyLimit, State};
+    use axum::http::{HeaderMap, Response, StatusCode, Uri};
+    use axum::routing::put;
+    use axum::Router;
+    use nostr::Keys;
+    use tokio::net::TcpListener;
+
+    use super::super::error::CliError;
+    use super::{media_size_cap, BuzzClient, MAX_BUFFERED_UPLOAD_BYTES, MAX_IMAGE_BYTES};
+
+    /// A real, minimal Excel workbook (five OOXML parts, deflated) — the format
+    /// that the old five-entry client allowlist rejected before sending.
+    const XLSX_FIXTURE: &[u8] = include_bytes!("../testdata/minimal.xlsx");
+
+    /// A minimal but structurally valid PDF.
+    const PDF_FIXTURE: &[u8] =
+        b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
+
+    /// JPEG SOI + APP0/JFIF header — enough for magic-byte detection.
+    const JPEG_FIXTURE: &[u8] =
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00";
+
+    /// PNG signature — used as the head of a sparse over-cap image.
+    const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    /// One upload request as the server saw it.
+    #[derive(Clone)]
+    struct Received {
+        path: String,
+        content_type: String,
+        body: Vec<u8>,
+    }
+
+    type Log = Arc<Mutex<Vec<Received>>>;
+    type Responder = Arc<dyn Fn(&str) -> (StatusCode, String) + Send + Sync>;
+
+    fn blob_json() -> String {
+        r#"{"url":"http://mock/blob","sha256":"00","size":1,"type":"application/octet-stream","uploaded":1}"#
+            .to_string()
+    }
+
+    /// Spawn a mock Blossom server exposing `PUT /upload` and `PUT /media/upload`.
+    ///
+    /// Every request is recorded before `respond` is consulted for the reply, so the
+    /// returned log is also the evidence for how many requests were made and in what
+    /// order. The body limit is disabled so over-cap payloads reach the handler
+    /// instead of being truncated by axum's 2 MB default.
+    async fn upload_server<F>(respond: F) -> (String, Log)
+    where
+        F: Fn(&str) -> (StatusCode, String) + Send + Sync + 'static,
+    {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let state: (Responder, Log) = (Arc::new(respond), log.clone());
+
+        // Non-capturing, so it is `Copy` and can serve both routes.
+        let handler = |State((respond, log)): State<(Responder, Log)>,
+                       uri: Uri,
+                       headers: HeaderMap,
+                       body: Bytes| async move {
+            let path = uri.path().to_string();
+            log.lock().unwrap().push(Received {
+                path: path.clone(),
+                content_type: headers
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string(),
+                body: body.to_vec(),
+            });
+            let (status, reply) = respond(&path);
+            Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(Body::from(reply))
+                .unwrap()
+        };
+
+        let app = Router::new()
+            .route("/upload", put(handler))
+            .route("/media/upload", put(handler))
+            .layer(DefaultBodyLimit::disable())
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), log)
+    }
+
+    /// A server that accepts everything on the primary endpoint.
+    async fn accepting_server() -> (String, Log) {
+        upload_server(|_path| (StatusCode::OK, blob_json())).await
+    }
+
+    fn test_client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+    }
+
+    fn write_file(dir: &tempfile::TempDir, name: &str, content: &[u8]) -> String {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Create a sparse file of `len` bytes whose head is `prefix` (so magic-byte
+    /// detection still works) without allocating `len` bytes on disk.
+    fn sparse_file(dir: &tempfile::TempDir, name: &str, prefix: &[u8], len: u64) -> String {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(prefix).unwrap();
+        f.set_len(len).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn paths(log: &Log) -> Vec<String> {
+        log.lock().unwrap().iter().map(|r| r.path.clone()).collect()
+    }
+
+    /// The reported bug: a real XLSX is no longer rejected before the request, and
+    /// arrives at the relay byte-identical.
+    #[tokio::test]
+    async fn xlsx_reaches_the_upload_endpoint_byte_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(&dir, "book.xlsx", XLSX_FIXTURE);
+        let (url, log) = accepting_server().await;
+
+        test_client(&url).upload_file(&file).await.unwrap();
+
+        let received = log.lock().unwrap();
+        assert_eq!(received.len(), 1, "expected exactly one upload request");
+        assert_eq!(received[0].path, "/upload");
+        assert_eq!(
+            received[0].body, XLSX_FIXTURE,
+            "body must round-trip intact"
+        );
+        assert_eq!(
+            received[0].content_type,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "detected MIME is still advertised as the advisory Content-Type"
+        );
+    }
+
+    #[tokio::test]
+    async fn pdf_reaches_the_upload_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(&dir, "doc.pdf", PDF_FIXTURE);
+        let (url, log) = accepting_server().await;
+
+        test_client(&url).upload_file(&file).await.unwrap();
+
+        let received = log.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].path, "/upload");
+        assert_eq!(received[0].body, PDF_FIXTURE);
+        assert_eq!(received[0].content_type, "application/pdf");
+    }
+
+    /// Bytes with no recognisable signature are the relay's call, not the client's.
+    #[tokio::test]
+    async fn opaque_bytes_reach_the_upload_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let file = write_file(&dir, "blob.bin", &content);
+        let (url, log) = accepting_server().await;
+
+        test_client(&url).upload_file(&file).await.unwrap();
+
+        let received = log.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].path, "/upload");
+        assert_eq!(received[0].body, content);
+        assert_eq!(received[0].content_type, "application/octet-stream");
+    }
+
+    /// Existing media behaviour is unchanged: a JPEG still uploads under its own
+    /// detected type.
+    #[tokio::test]
+    async fn jpeg_still_uploads_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(&dir, "photo.jpg", JPEG_FIXTURE);
+        let (url, log) = accepting_server().await;
+
+        test_client(&url).upload_file(&file).await.unwrap();
+
+        let received = log.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].path, "/upload");
+        assert_eq!(received[0].content_type, "image/jpeg");
+    }
+
+    /// The relay's own refusal must reach the user verbatim — not be retried, and
+    /// not be mistaken for "this relay has no /upload" and replayed against the
+    /// legacy endpoint.
+    #[tokio::test]
+    async fn relay_415_is_surfaced_without_retry_or_legacy_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(&dir, "clip.bin", b"ID3\x04\x00\x00\x00\x00\x00\x00nope");
+        let (url, log) = upload_server(|_path| {
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                r#"{"error":"disallowed content type: audio/mpeg"}"#.to_string(),
+            )
+        })
+        .await;
+
+        let err = test_client(&url).upload_file(&file).await.unwrap_err();
+
+        match &err {
+            CliError::Relay { status, body } => {
+                assert_eq!(*status, 415);
+                assert!(
+                    body.contains("disallowed content type: audio/mpeg"),
+                    "relay explanation must survive intact, got {body}"
+                );
+            }
+            other => panic!("expected CliError::Relay, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("relay error 415"),
+            "user-facing message must name the relay status, got {err}"
+        );
+        assert_eq!(
+            paths(&log),
+            vec!["/upload"],
+            "a 415 is definitive: no retry, no legacy fallback"
+        );
+    }
+
+    /// A relay too old to route `/upload` still gets the file via `/media/upload`.
+    #[tokio::test]
+    async fn upload_404_falls_back_to_the_legacy_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(&dir, "book.xlsx", XLSX_FIXTURE);
+        let (url, log) = upload_server(|path| {
+            if path == "/upload" {
+                (
+                    StatusCode::NOT_FOUND,
+                    r#"{"error":"not found"}"#.to_string(),
+                )
+            } else {
+                (StatusCode::OK, blob_json())
+            }
+        })
+        .await;
+
+        test_client(&url).upload_file(&file).await.unwrap();
+
+        assert_eq!(paths(&log), vec!["/upload", "/media/upload"]);
+        assert_eq!(log.lock().unwrap()[1].body, XLSX_FIXTURE);
+    }
+
+    /// The image cap is a media cap, not a general one: a 50 MB+ document must not
+    /// inherit it. Only the relay knows its own `max_file_bytes`.
+    #[tokio::test]
+    async fn generic_file_above_the_image_cap_is_not_capped_by_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let len = MAX_IMAGE_BYTES + 1;
+        let file = sparse_file(&dir, "big.bin", b"", len);
+        let (url, log) = accepting_server().await;
+
+        test_client(&url).upload_file(&file).await.unwrap();
+
+        let received = log.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].path, "/upload");
+        assert_eq!(received[0].body.len() as u64, len);
+    }
+
+    /// Above the client's buffering ceiling the upload fails locally, before the
+    /// file is read and before any socket is opened.
+    #[tokio::test]
+    async fn file_above_the_buffer_guard_fails_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = sparse_file(&dir, "huge.bin", b"", MAX_BUFFERED_UPLOAD_BYTES + 1);
+        let (url, log) = accepting_server().await;
+
+        let err = test_client(&url).upload_file(&file).await.unwrap_err();
+
+        assert!(
+            matches!(err, CliError::Usage(_)),
+            "expected a local usage error, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("too large to buffer safely") && msg.contains("not a relay policy limit"),
+            "must not read as a relay refusal, got {msg}"
+        );
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "the guard must trip before any HTTP request"
+        );
+    }
+
+    /// The established media caps still apply, and now trip before the read too.
+    #[tokio::test]
+    async fn image_above_the_image_cap_is_still_rejected_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = sparse_file(&dir, "huge.png", PNG_SIGNATURE, MAX_IMAGE_BYTES + 1);
+        let (url, log) = accepting_server().await;
+
+        let err = test_client(&url).upload_file(&file).await.unwrap_err();
+
+        assert!(
+            matches!(err, CliError::Usage(_)),
+            "expected a local usage error, got {err:?}"
+        );
+        assert!(err.to_string().contains("file too large"), "got {err}");
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    /// The cap table: media types keep their limits, everything else defers to the
+    /// relay.
+    #[test]
+    fn media_size_cap_covers_only_the_established_media_types() {
+        for mime in ["image/jpeg", "image/png", "image/gif", "image/webp"] {
+            assert_eq!(media_size_cap(mime), Some(MAX_IMAGE_BYTES), "{mime}");
+        }
+        assert_eq!(media_size_cap("video/mp4"), Some(super::MAX_VIDEO_BYTES));
+        for mime in [
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/octet-stream",
+            "video/quicktime",
+            "audio/mpeg",
+        ] {
+            assert_eq!(media_size_cap(mime), None, "{mime}");
+        }
     }
 }
