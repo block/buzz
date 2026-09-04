@@ -379,6 +379,10 @@ type MockBridgeOptions = {
   openerError?: string;
   /** Delay binding signatures so specs can exercise request supersession. */
   nostrBindSignDelayMs?: number;
+  /** Sequenced authoritative results returned to the Run402 handoff UI. */
+  nostrBindResultResponses?: Array<Record<string, unknown>>;
+  /** Delay each result read so specs can supersede an in-flight request. */
+  nostrBindResultDelayMs?: number;
   /** Reject successive mock WebSocket connect attempts, then resume. */
   websocketConnectErrors?: string[];
   /** Deliver AUTH synchronously, before the mock connect command resolves. */

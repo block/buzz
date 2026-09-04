@@ -473,6 +473,10 @@ type E2eConfig = {
     openerError?: string;
     /** Delay binding signatures so specs can exercise request supersession. */
     nostrBindSignDelayMs?: number;
+    /** Sequenced authoritative results returned to the Run402 handoff UI. */
+    nostrBindResultResponses?: Array<Record<string, unknown>>;
+    /** Delay each result read so specs can supersede an in-flight request. */
+    nostrBindResultDelayMs?: number;
     /** Reject successive mock WebSocket connect attempts, then resume. */
     websocketConnectErrors?: string[];
     /** Deliver AUTH synchronously, before the mock connect command resolves. */
@@ -8612,6 +8616,7 @@ let mockGlobalAgentConfig: {
 let nsecCallCount = 0;
 let backupVerificationCallCount = 0;
 let backupSaveCallCount = 0;
+let nostrBindResultCallCount = 0;
 
 const MOCK_NCRYPTSEC =
   "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
@@ -12606,6 +12611,21 @@ export function maybeInstallE2eTauriMocks() {
           content: "",
           sig: "e2e-signed-nostr-binding",
         });
+      }
+      case "fetch_nostr_bind_result": {
+        const delayMs = activeConfig?.mock?.nostrBindResultDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        const responses = activeConfig?.mock?.nostrBindResultResponses ?? [
+          { status: "pending" },
+        ];
+        const index = Math.min(
+          nostrBindResultCallCount,
+          Math.max(responses.length - 1, 0),
+        );
+        nostrBindResultCallCount += 1;
+        return responses[index] ?? { status: "pending" };
       }
       case "sign_out":
         // Production wipes local state and restarts the app. In the browser
