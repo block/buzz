@@ -647,6 +647,49 @@ pub async fn list_restricted(pool: &PgPool, community: CommunityId) -> Result<Ve
     rows.into_iter().map(row_to_ban).collect()
 }
 
+/// List currently-restricted members with stable keyset pagination.
+///
+/// Returns at most `limit` rows. Pass the `updated_at` + `pubkey` of the last
+/// returned row as `cursor` to fetch the next page. The tie-breaker on `pubkey`
+/// (`BYTEA` comparison) makes the cursor deterministic even when multiple rows
+/// share an identical `updated_at`.
+pub async fn list_restricted_page(
+    pool: &PgPool,
+    community: CommunityId,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Vec<u8>)>,
+) -> Result<Vec<BanRecord>> {
+    let (cursor_ts, cursor_pk) = cursor.unzip();
+    let rows = sqlx::query(
+        r#"
+        SELECT pubkey,
+               (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
+               ban_expires_at, ban_reason, muted_until,
+               mute_reason, actor_pubkey, updated_at
+        FROM community_bans
+        WHERE community_id = $1
+          AND (
+              (banned AND (ban_expires_at IS NULL OR ban_expires_at > now()))
+              OR muted_until > now()
+          )
+          AND (
+              $2::timestamptz IS NULL
+              OR (updated_at, pubkey) < ($2, $3::bytea)
+          )
+        ORDER BY updated_at DESC, pubkey DESC
+        LIMIT $4
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(cursor_ts)
+    .bind(cursor_pk)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(row_to_ban).collect()
+}
+
 /// Insert a moderation audit row, returning its id.
 pub async fn insert_action(
     pool: &PgPool,
@@ -933,6 +976,20 @@ impl Db {
         community: CommunityId,
     ) -> Result<Vec<BanRecord>> {
         list_restricted(&self.pool, community).await
+    }
+
+    /// List currently restricted members with stable keyset pagination.
+    ///
+    /// Returns at most `limit` rows. Supply the `(updated_at, pubkey)` of the
+    /// last row as `cursor` to advance to the next page.
+    #[datastore_span(name = "list_community_restrictions_page", system = "postgresql")]
+    pub async fn list_community_restrictions_page(
+        &self,
+        community: CommunityId,
+        limit: i64,
+        cursor: Option<(DateTime<Utc>, Vec<u8>)>,
+    ) -> Result<Vec<BanRecord>> {
+        list_restricted_page(&self.pool, community, limit, cursor).await
     }
 
     /// Insert a moderation audit action row.

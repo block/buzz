@@ -1150,23 +1150,93 @@ impl From<buzz_db::moderation::BanRecord> for MemberRestrictionRecord {
     }
 }
 
+/// Paginated response for `GET /members/restrictions`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RestrictionsPage {
+    /// Restriction records for this page, newest first.
+    items: Vec<MemberRestrictionRecord>,
+    /// Opaque cursor for the next page, or `null` when exhausted.
+    ///
+    /// Encoding: `base64url(updated_at_micros_decimal + "_" + pubkey_hex)`.
+    /// Treat as opaque — the format may change across releases.
+    next_cursor: Option<String>,
+}
+
+/// Encode a keyset cursor as a base64url-safe opaque token.
+///
+/// Format: `{updated_at_micros}_{pubkey_hex}` encoded with URL_SAFE_NO_PAD.
+fn encode_cursor(updated_at: DateTime<Utc>, pubkey: &[u8]) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let payload = format!("{}_{}", updated_at.timestamp_micros(), hex::encode(pubkey));
+    URL_SAFE_NO_PAD.encode(payload.as_bytes())
+}
+
+/// Decode an opaque cursor token back to `(updated_at, pubkey_bytes)`.
+fn decode_cursor(token: &str) -> Result<(DateTime<Utc>, Vec<u8>), ApiError> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(token)
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor is not valid base64url"))?;
+    let s = std::str::from_utf8(&bytes)
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor is not valid UTF-8"))?;
+    let (ts_str, pk_hex) = s
+        .split_once('_')
+        .ok_or_else(|| ApiError::bad_request("invalid_cursor", "cursor format is invalid"))?;
+    let micros: i64 = ts_str
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor timestamp is invalid"))?;
+    let dt = DateTime::from_timestamp_micros(micros)
+        .ok_or_else(|| ApiError::bad_request("invalid_cursor", "cursor timestamp out of range"))?;
+    let pubkey = hex::decode(pk_hex)
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor pubkey is invalid hex"))?;
+    if pubkey.len() != 32 {
+        return Err(ApiError::bad_request(
+            "invalid_cursor",
+            "cursor pubkey must be 32 bytes",
+        ));
+    }
+    Ok((dt, pubkey))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommunityQuery {
     community_id: Uuid,
 }
 
-/// GET /members/restrictions?communityId={uuid}
+/// Query params for `GET /members/restrictions`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestrictionsQuery {
+    community_id: Uuid,
+    /// Maximum number of records to return (1–200, default 200).
+    limit: Option<i64>,
+    /// Opaque continuation cursor from a prior response's `nextCursor` field.
+    cursor: Option<String>,
+}
+
+/// GET /members/restrictions?communityId={uuid}[&limit={1-200}][&cursor={token}]
 ///
-/// List all currently active bans and timeouts for the given community.
-/// Returns 400 if `communityId` is absent or not a valid UUID.
-/// Requires admin auth (nip98 or disabled mode).
+/// List currently active bans and timeouts for the given community, newest
+/// first, with stable keyset pagination.
+///
+/// **Response shape:** `{ "items": [...], "nextCursor": "<token>"|null }`
+///
+/// - `limit` — page size, 1–200, default 200. Enforced as a SQL `LIMIT`.
+/// - `cursor` — opaque token from a prior page's `nextCursor`. Omit for the
+///   first page. Format: base64url of `{updated_at_micros}_{pubkey_hex}`.
+///
+/// Returns 400 if `communityId` is absent / invalid, `limit` is out of range,
+/// or `cursor` is malformed. Returns 401 without a valid admin credential.
 async fn list_member_restrictions(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
     headers: HeaderMap,
-    Query(query): Query<CommunityQuery>,
-) -> Result<Json<Vec<MemberRestrictionRecord>>, ApiError> {
+    Query(query): Query<RestrictionsQuery>,
+) -> Result<Json<RestrictionsPage>, ApiError> {
     authorize(
         &state,
         &headers,
@@ -1177,9 +1247,27 @@ async fn list_member_restrictions(
     )
     .await?;
 
+    let page_limit = limit(query.limit)?;
+    let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
+
     let community = buzz_core::CommunityId::from_uuid(query.community_id);
-    let records = state.db.list_community_restrictions(community).await?;
-    Ok(Json(records.into_iter().map(Into::into).collect()))
+    let records = state
+        .db
+        .list_community_restrictions_page(community, page_limit, cursor)
+        .await?;
+
+    let next_cursor = if records.len() as i64 == page_limit {
+        records
+            .last()
+            .map(|r| encode_cursor(r.updated_at, &r.pubkey))
+    } else {
+        None
+    };
+
+    Ok(Json(RestrictionsPage {
+        items: records.into_iter().map(Into::into).collect(),
+        next_cursor,
+    }))
 }
 
 /// DELETE /members/{pubkey}/ban?communityId={uuid}
@@ -2169,9 +2257,9 @@ mod postgres_tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("read body");
-        let records: Vec<serde_json::Value> =
-            serde_json::from_slice(&body).expect("parse JSON array");
+        let page: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON");
 
+        let records = page["items"].as_array().expect("items must be an array");
         assert_eq!(records.len(), 2, "must return both the ban and the timeout");
 
         let banned_hex = hex::encode(&banned_pubkey);
@@ -2198,6 +2286,142 @@ mod postgres_tests {
             banned_rec["banned"],
             serde_json::Value::Bool(true),
             "banned record must have banned=true"
+        );
+
+        // Two records returned with default limit=200 → no next page.
+        assert_eq!(
+            page["nextCursor"],
+            serde_json::Value::Null,
+            "nextCursor must be null when all records fit in one page"
+        );
+    }
+
+    /// Pagination regression: seed more than the cap, prove no page exceeds the
+    /// cap, walk pages to exhaustion, assert exactly-once coverage, and exercise
+    /// the tie-breaker with rows that share identical `updated_at` timestamps.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn list_restrictions_pagination_exhaustive() {
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("list-restrict-pg-{}.example", community_uuid.simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let community_uuid = *community.as_uuid();
+
+        let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
+        // Seed 5 bans — more than the page size of 2 we'll use below.
+        // Pubkeys 0x01..0x05 are distinct; each UPDATE sets updated_at = now()
+        // so they naturally differ unless inserted in the same microsecond.
+        let mut all_pubkeys: Vec<Vec<u8>> = Vec::new();
+        for i in 1u8..=5 {
+            let pk = vec![i; 32];
+            db.ban_community_member(community, &pk, &actor_pubkey, None, None)
+                .await
+                .expect("insert ban");
+            all_pubkeys.push(pk);
+        }
+
+        // Force two rows to share the EXACT same `updated_at` so the
+        // tie-breaker path is exercised: update both in the same transaction
+        // with an explicit identical timestamp.
+        let shared_ts = chrono::Utc::now() - chrono::Duration::seconds(5);
+        sqlx::query(
+            "UPDATE community_bans SET updated_at = $1
+             WHERE community_id = $2 AND pubkey = ANY($3::bytea[])",
+        )
+        .bind(shared_ts)
+        .bind(community.as_uuid())
+        .bind(
+            all_pubkeys[..2]
+                .iter()
+                .map(|p| p.as_slice())
+                .collect::<Vec<_>>(),
+        )
+        .execute(&pool)
+        .await
+        .expect("force identical updated_at on first two rows");
+
+        let state = nip98_state_with_real_pool(pool).await;
+        let operator_keys = test_operator_keys();
+
+        // Walk pages with limit=2 until nextCursor is null.
+        let mut seen_pubkeys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut page_count = 0usize;
+        let mut cursor_token: Option<String> = None;
+
+        loop {
+            let path = match &cursor_token {
+                None => format!("/members/restrictions?communityId={community_uuid}&limit=2"),
+                Some(tok) => format!(
+                    "/members/restrictions?communityId={community_uuid}&limit=2&cursor={tok}"
+                ),
+            };
+            let auth = make_nostr_auth(&operator_keys, &path);
+            let response = status_for(
+                Arc::clone(&state),
+                Request::builder()
+                    .method("GET")
+                    .uri(&path)
+                    .header(header::HOST, "admin.example")
+                    .header(header::AUTHORIZATION, auth)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "page {page_count}: GET restrictions must return 200"
+            );
+
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            let page: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON");
+
+            let items = page["items"].as_array().expect("items array");
+            assert!(
+                items.len() <= 2,
+                "page {page_count}: must not exceed the limit of 2; got {}",
+                items.len()
+            );
+
+            for item in items {
+                let pk = item["pubkey"].as_str().expect("pubkey str").to_owned();
+                assert!(
+                    seen_pubkeys.insert(pk.clone()),
+                    "page {page_count}: pubkey {pk} appeared more than once across pages"
+                );
+            }
+
+            page_count += 1;
+
+            cursor_token = page["nextCursor"].as_str().map(str::to_owned);
+            if cursor_token.is_none() {
+                break;
+            }
+
+            assert!(
+                page_count <= 5,
+                "pagination must terminate within 5 pages for 5 rows"
+            );
+        }
+
+        // Exactly-once coverage: every seeded pubkey must appear exactly once.
+        let expected: std::collections::HashSet<String> =
+            all_pubkeys.iter().map(hex::encode).collect();
+        assert_eq!(
+            seen_pubkeys, expected,
+            "every seeded pubkey must appear exactly once across all pages"
         );
     }
 
