@@ -1,4 +1,5 @@
 import BuzzPushKit
+import Flutter
 import Intents
 import UserNotifications
 import XCTest
@@ -69,6 +70,7 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
       donate: { _, completion in
         completion(NSError(domain: "test", code: 1))
       },
+      deleteAllInteractions: { completion in completion(nil) },
       updateContent: { content, _ in
         updateCalled = true
         return content
@@ -98,6 +100,7 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
         order.append("donate")
         completion(nil)
       },
+      deleteAllInteractions: { completion in completion(nil) },
       updateContent: { _, _ in
         order.append("update")
         let specialized = UNMutableNotificationContent()
@@ -125,6 +128,7 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
     ordinary.body = "Hello Buzz"
     let presenter = BuzzCommunicationNotificationPresenter(
       donate: { _, completion in completion(nil) },
+      deleteAllInteractions: { completion in completion(nil) },
       updateContent: { _, _ in throw NSError(domain: "test", code: 2) }
     )
     let completed = expectation(description: "ordinary fallback returned")
@@ -139,6 +143,126 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
     }
 
     wait(for: [completed], timeout: 1)
+  }
+
+  func testFenceChangeDeletesDonatedInteractionBeforeCompleting() {
+    let ordinary = UNMutableNotificationContent()
+    ordinary.title = "Alice"
+    var allowed = true
+    var order: [String] = []
+    let presenter = BuzzCommunicationNotificationPresenter(
+      donate: { _, completion in
+        order.append("donate")
+        allowed = false
+        completion(nil)
+      },
+      deleteAllInteractions: { completion in
+        order.append("delete")
+        completion(nil)
+      },
+      updateContent: { content, _ in
+        order.append("update")
+        return content
+      }
+    )
+    let completed = expectation(description: "restricted donation deleted")
+
+    presenter.present(
+      ordinaryContent: ordinary,
+      resolution: communicationResolution(),
+      isStillAllowed: { allowed }
+    ) { content in
+      order.append("complete")
+      XCTAssertEqual(content.title, "Alice")
+      completed.fulfill()
+    }
+
+    wait(for: [completed], timeout: 1)
+    XCTAssertEqual(order, ["donate", "delete", "complete"])
+  }
+
+  func testBlockedFenceDoesNotDonate() {
+    let ordinary = UNMutableNotificationContent()
+    ordinary.title = "Alice"
+    var donateCalled = false
+    let presenter = BuzzCommunicationNotificationPresenter(
+      donate: { _, completion in
+        donateCalled = true
+        completion(nil)
+      },
+      deleteAllInteractions: { completion in completion(nil) },
+      updateContent: { content, _ in content }
+    )
+    let completed = expectation(description: "blocked donation skipped")
+
+    presenter.present(
+      ordinaryContent: ordinary,
+      resolution: communicationResolution(),
+      isStillAllowed: { false }
+    ) { content in
+      XCTAssertEqual(content.title, "Alice")
+      completed.fulfill()
+    }
+
+    wait(for: [completed], timeout: 1)
+    XCTAssertFalse(donateCalled)
+  }
+
+  func testFailedLateDonationDeletionReactivatesFenceUntilAppRetry() throws {
+    let ordinary = UNMutableNotificationContent()
+    ordinary.title = "Alice"
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fenceStore = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let fenceAtStart = fenceStore.current()
+    var order: [String] = []
+    let deletionFailure = NSError(domain: "test", code: 3)
+    let presenter = BuzzCommunicationNotificationPresenter(
+      donate: { _, completion in
+        order.append("donate")
+        XCTAssertNoThrow(try fenceStore.performFencedCleanup {})
+        completion(nil)
+      },
+      deleteAllInteractions: { completion in
+        order.append("delete")
+        completion(deletionFailure)
+      },
+      updateContent: { content, _ in content }
+    )
+    let completed = expectation(description: "failed deletion fenced")
+
+    presenter.present(
+      ordinaryContent: ordinary,
+      resolution: communicationResolution(),
+      isStillAllowed: {
+        !fenceStore.current().requiresDiscard(since: fenceAtStart)
+      },
+      onDeletionFailure: { error in
+        XCTAssertEqual(error as NSError, deletionFailure)
+        XCTAssertNoThrow(try fenceStore.begin())
+        order.append("fence")
+      }
+    ) { content in
+      order.append("complete")
+      XCTAssertEqual(content.title, "Alice")
+      completed.fulfill()
+    }
+
+    wait(for: [completed], timeout: 1)
+    XCTAssertEqual(order, ["donate", "delete", "fence", "complete"])
+    XCTAssertTrue(fenceStore.current().isFencing)
+
+    var retryError: Error?
+    try fenceStore.performFencedAsyncCleanup(
+      { $0(nil) },
+      completion: { retryError = $0 }
+    )
+    XCTAssertNil(retryError)
+    XCTAssertFalse(fenceStore.current().isFencing)
   }
 
   private func communicationResolution(
@@ -175,6 +299,47 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
 }
 
 final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
+  func testLaunchBeginsAgeRestrictionFenceBeforeFlutterState() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    try AppDelegate.beginLaunchAgeRestrictionFence(containerURL: directory)
+
+    XCTAssertTrue(BuzzAgeRestrictionFenceStore(containerURL: directory).current().isFencing)
+  }
+
+  func testStrictAgeGateWriteFailsWhenAppGroupStoreIsUnavailable() {
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil
+    )
+    let completed = expectation(description: "strict write rejected")
+
+    XCTAssertTrue(
+      bridge.handle(
+        FlutterMethodCall(
+          methodName: "syncAgeGatePushSnapshot",
+          arguments: [
+            "section": "communities",
+            "communities": [[String: Any]](),
+            "signingKeys": [String: String](),
+            "settleFence": false,
+          ]
+        )
+      ) { value in
+        XCTAssertEqual((value as? FlutterError)?.code, "snapshot_sync_unavailable")
+        completed.fulfill()
+      }
+    )
+
+    wait(for: [completed], timeout: 1)
+  }
+
   func testMetadataAuthorityUsesCurrentAppProfileForMatchingRelay() {
     let correctProfile = grant(
       appProfile: BuzzDevPushEnrollmentDriver.appProfile,

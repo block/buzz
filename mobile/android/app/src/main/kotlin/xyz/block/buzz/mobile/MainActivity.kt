@@ -1,5 +1,7 @@
 package xyz.block.buzz.mobile
 
+import android.content.Intent
+
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -10,6 +12,11 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
 import androidx.annotation.RequiresApi
+import com.google.android.play.agesignals.AgeSignalsAccessRequest
+import com.google.android.play.agesignals.AgeSignalsManager
+import com.google.android.play.agesignals.AgeSignalsManagerFactory
+import com.google.android.play.agesignals.AgeSignalsRequest
+import com.google.android.play.agesignals.model.AgeSignalsStatus
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -17,6 +24,31 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.UUID
+
+internal fun ageSignalPayload(ageUpper: Int?): Map<String, Any?> {
+    return mapOf(
+        "status" to "signal",
+        "ageUpper" to ageUpper,
+    )
+}
+
+internal fun noAgeSignalPayload(): Map<String, Any?> {
+    return mapOf(
+        "status" to "noSignal",
+        "ageUpper" to null,
+    )
+}
+
+internal fun replyWithAgeSignalError(
+    result: MethodChannel.Result,
+    error: Exception,
+) {
+    result.error(
+        "age_signal_unavailable",
+        "The age signal request failed.",
+        error.javaClass.simpleName,
+    )
+}
 
 internal object AndroidImageProcessor {
     fun decodeSrgbBitmap(bytes: ByteArray): Bitmap? {
@@ -79,6 +111,9 @@ internal object AndroidImageProcessor {
 
 class MainActivity : FlutterFragmentActivity() {
     private var mediaUploadChannel: MethodChannel? = null
+    private var ageSignalChannel: MethodChannel? = null
+    private var ageSignalRequestGeneration = 0
+    private var pendingAgeSignalResult: MethodChannel.Result? = null
     private var huddleMediaPlugin: HuddleMediaPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -117,6 +152,107 @@ class MainActivity : FlutterFragmentActivity() {
                 }
             }
         }
+
+        ageSignalChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            AGE_SIGNAL_CHANNEL,
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    REQUEST_AGE_SIGNAL_METHOD -> {
+                        handleRequestAgeSignal(
+                            AgeSignalsManagerFactory.create(applicationContext),
+                            result,
+                        )
+                    }
+                    CANCEL_AGE_SIGNAL_METHOD -> cancelAgeSignalRequest(result)
+                    RESTART_AGE_SIGNAL_METHOD -> restartForAgeSignal(result)
+                    else -> result.notImplemented()
+                }
+            }
+        }
+    }
+
+    private fun handleRequestAgeSignal(
+        ageSignalsManager: AgeSignalsManager,
+        result: MethodChannel.Result,
+    ) {
+        if (pendingAgeSignalResult != null) {
+            result.error("age_signal_in_flight", "An age signal request is already active.", null)
+            return
+        }
+        ageSignalRequestGeneration += 1
+        val generation = ageSignalRequestGeneration
+        pendingAgeSignalResult = result
+        val accessRequest = AgeSignalsAccessRequest.builder()
+            .setActivity(this)
+            .build()
+        ageSignalsManager.requestAgeSignalsAccess(accessRequest)
+            .addOnSuccessListener { accessResult ->
+                if (accessResult.ageSignalsStatus() != AgeSignalsStatus.SHARED) {
+                    completeAgeSignalRequest(generation, result) { replyWithNoAgeSignal(result) }
+                    return@addOnSuccessListener
+                }
+
+                ageSignalsManager.checkAgeSignals(AgeSignalsRequest.builder().build())
+                    .addOnSuccessListener { ageSignalsResult ->
+                        completeAgeSignalRequest(generation, result) {
+                            replyWithAgeSignal(result, ageSignalsResult.ageUpper())
+                        }
+                    }
+                    .addOnFailureListener { error ->
+                        completeAgeSignalRequest(generation, result) {
+                            replyWithAgeSignalError(result, error)
+                        }
+                    }
+            }
+            .addOnFailureListener { error ->
+                completeAgeSignalRequest(generation, result) {
+                    replyWithAgeSignalError(result, error)
+                }
+            }
+    }
+
+    private fun completeAgeSignalRequest(
+        generation: Int,
+        result: MethodChannel.Result,
+        reply: () -> Unit,
+    ) {
+        if (generation != ageSignalRequestGeneration || pendingAgeSignalResult !== result) return
+        pendingAgeSignalResult = null
+        reply()
+    }
+
+    private fun cancelAgeSignalRequest(result: MethodChannel.Result) {
+        // Play age-signals 0.0.4 exposes non-cancellable Tasks. Retain the
+        // original single flight rather than allowing an overlapping prompt.
+        result.success(false)
+    }
+
+    private fun restartForAgeSignal(result: MethodChannel.Result) {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+        if (launchIntent == null) {
+            result.error("age_signal_restart_failed", "Buzz could not restart.", null)
+            return
+        }
+        result.success(null)
+        window.decorView.post {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            startActivity(launchIntent)
+            finishAffinity()
+            Runtime.getRuntime().exit(0)
+        }
+    }
+
+    private fun replyWithAgeSignal(
+        result: MethodChannel.Result,
+        ageUpper: Int?,
+    ) {
+        result.success(ageSignalPayload(ageUpper))
+    }
+
+    private fun replyWithNoAgeSignal(result: MethodChannel.Result) {
+        result.success(noAgeSignalPayload())
     }
 
     override fun onRequestPermissionsResult(
@@ -388,6 +524,10 @@ class MainActivity : FlutterFragmentActivity() {
 
     companion object {
         private const val MEDIA_UPLOAD_CHANNEL = "buzz/media_upload"
+        private const val AGE_SIGNAL_CHANNEL = "buzz/age_signal"
+        private const val REQUEST_AGE_SIGNAL_METHOD = "requestAgeSignal"
+        private const val CANCEL_AGE_SIGNAL_METHOD = "cancelAgeSignalRequest"
+        private const val RESTART_AGE_SIGNAL_METHOD = "restartForAgeSignal"
         private const val SANITIZE_IMAGE_FOR_UPLOAD_METHOD = "sanitizeImageForUpload"
         private const val TRANSCODE_IMAGE_TO_JPEG_METHOD = "transcodeImageToJpeg"
         private const val TRANSCODE_VIDEO_TO_MP4_METHOD = "transcodeVideoToMp4"

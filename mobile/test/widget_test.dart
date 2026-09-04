@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/app.dart';
+import 'package:buzz/features/age_gate/age_signal_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 
@@ -16,6 +17,7 @@ void main() {
       ProviderScope(
         overrides: [
           authProvider.overrideWith(() => _FakeAuthNotifier()),
+          ageSignalProvider.overrideWith(() => _AllowedAgeSignalNotifier()),
           savedPrefsProvider.overrideWithValue(prefs),
         ],
         child: const App(),
@@ -24,6 +26,14 @@ void main() {
     await tester.pump();
     expect(find.text('Welcome to Buzz'), findsOneWidget);
   });
+}
+
+class _AllowedAgeSignalNotifier extends AgeSignalNotifier {
+  @override
+  AgeSignalState build() => AgeSignalState.allowed;
+
+  @override
+  Future<void> request() async {}
 }
 
 class _FakeAuthNotifier extends AuthNotifier {
