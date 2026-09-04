@@ -129,6 +129,10 @@ pub const KIND_DESKTOP_CAPABILITIES: u32 = 30182;
 pub const KIND_DESKTOP_STOP: u32 = 50180;
 /// Owner-private ordinary Desktop Stop outcome, correlated by request event ID.
 pub const KIND_DESKTOP_STOP_RESULT: u32 = 50181;
+/// Owner-private Start/Restart/status request, separate from legacy Stop.
+pub const KIND_DESKTOP_LIFECYCLE: u32 = 50182;
+/// Correlated owner-private Desktop lifecycle result.
+pub const KIND_DESKTOP_LIFECYCLE_RESULT: u32 = 50183;
 
 /// Kinds whose stored events are readable only by their author.
 ///
@@ -148,6 +152,8 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_DESKTOP_CAPABILITIES,
     KIND_DESKTOP_STOP,
     KIND_DESKTOP_STOP_RESULT,
+    KIND_DESKTOP_LIFECYCLE,
+    KIND_DESKTOP_LIFECYCLE_RESULT,
 ];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
@@ -682,6 +688,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_DESKTOP_CAPABILITIES,
     KIND_DESKTOP_STOP,
     KIND_DESKTOP_STOP_RESULT,
+    KIND_DESKTOP_LIFECYCLE,
+    KIND_DESKTOP_LIFECYCLE_RESULT,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,

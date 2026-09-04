@@ -3,8 +3,8 @@ use super::postgres_tests::bridge_handler_test_state;
 use super::*;
 use axum::{body::Body, http::Request};
 use buzz_core::kind::{
-    KIND_DESKTOP_CAPABILITIES, KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE, KIND_DESKTOP_STOP,
-    KIND_DESKTOP_STOP_RESULT,
+    KIND_DESKTOP_CAPABILITIES, KIND_DESKTOP_LIFECYCLE, KIND_DESKTOP_LIFECYCLE_RESULT,
+    KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE, KIND_DESKTOP_STOP, KIND_DESKTOP_STOP_RESULT,
 };
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde_json::json;
@@ -92,6 +92,13 @@ async fn desktop_stop_authenticated_owner_query_and_private_storage() {
     assert_private_desktop(KIND_DESKTOP_STOP_RESULT).await;
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn desktop_lifecycle_authenticated_owner_query_and_private_storage() {
+    assert_private_desktop(KIND_DESKTOP_LIFECYCLE).await;
+    assert_private_desktop(KIND_DESKTOP_LIFECYCLE_RESULT).await;
+}
+
 async fn assert_private_desktop(kind: u32) {
     let mut state = bridge_handler_test_state()
         .await
@@ -128,6 +135,29 @@ async fn assert_private_desktop(kind: u32) {
                 target,
                 request: request.id.to_hex(),
                 outcome: buzz_core::desktop_stop::StopOutcome::Stopped,
+            }
+            .sign(&owner)
+            .unwrap()
+        }
+    } else if matches!(kind, KIND_DESKTOP_LIFECYCLE | KIND_DESKTOP_LIFECYCLE_RESULT) {
+        let request = buzz_core::desktop_lifecycle::Request {
+            target: buzz_core::desktop_stop::StopTarget {
+                v: 1,
+                community: format!("wss://{host}"),
+                desktop: id.clone(),
+                agent: Keys::generate().public_key().to_hex(),
+            },
+            action: buzz_core::desktop_lifecycle::Action::Start,
+            observed: None,
+        };
+        let event = request.sign(&owner).unwrap();
+        if kind == KIND_DESKTOP_LIFECYCLE {
+            event
+        } else {
+            buzz_core::desktop_lifecycle::ResultMessage {
+                request,
+                id: event.id.to_hex(),
+                outcome: buzz_core::desktop_lifecycle::Outcome::Running,
             }
             .sign(&owner)
             .unwrap()
@@ -320,6 +350,14 @@ async fn aged_desktop_profile_retries_through_production_ingest_without_resignin
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn desktop_stop_retry_redelivers_exact_event_only_to_owner() {
+    assert_retry(KIND_DESKTOP_STOP).await;
+}
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn desktop_lifecycle_retry_redelivers_exact_event_only_to_owner() {
+    assert_retry(KIND_DESKTOP_LIFECYCLE).await;
+}
+async fn assert_retry(kind: u32) {
     use nostr::Filter;
     use std::sync::atomic::AtomicU8;
     use tokio::sync::{mpsc, Mutex};
@@ -343,7 +381,17 @@ async fn desktop_stop_retry_redelivers_exact_event_only_to_owner() {
         desktop: uuid::Uuid::new_v4().simple().to_string(),
         agent: Keys::generate().public_key().to_hex(),
     };
-    let prepared = target.sign(&owner).unwrap();
+    let prepared = if kind == KIND_DESKTOP_STOP {
+        target.sign(&owner).unwrap()
+    } else {
+        buzz_core::desktop_lifecycle::Request {
+            target,
+            action: buzz_core::desktop_lifecycle::Action::Start,
+            observed: None,
+        }
+        .sign(&owner)
+        .unwrap()
+    };
     let event = EventBuilder::new(prepared.kind, &prepared.content)
         .tags(prepared.tags.iter().cloned())
         .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - 86_400))
@@ -383,7 +431,7 @@ async fn desktop_stop_retry_redelivers_exact_event_only_to_owner() {
             tenant,
             conn,
             "stop".into(),
-            vec![Filter::new().kind(Kind::Custom(KIND_DESKTOP_STOP as u16))],
+            vec![Filter::new().kind(Kind::Custom(kind as u16))],
             None,
         );
         receivers.push(rx);
@@ -407,6 +455,6 @@ async fn desktop_stop_retry_redelivers_exact_event_only_to_owner() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
     assert!(drain(&mut receivers[0]).is_empty());
     let (_, rows) = post(&state, &host, "/query", &owner,
-        json!([{"kinds":[KIND_DESKTOP_STOP],"authors":[owner.public_key().to_hex()], "ids":[event.id.to_hex()]}]), true).await;
+        json!([{"kinds":[kind],"authors":[owner.public_key().to_hex()], "ids":[event.id.to_hex()]}]), true).await;
     assert_eq!(rows.as_array().unwrap().len(), 1);
 }
