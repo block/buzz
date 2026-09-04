@@ -72,6 +72,7 @@ mod teams;
 mod updater;
 mod window_chrome;
 mod window_vibrancy;
+mod workflow_trigger;
 mod workflows;
 mod workspace;
 
@@ -130,5 +131,6 @@ pub use teams::*;
 pub use updater::*;
 pub use window_chrome::*;
 pub use window_vibrancy::*;
+pub use workflow_trigger::*;
 pub use workflows::*;
 pub use workspace::*;

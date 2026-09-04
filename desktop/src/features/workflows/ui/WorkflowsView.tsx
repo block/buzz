@@ -25,7 +25,6 @@ import type { Channel, Workflow } from "@/shared/api/types";
 import {
   deleteWorkflow,
   getChannelsWorkflows,
-  triggerWorkflow,
   updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
 import {
@@ -152,15 +151,6 @@ export function WorkflowsView({
   const authorPresentations = useWorkflowListAuthorPresentations(workflows);
   const messagePresentations = useWorkflowListMessagePresentations(workflows);
 
-  const triggerMutation = useMutation({
-    mutationFn: (workflowId: string) => triggerWorkflow(workflowId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        predicate: (query) => query.queryKey[0] === "workflow-runs",
-      });
-    },
-  });
-
   const deleteMutation = useMutation({
     mutationFn: (workflowId: string) => deleteWorkflow(workflowId),
     onSuccess: () => {
@@ -204,12 +194,6 @@ export function WorkflowsView({
       });
     },
   });
-
-  const triggerOne = triggerMutation.mutate;
-  const handleTrigger = React.useCallback(
-    (workflowId: string) => triggerOne(workflowId),
-    [triggerOne],
-  );
 
   const handleDelete = React.useCallback(
     (workflow: Workflow) => setDeleteTarget(workflow),
@@ -327,7 +311,6 @@ export function WorkflowsView({
                   onDuplicate={handleDuplicate}
                   onEdit={handleEdit}
                   onToggleEnabled={handleToggleEnabled}
-                  onTrigger={handleTrigger}
                   onView={handleView}
                   workflow={workflow}
                 />
@@ -345,7 +328,6 @@ export function WorkflowsView({
         onDuplicateWorkflow={onDuplicateWorkflow}
         onEditWorkflow={onEditWorkflow}
         onEditorPaneChange={onEditorPaneChange}
-        onTriggerWorkflow={handleTrigger}
         workflowHint={editorWorkflowHint}
       />
 

@@ -35,7 +35,6 @@ type WorkflowEditorHostProps = {
   onDuplicateWorkflow: (workflowId: string) => void;
   onEditWorkflow: (workflowId: string) => void;
   onEditorPaneChange: (pane: WorkflowEditorPane) => void;
-  onTriggerWorkflow: (workflowId: string) => void;
   /**
    * Workflow the opening surface already holds for this target. Supplying it
    * skips the loading dialog the detail query would otherwise show first.
@@ -56,7 +55,6 @@ export function WorkflowEditorHost({
   onDuplicateWorkflow,
   onEditWorkflow,
   onEditorPaneChange,
-  onTriggerWorkflow,
   workflowHint,
 }: WorkflowEditorHostProps) {
   const editorWorkflowId =
@@ -101,7 +99,6 @@ export function WorkflowEditorHost({
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
-      onTriggerWorkflow={onTriggerWorkflow}
       open
       pane={editor.pane}
       workflow={editorWorkflow}

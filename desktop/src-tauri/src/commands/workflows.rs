@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
 
@@ -318,29 +318,6 @@ pub async fn delete_workflow(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn trigger_workflow(
-    workflow_id: String,
-    state: State<'_, AppState>,
-) -> Result<WorkflowTriggerWire, String> {
-    #[derive(Deserialize)]
-    struct WorkflowRevisionWire {
-        id: String,
-    }
-
-    // Resolve the current signed definition at trigger time. The relay binds
-    // authorization and execution to this exact revision and rejects a stale
-    // result if an update races this command. The revision endpoint returns
-    // only this identifier so immutable ownership never grants definition-read
-    // access after channel membership is revoked.
-    let revision: WorkflowRevisionWire =
-        get_relay_json(&state, &format!("/workflows/{workflow_id}/revision")).await?;
-    let definition_event_id = revision.id;
-    let builder = events::build_workflow_trigger(&workflow_id, &definition_event_id)?;
-    let result = submit_event(builder, &state).await?;
-    trigger_wire_from_message(workflow_id, &result.message)
-}
-
 // ── Approvals ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -384,7 +361,7 @@ pub async fn deny_approval(
 
 // ── Helpers (pure, unit-tested in workflows_tests.rs) ─────────────────────────
 
-fn trigger_wire_from_message(
+pub(super) fn trigger_wire_from_message(
     workflow_id: String,
     message: &str,
 ) -> Result<WorkflowTriggerWire, String> {

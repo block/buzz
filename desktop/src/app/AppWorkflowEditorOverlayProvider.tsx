@@ -9,7 +9,7 @@ import {
   type WorkflowEditorTarget,
 } from "@/features/workflows/ui/WorkflowEditorHost";
 import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorPane";
-import { deleteWorkflow, triggerWorkflow } from "@/shared/api/tauriWorkflows";
+import { deleteWorkflow } from "@/shared/api/tauriWorkflows";
 import type { Workflow } from "@/shared/api/types";
 import { WorkflowEditorOverlayProvider } from "@/shared/context/WorkflowEditorOverlayContext";
 
@@ -95,15 +95,6 @@ export function AppWorkflowEditorOverlayProvider({
     setEditor({ mode: "duplicate", pane: INITIAL_PANE, workflowId });
   }, []);
 
-  const triggerMutation = useMutation({
-    mutationFn: (workflowId: string) => triggerWorkflow(workflowId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        predicate: (query) => query.queryKey[0] === "workflow-runs",
-      });
-    },
-  });
-
   const deleteMutation = useMutation({
     mutationFn: (workflowId: string) => deleteWorkflow(workflowId),
     onSuccess: () => {
@@ -114,12 +105,6 @@ export function AppWorkflowEditorOverlayProvider({
       });
     },
   });
-
-  const triggerOne = triggerMutation.mutate;
-  const handleTriggerWorkflow = React.useCallback(
-    (workflowId: string) => triggerOne(workflowId),
-    [triggerOne],
-  );
 
   const deleteOne = deleteMutation.mutateAsync;
   const handleConfirmDelete = React.useCallback(
@@ -149,7 +134,6 @@ export function AppWorkflowEditorOverlayProvider({
         onDuplicateWorkflow={handleDuplicateWorkflow}
         onEditWorkflow={handleEditWorkflow}
         onEditorPaneChange={handleEditorPaneChange}
-        onTriggerWorkflow={handleTriggerWorkflow}
         workflowHint={workflowHint}
       />
       <WorkflowDeleteDialog

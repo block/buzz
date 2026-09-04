@@ -1,3 +1,5 @@
+import { useWorkflowTriggerOperation } from "../useWorkflowTriggerOperation";
+import { WorkflowTriggerFeedback } from "./WorkflowTriggerFeedback";
 import {
   ArrowRight,
   CalendarClock,
@@ -39,7 +41,6 @@ type WorkflowCardProps = {
   isTogglingEnabled?: boolean;
   messagePresentation?: WorkflowMessagePresentation;
   onView: (workflow: Workflow) => void;
-  onTrigger: (workflowId: string) => void;
   onToggleEnabled: (workflow: Workflow) => void;
   onEdit: (workflow: Workflow) => void;
   onDuplicate: (workflow: Workflow) => void;
@@ -200,7 +201,6 @@ export function WorkflowCard({
   isTogglingEnabled = false,
   messagePresentation,
   onView,
-  onTrigger,
   onToggleEnabled,
   onEdit,
   onDuplicate,
@@ -208,6 +208,17 @@ export function WorkflowCard({
 }: WorkflowCardProps) {
   const [triggerAnimationSequence, setTriggerAnimationSequence] =
     React.useState(0);
+  const trigger = useWorkflowTriggerOperation(workflow.id);
+  const fireTrigger = (newRun = false) => {
+    void trigger
+      .run(newRun)
+      .then(() => {
+        setTriggerAnimationSequence((sequence) => sequence + 1);
+      })
+      .catch(() => {
+        /* The shared operation retains the error and retry event. */
+      });
+  };
   const isEnabled = getWorkflowEnabled(workflow.definition);
   const configuredTrigger = getWorkflowTriggerConfig(workflow.definition);
   const cardLabel = getWorkflowCardLabel(workflow.definition, {
@@ -282,15 +293,21 @@ export function WorkflowCard({
               onDuplicate={() => onDuplicate(workflow)}
               onEdit={() => onEdit(workflow)}
               onToggleEnabled={() => onToggleEnabled(workflow)}
-              onTrigger={() => {
-                setTriggerAnimationSequence((sequence) => sequence + 1);
-                onTrigger(workflow.id);
-              }}
+              onTrigger={() => fireTrigger()}
+              isTriggering={trigger.status === "pending" || !trigger.ready}
+              triggerLabel={
+                trigger.status === "error" ? "Retry trigger" : "Trigger"
+              }
               showEnabledToggle={false}
             />
           </div>
         </div>
 
+        <WorkflowTriggerFeedback
+          state={trigger}
+          onRetry={() => fireTrigger()}
+          onNewRun={() => fireTrigger(true)}
+        />
         <h3
           className="mt-4 line-clamp-4 text-xl font-bold leading-tight tracking-tight"
           data-testid="workflow-card-semantic-label"

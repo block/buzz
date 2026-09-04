@@ -1,6 +1,7 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import type {
   ApprovalActionResponse,
+  RelayEvent,
   TriggerWorkflowResponse,
   Workflow,
   WorkflowApproval,
@@ -261,12 +262,29 @@ export async function getRunApprovals(
   return raw.approvals.map(fromRawApproval);
 }
 
+export type WorkflowTriggerScope = {
+  expectedRelayUrl: string;
+  expectedSignerPubkey: string;
+};
+
+export async function prepareWorkflowTrigger(
+  workflowId: string,
+  scope: WorkflowTriggerScope,
+): Promise<RelayEvent> {
+  return invokeTauri<RelayEvent>("prepare_workflow_trigger", {
+    workflowId,
+    ...scope,
+  });
+}
+
 export async function triggerWorkflow(
   workflowId: string,
+  event: RelayEvent,
+  scope: WorkflowTriggerScope,
 ): Promise<TriggerWorkflowResponse> {
   const raw = await invokeTauri<RawTriggerWorkflowResponse>(
     "trigger_workflow",
-    { workflowId },
+    { workflowId, event, ...scope },
   );
   return fromRawTriggerResponse(raw);
 }

@@ -367,3 +367,14 @@ CLI-side, only two matter for testing:
 | ACP logs `discovered 0 channel(s)` / `no channel subscriptions resolved` | Agent identity isn't a member of any channel | `buzz channels add-member --channel "$CHANNEL" --pubkey "$AGENT_PUBKEY" --role member` from another identity |
 | `GOOSE_MODE` warning, agent hangs | Not set | `export GOOSE_MODE=auto` |
 | Tests pass locally but CI fails | Forgot to run `just ci` | `just ci` runs the gate (fmt, clippy, unit tests, desktop/web builds) |
+
+### Workflow fixture repository/cache isolation
+
+`AppState::new` initializes `GitPackCache`, whose startup sweeps stale
+`session-*` directories under `config.git_pack_cache_path`. Workflow unit-test fixture states
+therefore own a temporary repository/cache directory, outside the worktree.
+Integration binaries must likewise set `BUZZ_GIT_REPO_PATH` and
+`BUZZ_GIT_PACK_CACHE_PATH` to disposable external paths **before** reading
+`Config::from_env`; the default is `./repos/.pack-cache`. Never infer cache
+preservation from a clean Git status: Git does not inventory empty directories.
+Capture an inventory before tests when pre-existing untracked files matter.

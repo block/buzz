@@ -1,9 +1,10 @@
+import { useWorkflowTriggerOperation } from "../useWorkflowTriggerOperation";
+import { WorkflowTriggerFeedback } from "./WorkflowTriggerFeedback";
 import { ChevronDown, ChevronRight, Pencil, Play, X } from "lucide-react";
 import * as React from "react";
 
 import {
   useRunApprovalsQuery,
-  useTriggerWorkflowMutation,
   useWorkflowQuery,
   useWorkflowRunsQuery,
 } from "@/features/workflows/hooks";
@@ -35,7 +36,7 @@ export function WorkflowDetailPanel({
 }: WorkflowDetailPanelProps) {
   const workflowQuery = useWorkflowQuery(workflowId);
   const runsQuery = useWorkflowRunsQuery(workflowId);
-  const triggerMutation = useTriggerWorkflowMutation(workflowId);
+  const triggerMutation = useWorkflowTriggerOperation(workflowId);
   const [selectedRunId, setSelectedRunId] = React.useState<string | null>(null);
 
   const workflow = workflowQuery.data;
@@ -48,10 +49,6 @@ export function WorkflowDetailPanel({
     ? getWorkflowTriggerSummary(workflow.definition)
     : null;
   const workflowStatus = workflow ? getWorkflowDisplayStatus(workflow) : null;
-  const triggerError = errorMessage(
-    triggerMutation.error,
-    "The relay did not create a workflow run.",
-  );
   const runsError = errorMessage(
     runsQuery.error,
     "Run history could not be loaded.",
@@ -59,12 +56,12 @@ export function WorkflowDetailPanel({
   const selectedRunIsPendingHistory =
     selectedRunId !== null && !runs.some((run) => run.id === selectedRunId);
 
-  async function handleTrigger() {
+  async function handleTrigger(newRun = false) {
     try {
-      const response = await triggerMutation.mutateAsync();
+      const response = await triggerMutation.run(newRun);
       setSelectedRunId(response.runId);
     } catch {
-      // React Query stores the error; keep the current selection unchanged.
+      // The shared operation retains the error and the exact retry event.
     }
   }
 
@@ -119,13 +116,21 @@ export function WorkflowDetailPanel({
               </Button>
             ) : null}
             <Button
-              disabled={triggerMutation.isPending || workflowQuery.isLoading}
+              disabled={
+                triggerMutation.status === "pending" ||
+                !triggerMutation.ready ||
+                workflowQuery.isLoading
+              }
               onClick={() => void handleTrigger()}
               size="sm"
               variant="outline"
             >
               <Play className="mr-1 h-4 w-4" />
-              {triggerMutation.isPending ? "Triggering..." : "Trigger"}
+              {triggerMutation.status === "pending"
+                ? "Triggering..."
+                : triggerMutation.status === "error"
+                  ? "Retry trigger"
+                  : "Trigger"}
             </Button>
             {onClose ? (
               <Button
@@ -141,16 +146,12 @@ export function WorkflowDetailPanel({
         </div>
       ) : null}
 
-      {triggerMutation.isError ? (
-        <div
-          className="border-b px-4 py-2 text-xs text-destructive"
-          role="alert"
-        >
-          <p className="font-medium">Failed to trigger workflow</p>
-          <p className="mt-1 break-words text-muted-foreground">
-            {triggerError}
-          </p>
-        </div>
+      {showHeader ? (
+        <WorkflowTriggerFeedback
+          state={triggerMutation}
+          onRetry={() => void handleTrigger()}
+          onNewRun={() => void handleTrigger(true)}
+        />
       ) : null}
 
       <div

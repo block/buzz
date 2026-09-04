@@ -301,6 +301,7 @@ mod postgres_tests {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let mut config = crate::config::Config::from_env().expect("config from env");
+        let test_git_directory = AppState::workflow_test_git_directory(&mut config);
         config.database_url = database_url.clone();
         config.redis_url = redis_url.clone();
         config.relay_url = format!("wss://{host}");
@@ -331,7 +332,7 @@ mod postgres_tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -343,6 +344,7 @@ mod postgres_tests {
             Keys::generate(),
             media_storage,
         );
+        state.test_git_directory = Some(test_git_directory);
         Arc::new(state)
     }
 
