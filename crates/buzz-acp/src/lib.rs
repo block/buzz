@@ -5242,7 +5242,7 @@ mod agent_draft_prompt_tests {
     fn shared_base_prompt_teaches_portable_agent_drafts() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.starts_with(
-            "You are a managed agent in Buzz, a shared workspace where humans and agents collaborate as colleagues. Buzz is a desktop and mobile collaboration app organized around channels, conversations, and shared work."
+            "You are an agent operating inside Buzz — a Nostr-based messaging platform for human-agent collaboration.\nBuzz is a desktop and mobile collaboration app organized around channels, conversations, and shared work."
         ));
         assert!(prompt.contains("buzz agents draft-create"));
         assert!(prompt.contains("ask for at most two things"));
