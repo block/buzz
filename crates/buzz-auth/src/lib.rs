@@ -61,6 +61,8 @@ pub use access::MockAccessChecker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use nip98_replay::AlwaysFreshReplayGuard;
 #[cfg(any(test, feature = "test-utils"))]
+pub use nip_fi::ToggleJwksFetcher;
+#[cfg(any(test, feature = "test-utils"))]
 pub use rate_limit::AlwaysAllowRateLimiter;
 
 /// How the connection was authenticated.

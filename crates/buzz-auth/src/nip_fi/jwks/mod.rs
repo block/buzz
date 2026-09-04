@@ -734,5 +734,66 @@ impl<F> std::fmt::Debug for ProductionJwksSource<F> {
     }
 }
 
+/// A toggle-controlled [`JwksFetcher`] for use in downstream-crate integration
+/// tests. Returns a minimal but valid JWKS document when the toggle is `true`,
+/// and `NetworkError` when `false`.
+///
+/// This is the only path by which a crate outside `buzz-auth` can build a
+/// `ProductionJwksSource` with a controllable fetch outcome — `sealed::Sealed`
+/// is crate-private, so downstream crates cannot implement `JwksFetcher`
+/// directly. Because the returned JWKS is real (not a synthetic shortcut), the
+/// full `ProductionJwksSource` code path — parse, bound, cache, hard-deadline —
+/// exercises itself normally, and the resulting `AssertionKeySet` is valid for
+/// verifier lookups.
+///
+/// Only available with the `test-utils` feature enabled.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Debug)]
+pub struct ToggleJwksFetcher {
+    /// When `true` the fetcher returns a minimal valid JWKS body; when `false`
+    /// it returns `JwksFetchError::NetworkError`.
+    pub available: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl ToggleJwksFetcher {
+    /// Construct a new `ToggleJwksFetcher`. Pass `initial` as the starting
+    /// availability state; the shared `available` flag can be flipped from the
+    /// test after construction.
+    pub fn new(initial: bool) -> Self {
+        Self {
+            available: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(initial)),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl super::verifier::sealed::Sealed for ToggleJwksFetcher {}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl JwksFetcher for ToggleJwksFetcher {
+    fn fetch_jwks<'a>(
+        &'a self,
+        _uri: &'a str,
+    ) -> impl std::future::Future<Output = Result<String, JwksFetchError>> + Send + 'a {
+        // A minimal P-256 JWK.  The coordinates are the same values used in
+        // buzz-auth's own test suite (tests.rs `minimal_jwks_json`).
+        const TOGGLE_JWKS: &str = concat!(
+            r#"{"keys":[{"kty":"EC","crv":"P-256","#,
+            r#""x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","#,
+            r#""y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0","#,
+            r#""use":"sig","alg":"ES256","kid":"toggle-kid"}]}"#
+        );
+        let available = self.available.load(std::sync::atomic::Ordering::SeqCst);
+        async move {
+            if available {
+                Ok(TOGGLE_JWKS.to_string())
+            } else {
+                Err(JwksFetchError::NetworkError)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
