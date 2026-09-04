@@ -83,7 +83,7 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
     },
   ]);
   assert.equal(cancelCount, 0);
-  assert.deepEqual(openPickerCalls, [[text.length, "preserve"]]);
+  assert.deepEqual(openPickerCalls, [[text.length]]);
   assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
   assert.equal(

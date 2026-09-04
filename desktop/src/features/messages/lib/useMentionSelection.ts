@@ -1,40 +1,55 @@
 import * as React from "react";
+import type { MentionSuggestion } from "../ui/MentionAutocomplete";
+import type { MentionRequest } from "./useMentionQuery";
 
-import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
+export type MentionPickerMode = "first-agent" | null;
 
-export type MentionPickerMode = "first-agent" | "preserve" | null;
-
-export function useMentionSelection(suggestions: MentionSuggestion[]) {
-  const [mentionSelectedIndex, setMentionSelectedIndex] = React.useState(0);
-  const preferAgentSelectionRef = React.useRef(false);
-
+/** Install once per request; indexes refer to these displayed rows, never live ranking. */
+export function useMentionSelection(
+  request: MentionRequest | null,
+  candidates: MentionSuggestion[],
+  ready: boolean,
+) {
+  const [snapshot, setSnapshot] = React.useState<{
+    request: MentionRequest;
+    rows: MentionSuggestion[];
+    index: number;
+  } | null>(null);
   React.useEffect(() => {
-    setMentionSelectedIndex((current) => {
-      if (suggestions.length === 0) return 0;
-      if (preferAgentSelectionRef.current) {
-        preferAgentSelectionRef.current = false;
-        const firstAgentIndex = suggestions.findIndex(
-          (suggestion) => suggestion.isAgent && suggestion.pubkey,
-        );
-        if (firstAgentIndex >= 0) return firstAgentIndex;
-      }
-      return Math.min(current, suggestions.length - 1);
-    });
-  }, [suggestions]);
-
-  const clearAgentSelectionPreference = React.useCallback(() => {
-    preferAgentSelectionRef.current = false;
-  }, []);
-  const prepareSelectionPreference = React.useCallback(
-    (preference: MentionPickerMode) => {
-      preferAgentSelectionRef.current = preference === "first-agent";
-    },
-    [],
-  );
+    if (!request) {
+      setSnapshot(null);
+      return;
+    }
+    if (!ready) return;
+    setSnapshot((old) =>
+      old?.request === request
+        ? old
+        : {
+            request,
+            rows: candidates.map((row) => ({ ...row })),
+            index: request.firstAgent
+              ? Math.max(
+                  0,
+                  candidates.findIndex((s) => s.isAgent && s.pubkey),
+                )
+              : 0,
+          },
+    );
+  }, [request, candidates, ready]);
+  const installed = snapshot?.request === request ? snapshot : null;
   return {
-    clearAgentSelectionPreference,
-    mentionSelectedIndex,
-    prepareSelectionPreference,
-    setMentionSelectedIndex,
+    suggestions: installed?.rows ?? [],
+    mentionSelectedIndex: installed?.index ?? 0,
+    isLoading: !!request && !installed,
+    move: (direction: number) =>
+      setSnapshot((old) =>
+        !old || old.request !== request || !old.rows.length
+          ? old
+          : {
+              ...old,
+              index:
+                (old.index + direction + old.rows.length) % old.rows.length,
+            },
+      ),
   };
 }

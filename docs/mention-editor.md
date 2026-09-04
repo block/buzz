@@ -63,3 +63,26 @@ refs, typed members and personas before presence selection; they are never match
 in a separate, narrower pass. Current selections (including unbound personas)
 take precedence over same-label fallback refs. Historical unresolved identities
 still preserve non-notifying metadata, without claiming a literal binding.
+
+## Stable completion choices
+
+Changing completion text requests a new list. The picker shows loading while
+needed data arrives, then installs one set of up to 50 choices. Background
+membership, directory, presence and ranking updates do not replace or reorder
+those choices. A subsequent text change or explicit open uses current evidence.
+Create/Add membership refreshes discovery for that next open, not a moving list.
+
+Arrow keys select an index in the displayed set. Tab, plain Enter and clicking
+choose that displayed identity, including same-name rows; they do not require
+global uniqueness or exhaust search pagination. Space is still implicit exact
+name completion: partial, longer-name and ambiguous matches stay literal.
+
+Leaving the completion, dismissal and navigation abandon its request and
+selection. Closed or superseded requests cannot install their results. Explicit
+no-trigger menus open/reset normally; toggling an automatic address reopens a
+fresh menu rather than preserving selection across an edited document.
+
+This is display stability, not cached permission. Selection checks current
+exact-key access and team recipients; publication still revalidates authority.
+Recipient-label binding and highlight settlement remain independent of the
+picker's request lifecycle.

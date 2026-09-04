@@ -93,7 +93,8 @@ export function MessageComposerAutocompletes({
         onToggleAlwaysAddressAgent={
           audienceControlsEnabled ? onToggleAlwaysAddressAgent : undefined
         }
-        onFetchMore={mentions.fetchMoreSuggestions}
+        isOpen={mentions.isMentionOpen}
+        isLoading={mentions.isMentionLoading}
         onDismiss={mentions.cancelMentionAutocomplete}
         onSelect={onMentionSelect}
         selectedIndex={mentions.mentionSelectedIndex}

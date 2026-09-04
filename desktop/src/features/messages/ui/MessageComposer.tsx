@@ -152,6 +152,8 @@ function MessageComposerImpl({
   const mentions = useMentions(channelId, undefined, profiles, {
     channelType,
     recentMentionPubkeys,
+    getEditorSnapshot: (): { text: string; cursor: number } =>
+      richText.getPlainTextAndCursor(),
   });
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();
@@ -302,6 +304,8 @@ function MessageComposerImpl({
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
+    onSelectionUpdate: ({ text, cursor }) =>
+      mentions.updateMentionQuery(text, cursor),
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
       trackAuthoredContent(text);
       contentRef.current = text;
