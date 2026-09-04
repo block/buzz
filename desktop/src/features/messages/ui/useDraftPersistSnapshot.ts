@@ -6,6 +6,7 @@ import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import {
   getDraftStoreScope,
+  type DraftEntryKind,
   type DraftMentionRef,
   type DraftState,
 } from "@/features/messages/lib/useDrafts";
@@ -23,6 +24,7 @@ type UseDraftPersistLifecycleParams = {
     pendingImeta: ImetaMedia[],
     spoileredAttachmentUrls: string[],
     mentionRefs: DraftMentionRef[],
+    entryKind?: DraftEntryKind,
   ) => void;
   /** Snapshot selected mention identities still present in current content. */
   getMentionRefs: (content: string) => DraftMentionRef[];
@@ -30,6 +32,8 @@ type UseDraftPersistLifecycleParams = {
   restoreMentionRefs: (refs: readonly DraftMentionRef[]) => void;
   /** Live `pendingImeta` from React state — used for render-time ref sync. */
   livePendingImeta: ImetaMedia[];
+  /** Live local-file count; any retained attachment makes this a real draft. */
+  liveQueuedAttachmentCount?: number;
   /** Async setter for pendingImeta — called after the synchronous snapshot. */
   setPendingImeta: (imeta: ImetaMedia[]) => void;
   /** Snapshot the local files owned by the outgoing draft key. */
@@ -72,12 +76,38 @@ type UseDraftPersistLifecycleResult = {
    * later non-empty editor update supersedes it.
    */
   trackAuthoredContent: (content: string) => void;
+  /** Begin a fresh automatic address-only composer snapshot. */
+  resetToAgentPrefill: () => void;
+  /**
+   * Persist an automatic prefill, or clear it after its last mention is
+   * removed. Re-persisting a snapshot identical to the stored record is a
+   * no-op (no write, no subscriber broadcast, no updatedAt churn).
+   */
+  persistAgentPrefill: (content: string) => void;
+  /** Restore the exact classification captured before an attempted send. */
+  restoreEntryKind: (entryKind: DraftEntryKind) => void;
+  getEntryKind: () => DraftEntryKind;
 };
 
 const authoritativelyClearedDraftKeys = new Set<string>();
 
 function scopedDraftKey(draftKey: string): string {
   return `${getDraftStoreScope()}:${draftKey}`;
+}
+
+function mentionRefsEqual(
+  stored: readonly DraftMentionRef[],
+  next: readonly DraftMentionRef[],
+): boolean {
+  return (
+    stored.length === next.length &&
+    stored.every(
+      (ref, i) =>
+        ref.displayName === next[i].displayName &&
+        ref.pubkey === next[i].pubkey &&
+        ref.isAgent === next[i].isAgent,
+    )
+  );
 }
 
 /**
@@ -113,6 +143,7 @@ export function useDraftPersistLifecycle({
   getMentionRefs,
   restoreMentionRefs,
   livePendingImeta,
+  liveQueuedAttachmentCount = 0,
   setPendingImeta,
   getQueuedAttachments,
   saveQueuedAttachmentsForDraft,
@@ -137,6 +168,7 @@ export function useDraftPersistLifecycle({
 
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
   const emptyContentIsAuthoritativeRef = React.useRef(false);
+  const entryKindRef = React.useRef<DraftEntryKind>("draft");
   const isRestoringContentRef = React.useRef(false);
   const restoredQueuedAttachmentsRef = React.useRef<QueuedMediaAttachment[]>(
     [],
@@ -147,6 +179,9 @@ export function useDraftPersistLifecycle({
   // Render-time update: keep the ref in sync with committed state so the
   // cleanup always reads the latest value during normal mounted operation.
   pendingImetaForPersistRef.current = livePendingImeta;
+  if (livePendingImeta.length > 0 || liveQueuedAttachmentCount > 0) {
+    entryKindRef.current = "draft";
+  }
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useLayoutEffect(() => {
@@ -175,6 +210,7 @@ export function useDraftPersistLifecycle({
     const saved = effectiveDraftKey ? loadDraft(effectiveDraftKey) : undefined;
     emptyContentIsAuthoritativeRef.current = wasAuthoritativelyCleared;
     isRestoringContentRef.current = true;
+    entryKindRef.current = saved?.entryKind ?? "draft";
     if (saved) {
       const restoredContent = wasAuthoritativelyCleared ? "" : saved.content;
       setContent(restoredContent);
@@ -204,9 +240,25 @@ export function useDraftPersistLifecycle({
         if (queuedAttachments.length > 0) {
           saveQueuedAttachmentsForDraft?.(effectiveDraftKey, queuedAttachments);
         }
-        const content = emptyContentIsAuthoritativeRef.current
+        const entryKind =
+          pendingImetaForPersistRef.current.length > 0 ||
+          queuedAttachments.length > 0
+            ? "draft"
+            : entryKindRef.current;
+        const editorContent = emptyContentIsAuthoritativeRef.current
           ? ""
-          : persistedContent(syncComposerContentFromEditor());
+          : syncComposerContentFromEditor();
+        // A pure automatic prefill IS the implicit prefix: stripping it here
+        // would persist "" (which clears the record), so the agent-prefill
+        // classification would survive full reloads but not in-app
+        // navigation. Any authored edit or retained attachment has already
+        // demoted entryKind to "draft", and the storage boundary re-demotes
+        // anything that is not mention-only, so skipping the strip cannot
+        // leak an implicit prefix into an Inbox-visible draft.
+        const content =
+          entryKind === "agent-prefill"
+            ? editorContent
+            : persistedContent(editorContent);
         persistDraft(
           effectiveDraftKey,
           content,
@@ -214,6 +266,7 @@ export function useDraftPersistLifecycle({
           [...pendingImetaForPersistRef.current],
           [...spoileredAttachmentUrlsRef.current],
           getMentionRefs(content),
+          entryKind,
         );
       }
     };
@@ -222,6 +275,7 @@ export function useDraftPersistLifecycle({
   const trackAuthoredContent = React.useCallback(
     (content: string) => {
       if (!effectiveDraftKey || isRestoringContentRef.current) return;
+      entryKindRef.current = "draft";
       const authoritativeDraftKey = scopedDraftKey(effectiveDraftKey);
       if (content.length > 0) {
         authoritativelyClearedDraftKeys.delete(authoritativeDraftKey);
@@ -237,10 +291,85 @@ export function useDraftPersistLifecycle({
         [...pendingImetaForPersistRef.current],
         [...spoileredAttachmentUrlsRef.current],
         [],
+        "draft",
       );
     },
     [channelId, effectiveDraftKey, persistDraft, spoileredAttachmentUrlsRef],
   );
 
-  return { trackAuthoredContent };
+  const resetToAgentPrefill = React.useCallback(() => {
+    entryKindRef.current = "agent-prefill";
+    if (effectiveDraftKey) {
+      authoritativelyClearedDraftKeys.delete(scopedDraftKey(effectiveDraftKey));
+      emptyContentIsAuthoritativeRef.current = false;
+    }
+  }, [effectiveDraftKey]);
+
+  const persistAgentPrefill = React.useCallback(
+    (content: string) => {
+      if (!effectiveDraftKey) return;
+      if (content.trim().length === 0) {
+        entryKindRef.current = "draft";
+        persistDraft(
+          effectiveDraftKey,
+          content,
+          channelId ?? effectiveDraftKey,
+          [...pendingImetaForPersistRef.current],
+          [...spoileredAttachmentUrlsRef.current],
+          [],
+          "draft",
+        );
+        return;
+      }
+      resetToAgentPrefill();
+      // Effect-driven callers re-run whenever a collaborator identity changes
+      // (profile refresh, audience update) without the prefill itself moving.
+      // saveDraftEntry has no same-content short-circuit — every write flushes
+      // localStorage and broadcasts a fresh updatedAt to Inbox subscribers —
+      // so skip the re-persist when the stored snapshot is already identical.
+      const mentionRefs = getMentionRefs(content);
+      const stored = loadDraft(effectiveDraftKey);
+      if (
+        stored?.entryKind === "agent-prefill" &&
+        stored.content === content &&
+        stored.channelId === (channelId ?? effectiveDraftKey) &&
+        pendingImetaForPersistRef.current.length === 0 &&
+        spoileredAttachmentUrlsRef.current.size === 0 &&
+        mentionRefsEqual(stored.mentionRefs ?? [], mentionRefs)
+      ) {
+        return;
+      }
+      persistDraft(
+        effectiveDraftKey,
+        content,
+        channelId ?? effectiveDraftKey,
+        [...pendingImetaForPersistRef.current],
+        [...spoileredAttachmentUrlsRef.current],
+        mentionRefs,
+        "agent-prefill",
+      );
+    },
+    [
+      channelId,
+      effectiveDraftKey,
+      getMentionRefs,
+      loadDraft,
+      persistDraft,
+      resetToAgentPrefill,
+      spoileredAttachmentUrlsRef,
+    ],
+  );
+
+  const restoreEntryKind = React.useCallback((entryKind: DraftEntryKind) => {
+    entryKindRef.current = entryKind;
+  }, []);
+
+  const getEntryKind = React.useCallback(() => entryKindRef.current, []);
+  return {
+    trackAuthoredContent,
+    resetToAgentPrefill,
+    persistAgentPrefill,
+    restoreEntryKind,
+    getEntryKind,
+  };
 }

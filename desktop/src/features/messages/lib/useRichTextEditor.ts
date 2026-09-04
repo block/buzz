@@ -76,6 +76,8 @@ export type AutocompleteEdit = {
   preserveSelection?: boolean;
   /** Skip asynchronous DOM caret reassertion when focus may move elsewhere. */
   reassertMentionCaret?: boolean;
+  /** Suppress authored-update observers for automatic composer restoration. */
+  preventUpdate?: boolean;
   /**
    * When set, the replaced range becomes a CustomEmojiNode for this
    * shortcode (followed by `insertText`, which carries the trailing space)
@@ -707,6 +709,22 @@ export function useRichTextEditor({
     (markdown: string) => {
       if (!editor) return;
       editor.commands.setContent(markdown);
+      // The markdown re-parse drops trailing spaces, but a restored draft's
+      // trailing run can be meaningful: an automatic agent prefill is exactly
+      // "@Name " and its separator must survive restoration so the caret
+      // lands past it and the next keystroke does not fuse into the mention.
+      // Re-insert whatever the parse lost, without emitting an update.
+      const trailingSpaces = / +$/.exec(markdown)?.[0] ?? "";
+      if (!trailingSpaces) return;
+      const doc = editor.state.doc;
+      const docText = doc.textBetween(0, doc.content.size, "\n", "\n");
+      const preserved = / +$/.exec(docText)?.[0] ?? "";
+      const missing = trailingSpaces.slice(preserved.length);
+      if (!missing) return;
+      const end = TextSelection.atEnd(doc).from;
+      editor.view.dispatch(
+        editor.state.tr.insertText(missing, end).setMeta("preventUpdate", true),
+      );
     },
     [editor],
   );
@@ -802,6 +820,7 @@ export function useRichTextEditor({
       customEmojiShortcode?: string,
       preserveSelection = false,
       reassertMentionCaret = !preserveSelection,
+      preventUpdate = false,
     ) => {
       if (!editor) return;
       const projection = buildPlainTextProjection(editor.state.doc);
@@ -824,6 +843,7 @@ export function useRichTextEditor({
           // after it.
           const afterNode = tr.mapping.map(toPM);
           if (text) tr = tr.insertText(text, afterNode);
+          if (preventUpdate) tr.setMeta("preventUpdate", true);
           const cursorPM = afterNode + (text ? text.length : 0);
           tr = tr.setSelection(TextSelection.create(tr.doc, cursorPM));
           editor.view.dispatch(tr);
@@ -834,6 +854,7 @@ export function useRichTextEditor({
       }
 
       const tr = editor.state.tr.insertText(text, fromPM, toPM);
+      if (preventUpdate) tr.setMeta("preventUpdate", true);
       if (preserveSelection) {
         tr.setSelection(editor.state.selection.map(tr.doc, tr.mapping));
       } else {

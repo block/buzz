@@ -25,6 +25,7 @@ export function useProjectDiscussInChannel(items: ProjectSelectionItem[]) {
       saveDraftEntry(channelId, {
         channelId,
         content,
+        entryKind: "draft",
         createdAt: existing?.createdAt ?? now,
         mentionRefs: existing?.mentionRefs ?? [],
         pendingImeta: existing?.pendingImeta ?? [],

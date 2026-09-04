@@ -193,6 +193,7 @@ function installDOMShim() {
     }
   };
   globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
 }
 
 installDOMShim();
@@ -233,14 +234,17 @@ import { act } from "react";
 // Production hook under test — owns the restore effect, cleanup, and the
 // synchronous ref write that is the StrictMode fix.
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot.ts";
+import { useAgentPrefillDraftBridge } from "./useAgentPrefillDraftBridge.ts";
 
 // Real storage functions — the test uses them, not a replica.
 import {
   clearAllDrafts,
   deleteDraftEntry,
+  getInboxDraftEntries,
   initDraftStore,
   loadDraftEntry,
   persistDraftEntry,
+  subscribeToStore,
 } from "../lib/useDrafts.ts";
 import {
   saveQueuedAttachmentsForDraft,
@@ -880,4 +884,539 @@ test("discarding_a_draft_drops_its_retained_local_files", () => {
   deleteDraftEntry("chan-deleted");
 
   assert.deepEqual(takeQueuedAttachmentsForDraft("chan-deleted"), []);
+});
+
+const AGENT_PREFILL_REFS = [
+  { displayName: "Jitter", pubkey: "agent-jitter", isAgent: true },
+];
+
+test("strictmode_lifecycle_restores_and_repersists_agent_prefill_kind", async () => {
+  const draftKey = "chan-prefill-strictmode";
+  setupStore("pubkey-prefill-strictmode");
+  persistDraftEntry(
+    draftKey,
+    "@Jitter ",
+    draftKey,
+    [],
+    [],
+    AGENT_PREFILL_REFS,
+    "agent-prefill",
+  );
+
+  let editorContent = "";
+  let activeRefs = [];
+  let getEntryKind;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    ({ getEntryKind } = useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => activeRefs,
+      restoreMentionRefs: (refs) => {
+        activeRefs = [...refs];
+      },
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.equal(getEntryKind(), "agent-prefill");
+  assert.equal(editorContent, "@Jitter ");
+  await handle.unmount();
+  assert.equal(loadDraftEntry(draftKey)?.entryKind, "agent-prefill");
+});
+
+test("automatic_prefill_persists_immediately_without_waiting_for_cleanup", async () => {
+  const draftKey = "chan-prefill-immediate";
+  setupStore("pubkey-prefill-immediate");
+
+  let persistAgentPrefill;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    ({ persistAgentPrefill } = useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => AGENT_PREFILL_REFS,
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: () => {},
+      clearContent: () => {},
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => "@Jitter ",
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  persistAgentPrefill("@Jitter ");
+  assert.equal(loadDraftEntry(draftKey)?.entryKind, "agent-prefill");
+  assert.equal(loadDraftEntry(draftKey)?.content, "@Jitter ");
+  await handle.unmount();
+});
+
+test("repersisting_an_identical_prefill_snapshot_is_a_storage_noop", async () => {
+  const draftKey = "chan-prefill-noop";
+  setupStore("pubkey-prefill-noop");
+  const GROWN_PREFILL_REFS = [
+    ...AGENT_PREFILL_REFS,
+    { displayName: "Scout", pubkey: "agent-scout", isAgent: true },
+  ];
+
+  let persistAgentPrefill;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    ({ persistAgentPrefill } = useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: (content) =>
+        content.includes("@Scout") ? GROWN_PREFILL_REFS : AGENT_PREFILL_REFS,
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: () => {},
+      clearContent: () => {},
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => "@Jitter ",
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  persistAgentPrefill("@Jitter ");
+  const first = loadDraftEntry(draftKey);
+  assert.equal(first?.entryKind, "agent-prefill");
+
+  // ISO timestamps have millisecond precision — space the writes out so an
+  // updatedAt bump from a non-skipped duplicate persist is observable.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  let notifications = 0;
+  const unsubscribe = subscribeToStore(() => {
+    notifications += 1;
+  });
+  persistAgentPrefill("@Jitter ");
+  persistAgentPrefill("@Jitter ");
+  assert.equal(
+    notifications,
+    0,
+    "re-persisting an identical prefill snapshot must not notify subscribers",
+  );
+  assert.equal(
+    loadDraftEntry(draftKey)?.updatedAt,
+    first.updatedAt,
+    "re-persisting an identical prefill snapshot must not bump updatedAt",
+  );
+
+  // A genuinely changed snapshot (audience grew) must still write and notify.
+  persistAgentPrefill("@Jitter @Scout ");
+  unsubscribe();
+  assert.equal(notifications, 1, "a changed prefill snapshot must persist");
+  const grown = loadDraftEntry(draftKey);
+  assert.equal(grown?.content, "@Jitter @Scout ");
+  assert.equal(grown?.entryKind, "agent-prefill");
+  assert.notEqual(grown?.updatedAt, first.updatedAt);
+  await handle.unmount();
+});
+
+test("authored_edit_promotes_prefill_monotonically_even_if_text_returns", async () => {
+  const draftKey = "chan-prefill-authored";
+  setupStore("pubkey-prefill-authored");
+  persistDraftEntry(
+    draftKey,
+    "@Jitter ",
+    draftKey,
+    [],
+    [],
+    AGENT_PREFILL_REFS,
+    "agent-prefill",
+  );
+
+  let editorContent = "";
+  let activeRefs = [];
+  let getEntryKind;
+  let trackAuthoredContent;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    ({ getEntryKind, trackAuthoredContent } = useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => activeRefs,
+      restoreMentionRefs: (refs) => {
+        activeRefs = [...refs];
+      },
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  editorContent = "@Jitter hello";
+  trackAuthoredContent(editorContent);
+  assert.equal(getEntryKind(), "draft");
+  editorContent = "@Jitter ";
+  trackAuthoredContent(editorContent);
+  assert.equal(getEntryKind(), "draft");
+  await handle.unmount();
+  assert.equal(loadDraftEntry(draftKey)?.entryKind, "draft");
+});
+
+test("retained_attachment_promotes_an_agent_prefill_to_draft", async () => {
+  const draftKey = "chan-prefill-media";
+  setupStore("pubkey-prefill-media");
+  persistDraftEntry(
+    draftKey,
+    "@Jitter ",
+    draftKey,
+    [],
+    [],
+    AGENT_PREFILL_REFS,
+    "agent-prefill",
+  );
+
+  let editorContent = "";
+  let activeRefs = [];
+  let pendingImeta = [];
+  let getEntryKind;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    ({ getEntryKind } = useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => activeRefs,
+      restoreMentionRefs: (refs) => {
+        activeRefs = [...refs];
+      },
+      livePendingImeta: pendingImeta,
+      setPendingImeta: (imeta) => {
+        pendingImeta = imeta;
+      },
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  pendingImeta = [IMG_A];
+  await handle.rerender();
+  assert.equal(getEntryKind(), "draft");
+  await handle.unmount();
+  assert.equal(loadDraftEntry(draftKey)?.entryKind, "draft");
+  assert.deepEqual(loadDraftEntry(draftKey)?.pendingImeta, [IMG_A]);
+});
+
+test("failed_send_restores_the_captured_entry_kind", async () => {
+  const draftKey = "chan-send-kind-recovery";
+  setupStore("pubkey-send-kind-recovery");
+  persistDraftEntry(draftKey, "authored message", draftKey, [], []);
+
+  let editorContent = "";
+  let getEntryKind;
+  let resetToAgentPrefill;
+  let restoreEntryKind;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    ({ getEntryKind, resetToAgentPrefill, restoreEntryKind } =
+      useDraftPersistLifecycle({
+        effectiveDraftKey: draftKey,
+        channelId: draftKey,
+        loadDraft: loadDraftEntry,
+        persistDraft: persistDraftEntry,
+        getMentionRefs: () => [],
+        restoreMentionRefs: () => {},
+        livePendingImeta: [],
+        setPendingImeta: () => {},
+        setContent: (content) => {
+          editorContent = content;
+        },
+        clearContent: () => {
+          editorContent = "";
+        },
+        setSpoileredAttachmentUrls: () => {},
+        spoileredAttachmentUrlsRef: spoileredRef,
+        syncComposerContentFromEditor: () => editorContent,
+      }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  const submittedKind = getEntryKind();
+  editorContent = "@Jitter ";
+  resetToAgentPrefill();
+  assert.equal(getEntryKind(), "agent-prefill");
+
+  editorContent = "authored message";
+  restoreEntryKind(submittedKind);
+  await handle.unmount();
+  assert.equal(loadDraftEntry(draftKey)?.entryKind, "draft");
+  assert.equal(loadDraftEntry(draftKey)?.content, "authored message");
+});
+
+test("unmount_cleanup_keeps_a_pure_prefill_durable_with_a_real_prefix_getter", async () => {
+  const draftKey = "chan-prefill-unmount-strip";
+  setupStore("pubkey-prefill-unmount-strip");
+  persistDraftEntry(
+    draftKey,
+    "@Jitter ",
+    draftKey,
+    [],
+    [],
+    AGENT_PREFILL_REFS,
+    "agent-prefill",
+  );
+
+  let editorContent = "";
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: (content) =>
+        content.includes("@Jitter") ? AGENT_PREFILL_REFS : [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+      // The production wiring supplies the implicit-prefix getter, so the
+      // cleanup's persistedContent() would strip a pure prefill to "" — and an
+      // empty persist clears the stored record. In-app navigation unmounts the
+      // composer through exactly this path.
+      getImplicitAgentMentionPrefix: () => "@Jitter ",
+    });
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "@Jitter ");
+  await handle.unmount();
+
+  assert.equal(
+    loadDraftEntry(draftKey)?.entryKind,
+    "agent-prefill",
+    "the stored agent-prefill classification must survive composer unmount",
+  );
+  assert.equal(loadDraftEntry(draftKey)?.content, "@Jitter ");
+  assert.equal(
+    getInboxDraftEntries().some(({ key }) => key === draftKey),
+    false,
+    "the surviving prefill record must stay excluded from Inbox drafts",
+  );
+});
+
+test("unmount_cleanup_still_strips_the_implicit_prefix_from_authored_drafts", async () => {
+  const draftKey = "chan-authored-unmount-strip";
+  setupStore("pubkey-authored-unmount-strip");
+  persistDraftEntry(
+    draftKey,
+    "@Jitter ",
+    draftKey,
+    [],
+    [],
+    AGENT_PREFILL_REFS,
+    "agent-prefill",
+  );
+
+  let editorContent = "";
+  let trackAuthoredContent;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    ({ trackAuthoredContent } = useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: (content) =>
+        content.includes("@Jitter") ? AGENT_PREFILL_REFS : [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+      getImplicitAgentMentionPrefix: () => "@Jitter ",
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  editorContent = "@Jitter hello";
+  trackAuthoredContent(editorContent);
+  await handle.unmount();
+
+  assert.equal(
+    loadDraftEntry(draftKey)?.content,
+    "hello",
+    "authored drafts keep stripping the implicit prefix on unmount",
+  );
+  assert.equal(loadDraftEntry(draftKey)?.entryKind, "draft");
+});
+
+function mountAgentPrefillBridge(overrides = {}) {
+  let bridge;
+  const contentRef = { current: "@Jitter " };
+  const persisted = [];
+  const rendered = [];
+  let entryKind = "agent-prefill";
+  let resetCount = 0;
+  function HarnessComposer() {
+    bridge = useAgentPrefillDraftBridge({
+      // The deferred restore only runs for agents the audience confirmed as
+      // pinned, so the agent under test has to be in it.
+      audiencePubkeys: ["agent-jitter"],
+      channelId: "chan-prefill-bridge",
+      contentRef,
+      getEntryKind: () => entryKind,
+      keepMentionedAgentsPinned: false,
+      pendingImetaRef: { current: [] },
+      persistAgentPrefill: (content) => persisted.push(content),
+      queuedAttachmentsRef: { current: [] },
+      resetToAgentPrefill: () => {
+        entryKind = "agent-prefill";
+        resetCount += 1;
+      },
+      setComposerContent: (content) => rendered.push(content),
+      ...overrides,
+    });
+    return null;
+  }
+  return {
+    HarnessComposer,
+    contentRef,
+    persisted,
+    rendered,
+    get bridge() {
+      return bridge;
+    },
+    get entryKind() {
+      return entryKind;
+    },
+    set entryKind(value) {
+      entryKind = value;
+    },
+    get resetCount() {
+      return resetCount;
+    },
+  };
+}
+
+test("agent_prefill_bridge_classifies_the_optimistic_clear", async () => {
+  const harness = mountAgentPrefillBridge();
+  const handle = await mountStrictMode(harness.HarnessComposer);
+  harness.bridge.restoreAddressedAgentMentionsRef.current = () => "@Jitter ";
+
+  let restored;
+  await act(async () => {
+    restored = harness.bridge.onAddressedAgentsComposerCleared([
+      "agent-jitter",
+    ]);
+  });
+
+  assert.equal(restored, "@Jitter ");
+  assert.equal(harness.entryKind, "agent-prefill");
+  assert.equal(harness.resetCount, 1);
+  assert.deepEqual(harness.rendered, ["@Jitter "]);
+  await handle.unmount();
+});
+
+test("agent_prefill_bridge_persists_the_post_send_prefill_immediately", async () => {
+  const harness = mountAgentPrefillBridge();
+  const handle = await mountStrictMode(harness.HarnessComposer);
+
+  await act(async () => {
+    harness.bridge.onAddressedAgentsSendSucceeded(["agent-jitter"], []);
+  });
+
+  assert.deepEqual(harness.persisted, ["@Jitter "]);
+  await handle.unmount();
+});
+
+test("agent_prefill_bridge_never_persists_a_delayed_restore_over_authored_text", async () => {
+  let scheduledFrame = null;
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => {
+    scheduledFrame = callback;
+    return 1;
+  };
+  globalThis.cancelAnimationFrame = () => {
+    scheduledFrame = null;
+  };
+  const harness = mountAgentPrefillBridge({
+    keepMentionedAgentsPinned: true,
+  });
+  const handle = await mountStrictMode(harness.HarnessComposer);
+  harness.bridge.restoreAddressedAgentMentionsRef.current = () =>
+    "@Jitter authored";
+
+  await act(async () => {
+    harness.bridge.onAddressedAgentsSendSucceeded(
+      ["agent-jitter"],
+      ["agent-jitter"],
+    );
+  });
+  harness.entryKind = "draft";
+  harness.contentRef.current = "authored";
+  await act(async () => scheduledFrame());
+
+  assert.equal(harness.contentRef.current, "@Jitter authored");
+  assert.deepEqual(harness.persisted, ["@Jitter "]);
+  await handle.unmount();
+  globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+  globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
 });

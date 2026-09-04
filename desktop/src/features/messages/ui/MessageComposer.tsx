@@ -5,6 +5,7 @@ import {
   type ChannelSuggestion,
 } from "@/features/messages/lib/useChannelLinks";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
+import type { DraftEntryKind } from "@/features/messages/lib/useDrafts";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
 import {
@@ -61,10 +62,10 @@ import { useComposerPasteHandler } from "./useComposerPasteHandler";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { useImplicitAgentMentionProvenance } from "./useImplicitAgentMentionProvenance";
 import { useThreadAgentAudience } from "./useThreadAgentAudience";
+import { useAgentPrefillDraftBridge } from "./useAgentPrefillDraftBridge";
 import { submitMessageEdit } from "./submitMessageEdit";
 import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
-import { useAddressedAgentMentionRestore } from "./useAddressedAgentMentionRestore";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
@@ -139,6 +140,7 @@ function MessageComposerImpl({
     useImplicitAgentMentionProvenance(effectiveDraftKey);
   const preEditSnapshotRef = React.useRef<{
     content: string;
+    entryKind: DraftEntryKind;
     pendingImeta: ImetaMedia[];
     queuedAttachments: ReturnType<typeof useMediaUpload>["queuedAttachments"];
     spoileredAttachmentUrls: Set<string>;
@@ -191,7 +193,13 @@ function MessageComposerImpl({
     media.queuedAttachmentsRef.current.length === 0;
   const ownsDropZone = mediaController === undefined;
   const backgroundUpload = useBackgroundMediaUpload();
-  const { trackAuthoredContent } = useDraftPersistLifecycle({
+  const {
+    getEntryKind,
+    persistAgentPrefill,
+    resetToAgentPrefill,
+    restoreEntryKind,
+    trackAuthoredContent,
+  } = useDraftPersistLifecycle({
     effectiveDraftKey,
     channelId,
     loadDraft: drafts.loadDraft,
@@ -199,6 +207,7 @@ function MessageComposerImpl({
     getMentionRefs: mentions.getDraftMentionRefs,
     restoreMentionRefs: mentions.restoreDraftMentionRefs,
     livePendingImeta: media.pendingImeta,
+    liveQueuedAttachmentCount: media.queuedAttachments.length,
     setPendingImeta: media.setPendingImeta,
     getQueuedAttachments: () => media.queuedAttachmentsRef.current,
     saveQueuedAttachmentsForDraft,
@@ -345,10 +354,17 @@ function MessageComposerImpl({
     onTurnOff: () => setKeepMentionedAgentsPinned(false),
     onTurnOn: () => setKeepMentionedAgentsPinned(true),
   });
-  const addressedMentionRestore = useAddressedAgentMentionRestore({
+  const agentPrefillDraft = useAgentPrefillDraftBridge({
     audiencePubkeys: persistentAudience.pubkeys,
     channelId,
-    enabled: keepMentionedAgentsPinned,
+    contentRef,
+    getEntryKind,
+    keepMentionedAgentsPinned,
+    pendingImetaRef: media.pendingImetaRef,
+    persistAgentPrefill,
+    queuedAttachmentsRef: media.queuedAttachmentsRef,
+    resetToAgentPrefill,
+    setComposerContent,
   });
   const mentionSendFlow = useMentionSendFlow({
     channelId,
@@ -360,10 +376,11 @@ function MessageComposerImpl({
     emojiAutocomplete,
     mentions,
     onAddressedAgentsComposerCleared:
-      addressedMentionRestore.onAddressedAgentsComposerCleared,
+      agentPrefillDraft.onAddressedAgentsComposerCleared,
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
+    onDraftEntryKindRestored: restoreEntryKind,
     onAddressedAgentsSendSucceeded:
-      addressedMentionRestore.onAddressedAgentsSendSucceeded,
+      agentPrefillDraft.onAddressedAgentsSendSucceeded,
     onPrepareSendChannel,
     onSendRef,
     richText,
@@ -387,6 +404,7 @@ function MessageComposerImpl({
     if (editTarget) {
       preEditSnapshotRef.current = {
         content: syncComposerContentFromEditor(),
+        entryKind: getEntryKind(),
         pendingImeta: [...media.pendingImetaRef.current],
         queuedAttachments: [...media.queuedAttachmentsRef.current],
         spoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
@@ -410,6 +428,7 @@ function MessageComposerImpl({
     } else if (preEditSnapshotRef.current !== null) {
       const {
         content: restoredContent,
+        entryKind: restoredEntryKind,
         pendingImeta: restoredImeta,
         queuedAttachments: restoredQueuedAttachments,
         spoileredAttachmentUrls: restoredSpoileredAttachmentUrls,
@@ -419,6 +438,7 @@ function MessageComposerImpl({
       restoredContent
         ? richText.setContent(restoredContent)
         : richText.clearContent();
+      restoreEntryKind(restoredEntryKind);
       media.setPendingImeta(restoredImeta);
       media.restoreQueuedAttachments(restoredQueuedAttachments);
       setSpoileredAttachmentUrls(restoredSpoileredAttachmentUrls);
@@ -438,6 +458,7 @@ function MessageComposerImpl({
         edit.customEmojiShortcode,
         edit.preserveSelection,
         edit.reassertMentionCaret,
+        edit.preventUpdate,
       );
     },
     [richText.replacePlainTextRange],
@@ -460,6 +481,7 @@ function MessageComposerImpl({
       promoteExplicitlyAddressedAgents({
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       }),
+    onAgentPrefillChanged: agentPrefillDraft.onAgentPrefillChanged,
     onAutoPinAgentMention: (suggestion, options) => {
       promoteMentionedAgents({
         ...options,
@@ -471,13 +493,23 @@ function MessageComposerImpl({
     onPulseAddressLock: addressPulse.pulseOne,
     profiles,
     richText,
+    shouldKeepAgentPrefill: agentPrefillDraft.shouldKeepAgentPrefill,
   });
-  addressedMentionRestore.restoreAddressedAgentMentionsRef.current =
+  agentPrefillDraft.restoreAddressedAgentMentionsRef.current =
     restoreAddressedAgentMentions;
+  const applyRestoredAgentMentions =
+    agentPrefillDraft.applyRestoredAgentMentions;
   React.useLayoutEffect(() => {
     if (!audienceScope || editTarget != null) return;
-    restoreAddressedAgentMentions();
-  }, [audienceScope, editTarget, restoreAddressedAgentMentions]);
+    // Routed through the bridge: the restore's insert is applied with
+    // `preventUpdate`, so composer state only learns about it from here.
+    applyRestoredAgentMentions(restoreAddressedAgentMentions);
+  }, [
+    applyRestoredAgentMentions,
+    audienceScope,
+    editTarget,
+    restoreAddressedAgentMentions,
+  ]);
   syncAddressedAgentsFromTextRef.current = syncAddressedAgentsFromText;
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
@@ -644,6 +676,7 @@ function MessageComposerImpl({
         recoveryDraftKey: effectiveDraftKey,
         spoileredAttachmentUrls,
         trimmed,
+        entryKind: hasMedia ? "draft" : getEntryKind(),
       });
     } finally {
       isSubmitLockedRef.current = false;
@@ -656,6 +689,7 @@ function MessageComposerImpl({
     customEmoji,
     drafts.loadDraft,
     emojiAutocomplete.clearEmojis,
+    getEntryKind,
     getLiveLinkPreviewCandidates,
     getReadyLinkPreviewTags,
     media.clearQueuedAttachments,

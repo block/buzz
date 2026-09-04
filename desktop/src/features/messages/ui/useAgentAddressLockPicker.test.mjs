@@ -420,6 +420,7 @@ test("restoring a multi-word automatic mention into an empty composer focuses af
       replaceToOffset: 0,
       insertText: "@claude code ",
       preserveSelection: true,
+      preventUpdate: true,
     },
   ]);
   assert.equal(focusEndCount, 1);
@@ -463,6 +464,7 @@ test("restoring before authored text preserves its selection", async () => {
       replaceToOffset: 0,
       insertText: "@Morgarita ",
       preserveSelection: true,
+      preventUpdate: true,
     },
   ]);
   assert.equal(focusEndCount, 0);
@@ -861,4 +863,129 @@ test("an addressed agent keeps its resolved name while mention state clears duri
   rerender({ profiles: {} });
 
   assert.equal(result.current.lockedAgents[0].displayName, "Agent Ada");
+});
+
+test("always-addressing an empty composer classifies the inserted mention as a prefill", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  let text = "";
+  const persistedPrefills = [];
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => {
+        text = `${edit.insertText}${text}`;
+      },
+      audience: { pubkeys: [], addPubkey: () => {} },
+      audienceScope: "channel-scope",
+      mentions: {
+        getDraftMentionRefs: () => [],
+        getMentionDisplayName: () => "Agent Ada",
+        isInlineMentionSelection: () => false,
+        isMentionOpen: false,
+        registerMentionPubkey: () => {},
+      },
+      onAgentPrefillChanged: (content) => persistedPrefills.push(content),
+      onPulseAddressLock: () => {},
+      richText: {
+        getPlainTextAndCursor: () => ({ text, cursor: text.length }),
+      },
+      shouldKeepAgentPrefill: (currentContent) => currentContent.length === 0,
+    }),
+  );
+
+  act(() =>
+    result.current.toggleAlwaysAddressAgent({
+      pubkey: "agent-pubkey",
+      displayName: "Agent Ada",
+      isAgent: true,
+    }),
+  );
+
+  assert.equal(text, "@Agent Ada ");
+  assert.deepEqual(persistedPrefills, ["@Agent Ada "]);
+});
+
+test("always-addressing never downgrades existing authored content", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  let text = "authored";
+  const persistedPrefills = [];
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => {
+        text = `${edit.insertText}${text}`;
+      },
+      audience: { pubkeys: [], addPubkey: () => {} },
+      audienceScope: "channel-scope",
+      mentions: {
+        getDraftMentionRefs: () => [],
+        getMentionDisplayName: () => "Agent Ada",
+        isInlineMentionSelection: () => false,
+        isMentionOpen: false,
+        registerMentionPubkey: () => {},
+      },
+      onAgentPrefillChanged: (content) => persistedPrefills.push(content),
+      onPulseAddressLock: () => {},
+      richText: {
+        getPlainTextAndCursor: () => ({ text, cursor: text.length }),
+      },
+      shouldKeepAgentPrefill: (currentContent) => currentContent.length === 0,
+    }),
+  );
+
+  act(() =>
+    result.current.toggleAlwaysAddressAgent({
+      pubkey: "agent-pubkey",
+      displayName: "Agent Ada",
+      isAgent: true,
+    }),
+  );
+
+  assert.equal(text, "@Agent Ada authored");
+  assert.deepEqual(persistedPrefills, []);
+});
+
+test("post-send address restoration suppresses the authored update path", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const edits = [];
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => edits.push(edit),
+      audience: { pubkeys: ["agent-pubkey"] },
+      audienceScope: "channel-scope",
+      mentions: {
+        getDraftMentionRefs: () => [],
+        getMentionDisplayName: () => "Agent Ada",
+        registerMentionPubkey: () => {},
+      },
+      onPulseAddressLock: () => {},
+      richText: {
+        focusEnd: () => {},
+        getPlainTextAndCursor: () => ({ text: "", cursor: 0 }),
+      },
+    }),
+  );
+
+  let restored;
+  act(() => {
+    restored = result.current.restoreAddressedAgentMentions(["agent-pubkey"]);
+  });
+
+  assert.equal(restored, "@Agent Ada ");
+  assert.deepEqual(edits, [
+    {
+      replaceFromOffset: 0,
+      replaceToOffset: 0,
+      insertText: "@Agent Ada ",
+      preserveSelection: true,
+      preventUpdate: true,
+    },
+  ]);
 });

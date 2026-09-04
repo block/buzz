@@ -20,18 +20,21 @@ export function useAgentAddressLockPicker({
   audienceScope,
   mentions,
   onAddressAgentMention,
+  onAgentPrefillChanged,
   onAutoPinAgentMention,
   onImplicitPrefixInserted,
   onImplicitPrefixRemoved,
   onPulseAddressLock,
   profiles,
   richText,
+  shouldKeepAgentPrefill,
 }: {
   applyAutocompleteEdit: (edit: AutocompleteEdit) => void;
   audience: ReturnType<typeof usePersistentAgentAudience>;
   audienceScope: string | null;
   mentions: UseMentionsResult;
   onAddressAgentMention?: (suggestion: MentionSuggestion) => void;
+  onAgentPrefillChanged?: (content: string) => void;
   onAutoPinAgentMention?: (
     suggestion: MentionSuggestion,
     options: { reinstateExcluded: boolean },
@@ -45,6 +48,7 @@ export function useAgentAddressLockPicker({
   onPulseAddressLock: (pubkey: string) => void;
   profiles?: UserProfileLookup;
   richText: UseRichTextEditorResult;
+  shouldKeepAgentPrefill?: (currentContent: string) => boolean;
 }) {
   const lockedAgentPubkeys = React.useMemo(
     () => new Set(audience.pubkeys),
@@ -153,11 +157,12 @@ export function useAgentAddressLockPicker({
       const normalized = normalizePubkey(pubkey);
       if (!audienceScope || !normalized) return;
       unpinAddressedAgent(normalized);
+      const { text } = richText.getPlainTextAndCursor();
+      const keepAgentPrefill = shouldKeepAgentPrefill?.(text) ?? false;
       const displayName = lockedAgents.find(
         (agent) => agent.pubkey === normalized,
       )?.displayName;
       if (displayName) {
-        const text = richText.getPlainTextAndCursor().text;
         const implicitPrefix = `@${displayName}${text === `@${displayName}` ? "" : " "}`;
         const strippedText = stripImplicitAgentMentionPrefix(
           text,
@@ -169,16 +174,22 @@ export function useAgentAddressLockPicker({
             replaceFromOffset: 0,
             replaceToOffset: text.length - strippedText.length,
             insertText: "",
+            ...(keepAgentPrefill ? { preventUpdate: true } : {}),
           });
         }
+      }
+      if (keepAgentPrefill) {
+        onAgentPrefillChanged?.(richText.getPlainTextAndCursor().text);
       }
     },
     [
       applyAutocompleteEdit,
       audienceScope,
       lockedAgents,
+      onAgentPrefillChanged,
       onImplicitPrefixRemoved,
       richText.getPlainTextAndCursor,
+      shouldKeepAgentPrefill,
       unpinAddressedAgent,
     ],
   );
@@ -189,6 +200,7 @@ export function useAgentAddressLockPicker({
     ) => {
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
       if (!audienceScope || !pubkey || !suggestion.isAgent) return;
+      let keepAgentPrefill = false;
 
       if (lockedAgentPubkeys.has(pubkey)) {
         if (options.preserveMention) {
@@ -205,6 +217,7 @@ export function useAgentAddressLockPicker({
           isAgent: true,
         });
         const { text } = richText.getPlainTextAndCursor();
+        keepAgentPrefill = shouldKeepAgentPrefill?.(text) ?? false;
         if (getMentionOffsets(text, suggestion.displayName).length === 0) {
           const insertedText = `@${suggestion.displayName} `;
           onImplicitPrefixInserted?.([{ pubkey, prefix: insertedText }]);
@@ -214,6 +227,7 @@ export function useAgentAddressLockPicker({
             insertText: insertedText,
             preserveSelection: text.length > 0,
             reassertMentionCaret: false,
+            ...(keepAgentPrefill ? { preventUpdate: true } : {}),
           });
         }
         trackMentionAddressedAgent(pubkey);
@@ -252,6 +266,10 @@ export function useAgentAddressLockPicker({
           mentions.openMentionPicker(cursor, "preserve");
         }
       }
+      const nextContent = richText.getPlainTextAndCursor().text;
+      if (keepAgentPrefill) {
+        onAgentPrefillChanged?.(nextContent);
+      }
     },
     [
       applyAutocompleteEdit,
@@ -264,10 +282,12 @@ export function useAgentAddressLockPicker({
       mentions.openMentionPicker,
       mentions.registerMentionPubkey,
       onAddressAgentMention,
+      onAgentPrefillChanged,
       onImplicitPrefixInserted,
       onPulseAddressLock,
       removeAddressedAgent,
       richText.getPlainTextAndCursor,
+      shouldKeepAgentPrefill,
       trackMentionAddressedAgent,
       unpinAddressedAgent,
     ],
@@ -404,6 +424,7 @@ export function useAgentAddressLockPicker({
         replaceToOffset: 0,
         insertText: insertedText,
         preserveSelection: true,
+        preventUpdate: true,
       });
       // A restored empty composer has no authored caret to preserve. Move it
       // to the real document end after insertion so WebKit places it after

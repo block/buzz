@@ -4,7 +4,7 @@ import * as React from "react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
-  getActiveDraftEntries,
+  getInboxDraftEntries,
   renameDraftEntry,
   useDraftsSnapshot,
   type DraftState,
@@ -104,12 +104,6 @@ export function getThreadRootId(draftKey: string): string | null {
 
   const id = originalDraftKey.slice(THREAD_DRAFT_PREFIX.length).trim();
   return id.length > 0 ? id : null;
-}
-
-function isVisibleDraft(entry: DraftListEntry): boolean {
-  const content = entry.draft.content.trim();
-  const attachmentCount = entry.draft.pendingImeta.length;
-  return content.length > 0 || attachmentCount > 0;
 }
 
 export function getDraftPreview(draft: DraftState): string {
@@ -468,7 +462,7 @@ function DraftRow({
  * and root-status map. A draft is excluded from the count when its thread root
  * is definitively deleted (`"deleted"` status).
  *
- * @param activeDrafts  Active draft entries from `getActiveDraftEntries()`.
+ * @param activeDrafts  User-authored entries from `getInboxDraftEntries()`.
  * @param rootStatusMap Root-status map from `useDraftRootStatus()`.
  * @returns             Count of active drafts whose root is NOT deleted.
  */
@@ -505,7 +499,7 @@ export function useActiveDraftCount(
 ): number {
   // Re-render on every draft write via useDraftsSnapshot.
   useDraftsSnapshot();
-  const activeDrafts = getActiveDraftEntries().filter(isVisibleDraft);
+  const activeDrafts = getInboxDraftEntries();
   return deriveActiveDraftCount(activeDrafts, rootStatusMap);
 }
 
@@ -517,7 +511,7 @@ export function useDraftViewItems(enabled: boolean): DraftViewItem[] {
   const channelsQuery = useChannelsQuery();
 
   useDraftsSnapshot();
-  const drafts = getActiveDraftEntries().filter(isVisibleDraft);
+  const drafts = getInboxDraftEntries();
 
   const threadRootIds = React.useMemo(() => {
     const ids = new Set<string>();

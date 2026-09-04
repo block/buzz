@@ -7,7 +7,10 @@ import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLi
 import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTextEditor";
-import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
+import type {
+  DraftEntryKind,
+  UseDraftsResult,
+} from "@/features/messages/lib/useDrafts";
 
 export type UseMentionSendFlowOptions = {
   channelId: string | null;
@@ -21,6 +24,7 @@ export type UseMentionSendFlowOptions = {
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onAddressedAgentsComposerCleared?: (pubkeys: readonly string[]) => string;
   onAddressedAgentsSendFailed?: (pubkeys: readonly string[]) => void;
+  onDraftEntryKindRestored?: (entryKind: DraftEntryKind) => void;
   onAddressedAgentsSendSucceeded?: (
     pubkeys: readonly string[],
     newlyPinnedPubkeys: readonly string[],

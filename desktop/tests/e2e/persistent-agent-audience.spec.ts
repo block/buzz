@@ -8,6 +8,8 @@ const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
+// Active mock identity (DEFAULT_MOCK_IDENTITY.pubkey in e2eBridge.ts).
+const OWN_PUBKEY = "deadbeef".repeat(8);
 const THREAD_ROOT_ID = "mock-general-welcome";
 const KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY =
   "buzz.messages.keepMentionedAgentsPinned";
@@ -167,6 +169,28 @@ async function readOutgoingMentionPubkeys(page: Page, content: string) {
 
     return null;
   }, content);
+}
+
+async function readStoredDraftEntryKind(page: Page, channelId: string) {
+  return page.evaluate((targetChannelId) => {
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (!key?.startsWith("buzz-drafts.")) continue;
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      try {
+        const drafts = JSON.parse(raw) as Record<
+          string,
+          { channelId?: string; entryKind?: string }
+        >;
+        const draft = Object.values(drafts).find(
+          (candidate) => candidate.channelId === targetChannelId,
+        );
+        if (draft) return draft.entryKind ?? null;
+      } catch {}
+    }
+    return null;
+  }, channelId);
 }
 
 async function emitMockMessage(
@@ -379,6 +403,117 @@ test("keeps the composer and global automatic mention settings synchronized", as
       name: "Automatically mention Morgarita",
     }),
   ).toHaveAttribute("aria-pressed", "false");
+});
+
+test("automatic agent prefill survives navigation and reload without becoming an Inbox draft", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openThread(page);
+
+  const composer = threadComposer(page);
+  await automaticallyMention(composer, "Morgarita");
+  await expect(composer.getByTestId("message-input")).toHaveText("@Morgarita ");
+  await expect
+    .poll(() => readStoredDraftEntryKind(page, CHANNEL_ID))
+    .toBe("agent-prefill");
+
+  // In-app navigation (no full page load) unmounts the composer and runs the
+  // persist-lifecycle cleanup — the stored classification must survive that
+  // path too, not just full reloads.
+  await page
+    .getByTestId("sidebar-primary-menu")
+    .getByRole("button", { name: "Inbox", exact: true })
+    .click();
+  await expect(page.getByTestId("home-inbox")).toBeVisible();
+  expect(await readStoredDraftEntryKind(page, CHANNEL_ID)).toBe(
+    "agent-prefill",
+  );
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Drafts" }).click();
+  await expect(page.getByTestId("home-inbox-drafts")).toBeVisible();
+  await expect(page.locator("[data-testid^='home-draft-item-']")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("inbox-draft-badge-option")).toHaveCount(0);
+
+  await openThread(page);
+  await expect(threadComposer(page).getByTestId("message-input")).toHaveText(
+    "@Morgarita ",
+  );
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("home-inbox")).toBeVisible();
+  expect(await readStoredDraftEntryKind(page, CHANNEL_ID)).toBe(
+    "agent-prefill",
+  );
+
+  await openThread(page);
+  await expect(threadComposer(page).getByTestId("message-input")).toHaveText(
+    "@Morgarita ",
+  );
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  await expect(threadComposer(page).getByTestId("message-input")).toHaveText(
+    "@Morgarita ",
+  );
+});
+
+test("cancelling a message edit restores the automatic prefill classification", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openThread(page);
+  await waitForMockLiveSubscription(page, "general");
+
+  // Automatic mentions are thread-only, so the edit that displaces the
+  // prefill must target an own thread reply — routed to the thread composer.
+  const replyId = "e".repeat(64);
+  await page.evaluate(
+    ({ content, eventId, ownPubkey, rootId }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content,
+        id: eventId,
+        parentEventId: rootId,
+        pubkey: ownPubkey,
+      });
+    },
+    {
+      content: "own reply before editing",
+      eventId: replyId,
+      ownPubkey: OWN_PUBKEY,
+      rootId: THREAD_ROOT_ID,
+    },
+  );
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const replyRow = threadPanel.locator(`[data-message-id="${replyId}"]`);
+  await expect(replyRow).toBeVisible();
+
+  const composer = threadComposer(page);
+  const input = composer.getByTestId("message-input");
+  await automaticallyMention(composer, "Morgarita");
+  await expect
+    .poll(() => readStoredDraftEntryKind(page, CHANNEL_ID))
+    .toBe("agent-prefill");
+
+  await replyRow.hover();
+  await replyRow.getByRole("button", { name: "More actions" }).click();
+  await page.getByTestId(`edit-message-${replyId}`).click();
+  await expect(composer.getByTestId("edit-target")).toBeVisible();
+
+  await composer.getByRole("button", { name: "Cancel edit" }).click();
+  await expect(input).toHaveText("@Morgarita ");
+  await expect
+    .poll(() => readStoredDraftEntryKind(page, CHANNEL_ID))
+    .toBe("agent-prefill");
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Drafts" }).click();
+  await expect(page.locator("[data-testid^='home-draft-item-']")).toHaveCount(
+    0,
+  );
 });
 
 test("the disabled root composer preserves its explicit draft without audience controls", async ({

@@ -54,6 +54,7 @@ import {
   clearDraftEntry,
   getActiveDraftEntries,
   getAllDraftEntries,
+  getInboxDraftEntries,
   getSentDraftEntries,
   initDraftStore,
   loadDraftEntry,
@@ -96,7 +97,10 @@ function makeDraft(overrides = {}) {
     createdAt: now,
     updatedAt: now,
     pendingImeta: [],
+    mentionRefs: [],
     spoileredAttachmentUrls: [],
+    status: "active",
+    entryKind: "draft",
     ...overrides,
   };
 }
@@ -623,6 +627,7 @@ function makeFullDraft(overrides = {}) {
     pendingImeta: [],
     spoileredAttachmentUrls: [],
     status: "active",
+    entryKind: "draft",
     ...overrides,
   };
 }
@@ -1404,4 +1409,208 @@ test("no_relay_legacy_caller_form_still_reads_writes_v1_key", () => {
   const raw = JSON.parse(storage.getItem(`buzz-drafts.v1:${pk}`));
   assert.ok(raw["chan-new"], "new draft must be in v1 key");
   assert.equal(raw["chan-new"].content, "New no-relay");
+});
+
+const AGENT_REF = {
+  displayName: "Jitter",
+  pubkey: "agent-pubkey-1",
+  isAgent: true,
+};
+const HUMAN_REF = {
+  displayName: "Alice",
+  pubkey: "human-pubkey-1",
+  isAgent: false,
+};
+
+function makePrefill(overrides = {}) {
+  return makeDraft({
+    content: "@Jitter ",
+    selectionStart: 8,
+    selectionEnd: 8,
+    channelId: "chan-prefill",
+    entryKind: "agent-prefill",
+    mentionRefs: [AGENT_REF],
+    ...overrides,
+  });
+}
+
+function seedRawDrafts(pubkey, drafts) {
+  localStorage.setItem(`buzz-drafts.v1:${pubkey}`, JSON.stringify(drafts));
+  clearAllDrafts();
+  initDraftStore(pubkey);
+}
+
+test("entryKind round-trips both kinds across restart", () => {
+  const pubkey = "pubkey-entrykind-roundtrip";
+  setup(pubkey);
+  saveDraftEntry("chan-draft", makeDraft({ content: "authored" }));
+  saveDraftEntry("chan-prefill", makePrefill());
+
+  clearAllDrafts();
+  initDraftStore(pubkey);
+  assert.equal(loadDraftEntry("chan-draft")?.entryKind, "draft");
+  assert.equal(loadDraftEntry("chan-prefill")?.entryKind, "agent-prefill");
+});
+
+test("missing and unknown entryKind values normalize to draft", () => {
+  const pubkey = "pubkey-entrykind-legacy";
+  setup(pubkey);
+  const { entryKind, ...legacy } = makeDraft({ content: "legacy" });
+  seedRawDrafts(pubkey, {
+    legacy,
+    unknown: makeDraft({ content: "unknown", entryKind: "bogus" }),
+  });
+  assert.equal(loadDraftEntry("legacy")?.entryKind, "draft");
+  assert.equal(loadDraftEntry("unknown")?.entryKind, "draft");
+});
+
+test("invalid agent-prefill metadata fails visible as draft", () => {
+  const pubkey = "pubkey-entrykind-invalid-prefill";
+  setup(pubkey);
+  seedRawDrafts(pubkey, {
+    empty: makePrefill({ content: " " }),
+    media: makePrefill({ pendingImeta: [IMG_A] }),
+    spoiler: makePrefill({ spoileredAttachmentUrls: [IMG_A.url] }),
+    noRefs: makePrefill({ mentionRefs: [] }),
+    humanRef: makePrefill({ mentionRefs: [AGENT_REF, HUMAN_REF] }),
+    authoredText: makePrefill({ content: "@Jitter please investigate" }),
+    unknownMention: makePrefill({ content: "@SomeoneElse " }),
+    missingMention: makePrefill({
+      content: "@Jitter ",
+      mentionRefs: [
+        AGENT_REF,
+        { displayName: "Vogue", pubkey: "agent-vogue", isAgent: true },
+      ],
+    }),
+  });
+  for (const key of [
+    "empty",
+    "media",
+    "spoiler",
+    "noRefs",
+    "humanRef",
+    "authoredText",
+    "unknownMention",
+    "missingMention",
+  ]) {
+    assert.equal(loadDraftEntry(key)?.entryKind, "draft", key);
+  }
+});
+
+test("save boundary also normalizes invalid agent-prefill metadata", () => {
+  setup("pubkey-entrykind-save-boundary");
+  saveDraftEntry("missing-kind", {
+    ...makeDraft({ content: "authored" }),
+    entryKind: undefined,
+  });
+  saveDraftEntry("media", makePrefill({ pendingImeta: [IMG_A] }));
+  assert.equal(loadDraftEntry("missing-kind")?.entryKind, "draft");
+  assert.equal(loadDraftEntry("media")?.entryKind, "draft");
+});
+
+test("persistDraftEntry defaults to draft and accepts valid prefill", () => {
+  setup("pubkey-entrykind-persist");
+  persistDraftEntry("draft", "hello", "draft", [], []);
+  persistDraftEntry(
+    "prefill",
+    "@Jitter ",
+    "prefill",
+    [],
+    [],
+    [AGENT_REF],
+    "agent-prefill",
+  );
+  assert.equal(loadDraftEntry("draft")?.entryKind, "draft");
+  assert.equal(loadDraftEntry("prefill")?.entryKind, "agent-prefill");
+});
+
+test("entryKind transition resets createdAt while same kind preserves it", () => {
+  setup("pubkey-entrykind-createdat");
+  const oldCreatedAt = "2025-01-01T00:00:00.000Z";
+  saveDraftEntry(
+    "chan-a",
+    makePrefill({ createdAt: oldCreatedAt, updatedAt: oldCreatedAt }),
+  );
+  persistDraftEntry(
+    "chan-a",
+    "@Jitter ",
+    "chan-a",
+    [],
+    [],
+    [AGENT_REF],
+    "agent-prefill",
+  );
+  assert.equal(loadDraftEntry("chan-a")?.createdAt, oldCreatedAt);
+  persistDraftEntry("chan-a", "authored", "chan-a", [], []);
+  assert.notEqual(loadDraftEntry("chan-a")?.createdAt, oldCreatedAt);
+});
+
+test("Inbox selector excludes prefills but keeps text and media drafts", () => {
+  setup("pubkey-entrykind-inbox");
+  saveDraftEntry("prefill", makePrefill());
+  saveDraftEntry("text", makeDraft({ content: "authored" }));
+  saveDraftEntry("media", makeDraft({ content: "", pendingImeta: [IMG_A] }));
+  assert.deepEqual(
+    getInboxDraftEntries()
+      .map(({ key }) => key)
+      .sort(),
+    ["media", "text"],
+  );
+  assert.equal(loadDraftEntry("prefill")?.entryKind, "agent-prefill");
+});
+
+test("prefill retention cannot evict real drafts", () => {
+  setup("pubkey-entrykind-retention-isolation");
+  for (let i = 0; i < 100; i++) {
+    const timestamp = new Date(1_000_000 + i * 1000).toISOString();
+    saveDraftEntry(
+      `draft-${i}`,
+      makeDraft({ createdAt: timestamp, updatedAt: timestamp }),
+    );
+  }
+  for (let i = 0; i < 201; i++) {
+    const timestamp = new Date(2_000_000 + i * 1000).toISOString();
+    saveDraftEntry(
+      `prefill-${i}`,
+      makePrefill({ createdAt: timestamp, updatedAt: timestamp }),
+    );
+  }
+  assert.equal(loadDraftEntry("prefill-0"), undefined);
+  for (let i = 0; i < 100; i++) {
+    assert.ok(loadDraftEntry(`draft-${i}`), `draft-${i}`);
+  }
+});
+
+test("rename collision distinguishes records that differ only by entryKind", () => {
+  setup("pubkey-entrykind-rename");
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  const shared = {
+    channelId: "chan-a",
+    content: "@Jitter ",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    mentionRefs: [AGENT_REF],
+  };
+  saveDraftEntry("draft", makeDraft({ ...shared }));
+  saveDraftEntry("prefill", makePrefill({ ...shared }));
+  assert.equal(renameDraftEntry("prefill", "draft"), "collision");
+  assert.ok(loadDraftEntry("draft"));
+  assert.ok(loadDraftEntry("prefill"));
+});
+
+test("markDraftSentEntry includes entryKind in exact-snapshot clearing", () => {
+  setup("pubkey-entrykind-send-clear");
+  persistDraftEntry(
+    "chan-a",
+    "@Jitter ",
+    "chan-a",
+    [],
+    [],
+    [AGENT_REF],
+    "agent-prefill",
+  );
+  markDraftSentEntry("chan-a", "@Jitter ", "chan-a", [], [], "draft");
+  assert.equal(loadDraftEntry("chan-a")?.entryKind, "agent-prefill");
+  markDraftSentEntry("chan-a", "@Jitter ", "chan-a", [], [], "agent-prefill");
+  assert.equal(loadDraftEntry("chan-a"), undefined);
 });

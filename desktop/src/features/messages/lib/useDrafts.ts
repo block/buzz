@@ -46,7 +46,11 @@ export type DraftMentionRef = {
   isAgent: boolean;
 };
 
+export type DraftEntryKind = "draft" | "agent-prefill";
+
 export type DraftState = {
+  /** Current purpose of this stored composer snapshot. */
+  entryKind: DraftEntryKind;
   content: string;
   selectionStart: number;
   selectionEnd: number;
@@ -72,7 +76,8 @@ export type DraftState = {
    * The `"sent"` value is not written by any production path; legacy `sent:`
    * keyed records from older builds are dropped on read by `readStore`.
    * Entries persisted before this field was added have no status field —
-   * the read path treats absent status as `"active"` (see `isValidDraftState`).
+   * the read path treats absent status as `"active"` (see
+   * `normalizeStoredDraft`).
    */
   status: "active" | "sent";
 };
@@ -83,6 +88,7 @@ type StoredDrafts = Record<string, DraftState>;
 const DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v2";
 const LEGACY_DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v1";
 const MAX_DRAFTS = 100;
+const MAX_AGENT_PREFILLS = 200;
 
 /**
  * Canonicalize a relay URL for use as a storage key scope.
@@ -192,7 +198,7 @@ function readStore(): Map<string, DraftState> {
           continue;
         }
         if (isValidDraftState(value)) {
-          map.set(key, value);
+          map.set(key, normalizeStoredDraft(value));
         }
       }
     }
@@ -209,6 +215,12 @@ function readStore(): Map<string, DraftState> {
   return map;
 }
 
+/**
+ * Pure structural predicate over a parsed store entry — it never writes to
+ * its argument. Migration-era absences (`mentionRefs`, `status`, `entryKind`)
+ * are accepted here and defaulted by `normalizeStoredDraft` at the read
+ * boundary in `readStore`.
+ */
 function isValidDraftState(v: unknown): v is DraftState {
   if (typeof v !== "object" || v === null) return false;
   const d = v as Partial<DraftState>;
@@ -224,36 +236,103 @@ function isValidDraftState(v: unknown): v is DraftState {
   ) {
     return false;
   }
-  // Migration: drafts written before mention routing was persisted have no
-  // mentionRefs. Preserve them as ordinary drafts with no selected identities.
-  if (d.mentionRefs === undefined) {
-    (d as DraftState).mentionRefs = [];
-  } else if (
-    !Array.isArray(d.mentionRefs) ||
-    d.mentionRefs.some(
-      (ref) =>
-        typeof ref !== "object" ||
-        ref === null ||
-        typeof ref.displayName !== "string" ||
-        ref.displayName.trim().length === 0 ||
-        typeof ref.pubkey !== "string" ||
-        ref.pubkey.trim().length === 0 ||
-        typeof ref.isAgent !== "boolean",
-    )
+  // Drafts written before mention routing was persisted have no mentionRefs —
+  // accepted, and preserved as ordinary drafts with no selected identities.
+  if (
+    d.mentionRefs !== undefined &&
+    (!Array.isArray(d.mentionRefs) ||
+      d.mentionRefs.some(
+        (ref) =>
+          typeof ref !== "object" ||
+          ref === null ||
+          typeof ref.displayName !== "string" ||
+          ref.displayName.trim().length === 0 ||
+          typeof ref.pubkey !== "string" ||
+          ref.pubkey.trim().length === 0 ||
+          typeof ref.isAgent !== "boolean",
+      ))
   ) {
     return false;
   }
-  // Migration: entries written before the status field was introduced have no
-  // status field. Treat absent status as "active" to avoid data loss on the
-  // first run after the upgrade.
+  // Entries written before the status field was introduced have no status
+  // field — accepted, to avoid data loss on the first run after the upgrade.
   // Legacy sent: keys are skipped by readStore before reaching this function;
   // reject any remaining entry whose status is not "active".
-  if (d.status === undefined || d.status === null) {
-    (d as DraftState).status = "active";
-  } else if (d.status !== "active") {
+  if (d.status !== undefined && d.status !== null && d.status !== "active") {
     return false;
   }
   return true;
+}
+
+/**
+ * Canonicalize a validated store entry at the read boundary: default the
+ * migration-era optional fields (`mentionRefs`, `status`) and demote any
+ * stored `entryKind` that no longer satisfies the agent-prefill invariants.
+ * This lives in the read funnel rather than inside `isValidDraftState` so
+ * validation stays a pure predicate.
+ */
+function normalizeStoredDraft(draft: DraftState): DraftState {
+  return {
+    ...draft,
+    mentionRefs: draft.mentionRefs ?? [],
+    status: draft.status ?? "active",
+    entryKind: normalizeDraftEntryKind(draft),
+  };
+}
+
+function normalizeDraftEntryKind(draft: Partial<DraftState>): DraftEntryKind {
+  if (draft.entryKind !== "agent-prefill") return "draft";
+  const mentionRefs = draft.mentionRefs;
+  const isValidAgentPrefill =
+    typeof draft.content === "string" &&
+    draft.content.trim().length > 0 &&
+    Array.isArray(draft.pendingImeta) &&
+    draft.pendingImeta.length === 0 &&
+    Array.isArray(draft.spoileredAttachmentUrls) &&
+    draft.spoileredAttachmentUrls.length === 0 &&
+    Array.isArray(mentionRefs) &&
+    mentionRefs.length > 0 &&
+    mentionRefs.every(
+      (ref) =>
+        typeof ref === "object" &&
+        ref !== null &&
+        typeof ref.displayName === "string" &&
+        ref.displayName.trim().length > 0 &&
+        typeof ref.pubkey === "string" &&
+        ref.pubkey.trim().length > 0 &&
+        ref.isAgent === true,
+    ) &&
+    isAgentMentionOnlyContent(draft.content, mentionRefs);
+  return isValidAgentPrefill ? "agent-prefill" : "draft";
+}
+
+function isAgentMentionOnlyContent(
+  content: string,
+  mentionRefs: DraftMentionRef[],
+): boolean {
+  const remainingMentions = mentionRefs
+    .map((ref) => `@${ref.displayName.trim()}`)
+    .sort((a, b) => b.length - a.length);
+  let offset = 0;
+  let matchedMentions = 0;
+
+  while (offset < content.length) {
+    while (/\s/.test(content[offset] ?? "")) offset += 1;
+    if (offset >= content.length) break;
+
+    const matchIndex = remainingMentions.findIndex((mention) => {
+      if (!content.startsWith(mention, offset)) return false;
+      const nextCharacter = content[offset + mention.length];
+      return nextCharacter === undefined || /\s/.test(nextCharacter);
+    });
+    if (matchIndex === -1) return false;
+
+    offset += remainingMentions[matchIndex].length;
+    remainingMentions.splice(matchIndex, 1);
+    matchedMentions += 1;
+  }
+
+  return matchedMentions > 0 && remainingMentions.length === 0;
 }
 
 function flushStore(map: Map<string, DraftState>): boolean {
@@ -265,18 +344,19 @@ function flushStore(map: Map<string, DraftState>): boolean {
   return setLocalStorageItemWithRecovery(storageKey(), JSON.stringify(obj));
 }
 
-/**
- * Evict the least-recently-updated entry until the map is within `MAX_DRAFTS`.
- */
+/** Evict oldest entries independently within each composer-state class. */
 function evictOldest(map: Map<string, DraftState>): void {
-  if (map.size <= MAX_DRAFTS) return;
-  // Sort ascending by updatedAt; evict oldest until within cap.
-  const sorted = [...map.entries()].sort((a, b) =>
-    a[1].updatedAt.localeCompare(b[1].updatedAt),
-  );
-  const excess = map.size - MAX_DRAFTS;
-  for (let i = 0; i < excess; i++) {
-    map.delete(sorted[i][0]);
+  const limits = [
+    ["draft", MAX_DRAFTS],
+    ["agent-prefill", MAX_AGENT_PREFILLS],
+  ] as const;
+  for (const [entryKind, limit] of limits) {
+    const entries = [...map.entries()]
+      .filter(([, draft]) => draft.entryKind === entryKind)
+      .sort((a, b) => a[1].updatedAt.localeCompare(b[1].updatedAt));
+    for (const [key] of entries.slice(0, Math.max(0, entries.length - limit))) {
+      map.delete(key);
+    }
   }
 }
 
@@ -291,7 +371,10 @@ export function saveDraftEntry(draftKey: string, draft: DraftState): void {
     return;
   }
   const map = readStore();
-  map.set(draftKey, draft);
+  map.set(draftKey, {
+    ...draft,
+    entryKind: normalizeDraftEntryKind(draft),
+  });
   evictOldest(map);
   flushStore(map);
   notifySubscribers();
@@ -331,6 +414,7 @@ function draftStatesEqual(a: DraftState, b: DraftState): boolean {
     a.createdAt !== b.createdAt ||
     a.updatedAt !== b.updatedAt ||
     a.status !== b.status ||
+    a.entryKind !== b.entryKind ||
     a.pendingImeta.length !== b.pendingImeta.length ||
     (a.mentionRefs?.length ?? 0) !== (b.mentionRefs?.length ?? 0) ||
     a.spoileredAttachmentUrls.length !== b.spoileredAttachmentUrls.length
@@ -438,18 +522,30 @@ export function persistDraftEntry(
   pendingImeta: ImetaMedia[],
   spoileredAttachmentUrls: string[],
   mentionRefs: DraftMentionRef[] = [],
+  entryKind: DraftEntryKind = "draft",
 ): void {
   const hasContent = content.trim().length > 0 || pendingImeta.length > 0;
   if (hasContent) {
     const map = readStore();
     const existing = map.get(draftKey);
     const now = new Date().toISOString();
+    const normalizedEntryKind = normalizeDraftEntryKind({
+      content,
+      entryKind,
+      mentionRefs,
+      pendingImeta,
+      spoileredAttachmentUrls,
+    });
     saveDraftEntry(draftKey, {
       content,
+      entryKind: normalizedEntryKind,
       selectionEnd: content.length,
       selectionStart: content.length,
       channelId,
-      createdAt: existing?.createdAt ?? now,
+      createdAt:
+        existing?.entryKind === normalizedEntryKind
+          ? (existing.createdAt ?? now)
+          : now,
       updatedAt: now,
       pendingImeta,
       mentionRefs,
@@ -486,6 +582,22 @@ export function getActiveDraftEntries(): Array<{
 }
 
 /**
+ * Returns the drafts the Inbox should surface: active, user-authored entries
+ * that carry text or an attachment. Automatic agent prefills remain loadable
+ * by their destination composers but never appear in the Inbox or its count.
+ */
+export function getInboxDraftEntries(): Array<{
+  key: string;
+  draft: DraftState;
+}> {
+  return getActiveDraftEntries().filter(
+    ({ draft }) =>
+      draft.entryKind === "draft" &&
+      (draft.content.trim().length > 0 || draft.pendingImeta.length > 0),
+  );
+}
+
+/**
  * Returns only sent drafts, sorted most-recently-updated first.
  * Returns empty — sent records are dropped on read. Kept for test assertions.
  */
@@ -509,6 +621,7 @@ export function markDraftSentEntry(
   channelId: string,
   pendingImeta: ImetaMedia[],
   spoileredAttachmentUrls: string[],
+  entryKind: DraftEntryKind = "draft",
 ): void {
   const draft = loadDraftEntry(draftKey);
   // A background upload can finish after the user has started the next draft
@@ -519,7 +632,8 @@ export function markDraftSentEntry(
     draft.channelId === channelId &&
     JSON.stringify(draft.pendingImeta) === JSON.stringify(pendingImeta) &&
     JSON.stringify(draft.spoileredAttachmentUrls) ===
-      JSON.stringify(spoileredAttachmentUrls)
+      JSON.stringify(spoileredAttachmentUrls) &&
+    draft.entryKind === entryKind
   ) {
     clearDraftEntry(draftKey);
   }
@@ -564,6 +678,7 @@ export function useDrafts() {
       pendingImeta: ImetaMedia[],
       spoileredAttachmentUrls: string[],
       mentionRefs: DraftMentionRef[] = [],
+      entryKind: DraftEntryKind = "draft",
     ) =>
       persistDraftEntry(
         draftKey,
@@ -572,6 +687,7 @@ export function useDrafts() {
         pendingImeta,
         spoileredAttachmentUrls,
         mentionRefs,
+        entryKind,
       ),
     [],
   );
@@ -589,6 +705,7 @@ export function useDrafts() {
       channelId: string,
       pendingImeta: ImetaMedia[],
       spoileredAttachmentUrls: string[],
+      entryKind: DraftEntryKind = "draft",
     ) =>
       markDraftSentEntry(
         draftKey,
@@ -596,6 +713,7 @@ export function useDrafts() {
         channelId,
         pendingImeta,
         spoileredAttachmentUrls,
+        entryKind,
       ),
     [],
   );
