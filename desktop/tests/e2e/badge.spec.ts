@@ -418,6 +418,100 @@ test("offscreen unread DM shows the primary sidebar arrow", async ({
   await expect(activityArrow).toHaveClass(/bg-primary/);
 });
 
+test("thread-only activity in an offscreen DM stays primary", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await waitForMockLiveSubscription(page, "alice-tyler");
+  await page.setViewportSize({ width: 1280, height: 360 });
+
+  const sidebarScroller = page
+    .getByTestId("app-sidebar")
+    .locator('[data-sidebar="content"]');
+  await sidebarScroller.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(page.getByTestId("channel-alice-tyler")).not.toBeInViewport();
+
+  const initialReplyAt = Math.floor(Date.now() / 1000) - 10;
+  const rootEventId = await page.evaluate((pubkey) => {
+    const root = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "alice-tyler",
+      content: "A DM thread I started",
+      kind: 40002,
+      pubkey,
+    });
+    return root?.id;
+  }, DEFAULT_MOCK_PUBKEY);
+  if (!rootEventId) throw new Error("Mock message emitter is unavailable");
+
+  await page.evaluate(
+    ({ createdAt, parentEventId, pubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "alice-tyler",
+        content: "Initial DM thread reply",
+        createdAt,
+        kind: 40002,
+        parentEventId,
+        pubkey,
+      });
+    },
+    {
+      createdAt: initialReplyAt,
+      parentEventId: rootEventId,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const threadSummary = page.getByTestId("message-thread-summary").first();
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  await page.getByTestId("auxiliary-panel-close").click();
+  const threadReadSecond = await page.evaluate(() =>
+    Math.floor(Date.now() / 1000),
+  );
+  await expect
+    .poll(() => page.evaluate(() => Math.floor(Date.now() / 1000)))
+    .toBeGreaterThan(threadReadSecond);
+
+  await page.evaluate(
+    ({ parentEventId, pubkey }) => {
+      const reply = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "alice-tyler",
+        content: "A non-mention reply in the active DM thread",
+        kind: 40002,
+        parentEventId,
+        pubkey,
+      });
+      if (!reply) throw new Error("Mock message emitter is unavailable");
+      window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?.({
+        category: "activity",
+        channel_id: "f48efb06-0c93-5025-aac9-2e646bb6bfa8",
+        channel_name: "alice-tyler",
+        channel_type: "dm",
+        content: reply.content,
+        created_at: reply.created_at,
+        id: reply.id,
+        kind: reply.kind,
+        pubkey: reply.pubkey,
+        tags: reply.tags,
+      });
+    },
+    { parentEventId: rootEventId, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  const activityArrow = page.getByTestId("sidebar-more-unread-below");
+  await expect(activityArrow).toBeVisible();
+  await expect(activityArrow).toContainText("1 unread");
+  await expect(activityArrow).toHaveClass(/bg-primary/);
+  await waitForAnimations(page);
+  await activityArrow.screenshot({
+    path: `${SHOTS}/sidebar-dm-thread-overflow-primary.png`,
+  });
+});
+
 test("regular message bolds inactive channel without numeric badge", async ({
   page,
 }) => {

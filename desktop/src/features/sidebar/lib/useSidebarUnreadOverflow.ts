@@ -7,9 +7,12 @@ type ScrollRef = Parameters<typeof useUnreadOverflow>[0]["scrollRef"];
 export function hasHighPriorityOverflow(
   offscreenChannelIds: readonly string[],
   highPriorityUnreadChannelIds: ReadonlySet<string>,
+  dmChannelIds: ReadonlySet<string>,
 ) {
-  return offscreenChannelIds.some((channelId) =>
-    highPriorityUnreadChannelIds.has(channelId),
+  return offscreenChannelIds.some(
+    (channelId) =>
+      dmChannelIds.has(channelId) ||
+      highPriorityUnreadChannelIds.has(channelId),
   );
 }
 
@@ -18,11 +21,13 @@ export function sidebarOverflowUnreadLabel(count: number) {
 }
 
 export function useSidebarUnreadOverflow({
+  dmChannelIds,
   highPriorityUnreadChannelIds,
   previewActivityChannelIds,
   scrollRef,
   unreadChannelIds,
 }: {
+  dmChannelIds: ReadonlySet<string>;
   highPriorityUnreadChannelIds: ReadonlySet<string>;
   previewActivityChannelIds: ReadonlySet<string>;
   scrollRef: ScrollRef;
@@ -43,10 +48,12 @@ export function useSidebarUnreadOverflow({
     hasHighPriorityAbove: hasHighPriorityOverflow(
       messageOverflow.unreadAboveChannelIds,
       highPriorityUnreadChannelIds,
+      dmChannelIds,
     ),
     hasHighPriorityBelow: hasHighPriorityOverflow(
       messageOverflow.unreadBelowChannelIds,
       highPriorityUnreadChannelIds,
+      dmChannelIds,
     ),
   };
 }

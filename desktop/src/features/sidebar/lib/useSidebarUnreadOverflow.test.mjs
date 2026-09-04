@@ -10,10 +10,15 @@ test("labels the destination total as unread", () => {
   assert.equal(sidebarOverflowUnreadLabel(3), "3 unread");
 });
 
-test("promotes only when the offscreen set includes actionable unread", () => {
-  const actionable = new Set(["dm", "mention"]);
+test("promotes actionable unread and every offscreen DM", () => {
+  const actionable = new Set(["mention"]);
+  const dms = new Set(["dm"]);
 
-  assert.equal(hasHighPriorityOverflow(["channel"], actionable), false);
-  assert.equal(hasHighPriorityOverflow(["channel", "dm"], actionable), true);
-  assert.equal(hasHighPriorityOverflow(["mention"], actionable), true);
+  assert.equal(hasHighPriorityOverflow(["channel"], actionable, dms), false);
+  assert.equal(hasHighPriorityOverflow(["mention"], actionable, dms), true);
+  assert.equal(hasHighPriorityOverflow(["dm"], actionable, dms), true);
+  assert.equal(
+    hasHighPriorityOverflow(["channel", "dm"], actionable, dms),
+    true,
+  );
 });
