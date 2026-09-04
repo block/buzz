@@ -377,7 +377,8 @@ The authorized admin API and client UI MUST expose:
   checkpoint-derived progress, current ownership disposition, retry eligibility,
   and timestamps;
 - bounded diagnostics for the latest execution or validation failure;
-- whether validation has not run, is running, succeeded, or failed; and
+- whether lifecycle validation has not run, is running, succeeded, or failed,
+  plus the bounded outcome and time of the latest explicit validation; and
 - whether the backfill currently participates in the automatic readiness gate.
 
 Progress MUST be presented honestly. Unknown totals, unavailable diagnostics,
@@ -392,8 +393,9 @@ The authorized admin API and client UI MUST support:
 
 - `start` for a `pending` backfill;
 - `pause` for initiated work in `running` or `validating`;
-- `resume` from `paused`; and
-- `retry` from `blocked` or `failed` after operator remediation.
+- `resume` from `paused`;
+- `retry` from `blocked` or `failed` after operator remediation; and
+- `validate` for any initiated or `completed` backfill.
 
 Controls express desired lifecycle transitions. They MUST be safe under client
 retry, duplicated delivery, concurrent operators, and a response lost after
@@ -406,6 +408,45 @@ the current server state so the client can refresh.
 is dispatched. In manual mode, that durable intent distinguishes work that may
 be recovered from registered `pending` work that automatic configuration MUST
 leave untouched.
+
+### Explicit validation
+
+`validate` is an operator-authorized request to run the definition-owned,
+read-only validation against authoritative PostgreSQL state. It is not a second
+lifecycle or an operator-selected completion transition. A `pending` record has
+no captured bound and MUST return a typed current-state outcome without running
+validation. An initiated or `completed` record MUST return exactly one of:
+
+- success, when validation ran and the postcondition held at the evaluated
+  authoritative state;
+- failure, when validation ran and rejected that state, with a bounded
+  diagnostic; or
+- current-state, when validation did not run or cannot yet return a result,
+  including the authoritative lifecycle and reason without implying success or
+  failure.
+
+When the record is already `validating` and all completion preconditions hold,
+an explicit request MAY drive the same generation-fenced validation and
+completion transition defined by the lifecycle. In every other state its result
+is diagnostic: it MUST NOT alter the upper bound, checkpoint, claim generation,
+or lifecycle. In particular, revalidation of `completed` work MUST report a
+current failure as failure even though completion is immutable; it MUST NOT
+rewrite completion or progress, demote the record, or synthesize success from
+the completed state.
+
+At most one validation invocation for a stable backfill ID may execute at a
+time. Duplicate delivery or retry of one logical request MUST return its
+original bounded outcome or the correlated current-state outcome without
+starting another invocation. Concurrent distinct requests MUST either converge
+on the active invocation or return a typed current-state outcome. A response
+lost after validation MUST be recoverable by retrying the same logical request;
+the client MUST refresh server state rather than infer an outcome.
+
+Every accepted, rejected, coalesced, and completed explicit validation request
+MUST be auditable with its request correlation, actor, stable backfill ID,
+evaluated lifecycle, and bounded outcome. Audit or bounded diagnostic recording
+MUST NOT make the validator a target-data writer or modify immutable completion
+and progress.
 
 The normal control surface MUST NOT expose reset, checkpoint rewind, bound
 change, record deletion, force-complete, or unfenced claim release. It MUST NOT
@@ -501,9 +542,18 @@ At minimum, the suite covers:
 10. **Admin idempotency.** Duplicate, concurrent, and lost-response control
    requests converge without duplicate starts, generation reuse, or bound
    recapture; conflicts return current state.
-11. **Client projection.** The UI renders server/PostgreSQL state, preserves
+11. **Explicit validation.** Through the production admin API and client, an
+   authorized `validate` on initiated and completed records invokes the
+   definition's read-only validator and renders typed success, failure, and
+   current-state outcomes; an unauthorized request invokes nothing. Concurrent,
+   duplicate, and lost-response requests converge without overlapping
+   invocation. A failed post-completion revalidation is audited and displayed as
+   failure while target data, lifecycle, immutable completion, bound, and
+   checkpoint remain unchanged. Removing either the read-only or immutable-state
+   guard MUST make the test fail.
+12. **Client projection.** The UI renders server/PostgreSQL state, preserves
    unknown and failure states honestly, and sends only the supported controls.
-12. **Configuration matrix.** All four schema/backfill control combinations are
+13. **Configuration matrix.** All four schema/backfill control combinations are
     exercised through real startup and readiness paths. Automatic mode gates
     until validation; manual mode never adds the backfill gate; schema safety
     remains independently enforced.
@@ -535,8 +585,8 @@ specification.
 | Stable-ID definition registration and rolling compatibility, lifecycle engine, PostgreSQL durable store, claim and generation fencing, checkpoint transactions, retry policy, and validation | The new `buzz-backfill` crate owns all backfill concepts and durable behavior. |
 | Basic writer-database and transaction access used to make mutation and checkpoint one commit | `buzz-db` supplies narrow database/transaction primitives. It does not acquire backfill records, states, policy, or orchestration, and it does not expose its connection pool. |
 | Automatic discovery/execution, the independent configuration controls, startup ordering, and the serving-readiness input | `buzz-relay` composes the backfill engine with existing startup, configuration, and readiness coordination. |
-| Authorized list/detail reads, safe lifecycle commands, typed conflicts, audit integration, and bounded diagnostics | The relay's deployment-admin interfaces expose the server contract; operator tooling consumes that contract rather than accessing backfill tables directly. |
-| List, detail, progress, diagnostics, validation status, readiness participation, and start/pause/resume/retry controls | The desktop/admin client is a projection and controller over the relay API and PostgreSQL state, never another state store. |
+| Authorized list/detail reads, safe lifecycle commands, explicit read-only validation, typed outcomes and conflicts, audit integration, and bounded diagnostics | The relay's deployment-admin interfaces expose the server contract; operator tooling consumes that contract rather than accessing backfill tables directly. |
+| List, detail, progress, diagnostics, validation status, readiness participation, and start/pause/resume/retry/validate controls | The desktop/admin client is a projection and controller over the relay API and PostgreSQL state, never another state store. |
 
 This boundary preserves the repository's focused-crate architecture: the relay
 orchestrates, the backfill crate owns its domain and persistence, and the
@@ -556,4 +606,5 @@ Schema migration and automatic execution remain independent. Automatic mode
 gates serving on validated completion; manual mode preserves readiness and is
 safe only because the application remains compatible with incomplete data. The
 relay admin API and client complete that manual operating loop without becoming
-new authorities.
+new authorities, including explicit read-only revalidation of initiated and
+completed work.
