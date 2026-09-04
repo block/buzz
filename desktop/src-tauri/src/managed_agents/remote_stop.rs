@@ -167,6 +167,22 @@ pub(crate) fn check_launch(
     }
     let conn = connection(app, key, &current_owner)?;
     schema(&conn)?;
+    let scope = super::retention::RetentionScope {
+        db_path: scoped_retention_db_path(
+            &super::managed_agents_base_dir(app)?,
+            &key.relay_url,
+            &current_owner,
+        ),
+        relay_url: key.relay_url.clone(),
+        owner_keys: state.signing_keys()?,
+    };
+    let mut local_conn = connection(app, key, &current_owner)?;
+    let host = crate::commands::desktop_stop::local_id(&mut local_conn, &scope)?;
+    if super::placement::blocked(&conn, &key.pubkey, &host)?
+        && (resume.is_none() || super::placement::has_start(&conn, &key.pubkey)?)
+    {
+        return Err("This Desktop is no longer the selected running destination. Use explicit Start on this Desktop.".into());
+    }
     let row: Option<(String, bool)> = conn
         .query_row(
             "SELECT event_id, blocked FROM desktop_stop_fence WHERE agent=?1",
