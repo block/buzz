@@ -304,13 +304,18 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
-## Desktop Stop launch fence
+## Remote Desktop Stop
 
+Native IPC accepts an owner-private, explicitly selected agent+Desktop Stop,
+not inferred agent location. The relay redelivers stored Stop duplicates without
+repeating relay side effects.
+The receiver returns saved results or Unknown, never repeats a consumed Stop.
+Native owner-delegation and community checks
+precede durable admission and ordinary pair Stop. A delivery ACK is not success.
 All local spawn paths consume the durable Stop fence at the shared native
 spawn boundary. Only a deliberate **Start agent** action can supersede that
 fence; config/restore/reconcile and Restart continuations cannot. Explicit Start
-captures its fence before preflight and fails if a newer Stop arrives. Fence
-release happens only after the new child has its receipt and tracked handle.
+captures its fence before preflight and fails if a newer Stop arrives.
 
 ## Channel-only runtime controls
 
