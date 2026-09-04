@@ -1168,8 +1168,8 @@ mod postgres_tests {
         // Workflow revision capture is additive: nullable 32-byte event IDs on
         // both the materialized definition and run, with identical fresh-schema
         // constraints and no backfill hidden in startup migration state.
-        assert_eq!(migrations[42].version, 43);
-        let workflow_revision_binding = migrations[42].sql.as_str();
+        assert_eq!(migrations[44].version, 45);
+        let workflow_revision_binding = migrations[44].sql.as_str();
         assert!(workflow_revision_binding.contains("ALTER TABLE workflows"));
         assert!(workflow_revision_binding.contains("ALTER TABLE workflow_runs"));
         assert!(workflow_revision_binding.contains("octet_length(definition_event_id) = 32"));
