@@ -2,8 +2,6 @@
 //! Automatic issuance is not in the merged broker contract. Keep the production
 //! provider fail-closed until that host-owned adapter is supplied; do not mint a
 //! competing bearer token or fall back to exporting the agent key.
-use super::ManagedAgentRecord;
-use buzz_core_pkg::desktop_lifecycle::Outcome;
 use std::process::Command;
 
 pub(crate) struct LaunchScope<'a> {
@@ -106,14 +104,6 @@ impl BrokerSession {
             .env("BUZZ_ACP_ALLOWED_RESPOND_TO", "owner-only");
         Ok(())
     }
-}
-
-/// Explicit external integration gate, not a fabricated successful launch.
-pub(crate) fn provision(
-    _scope: LaunchScope<'_>,
-    _record: &ManagedAgentRecord,
-) -> Result<BrokerSession, Outcome> {
-    Err(Outcome::ProvisioningUnavailable)
 }
 
 #[cfg(test)]
