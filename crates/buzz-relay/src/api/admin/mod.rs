@@ -1247,7 +1247,7 @@ async fn list_member_restrictions(
     )
     .await?;
 
-    let page_limit = limit(query.limit)?;
+    let page_limit = limit(Some(query.limit.unwrap_or(200)))?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
 
     let community = buzz_core::CommunityId::from_uuid(query.community_id);
