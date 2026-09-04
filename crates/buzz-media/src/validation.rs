@@ -377,6 +377,7 @@ fn validate_calendar_content(
     let mut components: Vec<&str> = Vec::new();
     let mut content_line_count = 0usize;
     let mut saw_content_line = false;
+    let mut closed_outer_envelope = false;
     let mut last_line = None;
 
     for raw_line in text.split('\n') {
@@ -389,6 +390,9 @@ fn validate_calendar_content(
             continue;
         }
         if line.starts_with([' ', '\t']) {
+            return Err(MediaError::UnknownContentType);
+        }
+        if closed_outer_envelope {
             return Err(MediaError::UnknownContentType);
         }
         if !saw_content_line {
@@ -429,6 +433,9 @@ fn validate_calendar_content(
                     .is_none_or(|component| !component.eq_ignore_ascii_case(value))
             {
                 return Err(MediaError::UnknownContentType);
+            }
+            if components.is_empty() {
+                closed_outer_envelope = true;
             }
         } else if components.is_empty() {
             return Err(MediaError::UnknownContentType);
@@ -2925,6 +2932,19 @@ mod tests {
 
         assert!(validate_file_content_with_hints(
             content,
+            &test_config(),
+            Some("text/calendar"),
+            Some("ics"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_validate_calendar_rejects_concatenated_outer_envelopes() {
+        let concatenated = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nSUMMARY:First\r\nEND:VCALENDAR\r\nBEGIN:VCALENDAR\r\nVERSION:2.0\r\nSUMMARY:Second\r\nEND:VCALENDAR\r\n";
+
+        assert!(validate_file_content_with_hints(
+            concatenated,
             &test_config(),
             Some("text/calendar"),
             Some("ics"),

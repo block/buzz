@@ -278,7 +278,7 @@ async fn upload_record_uses_first_writer_classification_claim() {
         &config,
         &tenant,
         &event,
-        body,
+        body.clone(),
         Some(UploadAttribution::default()),
         FileUploadHints {
             declared_mime: Some("text/calendar".to_string()),
@@ -287,6 +287,20 @@ async fn upload_record_uses_first_writer_classification_claim() {
     )
     .await
     .expect("upload must use the claimed generic classification");
+    let retry_descriptor = process_file_upload_with_hints(
+        &storage,
+        &config,
+        &tenant,
+        &event,
+        body,
+        Some(UploadAttribution::default()),
+        FileUploadHints {
+            declared_mime: Some("text/calendar".to_string()),
+            extension: Some("ics".to_string()),
+        },
+    )
+    .await
+    .expect("same signed upload retry must repair in place");
 
     let sidecar = storage
         .get_sidecar(&tenant, &sha256)
@@ -308,6 +322,7 @@ async fn upload_record_uses_first_writer_classification_claim() {
     }
 
     assert!(descriptor.url.ends_with(&format!("/{sha256}.bin")));
+    assert_eq!(retry_descriptor.url, descriptor.url);
     assert_eq!(descriptor.mime_type, generic_meta.mime_type);
     assert_eq!(sidecar.ext, generic_meta.ext);
     assert_eq!(record.ext, generic_meta.ext);

@@ -3,9 +3,11 @@
 //! Content-addressed storage keys facts about *bytes*; moderation and legal
 //! reporting (e.g. NCMEC CyberTipline) need facts about *upload events*: who
 //! uploaded, when, from which network address. This module writes one small
-//! append-only JSON record per **accepted** upload — including the idempotent
+//! JSON record per signed upload authorization — including the idempotent
 //! re-upload short-circuit, which does no blob PUT and is therefore invisible
-//! to any blob-creation-driven pipeline.
+//! to any blob-creation-driven pipeline. Transport retries that reuse the same
+//! signed authorization repair that record in place; a newly signed re-upload
+//! creates a distinct record.
 //!
 //! Key layout (alongside the existing `_meta/` sidecar convention):
 //!
@@ -13,10 +15,12 @@
 //! _uploads/{community}/{sha256}/{event_id}.json
 //! ```
 //!
-//! `event_id` is a ULID — unique and time-sortable, one record per accepted
-//! upload event. Records are unreachable through the media serve path by
-//! construction (`validate_media_path` requires a bare 64-hex first segment),
-//! and the bucket is only accessible via the relay's IAM role.
+//! `event_id` is a time-sortable ULID derived from the signed Blossom upload
+//! authorization event. Reusing that authorization for an idempotent request
+//! retry therefore repairs the same record instead of appending a duplicate.
+//! Records are unreachable through the media serve path by construction
+//! (`validate_media_path` requires a bare 64-hex first segment), and the bucket
+//! is only accessible via the relay's IAM role.
 //!
 //! The whole feature is **off by default** and gated behind
 //! `BUZZ_MEDIA_UPLOAD_RECORDS`. IP collection is a second, independent opt-in
@@ -56,7 +60,8 @@ pub const UPLOAD_RECORD_VERSION: u32 = 1;
 pub struct UploadRecord {
     /// Schema version ([`UPLOAD_RECORD_VERSION`]).
     pub version: u32,
-    /// ULID — unique per accepted upload, time-sortable. Also the key suffix.
+    /// Time-sortable ULID derived from the signed upload authorization event.
+    /// Idempotent retries reuse it. Also the key suffix.
     pub event_id: String,
     /// Content hash of the uploaded bytes (64 lowercase hex chars).
     pub sha256: String,
@@ -129,13 +134,6 @@ pub struct UploadEventFacts<'a> {
     pub uploaded_at: i64,
 }
 
-/// Handle used internally to correct a just-written record when a concurrent
-/// legacy sidecar writer wins with different canonical facts.
-pub(crate) struct StoredUploadRecord {
-    key: String,
-    record: UploadRecord,
-}
-
 /// Build and store the per-event record for one accepted upload.
 ///
 /// Called after blob and derived-artifact durability but before the sidecar
@@ -146,25 +144,13 @@ pub(crate) struct StoredUploadRecord {
 pub async fn record_upload_event(
     storage: &crate::storage::MediaStorage,
     ctx: &TenantContext,
-    uploader: &nostr::PublicKey,
+    auth_event: &nostr::Event,
     attribution: &UploadAttribution,
     facts: UploadEventFacts<'_>,
 ) -> Result<(), crate::error::MediaError> {
-    record_upload_event_with_handle(storage, ctx, uploader, attribution, facts)
-        .await
-        .map(|_| ())
-}
-
-pub(crate) async fn record_upload_event_with_handle(
-    storage: &crate::storage::MediaStorage,
-    ctx: &TenantContext,
-    uploader: &nostr::PublicKey,
-    attribution: &UploadAttribution,
-    facts: UploadEventFacts<'_>,
-) -> Result<StoredUploadRecord, crate::error::MediaError> {
     use nostr::ToBech32;
 
-    let event_id = ulid::Ulid::new().to_string();
+    let event_id = upload_event_id(auth_event);
     // Ports are only meaningful next to the address they were observed with.
     let ip = attribution.net.ip;
     let port = ip.and(attribution.net.port);
@@ -178,8 +164,8 @@ pub(crate) async fn record_upload_event_with_handle(
         uploaded_at: facts.uploaded_at,
         community_id: ctx.community().to_string(),
         community_host: ctx.host().to_string(),
-        uploader_id: uploader.to_hex(),
-        uploader_npub: uploader.to_bech32().map_err(|e| {
+        uploader_id: auth_event.pubkey.to_hex(),
+        uploader_npub: auth_event.pubkey.to_bech32().map_err(|e| {
             // Unreachable for a valid pubkey; surfaced rather than unwrapped.
             crate::error::MediaError::StorageError(format!("npub encoding failed: {e}"))
         })?,
@@ -189,22 +175,19 @@ pub(crate) async fn record_upload_event_with_handle(
     };
     let key = upload_record_key(ctx, facts.sha256, &event_id);
     let json = serde_json::to_vec(&record)?;
-    storage.put(&key, &json, "application/json").await?;
-    Ok(StoredUploadRecord { key, record })
+    storage.put(&key, &json, "application/json").await
 }
 
-pub(crate) async fn correct_upload_event_facts(
-    storage: &crate::storage::MediaStorage,
-    stored: &mut StoredUploadRecord,
-    facts: UploadEventFacts<'_>,
-) -> Result<(), crate::error::MediaError> {
-    stored.record.sha256 = facts.sha256.to_string();
-    stored.record.ext = facts.ext.to_string();
-    stored.record.mime_type = facts.mime.to_string();
-    stored.record.size = facts.size;
-    stored.record.uploaded_at = facts.uploaded_at;
-    let json = serde_json::to_vec(&stored.record)?;
-    storage.put(&stored.key, &json, "application/json").await
+fn upload_event_id(auth_event: &nostr::Event) -> String {
+    let event_bytes = auth_event.id.to_bytes();
+    let mut random_bytes = [0u8; 16];
+    random_bytes[6..].copy_from_slice(&event_bytes[..10]);
+    let random = u128::from_be_bytes(random_bytes);
+    ulid::Ulid::from_parts(
+        auth_event.created_at.as_secs().saturating_mul(1_000),
+        random,
+    )
+    .to_string()
 }
 
 /// Build the per-event record key:
@@ -312,6 +295,26 @@ mod tests {
                 "_uploads/{}/{sha}/01J9W3ULIDULIDULIDULIDULID.json",
                 ctx.community()
             )
+        );
+    }
+
+    #[test]
+    fn upload_auth_event_id_is_stable_for_idempotent_record_writes() {
+        use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+        let auth = EventBuilder::new(Kind::from(24242), "Upload")
+            .custom_created_at(Timestamp::from(1_700_000_000))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+
+        let first = upload_event_id(&auth);
+        let retry = upload_event_id(&auth);
+
+        assert_eq!(first, retry);
+        assert_eq!(first.len(), 26);
+        assert_eq!(
+            ulid::Ulid::from_string(&first).unwrap().timestamp_ms(),
+            1_700_000_000_000
         );
     }
 

@@ -11,10 +11,7 @@ use crate::error::MediaError;
 use crate::storage::{BlobMeta, MediaStorage};
 use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
-use crate::upload_record::{
-    correct_upload_event_facts, record_upload_event, record_upload_event_with_handle,
-    UploadAttribution, UploadEventFacts,
-};
+use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
     looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content_with_hints,
     validate_video_file,
@@ -38,8 +35,8 @@ use crate::validation::{
 /// separate (see [`process_video_upload`]) because it never buffers in RAM.
 ///
 /// `attribution` is `Some` when per-event upload records are enabled
-/// (`BUZZ_MEDIA_UPLOAD_RECORDS`): a record is then written for **every**
-/// accepted upload — including the idempotent short-circuit, which does no
+/// (`BUZZ_MEDIA_UPLOAD_RECORDS`): a record is then written for every signed
+/// upload authorization — including the idempotent short-circuit, which does no
 /// blob PUT and would otherwise be invisible to the moderation pipeline.
 /// For fresh uploads, the record is written after the blob and derived
 /// artifacts but before the sidecar. This preserves both contracts: record
@@ -52,6 +49,51 @@ struct BufferedUploadInput<'a> {
     auth_event: &'a nostr::Event,
     body: Bytes,
     attribution: Option<UploadAttribution>,
+}
+
+const UPLOAD_RECORD_CORRECTION_MAX_ATTEMPTS: usize = 3;
+
+async fn publish_sidecar_after_record<W, WFut, P, PFut, G, GFut>(
+    canonical_meta: BlobMeta,
+    mut write_record: W,
+    publish_sidecar: P,
+    read_sidecar: G,
+) -> Result<BlobMeta, MediaError>
+where
+    W: FnMut(BlobMeta) -> WFut,
+    WFut: std::future::Future<Output = Result<(), MediaError>>,
+    P: FnOnce(BlobMeta) -> PFut,
+    PFut: std::future::Future<Output = Result<bool, MediaError>>,
+    G: FnOnce() -> GFut,
+    GFut: std::future::Future<Output = Result<BlobMeta, MediaError>>,
+{
+    write_record(canonical_meta.clone()).await?;
+    if publish_sidecar(canonical_meta.clone()).await? {
+        return Ok(canonical_meta);
+    }
+
+    let published = read_sidecar().await?;
+    if published.ext == canonical_meta.ext && published.mime_type == canonical_meta.mime_type {
+        return Ok(published);
+    }
+
+    // A legacy writer won after our pre-record sidecar check. Repair the same
+    // auth-event-derived record key, retrying transient object-store failures.
+    // If all attempts fail, a client retry uses that same key and the now-known
+    // sidecar facts, so it repairs rather than appending a second record.
+    for attempt in 0..UPLOAD_RECORD_CORRECTION_MAX_ATTEMPTS {
+        match write_record(published.clone()).await {
+            Ok(()) => return Ok(published),
+            Err(error) if attempt + 1 == UPLOAD_RECORD_CORRECTION_MAX_ATTEMPTS => {
+                return Err(error);
+            }
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(1 << attempt)).await;
+            }
+        }
+    }
+
+    Err(MediaError::Internal)
 }
 
 async fn process_buffered_upload<V, M, Fut>(
@@ -118,7 +160,7 @@ where
             record_upload_event(
                 storage,
                 ctx,
-                &auth_event.pubkey,
+                auth_event,
                 attribution,
                 UploadEventFacts {
                     sha256: &sha256,
@@ -201,57 +243,43 @@ where
     // The moderation record precedes the sidecar publish gate. If this write
     // fails, the blob and any thumbnail remain orphaned but the media cannot be
     // served. Conversely, record existence still implies those objects exist.
-    let mut upload_record = if let Some(attribution) = &attribution {
-        Some(
-            record_upload_event_with_handle(
-                storage,
-                ctx,
-                &auth_event.pubkey,
-                attribution,
-                UploadEventFacts {
-                    sha256: &sha256,
-                    ext: &canonical_meta.ext,
-                    mime: &canonical_meta.mime_type,
-                    size: body.len() as u64,
-                    uploaded_at,
-                },
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    // Every updated writer uses the first-writer claim, so it records and
-    // publishes the same canonical facts. The conditional sidecar PUT also
-    // preserves any sidecar won by a legacy writer during a rollout race.
-    let sidecar_created = storage
-        .put_sidecar_if_absent(ctx, &sha256, &canonical_meta)
-        .await?;
-    let published_meta = if sidecar_created {
-        canonical_meta
-    } else {
-        let published = storage.get_sidecar(ctx, &sha256).await?;
-        if published.ext != canonical_meta.ext || published.mime_type != canonical_meta.mime_type {
-            if let Some(record) = &mut upload_record {
-                correct_upload_event_facts(
-                    storage,
-                    record,
-                    UploadEventFacts {
-                        sha256: &sha256,
-                        ext: &published.ext,
-                        mime: &published.mime_type,
-                        size: body.len() as u64,
-                        uploaded_at,
-                    },
-                )
-                .await?;
+    let attribution = attribution.as_ref();
+    let body_size = body.len() as u64;
+    let published_meta = publish_sidecar_after_record(
+        canonical_meta,
+        |record_meta| {
+            let sha256 = sha256.as_str();
+            async move {
+                if let Some(attribution) = attribution {
+                    record_upload_event(
+                        storage,
+                        ctx,
+                        auth_event,
+                        attribution,
+                        UploadEventFacts {
+                            sha256,
+                            ext: &record_meta.ext,
+                            mime: &record_meta.mime_type,
+                            size: body_size,
+                            uploaded_at,
+                        },
+                    )
+                    .await
+                } else {
+                    Ok(())
+                }
             }
-            return Err(MediaError::StorageError(
-                "published sidecar classification changed during upload".to_string(),
-            ));
-        }
-        published
-    };
+        },
+        |meta| {
+            let sha256 = sha256.as_str();
+            async move { storage.put_sidecar_if_absent(ctx, sha256, &meta).await }
+        },
+        || {
+            let sha256 = sha256.as_str();
+            async move { storage.get_sidecar(ctx, sha256).await }
+        },
+    )
+    .await?;
     let published_key = format!("{sha256}.{}", published_meta.ext);
     if !storage.head(&published_key).await? {
         return Err(MediaError::StorageError(
@@ -568,7 +596,7 @@ pub async fn process_video_upload(
             record_upload_event(
                 storage,
                 ctx,
-                &auth_event.pubkey,
+                auth_event,
                 attribution,
                 UploadEventFacts {
                     sha256: &sha256_hex,
@@ -630,54 +658,42 @@ pub async fn process_video_upload(
     }
 
     // Record before publishing the sidecar serve gate. See the buffered path.
-    let mut upload_record = if let Some(attribution) = &attribution {
-        Some(
-            record_upload_event_with_handle(
-                storage,
-                ctx,
-                &auth_event.pubkey,
-                attribution,
-                UploadEventFacts {
-                    sha256: &sha256_hex,
-                    ext: &canonical_meta.ext,
-                    mime: &canonical_meta.mime_type,
-                    size: file_size,
-                    uploaded_at,
-                },
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    let sidecar_created = storage
-        .put_sidecar_if_absent(ctx, &sha256_hex, &canonical_meta)
-        .await?;
-    let published_meta = if sidecar_created {
-        canonical_meta
-    } else {
-        let published = storage.get_sidecar(ctx, &sha256_hex).await?;
-        if published.ext != canonical_meta.ext || published.mime_type != canonical_meta.mime_type {
-            if let Some(record) = &mut upload_record {
-                correct_upload_event_facts(
-                    storage,
-                    record,
-                    UploadEventFacts {
-                        sha256: &sha256_hex,
-                        ext: &published.ext,
-                        mime: &published.mime_type,
-                        size: file_size,
-                        uploaded_at,
-                    },
-                )
-                .await?;
+    let attribution = attribution.as_ref();
+    let published_meta = publish_sidecar_after_record(
+        canonical_meta,
+        |record_meta| {
+            let sha256 = sha256_hex.as_str();
+            async move {
+                if let Some(attribution) = attribution {
+                    record_upload_event(
+                        storage,
+                        ctx,
+                        auth_event,
+                        attribution,
+                        UploadEventFacts {
+                            sha256,
+                            ext: &record_meta.ext,
+                            mime: &record_meta.mime_type,
+                            size: file_size,
+                            uploaded_at,
+                        },
+                    )
+                    .await
+                } else {
+                    Ok(())
+                }
             }
-            return Err(MediaError::StorageError(
-                "published sidecar classification changed during upload".to_string(),
-            ));
-        }
-        published
-    };
+        },
+        |meta| {
+            let sha256 = sha256_hex.as_str();
+            async move { storage.put_sidecar_if_absent(ctx, sha256, &meta).await }
+        },
+        || {
+            let sha256 = sha256_hex.as_str();
+            async move { storage.get_sidecar(ctx, sha256).await }
+        },
+    )
+    .await?;
     let published_key = format!("{sha256_hex}.{}", published_meta.ext);
     if !storage.head(&published_key).await? {
         return Err(MediaError::StorageError(
@@ -917,5 +933,61 @@ mod tests {
         assert!(desc.blurhash.is_none());
         assert!(desc.thumb.is_none());
         assert!(desc.duration.is_none());
+    }
+
+    #[tokio::test]
+    async fn transient_record_correction_failure_recovers_one_canonical_record() {
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let claimed = BlobMeta {
+            ext: "ics".to_string(),
+            mime_type: "text/calendar".to_string(),
+            ..BlobMeta::default()
+        };
+        let published = BlobMeta {
+            ext: "bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            ..BlobMeta::default()
+        };
+        let records = Arc::new(Mutex::new(HashMap::new()));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let records_for_write = Arc::clone(&records);
+        let writes_for_write = Arc::clone(&writes);
+        let published_for_read = published.clone();
+
+        let result = publish_sidecar_after_record(
+            claimed,
+            move |meta| {
+                let records = Arc::clone(&records_for_write);
+                let writes = Arc::clone(&writes_for_write);
+                async move {
+                    let attempt = writes.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 1 {
+                        return Err(MediaError::StorageError(
+                            "injected transient correction failure".to_string(),
+                        ));
+                    }
+                    records.lock().unwrap().insert("same-auth-event", meta);
+                    Ok(())
+                }
+            },
+            |_| async { Ok(false) },
+            move || {
+                let published = published_for_read.clone();
+                async move { Ok(published) }
+            },
+        )
+        .await;
+
+        let result = result.expect("transient correction must recover");
+        assert_eq!(writes.load(Ordering::SeqCst), 3);
+        assert_eq!(result.ext, published.ext);
+        assert_eq!(result.mime_type, published.mime_type);
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records["same-auth-event"].ext, published.ext);
+        assert_eq!(records["same-auth-event"].mime_type, published.mime_type);
     }
 }
