@@ -154,22 +154,32 @@ impl CommunityConnectionControl {
     }
 
     fn disconnect_nip_fi(&self) {
-        // Enqueue the route-specific denial payload BEFORE publishing the reason
-        // and cancelling.  The send loop (or pre-send-loop drain) drains
-        // `terminal_frame_tx` before emitting the 1008 close, so the client sees
-        // the protocol message before the transport closes.  Capacity-1 contention
-        // with the expiry task is benign — both would enqueue the same canonical
-        // denial frame, and first-frame-wins mirrors first-writer-wins on the reason.
-        // `try_send` is non-blocking; a full channel means the expiry task already
-        // queued the frame, which is fine.
+        // Atomically: win the reason slot and, only if we win, enqueue the
+        // denial payload.  Both operations are performed while holding the
+        // terminal_frame_tx lock so that a concurrent `disconnect_community`
+        // that loses reason publication cannot observe an enqueued denial
+        // frame against a "community deleted" close (and vice versa).
+        //
+        // Capacity-1 contention with the expiry task is benign — both would
+        // enqueue the same canonical denial frame, and first-frame-wins mirrors
+        // first-writer-wins on the reason.  `try_send` is non-blocking; a full
+        // channel means the expiry task already queued the frame, which is fine.
         if let Ok(slot) = self.terminal_frame_tx.lock() {
-            if let Some(ref tx) = *slot {
-                let _ = tx.try_send(crate::nip_fi_session::authorization_denied_frame(
-                    crate::nip_fi_session::NipFiWsRoute::Audio,
-                ));
+            let won = self.reason_tx.send_if_modified(|current| match current {
+                None => {
+                    *current = Some(CommunityDisconnectReason::AuthorizationDenied);
+                    true
+                }
+                Some(_) => false,
+            });
+            if won {
+                if let Some(ref tx) = *slot {
+                    let _ = tx.try_send(crate::nip_fi_session::authorization_denied_frame(
+                        crate::nip_fi_session::NipFiWsRoute::Audio,
+                    ));
+                }
             }
         }
-        self.publish_disconnect_reason(CommunityDisconnectReason::AuthorizationDenied);
         self.cancel.cancel();
     }
 }
@@ -3074,6 +3084,96 @@ pub(crate) mod tests {
             *reason_rx.borrow(),
             Some(CommunityDisconnectReason::AuthorizationDenied),
             "AuthorizationDenied (first writer) must not be clobbered by CommunityDeleted"
+        );
+    }
+
+    // ── Fix-2 payload-coupling tests ──────────────────────────────────────────
+    //
+    // These two tests prove that `disconnect_nip_fi` enqueues the denial payload
+    // ONLY when it wins reason publication — never when another cause already
+    // holds the reason slot.
+    //
+    // Mutation evidence:
+    //   A) Remove the `won` gate and always `try_send` unconditionally (revert to
+    //      pass-1 behavior) → the losing-deny test's `is_err()` assertion fails
+    //      because a frame IS queued against the CommunityDeleted close.
+    //   B) Remove the `send_if_modified` call inside the lock (make it always
+    //      return true) → same outcome as (A) in the delete-then-deny case.
+    //   C) Move `send_if_modified` outside the lock → the atomicity gap reopens;
+    //      a concurrent community deletion that wins reason between the outer
+    //      `send_if_modified` check and the inner `try_send` would still enqueue
+    //      a denial frame against the wrong close reason (race, not directly
+    //      tested here but the lock is the structural fix).
+
+    #[test]
+    fn disconnect_nip_fi_wins_reason_enqueues_frame_then_losing_delete_does_not() {
+        // disconnect_nip_fi fires first → wins reason → enqueues denial frame.
+        // disconnect_community fires second → loses reason → no second frame queued.
+        let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
+
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        control.set_terminal_frame_sender(terminal_tx);
+
+        // First writer: disconnect_nip_fi (Authorization wins reason slot).
+        control.disconnect_nip_fi();
+        // Second writer: disconnect_community (CommunityDeleted loses — slot already set).
+        control.disconnect_community();
+
+        // Reason slot retains AuthorizationDenied.
+        assert_eq!(
+            *control.disconnect_reason().borrow(),
+            Some(CommunityDisconnectReason::AuthorizationDenied),
+            "AuthorizationDenied must be retained when nip_fi wins reason"
+        );
+
+        // Exactly one frame queued — the winning denial payload.
+        let frame = terminal_rx
+            .try_recv()
+            .expect("winning disconnect_nip_fi must enqueue a denial frame");
+        let expected = crate::nip_fi_session::authorization_denied_frame(
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+        );
+        assert_eq!(
+            frame, expected,
+            "queued frame must be the canonical Audio denial frame"
+        );
+        // No second frame — losing delete must not queue anything.
+        assert!(
+            terminal_rx.try_recv().is_err(),
+            "losing disconnect_community must not enqueue a second frame"
+        );
+    }
+
+    #[test]
+    fn disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame() {
+        // disconnect_community fires first → wins reason → no payload (community-deleted
+        // path is intentionally payload-less).
+        // disconnect_nip_fi fires second → loses reason → must NOT enqueue a denial
+        // frame against the CommunityDeleted close.
+        let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
+
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        control.set_terminal_frame_sender(terminal_tx);
+
+        // First writer: disconnect_community.
+        control.disconnect_community();
+        // Second writer: disconnect_nip_fi — loses reason slot.
+        control.disconnect_nip_fi();
+
+        // Reason slot retains CommunityDeleted.
+        assert_eq!(
+            *control.disconnect_reason().borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted),
+            "CommunityDeleted must be retained when community wins reason"
+        );
+
+        // No frame queued — losing deny must not send an authorization_denied payload
+        // against a community-deleted close.
+        assert!(
+            terminal_rx.try_recv().is_err(),
+            "losing disconnect_nip_fi must not enqueue a denial frame when community wins reason"
         );
     }
 }
