@@ -1,13 +1,19 @@
 import { Link, Outlet } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 
 import { useColorScheme } from "@/shared/theme/useColorScheme";
 
-const SECTIONS: Array<{ heading: string; items: Array<[string, string]> }> = [
+/** A nav entry, optionally with children shown indented beneath it. */
+type NavItem = [label: string, to: string, children?: Array<[string, string]>];
+
+const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
   {
     heading: "Foundations",
     items: [
-      ["Colour", "/design/colour"],
+      // "Color" in the interface. The code still says `Colour` in places —
+      // registry types, the ColourPage component — and renaming those is a
+      // separate change from what the nav says.
+      ["Color", "/design/color", [["Token table", "/design/color/table"]]],
       ["Typography", "/design/typography"],
       ["Spacing", "/design/spacing"],
       ["Radius", "/design/radius"],
@@ -29,10 +35,20 @@ const SECTIONS: Array<{ heading: string; items: Array<[string, string]> }> = [
   },
 ];
 
-function NavLink({ to, children }: { to: string; children: ReactNode }) {
+function NavLink({
+  to,
+  exact,
+  children,
+}: {
+  to: string;
+  /** Set on a parent that has children, so it does not stay lit on a subpage. */
+  exact?: boolean;
+  children: ReactNode;
+}) {
   return (
     <Link
       to={to}
+      activeOptions={exact ? { exact: true } : undefined}
       className="block rounded-lg px-3 py-2 text-label text-secondary transition-colors hover:bg-hover hover:text-primary"
       activeProps={{
         className:
@@ -80,10 +96,20 @@ export function DesignSystemLayout() {
                 /* Narrow: links wrap as a row so the nav costs a few lines
                    instead of a screen. From lg they return to a column. */
                 <div className="flex flex-wrap gap-1 lg:flex-col">
-                  {section.items.map(([label, to]) => (
-                    <NavLink key={to} to={to}>
-                      {label}
-                    </NavLink>
+                  {section.items.map(([label, to, children]) => (
+                    <Fragment key={to}>
+                      <NavLink to={to} exact={children !== undefined}>
+                        {label}
+                      </NavLink>
+                      {/* Indented on the side rail so the nesting reads;
+                          inline in the wrapped narrow row, where an indent
+                          would just look like a gap. */}
+                      {children?.map(([childLabel, childTo]) => (
+                        <div key={childTo} className="lg:pl-3">
+                          <NavLink to={childTo}>{childLabel}</NavLink>
+                        </div>
+                      ))}
+                    </Fragment>
                   ))}
                 </div>
               )}

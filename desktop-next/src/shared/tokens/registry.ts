@@ -670,7 +670,7 @@ export const BLUR = [
 /** The entire exception list. Everything else points at a ramp step. */
 export const EXCEPTIONS = [
   {
-    name: "text-on-accent, text-on-inverse",
+    name: "text-on-accent, text-on-inverse, and the four status pairings",
     why: "Computed from their fill's lightness rather than fixed, because white is readable on a blue or purple fill and unreadable on yellow or lime. This is what keeps a free choice of accent hue from becoming a contrast lottery.",
   },
   {

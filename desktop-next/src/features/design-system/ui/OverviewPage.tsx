@@ -57,10 +57,10 @@ export function OverviewPage() {
       >
         <div className="flex flex-wrap gap-2">
           <Link
-            to="/design/colour"
+            to="/design/color"
             className="rounded-lg bg-accent px-4 py-2 text-label text-on-accent transition-opacity hover:opacity-90"
           >
-            Colour
+            Color
           </Link>
           <Link
             to="/design/typography"

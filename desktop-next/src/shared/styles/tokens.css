@@ -256,6 +256,18 @@
   --text-on-accent: #ffffff;
   --text-on-inverse: var(--neutral-1);
 
+  /* The status families need their paired text for the same reason accent does:
+     `bg-danger` is a saturated fill, and text on it must be the paired value
+     rather than whatever it inherits. The registry documented these four before
+     they were declared, so `text-on-danger` resolved to nothing and text on a
+     danger button fell back to near-black on red. The token table found it.
+     Literals for now, on the same exception as text-on-accent — they become
+     computed when the lightness rule lands. */
+  --text-on-danger: #ffffff;
+  --text-on-success: #ffffff;
+  --text-on-warning: var(--neutral-12);
+  --text-on-info: #ffffff;
+
   /*  2. The glass rim. A directional light effect, not a solid
         line: bright along the lit edge, dimmer on the opposite
         one, from one fixed light direction every glass surface
@@ -324,9 +336,13 @@
   --color-danger: var(--bg-danger);
   --color-danger-tint: var(--bg-danger-tint);
   --color-danger-tint-hover: var(--bg-danger-tint-hover);
+  --color-on-danger: var(--text-on-danger);
   --color-success: var(--bg-success);
   --color-success-tint: var(--bg-success-tint);
   --color-success-tint-hover: var(--bg-success-tint-hover);
+  --color-on-success: var(--text-on-success);
+  --color-on-warning: var(--text-on-warning);
+  --color-on-info: var(--text-on-info);
   --color-warning: var(--bg-warning);
   --color-warning-tint: var(--bg-warning-tint);
   --color-warning-tint-hover: var(--bg-warning-tint-hover);
