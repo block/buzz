@@ -508,8 +508,10 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var_os(key).is_none() {
-                cmd.env(key, value);
+            let target_key = extra_env_target_key(key);
+            let parent_has_value = std::env::var_os(target_key).is_some();
+            if should_apply_extra_env(key, parent_has_value) {
+                cmd.env(target_key, value);
             }
         }
         if let Some(merged) = codex_config_value {
@@ -2040,6 +2042,21 @@ impl AcpClient {
     }
 }
 
+/// Translate Buzz's internal forced Pi launcher input to the environment key
+/// consumed by `pi-acp`. All real adapter environment keys continue through
+/// the ordinary operator-wins path.
+fn extra_env_target_key(key: &str) -> &str {
+    if key == crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV {
+        crate::pi_system_prompt::PI_ACP_PI_COMMAND_ENV
+    } else {
+        key
+    }
+}
+
+fn should_apply_extra_env(key: &str, parent_has_value: bool) -> bool {
+    key == crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV || !parent_has_value
+}
+
 /// Build `session/prompt` params from one or more text content blocks.
 fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
@@ -2394,6 +2411,21 @@ mod tests {
             Some(StopReason::MaxTurnRequests)
         );
         assert_eq!(StopReason::from_str("Refusal"), Some(StopReason::Refusal));
+    }
+
+    #[test]
+    fn buzz_pi_launcher_overrides_inherited_adapter_command() {
+        assert_eq!(
+            extra_env_target_key(crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV),
+            crate::pi_system_prompt::PI_ACP_PI_COMMAND_ENV
+        );
+        assert_eq!(extra_env_target_key("ORDINARY_ENV"), "ORDINARY_ENV");
+        assert!(should_apply_extra_env(
+            crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV,
+            true
+        ));
+        assert!(!should_apply_extra_env("ORDINARY_ENV", true));
+        assert!(should_apply_extra_env("ORDINARY_ENV", false));
     }
 
     #[test]
@@ -3122,6 +3154,27 @@ mod tests {
             spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_forces_generated_pi_launcher_into_adapter_environment() {
+        let launcher = "/tmp/buzz-generated-pi-launcher";
+        let extra_env = [(
+            crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV.to_string(),
+            launcher.to_string(),
+        )];
+
+        assert_eq!(
+            spawn_named_and_read_child_env(
+                "pi-acp",
+                crate::pi_system_prompt::PI_ACP_PI_COMMAND_ENV,
+                &extra_env,
+            )
+            .await,
+            launcher,
+            "pi-acp must observe Buzz's generated launcher even when the parent has PI_ACP_PI_COMMAND"
         );
     }
 
