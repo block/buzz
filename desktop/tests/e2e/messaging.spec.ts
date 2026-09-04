@@ -2928,7 +2928,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   );
   expect(
     Math.abs(
-      summaryGeometry.avatarLeft - summaryGeometry.summarySurfaceLeft - 4,
+      summaryGeometry.avatarLeft - summaryGeometry.summarySurfaceLeft - 8,
     ),
   ).toBeLessThanOrEqual(1);
   expect(
