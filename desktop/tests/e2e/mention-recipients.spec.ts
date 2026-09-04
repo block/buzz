@@ -7,7 +7,7 @@ const SECOND = TEST_IDENTITIES.bob.pubkey;
 const AMBIGUOUS =
   "The mention @Scout is ambiguous. Choose a recipient from the mention picker.";
 
-async function install(page: Page, channel = "general") {
+async function install(page: Page, channel = "general", agents = false) {
   await installMockBridge(page, {
     managedAgents:
       channel === "watercooler"
@@ -17,10 +17,18 @@ async function install(page: Page, channel = "general") {
             status: "running",
             channelNames: ["watercooler"],
           }))
-        : [],
+        : agents
+          ? [FIRST, SECOND].map((pubkey) => ({
+              pubkey,
+              name: "Scout",
+              status: "running",
+              channelNames: [channel],
+            }))
+          : [],
     searchProfiles: [FIRST, SECOND].map((pubkey) => ({
       pubkey,
       displayName: "Scout",
+      isAgent: agents,
     })),
   });
   await page.goto("/");
@@ -419,12 +427,19 @@ test("editing to a longer typed member drops the original shorter reference", as
   await expect(row).toContainText("Scout Jones hello");
 });
 
-for (const scale of [1, 1.5]) {
-  test(`exact-key chips wrap in narrow composer, sent message and reopen at ${scale}x text`, async ({
+// The default relay directory knows FIRST as an agent; SECOND is a human.
+// The agent variant makes SECOND managed too, covering a qualified bot label.
+for (const { kind, scale } of [
+  { kind: "mixed", scale: 1 },
+  { kind: "mixed", scale: 1.5 },
+  { kind: "agent", scale: 1 },
+  { kind: "agent", scale: 1.5 },
+]) {
+  test(`exact-key ${kind} chips wrap in narrow composer, sent message and reopen at ${scale}x text`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 800, height: 900 });
-    await install(page);
+    await install(page, "general", kind === "agent");
     await page.evaluate((scale) => {
       document.documentElement.style.fontSize = `${16 * scale}px`;
     }, scale);
@@ -460,6 +475,13 @@ for (const scale of [1, 1.5]) {
       host: import("@playwright/test").Locator,
       stage: string,
     ) => {
+      if (stage === "sent") {
+        await expect(host.locator("[data-mention]")).toHaveCount(2);
+        await expect(host.locator("[data-mention]").last()).toHaveAttribute(
+          "data-mention-kind",
+          kind === "agent" ? "agent" : "human",
+        );
+      }
       const result = await geometry(host);
       expect(result.chips.length).toBeGreaterThanOrEqual(2);
       expect(result.scrollWidth).toBeLessThanOrEqual(result.clientWidth + 1);
@@ -475,7 +497,34 @@ for (const scale of [1, 1.5]) {
           expect(rect.right).toBeLessThanOrEqual(result.width + 1);
         }
       }
-      if (stage !== "sent") {
+      if (stage === "sent") {
+        for (const chip of await host.locator("[data-mention]").all()) {
+          const expectedKind =
+            kind === "agent" ||
+            (await chip.getAttribute("data-mention-pubkey")) === FIRST
+              ? "agent"
+              : "human";
+          await expect(chip).toHaveAttribute("data-mention-kind", expectedKind);
+          const leading = chip.locator(".inline-chip-leading-fragment");
+          await expect(leading).toHaveText("Scout");
+          const icon = await leading.evaluate((element) => {
+            const style = getComputedStyle(element, "::before");
+            return {
+              display: style.display,
+              mask: style.maskImage,
+              width: parseFloat(style.width),
+              height: parseFloat(style.height),
+            };
+          });
+          expect(icon.display).toBe("block");
+          expect(icon.mask).toContain("data:image/svg+xml");
+          expect(icon.width).toBeGreaterThan(0);
+          expect(icon.height).toBeGreaterThan(0);
+          await expect(leading).toHaveClass(
+            new RegExp(`inline-chip-icon-${expectedKind}`),
+          );
+        }
+      } else {
         for (const prefix of await host
           .locator(".mention-prefix-hidden")
           .all()) {
@@ -495,7 +544,7 @@ for (const scale of [1, 1.5]) {
       });
       await waitForAnimations(page);
       await page.screenshot({
-        path: `test-results/mention-recipients/layout-${scale}-${stage}.png`,
+        path: `test-results/mention-recipients/layout-${kind}-${scale}-${stage}.png`,
       });
     };
     await expect(input).toHaveText(content);

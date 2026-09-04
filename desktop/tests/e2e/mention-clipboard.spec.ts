@@ -133,8 +133,11 @@ async function copyFromTimeline(
       selection.removeAllRanges();
       const range = document.createRange();
       if (selectPartialChip) {
-        const label = chip.firstChild;
-        if (!label) throw new Error("Mention chip has no text node.");
+        const walker = document.createTreeWalker(chip, NodeFilter.SHOW_TEXT);
+        const label = walker.nextNode();
+        if (!label?.nodeValue?.startsWith("John")) {
+          throw new Error("Mention chip has no leading John text node.");
+        }
         range.setStart(label, 0);
         range.setEnd(label, 4);
       } else {
@@ -930,7 +933,7 @@ test("a boundary-crossing default copy pastes its chip fragment without a sigil"
       return nodes;
     };
     const label = textNodesUnder(chip).find((node) =>
-      node.nodeValue?.includes("John Smith"),
+      node.nodeValue?.includes("Smith"),
     );
     const tail = textNodesUnder(body).find((node) =>
       node.nodeValue?.includes("fixed the bug"),

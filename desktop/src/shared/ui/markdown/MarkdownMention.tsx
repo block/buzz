@@ -2,7 +2,11 @@ import type * as React from "react";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
-import { WRAPPING_INLINE_CHIP_CLASSES } from "@/shared/ui/mentionChip";
+import {
+  inlineChipIconClasses,
+  inlineChipLeadingEnd,
+  WRAPPING_INLINE_CHIP_CLASSES,
+} from "@/shared/ui/mentionChip";
 import { InlineChip } from "@/shared/ui/InlineChip";
 import { useMarkdownRuntime } from "./runtimeContext";
 
@@ -28,6 +32,8 @@ export function createMarkdownMention(interactive: boolean) {
       pubkey !== undefined &&
       agentMentionPubkeysByName?.[mentionName] === pubkey;
     const mentionLabel = mentionText.replace(/^@/, "");
+    const icon = isAgentMention ? "agent" : "human";
+    const leadingEnd = inlineChipLeadingEnd(mentionLabel);
     // Only chips that actually open a profile get the clickable affordance.
     // A mention whose pubkey didn't resolve stays a plain chip — a pointer
     // cursor there promises a click that does nothing.
@@ -46,10 +52,20 @@ export function createMarkdownMention(interactive: boolean) {
         )}
         title={mentionLabel}
         aria-label={mentionLabel}
-        icon={isAgentMention ? "agent" : "human"}
+        icon={icon}
         interactive={opensProfile}
       >
-        {mentionLabel}
+        {/* Wrapping chips hide the outer icon; keep it with a bounded prefix. */}
+        <span
+          aria-hidden="true"
+          className={cn(
+            "inline-chip-leading-fragment",
+            inlineChipIconClasses(icon),
+          )}
+        >
+          {mentionLabel.slice(0, leadingEnd)}
+        </span>
+        {mentionLabel.slice(leadingEnd)}
         {isAgentMention ? <AgentManagementMarker pubkey={pubkey} /> : null}
       </InlineChip>
     );
