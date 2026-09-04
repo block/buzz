@@ -66,6 +66,21 @@ pub fn apply_relay_mesh_env(
     // survives (see `insert_default_if_unset`, and the copy-forward list in
     // `relay_mesh_process_env` that preserves it through the spawn path).
     insert_default_if_unset(env, "BUZZ_AGENT_REQUIRE_REPLY", "1");
+    // A local mesh prefills a cold multi-ten-thousand-token prompt at a few
+    // hundred tokens/second, so the first turn of a large session legitimately
+    // runs for minutes with no bytes on the wire (`stream: false`). MeshLLM's
+    // own frontend gives such a request 600 s before it aborts
+    // (`OpenAiFrontendConfig::DEFAULT_BACKEND_TIMEOUT`); buzz-agent's 240 s
+    // default abandons it at four minutes, so the client gives up on work the
+    // server is still doing and retries it — adding load to a box that is
+    // already prefilling. Seat the client just above the server's budget so the
+    // mesh's own error is what surfaces, rather than a client-side abort racing
+    // it. Measured: an 88,318-token cold prompt on an M5 Max returns 200 at
+    // 503 s. Remote providers keep the 240 s default; only mesh moves.
+    // A default, not policy — an explicit user value survives via
+    // `insert_default_if_unset` and the copy-forward list in
+    // `relay_mesh_process_env`.
+    insert_default_if_unset(env, "BUZZ_AGENT_LLM_TIMEOUT_SECS", "660");
     // Deliberately no BUZZ_AGENT_THINKING_EFFORT default: mesh translates
     // `reasoning_effort` into the chat template's `enable_thinking` flag, so any
     // value we pick overrides each model's own template default — and the right
@@ -102,6 +117,10 @@ pub fn relay_mesh_process_env(
     for key in [
         "BUZZ_AGENT_MAX_OUTPUT_TOKENS",
         "BUZZ_AGENT_THINKING_EFFORT",
+        // Same reason as `BUZZ_AGENT_REQUIRE_REPLY` below: without the
+        // copy-forward, an explicit user timeout is re-defaulted to 660 by
+        // `apply_relay_mesh_env`.
+        "BUZZ_AGENT_LLM_TIMEOUT_SECS",
         // Must be copied forward for the user's value to survive: this map is
         // written onto the command *after* the layered user env, so a key absent
         // here is re-defaulted by `apply_relay_mesh_env` below and an explicit
@@ -267,6 +286,74 @@ mod tests {
             env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
             Some("0"),
             "an explicit opt-out is a user decision, not a value to re-default"
+        );
+    }
+
+    /// MeshLLM's frontend allows a backend call 600 s
+    /// (`OpenAiFrontendConfig::DEFAULT_BACKEND_TIMEOUT`). buzz-agent's 240 s
+    /// default abandons a healthy cold prefill long before the server does and
+    /// retries it, so the client budget must sit above the server's.
+    #[test]
+    fn native_provider_outlasts_the_mesh_backend_timeout() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        let seconds: u64 = env
+            .get("BUZZ_AGENT_LLM_TIMEOUT_SECS")
+            .expect("mesh seeds a client timeout")
+            .parse()
+            .expect("timeout is whole seconds");
+        assert!(
+            seconds > 600,
+            "client budget ({seconds}s) must outlast the mesh frontend's 600s backend timeout"
+        );
+    }
+
+    #[test]
+    fn native_provider_preserves_explicit_llm_timeout() {
+        let mut env =
+            BTreeMap::from([("BUZZ_AGENT_LLM_TIMEOUT_SECS".to_string(), "90".to_string())]);
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_LLM_TIMEOUT_SECS").map(String::as_str),
+            Some("90"),
+            "an explicit timeout is a user decision, not a value to re-default"
+        );
+    }
+
+    /// Same spawn-ordering hazard as the reply guard: without the copy-forward
+    /// in `relay_mesh_process_env`, the user's value is re-defaulted here.
+    #[test]
+    fn process_env_preserves_explicit_llm_timeout() {
+        let effective_env =
+            BTreeMap::from([("BUZZ_AGENT_LLM_TIMEOUT_SECS".to_string(), "90".to_string())]);
+
+        let env = relay_mesh_process_env(&effective_env, "Gemma-4");
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_LLM_TIMEOUT_SECS").map(String::as_str),
+            Some("90")
+        );
+    }
+
+    #[test]
+    fn non_mesh_provider_leaves_llm_timeout_unset() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(&mut env, Some("anthropic"), Some("claude-haiku-4.5"));
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            None,
+            "remote providers keep buzz-agent's own default"
         );
     }
 
