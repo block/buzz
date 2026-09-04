@@ -106,6 +106,7 @@ security-review-check:
 # cheap enough to run unconditionally without duplicating path filters.
 file-size-check:
     node --test scripts/check-file-sizes-core.test.mjs
+    node --test scripts/stage-debug-sidecars.test.mjs
     node desktop/scripts/check-file-sizes.mjs
     node web/scripts/check-file-sizes.mjs
     node mobile/scripts/check-file-sizes.mjs
@@ -178,6 +179,15 @@ _ensure-sidecar-stubs:
     for bin in "${SIDECARS[@]}"; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
+
+# Replace debug sidecar stubs with the binaries built in Cargo's root target directory.
+_stage-debug-sidecars:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    "{{justfile_directory()}}/scripts/stage-debug-sidecars.sh" "$TARGET" "$TARGET_DIR" "{{justfile_directory()}}/desktop/src-tauri/binaries"
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
 _ensure-services:
@@ -618,6 +628,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
         done
     fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    just _stage-debug-sidecars
     # Docker Desktop's forwarded MinIO port can stall under the deployment
     # probe's 32 concurrent writers. Keep the gate enabled in local dev, using
     # the bounded profile already used by the relay test launcher.
@@ -662,12 +673,7 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
-    TARGET=$(rustc -vV | sed -n 's|host: ||p')
-    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
-        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
-        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
-    done
+    just _stage-debug-sidecars
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     unset BUZZ_PRIVATE_KEY BUZZ_SHARE_IDENTITY
