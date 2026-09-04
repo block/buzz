@@ -337,6 +337,32 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
     }
 }
 
+/// Retry delivery of an already stored Stop, without audit/workflow effects.
+/// Admission and durable effect deduplication remain the Desktop's authority.
+pub(crate) async fn redeliver_desktop_stop(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &nostr::Event,
+) {
+    state.mark_local_event(tenant.community(), &event.id);
+    if let Err(error) = state
+        .pubsub
+        .publish_event(tenant, EventTopic::Global, event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event.id, %error, "Desktop Stop redelivery to peers failed");
+    }
+    fan_out_event_to_local_subscribers(
+        state,
+        tenant.community(),
+        &StoredEvent::new(event.clone(), None),
+    )
+    .await;
+}
+
 /// Schedule post-commit delivery/side effects for a stored event.
 ///
 /// This intentionally returns after only the bounded audit enqueue has completed:
@@ -2218,6 +2244,12 @@ mod tests {
         #[tokio::test]
         async fn desktop_observation_delivers_to_author_only() {
             assert_author_only_fanout(buzz_core::kind::KIND_DESKTOP_OBSERVATION).await;
+        }
+
+        #[tokio::test]
+        async fn desktop_stop_delivers_to_author_only() {
+            assert_author_only_fanout(buzz_core::kind::KIND_DESKTOP_STOP).await;
+            assert_author_only_fanout(buzz_core::kind::KIND_DESKTOP_STOP_RESULT).await;
         }
 
         #[tokio::test]

@@ -125,6 +125,11 @@ pub const KIND_DESKTOP_OBSERVATION: u32 = 30181;
 /// Owner-private built-in runtime facts per Desktop, not agent readiness.
 pub const KIND_DESKTOP_CAPABILITIES: u32 = 30182;
 
+/// Immutable owner-private Desktop Stop request (not a replaceable profile).
+pub const KIND_DESKTOP_STOP: u32 = 50180;
+/// Owner-private ordinary Desktop Stop outcome, correlated by request event ID.
+pub const KIND_DESKTOP_STOP_RESULT: u32 = 50181;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,
@@ -141,6 +146,8 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_DESKTOP_PROFILE,
     KIND_DESKTOP_OBSERVATION,
     KIND_DESKTOP_CAPABILITIES,
+    KIND_DESKTOP_STOP,
+    KIND_DESKTOP_STOP_RESULT,
 ];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
@@ -673,6 +680,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_DESKTOP_PROFILE,
     KIND_DESKTOP_OBSERVATION,
     KIND_DESKTOP_CAPABILITIES,
+    KIND_DESKTOP_STOP,
+    KIND_DESKTOP_STOP_RESULT,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
