@@ -9,6 +9,7 @@
 pub mod agent_turn_metric;
 /// Channel and membership enums shared across crates.
 pub mod channel;
+pub mod desktop_observation;
 /// Owner-private Desktop display profiles.
 pub mod desktop_profile;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,

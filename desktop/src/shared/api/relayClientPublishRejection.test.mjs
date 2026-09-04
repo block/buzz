@@ -293,3 +293,52 @@ test("a community switch after send failure cannot retry through its replacement
   );
   assert.equal(eventFrames().length, 0);
 });
+
+test("Desktop pulse cancellation fences rate-limit and reconnect continuations", async () => {
+  const { refreshDesktopObservations } = await import(
+    "../../features/agents/desktopObservations.ts"
+  );
+  for (const boundary of ["rate-limit", "reconnect"]) {
+    reset();
+    const client = connectedClient();
+    const scope = { owner: "owner", community: "wss://a.example" };
+    let active = true;
+    const reconnect = deferred();
+    let reconnecting = false;
+    client.ensureConnected = async () => {
+      reconnecting = true;
+      await reconnect.promise;
+      client.wsId = 8;
+      return client.connectionGeneration;
+    };
+    if (boundary === "rate-limit") activateRateLimit(4);
+    else
+      sendTransport = async () => {
+        throw Error("socket failed");
+      };
+    const result = refreshDesktopObservations(
+      scope,
+      () => active,
+      async (command) => {
+        assert.equal(command, "prepare_desktop_observation");
+        return { event: { id: "pulse", kind: 30181 } };
+      },
+      client,
+    );
+    const rejected = assert.rejects(result, /scope changed/);
+    if (boundary === "reconnect") await flushUntil(() => reconnecting);
+    else await Promise.resolve();
+    active = false;
+    const generation = client.connectionGeneration;
+    resetRateLimitGate();
+    reconnect.resolve();
+    await rejected;
+    assert.equal(eventFrames().length, 0, boundary);
+    assert.equal(client.pendingEvents.size, 0);
+    assert.equal(
+      client.connectionGeneration,
+      generation,
+      "cancellation is not socket failure",
+    );
+  }
+});
