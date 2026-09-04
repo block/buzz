@@ -71,7 +71,9 @@ const rawAgent = () => ({
 const invoke = async (command, args) => {
   if (command.startsWith("plugin:event|")) return 0;
   if (command === "search_users") {
-    return { users: [], next_cursor: null };
+    if (state.pendingSearch?.[args.query])
+      return state.pendingSearch[args.query];
+    return { users: state.searchUsers ?? [], next_cursor: null };
   }
   if (command === "get_identity") return { pubkey: VIEWER };
   if (command === "create_channel") return channel();
@@ -172,7 +174,7 @@ function Mutations() {
 }
 function Composer() {
   mention = useMentions(state.channelId, undefined, undefined, {
-    channelType: "stream",
+    channelType: state.channelType ?? "stream",
   });
   picker = useAgentAddressLockPicker({
     mentions: mention,
@@ -258,6 +260,7 @@ async function setup(overrides = {}) {
     }),
   );
   await render();
+  await settle();
   await act(async () => mention.updateMentionQuery("@", 1));
   await settle();
 }
@@ -275,7 +278,7 @@ for (const [owner, role] of [
   [VIEWER, "member"],
   [OTHER, "member"],
 ]) {
-  test(`fresh create/add then first @ catches up without a manual directory refresh (${owner === VIEWER ? "owned" : "nonowned"}, ${role})`, async () => {
+  test(`create/add refreshes discovery for the next open, not the displayed rows (${owner === VIEWER ? "owned" : "nonowned"}, ${role})`, async () => {
     await setup({ owner, role });
     assert.equal(
       rows().filter((row) => row.isAgent && !row.notInChannel).length,
@@ -314,6 +317,12 @@ for (const [owner, role] of [
       3,
       "later semantic roster change retries discovery",
     );
+    assert.equal(
+      rows().filter((row) => !row.notInChannel).length,
+      0,
+      "displayed choices stay frozen",
+    );
+    await act(async () => mention.openMentionPicker(1));
     assert.equal(rows().length, 1);
     assert.equal(rows()[0].isAgent, true);
     assert.equal(rows()[0].notInChannel, false);
@@ -448,7 +457,7 @@ test("retained explicit pin rejects latest policy denial without draft effects",
     client.invalidateQueries({ queryKey: ["relay-agents"] }),
   );
   await settle();
-  assert.equal(rows().length, 0);
+  assert.equal(rows().length, 1, "denial does not move the displayed row");
   await act(async () => oldPin(row));
   assert.deepEqual(effects, []);
   assert.deepEqual(mention.knownNames, []);
@@ -532,6 +541,7 @@ test("retained team cannot bind a removed exact member", async () => {
     client.setQueryData(["teams"], [team]);
   });
   await settle();
+  await act(async () => mention.openMentionPicker(1));
   const row = mention.suggestions.find((s) => s.kind === "team");
   assert.ok(row, JSON.stringify(mention.suggestions));
   assert.equal(row.teamMembers[0].pubkey, AGENT);
@@ -544,7 +554,7 @@ test("retained team cannot bind a removed exact member", async () => {
   await settle();
   assert.equal(
     mention.suggestions.some((s) => s.pubkey === AGENT),
-    false,
+    true,
   );
   assert.ok(mention.suggestions.find((s) => s.kind === "team"));
   let edit;
@@ -587,6 +597,7 @@ test("duplicate team members cannot mask a recipient set change", async () => {
     client.setQueryData(["teams"], [team]);
   });
   await settle();
+  await act(async () => mention.openMentionPicker(1));
   const row = mention.suggestions.find((s) => s.kind === "team");
   assert.ok(row);
   assert.equal(
@@ -604,7 +615,8 @@ test("duplicate team members cannot mask a recipient set change", async () => {
         .find((s) => s.kind === "team")
         .teamMembers.map((m) => m.pubkey ?? m.personaId),
     ).size,
-    2,
+    1,
+    "the displayed team is frozen but current recipient admission is not",
   );
   let edit;
   await act(async () => {
@@ -613,4 +625,192 @@ test("duplicate team members cannot mask a recipient set change", async () => {
   assert.equal(edit.insertText, "");
   assert.deepEqual(mention.knownNames, []);
   assert.deepEqual(mention.getDraftMentionRefs(edit.insertText), []);
+});
+
+const keyboard = (key) => ({ key, nativeEvent: { key }, preventDefault() {} });
+const person = (pubkey, name = "Scout") => ({
+  pubkey,
+  display_name: name,
+  is_agent: false,
+});
+
+for (const channelType of ["stream", "dm"]) {
+  test(`${channelType} without a destination does not wait for a disabled roster`, async () => {
+    await setup({
+      channelId: null,
+      channelType,
+      searchUsers: [person(OTHER, "Alice")],
+    });
+    assert.equal(
+      client.getQueryState(["channels", "none", "members"]).status,
+      "pending",
+    );
+    assert.equal(
+      client.getQueryState(["channels", "none", "members"]).fetchStatus,
+      "idle",
+    );
+    await act(async () => mention.updateMentionQuery("@Alice", 6));
+    await settle();
+    assert.equal(mention.isMentionLoading, false);
+    const choice = mention.handleMentionKeyDown(keyboard("Tab")).suggestion;
+    assert.equal(choice.pubkey, OTHER);
+    let edit;
+    await act(async () => {
+      edit = mention.insertMention(choice, 6);
+    });
+    assert.equal(mention.getDraftMentionRefs(edit.insertText)[0].pubkey, OTHER);
+  });
+
+  test(`${channelType} with a real pending roster still waits before admitting choices`, async () => {
+    let release;
+    await setup({
+      channelType,
+      heldRoster: new Promise((resolve) => {
+        release = resolve;
+      }),
+      searchUsers: [person(OTHER, "Alice")],
+    });
+    await act(async () => mention.updateMentionQuery("@Alice", 6));
+    await settle();
+    assert.equal(mention.isMentionLoading, true);
+    assert.deepEqual(mention.suggestions, []);
+    assert.equal(
+      mention.handleMentionKeyDown(keyboard("Tab")).suggestion,
+      undefined,
+    );
+    await act(async () => release({ members: [] }));
+    await settle();
+    assert.equal(mention.isMentionLoading, false);
+    assert.equal(
+      mention.handleMentionKeyDown(keyboard("Tab")).suggestion.pubkey,
+      OTHER,
+    );
+  });
+}
+
+test("background membership/search updates leave visible same-name rows and Tab identity fixed", async () => {
+  await setup({
+    owner: OTHER,
+    searchUsers: [person(OTHER), person("e".repeat(64))],
+  });
+  await act(async () => mention.updateMentionQuery("@Scout", 6));
+  await settle();
+  const displayed = mention.suggestions;
+  assert.equal(displayed.length, 2);
+  assert.deepEqual(
+    new Set(displayed.map((row) => row.pubkey)),
+    new Set([OTHER, "e".repeat(64)]),
+  );
+  assert.ok(displayed.every((row) => row.hasNameCollision));
+  await act(async () => mention.handleMentionKeyDown(keyboard("ArrowDown")));
+  const selected = displayed[1];
+  state.searchUsers = [
+    person("e".repeat(64)),
+    person(OTHER),
+    person("d".repeat(64)),
+  ];
+  await act(async () =>
+    client.invalidateQueries({ queryKey: ["user-search"] }),
+  );
+  await settle();
+  assert.equal(mention.suggestions, displayed);
+  let outcome, edit;
+  await act(async () => {
+    outcome = mention.handleMentionKeyDown(keyboard("Tab"));
+  });
+  assert.equal(outcome.suggestion, selected);
+  await act(async () => {
+    edit = mention.insertMention(outcome.suggestion, 6);
+  });
+  assert.equal(
+    mention.getDraftMentionRefs(edit.insertText)[0].pubkey,
+    selected.pubkey,
+  );
+  await act(async () => mention.updateMentionQuery("@Scou", 5));
+  await settle();
+  assert.equal(mention.suggestions.length, 3);
+});
+
+test("text changes load a new request; superseded and closed responses cannot install rows", async () => {
+  await setup();
+  let releaseOld, releaseNew, releaseClosed;
+  state.pendingSearch = {
+    old: new Promise((resolve) => {
+      releaseOld = resolve;
+    }),
+    new: new Promise((resolve) => {
+      releaseNew = resolve;
+    }),
+    closed: new Promise((resolve) => {
+      releaseClosed = resolve;
+    }),
+  };
+  await act(async () => mention.updateMentionQuery("@old", 4));
+  await settle();
+  assert.equal(mention.isMentionLoading, true);
+  assert.equal(
+    mention.handleMentionKeyDown(keyboard("Tab")).suggestion,
+    undefined,
+  );
+  await act(async () => mention.updateMentionQuery("@new", 4));
+  await settle();
+  await act(async () =>
+    releaseNew({ users: [person(OTHER, "New")], next_cursor: null }),
+  );
+  await settle();
+  const displayed = mention.suggestions;
+  assert.equal(displayed[0].pubkey, OTHER);
+  await act(async () =>
+    releaseOld({ users: [person(VIEWER, "Old")], next_cursor: null }),
+  );
+  await settle();
+  assert.equal(mention.suggestions, displayed);
+  await act(async () => mention.updateMentionQuery("@closed", 7));
+  await settle();
+  await act(async () => mention.cancelMentionAutocomplete());
+  await act(async () =>
+    releaseClosed({ users: [person(VIEWER, "Closed")], next_cursor: null }),
+  );
+  await settle();
+  assert.equal(mention.isMentionOpen, false);
+  assert.deepEqual(mention.suggestions, []);
+});
+
+test("leaving a completion and navigation discard choices; explicit reopen starts at zero", async () => {
+  await setup({ visible: true, directoryVisible: true });
+  const old = rows()[0];
+  await act(async () => mention.updateMentionQuery("plain", 5));
+  assert.equal(mention.isMentionOpen, false);
+  assert.equal(mention.insertMention(old, 5).insertText, "");
+  await act(async () => mention.openMentionPicker(5));
+  assert.equal(mention.mentionSelectedIndex, 0);
+  assert.notEqual(rows()[0], old);
+  state.channelId = "another-channel";
+  await render();
+  assert.equal(mention.isMentionOpen, false);
+  assert.deepEqual(mention.suggestions, []);
+});
+
+test("Space completes an exact name but remains literal for partial and same-name choices", async () => {
+  await setup({ searchUsers: [person(OTHER, "Alice")] });
+  await act(async () => mention.updateMentionQuery("@Ali", 4));
+  await settle();
+  assert.equal(mention.handleMentionKeyDown(keyboard(" ")).handled, false);
+  await act(async () => mention.updateMentionQuery("@Alice", 6));
+  await settle();
+  assert.equal(
+    mention.handleMentionKeyDown(keyboard(" ")).suggestion.pubkey,
+    OTHER,
+  );
+  state.searchUsers = [person(OTHER, "Alice"), person("e".repeat(64), "Alice")];
+  await act(async () =>
+    client.invalidateQueries({ queryKey: ["user-search"] }),
+  );
+  await act(async () => mention.updateMentionQuery("@ALICE", 6));
+  await settle();
+  assert.equal(mention.handleMentionKeyDown(keyboard(" ")).handled, false);
+  assert.equal(
+    mention.handleMentionKeyDown(keyboard("Tab")).suggestion.pubkey,
+    mention.suggestions[0].pubkey,
+  );
 });

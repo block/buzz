@@ -74,7 +74,11 @@ export function ForumComposer({
     if (compact) setIsCompactExpanded(true);
   }, [compact]);
 
-  const mentions = useMentions(channelId, members, profiles, { channelType });
+  const mentions = useMentions(channelId, members, profiles, {
+    channelType,
+    getEditorSnapshot: (): { text: string; cursor: number } =>
+      richText.getPlainTextAndCursor(),
+  });
   const channelLinks = useChannelLinks();
   const media = useMediaUpload();
   const { handlePaperclipClick, handleToolbarMouseDown, shouldIgnoreBlur } =
@@ -127,6 +131,8 @@ export function ForumComposer({
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
+    onSelectionUpdate: ({ text, cursor }) =>
+      mentions.updateMentionQuery(text, cursor),
     onUpdate: ({ cursor, text }) => {
       const markdown = richText.getMarkdown();
       setContent(markdown);
@@ -540,7 +546,8 @@ export function ForumComposer({
               }
               onChannelSelect={applyChannelInsert}
               onMentionDismiss={mentions.cancelMentionAutocomplete}
-              onMentionFetchMore={mentions.fetchMoreSuggestions}
+              isMentionOpen={mentions.isMentionOpen}
+              isMentionLoading={mentions.isMentionLoading}
               onMentionSelect={applyMentionInsert}
               position={autocompletePosition}
             />

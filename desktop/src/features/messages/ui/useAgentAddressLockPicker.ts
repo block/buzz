@@ -321,9 +321,9 @@ export function useAgentAddressLockPicker({
             ),
             insertText: "",
           });
-          mentions.openMentionPicker(queryStart, "preserve");
+          mentions.openMentionPicker(queryStart);
         } else {
-          mentions.openMentionPicker(cursor, "preserve");
+          mentions.openMentionPicker(cursor);
         }
       }
     },

@@ -1,3 +1,4 @@
+import { markMentionCollisions } from "./mentionPresentation";
 import {
   coalesceAgentAutocompleteCandidates,
   coalesceAutocompleteCandidatesByKey,
@@ -235,15 +236,17 @@ export function buildMentionCandidates({
       isAgent: true,
     }))
     .filter((candidate) => candidate.displayName.trim().length > 0);
-  return coalesceAgentAutocompleteCandidates(
-    coalesceAutocompleteCandidatesByKey(
-      [...candidatesByPubkey.values(), ...personaCandidates],
-      globalSearchIdentityKey,
+  return markMentionCollisions(
+    coalesceAgentAutocompleteCandidates(
+      coalesceAutocompleteCandidatesByKey(
+        [...candidatesByPubkey.values(), ...personaCandidates],
+        globalSearchIdentityKey,
+      ),
+      {
+        currentPubkey,
+        getLabel: mentionCandidateLabel,
+        preferredPubkeys: memberPubkeys,
+      },
     ),
-    {
-      currentPubkey,
-      getLabel: mentionCandidateLabel,
-      preferredPubkeys: memberPubkeys,
-    },
   );
 }

@@ -22,6 +22,7 @@ import { getPlatformKeysById } from "@/shared/lib/keyboard-shortcuts";
 
 export type MentionSuggestion = {
   action?: MentionAction;
+  hasNameCollision?: boolean;
   pubkey?: string;
   personaId?: string;
   teamId?: string;
@@ -48,7 +49,8 @@ type MentionAutocompleteProps = {
    * Options controls keeps the overlay mounted.
    */
   composerOwnsFocus: boolean;
-  onFetchMore?: () => void;
+  isOpen?: boolean;
+  isLoading?: boolean;
   onSelect: (suggestion: MentionSuggestion) => void;
   lockedAgentPubkeys?: ReadonlySet<string>;
   onToggleAlwaysAddressAgent?: (suggestion: MentionSuggestion) => void;
@@ -88,7 +90,8 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
   selectedIndex,
   composerOwnsFocus,
-  onFetchMore,
+  isOpen = suggestions.length > 0,
+  isLoading = false,
   onSelect,
   lockedAgentPubkeys,
   onToggleAlwaysAddressAgent,
@@ -165,15 +168,6 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       document.removeEventListener("pointerdown", handlePointerDown, true);
   }, [onDismiss]);
 
-  const handleScroll = React.useCallback(() => {
-    const list = listRef.current;
-    if (!list || !onFetchMore) return;
-
-    if (list.scrollHeight - list.scrollTop - list.clientHeight < 48) {
-      onFetchMore();
-    }
-  }, [onFetchMore]);
-
   // Escape from inside the overlay is the keyboard counterpart of pressing
   // outside it: hand focus back to the editor the overlay belongs to, then
   // dismiss. Focusing first keeps the composer's focus ownership unbroken, so
@@ -194,7 +188,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
     [onDismiss],
   );
 
-  if (!composerOwnsFocus || suggestions.length === 0) {
+  if (!composerOwnsFocus || !isOpen) {
     return null;
   }
 
@@ -219,6 +213,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       ref={rootRef}
     >
       <div className="w-full max-w-2xl">
+        {isLoading || suggestions.length === 0 ? (
+          <div
+            role="status"
+            className="rounded-xl bg-popover p-3 text-sm text-muted-foreground"
+          >
+            {isLoading ? "Loading mentions…" : "No mentions found"}
+          </div>
+        ) : null}
         {onKeepMentionedAgentsPinnedChange ? (
           <div className="mb-2 flex justify-end">
             {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, no behavior of its own — an unprevented mousedown on this surface (its padding, the switch's label) blurs the editor, and the focus gate above would unmount the overlay before the click lands. */}
@@ -319,7 +321,6 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
           )}
           data-testid="mention-autocomplete"
           onMouseDown={(event) => event.preventDefault()}
-          onScroll={handleScroll}
           ref={listRef}
           style={POPOVER_SHADOW_STYLE}
         >
@@ -332,6 +333,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
               suggestion.displayName;
             const hasNameCollision =
+              suggestion.hasNameCollision ||
               (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
             const showAgentProvenanceMarker = showMentionAgentProvenanceMarker(
               suggestion,
@@ -375,7 +377,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 key={suggestionKey}
               >
                 <button
-                  aria-label={`Mention ${suggestion.displayName}`}
+                  aria-label={`Mention ${suggestion.displayName}${hasNameCollision && suggestion.pubkey ? ` (${suggestion.pubkey})` : ""}`}
                   className={cn(
                     "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-1.5 text-left",
                     canAlwaysAddress && "pr-11",
