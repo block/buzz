@@ -146,6 +146,26 @@ pub(crate) fn verify_bridge_auth_with_options(
     Err(api_error(StatusCode::UNAUTHORIZED, "missing Nostr auth"))
 }
 
+/// A declared dev-mode identity is not proof of authorship. Preserve the
+/// public-kind fallback, but require verified NIP-98 for any filter that could
+/// read author-only data, including mixed-kind and known-ID queries.
+fn authorize_author_only_read(
+    filters: &[nostr::Filter],
+    signed_auth_created_at: Option<u64>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if signed_auth_created_at.is_none()
+        && filters
+            .iter()
+            .any(crate::handlers::req::filter_can_match_author_only_kinds)
+    {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "auth-required: author-only reads require NIP-98 authentication",
+        ));
+    }
+    Ok(())
+}
+
 /// Check NIP-98 replay and record the event ID atomically.
 ///
 /// The correctness boundary is the shared, community-scoped Redis seen-set on
@@ -1121,6 +1141,8 @@ async fn query_events_authed(
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
+    authorize_author_only_read(&filters, signed_auth_created_at)?;
+
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
     let authed_pubkey_hex = pubkey.to_hex();
@@ -1654,6 +1676,8 @@ async fn count_events_authed(
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
+
+    authorize_author_only_read(&filters, signed_auth_created_at)?;
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();
@@ -2528,6 +2552,10 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
         "updated_at": b.updated_at,
     })
 }
+
+#[cfg(test)]
+#[path = "private_read_postgres_tests.rs"]
+mod private_read_postgres_tests;
 
 #[cfg(test)]
 mod postgres_tests {
@@ -3839,7 +3867,7 @@ mod postgres_tests {
     /// - Redis pool points at the local dev instance for the admission check.
     ///
     /// Returns `None` when local Postgres is not reachable.
-    async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+    pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
