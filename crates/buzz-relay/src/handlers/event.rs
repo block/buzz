@@ -2207,6 +2207,15 @@ mod tests {
 
         #[tokio::test]
         async fn author_only_reminder_delivers_to_author_only() {
+            assert_author_only_fanout(buzz_core::kind::KIND_EVENT_REMINDER).await;
+        }
+
+        #[tokio::test]
+        async fn desktop_profile_delivers_to_author_only() {
+            assert_author_only_fanout(buzz_core::kind::KIND_DESKTOP_PROFILE).await;
+        }
+
+        async fn assert_author_only_fanout(kind: u32) {
             let state = test_state().await;
 
             let author_keys = Keys::generate();
@@ -2216,12 +2225,9 @@ mod tests {
             // KIND_EVENT_REMINDER (30300) is in AUTHOR_ONLY_KINDS and is stored
             // globally (channel_id = None), so the gate must apply independent
             // of any channel-membership check.
-            let reminder = EventBuilder::new(
-                Kind::Custom(buzz_core::kind::KIND_EVENT_REMINDER as u16),
-                "{}",
-            )
-            .sign_with_keys(&author_keys)
-            .expect("sign reminder");
+            let reminder = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                .sign_with_keys(&author_keys)
+                .expect("sign reminder");
             let stored = StoredEvent::new(reminder, None);
 
             let author_conn = register_conn(&state, Some(author_pk));
@@ -2233,6 +2239,16 @@ mod tests {
                 (other_conn, "o".to_string()),
                 (unauthed_conn, "u".to_string()),
             ];
+            // Even an authenticated owner subscription in another tenant is denied.
+            assert!(filter_fanout_by_access(
+                &state,
+                buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+                &stored,
+                matches.clone(),
+                None,
+            )
+            .await
+            .is_empty());
             let out = filter_fanout_by_access(
                 &state,
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),

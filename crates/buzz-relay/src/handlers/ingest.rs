@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use buzz_auth::Scope;
+use buzz_core::kind::KIND_DESKTOP_PROFILE;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
@@ -436,7 +437,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
-        KIND_PROFILE => Ok(Scope::UsersWrite),
+        KIND_PROFILE | KIND_DESKTOP_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
@@ -657,6 +658,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_TEAM
             | KIND_MANAGED_AGENT
             | KIND_PRIVATE_MANAGED_AGENT
+            | KIND_DESKTOP_PROFILE
             | KIND_TEAM_CATALOG
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
@@ -2779,6 +2781,11 @@ async fn ingest_event_inner(
                     .into(),
             ));
         }
+    }
+
+    if kind_u32 == KIND_DESKTOP_PROFILE {
+        buzz_core::desktop_profile::validate_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
     if kind_u32 == KIND_EVENT_REMINDER {

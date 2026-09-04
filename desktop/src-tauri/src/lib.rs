@@ -552,6 +552,8 @@ pub fn run() {
             transfer_builderlab_community,
             title_bar_double_click,
             get_identity,
+            prepare_desktop_profile,
+            read_desktop_profiles,
             get_nsec,
             generate_backup_passphrase,
             create_ncryptsec_backup,
