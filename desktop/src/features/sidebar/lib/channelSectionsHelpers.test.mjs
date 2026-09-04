@@ -1,11 +1,82 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { swapSectionOrder } from "./channelSectionsHelpers.ts";
+import {
+  isChannelSectionsAllowlistReady,
+  scopeChannelSectionsToKnownChannels,
+  swapSectionOrder,
+} from "./channelSectionsHelpers.ts";
 
 function makeStore(sections, assignments = {}) {
   return { version: 1, sections, assignments };
 }
+
+test("isChannelSectionsAllowlistReady: explicit ready wins over empty set", () => {
+  assert.equal(isChannelSectionsAllowlistReady(new Set(), true), true);
+  assert.equal(isChannelSectionsAllowlistReady(new Set(["a"]), false), false);
+  assert.equal(isChannelSectionsAllowlistReady(new Set(["a"])), true);
+  assert.equal(isChannelSectionsAllowlistReady(new Set()), false);
+});
+
+test("scopeChannelSectionsToKnownChannels: strips foreign channel ids", () => {
+  const store = makeStore([{ id: "s1", name: "One", order: 0 }], {
+    "chan-a": "s1",
+    "chan-b-foreign": "s1",
+  });
+  const filtered = scopeChannelSectionsToKnownChannels(
+    store,
+    new Set(["chan-a"]),
+  );
+  assert.deepEqual(filtered.assignments, { "chan-a": "s1" });
+  assert.equal(filtered.sections.length, 1);
+  assert.equal(filtered.sections[0].id, "s1");
+});
+
+test("scopeChannelSectionsToKnownChannels: drops sections that only held foreign channels", () => {
+  const store = makeStore(
+    [
+      { id: "s-local", name: "Local", order: 0 },
+      { id: "s-foreign", name: "From B", order: 1 },
+      { id: "s-empty", name: "Empty", order: 2 },
+    ],
+    {
+      "chan-a": "s-local",
+      "chan-b-foreign": "s-foreign",
+    },
+  );
+  const scoped = scopeChannelSectionsToKnownChannels(
+    store,
+    new Set(["chan-a"]),
+  );
+  assert.deepEqual(scoped.assignments, { "chan-a": "s-local" });
+  assert.deepEqual(
+    scoped.sections.map((s) => s.id),
+    ["s-local", "s-empty"],
+  );
+});
+
+test("scopeChannelSectionsToKnownChannels: empty allowlist is a no-op until channelsReady", () => {
+  const store = makeStore([{ id: "s1", name: "One", order: 0 }], {
+    "chan-a": "s1",
+  });
+  assert.equal(scopeChannelSectionsToKnownChannels(store, new Set()), store);
+  assert.equal(scopeChannelSectionsToKnownChannels(store, null), store);
+  assert.equal(scopeChannelSectionsToKnownChannels(store, undefined), store);
+  assert.deepEqual(
+    scopeChannelSectionsToKnownChannels(store, new Set(), true).assignments,
+    {},
+  );
+});
+
+test("scopeChannelSectionsToKnownChannels: returns same reference when nothing stripped", () => {
+  const store = makeStore([{ id: "s1", name: "One", order: 0 }], {
+    "chan-a": "s1",
+  });
+  assert.equal(
+    scopeChannelSectionsToKnownChannels(store, new Set(["chan-a", "chan-b"])),
+    store,
+  );
+});
 
 function makeSection(id, name, order) {
   return { id, name, order };

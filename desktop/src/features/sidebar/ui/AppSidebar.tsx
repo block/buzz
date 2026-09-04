@@ -250,6 +250,15 @@ export function AppSidebar({
     }));
   }, []);
 
+  const knownChannelIds = React.useMemo(
+    () => new Set(channels.map((channel) => channel.id)),
+    [channels],
+  );
+  // Distinguish "query settled with zero channels" from "still loading" so
+  // section scoping / seed-publish can wait without treating an empty Set as
+  // ready (#7207).
+  const channelsReady = !isLoading;
+
   const {
     sections: channelSections,
     assignments: channelAssignments,
@@ -261,7 +270,12 @@ export function AppSidebar({
     reorderSections,
     assignChannel,
     unassignChannel,
-  } = useChannelSections(currentPubkey, activeCommunity?.relayUrl);
+  } = useChannelSections(
+    currentPubkey,
+    activeCommunity?.relayUrl,
+    knownChannelIds,
+    channelsReady,
+  );
 
   const sectionIds = React.useMemo(
     () => channelSections.map((s) => s.id),
