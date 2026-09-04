@@ -1156,7 +1156,10 @@ impl From<buzz_db::moderation::BanRecord> for MemberRestrictionRecord {
 struct RestrictionsPage {
     /// Restriction records for this page, newest first.
     items: Vec<MemberRestrictionRecord>,
-    /// Opaque cursor for the next page, or `null` when exhausted.
+    /// Opaque cursor for the next page, or `null` when the returned page is
+    /// smaller than `limit` (i.e., all rows have been delivered). An exactly
+    /// full final page emits a non-null cursor; the subsequent request returns
+    /// an empty page with `null`.
     ///
     /// Encoding: `base64url(updated_at_micros_decimal + "_" + pubkey_hex)`.
     /// Treat as opaque — the format may change across releases.
@@ -2296,9 +2299,16 @@ mod postgres_tests {
         );
     }
 
-    /// Pagination regression: seed more than the cap, prove no page exceeds the
-    /// cap, walk pages to exhaustion, assert exactly-once coverage, and exercise
-    /// the tie-breaker with rows that share identical `updated_at` timestamps.
+    /// Pagination regression: bind the default=200 cap, SQL LIMIT enforcement,
+    /// keyset continuation, exactly-once coverage, and tie-breaker correctness
+    /// in a single falsifiable route test.
+    ///
+    /// Seeding strategy:
+    /// - Rows 1–199: distinct `updated_at` values, newest first (positions 1–199).
+    /// - Rows 200–201: two distinct pubkeys forced to share an identical older
+    ///   `updated_at` so they land at positions 200–201 in `ORDER BY updated_at
+    ///   DESC, pubkey DESC`, straddling the default 200-row page boundary.
+    ///   A broken tie-breaker will either duplicate or omit one of these rows.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn list_restrictions_pagination_exhaustive() {
@@ -2317,53 +2327,154 @@ mod postgres_tests {
         let community_uuid = *community.as_uuid();
 
         let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
-        // Seed 5 bans — more than the page size of 2 we'll use below.
-        // Pubkeys 0x01..0x05 are distinct; each UPDATE sets updated_at = now()
-        // so they naturally differ unless inserted in the same microsecond.
+
+        // Build 201 distinct pubkeys.  Pubkey layout:
+        //   indices 0..=198 (199 rows) → [i+1, i+1, ..., i+1] where i ∈ 0..199
+        //   indices 199..=200 (2 rows) → [0xE0 | j, 0xE0 | j, ..., 0xE0 | j]
+        // The tied pair uses a 0xE0-prefix to sort below all 0x01..0xC7 entries
+        // under `pubkey DESC`, ensuring they land at the bottom of every page
+        // regardless of the tie-breaking direction.
         let mut all_pubkeys: Vec<Vec<u8>> = Vec::new();
-        for i in 1u8..=5 {
-            let pk = vec![i; 32];
-            db.ban_community_member(community, &pk, &actor_pubkey, None, None)
-                .await
-                .expect("insert ban");
-            all_pubkeys.push(pk);
+        for i in 1u8..=199 {
+            all_pubkeys.push(vec![i; 32]);
+        }
+        all_pubkeys.push(vec![0xE1u8; 32]); // tied pair member A (index 199)
+        all_pubkeys.push(vec![0xE2u8; 32]); // tied pair member B (index 200)
+
+        // Batch-insert all 201 rows with explicit `updated_at` stamps:
+        //   rows 0..198 → now() - (i+1) seconds  (distinct, newer)
+        //   rows 199-200 → now() - 1000 seconds   (identical, oldest)
+        // This guarantees the tied pair occupies sort positions 200–201.
+        let actor_bytes = actor_pubkey;
+
+        // Insert in two batches to keep parameter counts manageable.
+        // Batch 1: rows 0..=198 (distinct timestamps).
+        for (i, pk) in all_pubkeys[..199].iter().enumerate() {
+            let secs_ago = (i as i64) + 1;
+            sqlx::query(
+                r#"
+                INSERT INTO community_bans
+                    (community_id, pubkey, banned, actor_pubkey, updated_at)
+                VALUES ($1, $2, true, $3,
+                        now() - make_interval(secs => $4))
+                ON CONFLICT (community_id, pubkey) DO UPDATE SET
+                    banned = true,
+                    actor_pubkey = EXCLUDED.actor_pubkey,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+            )
+            .bind(community.as_uuid())
+            .bind(pk.as_slice())
+            .bind(actor_bytes.as_slice())
+            .bind(secs_ago)
+            .execute(&pool)
+            .await
+            .expect("insert row");
         }
 
-        // Force two rows to share the EXACT same `updated_at` so the
-        // tie-breaker path is exercised: update both in the same transaction
-        // with an explicit identical timestamp.
-        let shared_ts = chrono::Utc::now() - chrono::Duration::seconds(5);
-        sqlx::query(
-            "UPDATE community_bans SET updated_at = $1
-             WHERE community_id = $2 AND pubkey = ANY($3::bytea[])",
-        )
-        .bind(shared_ts)
-        .bind(community.as_uuid())
-        .bind(
-            all_pubkeys[..2]
-                .iter()
-                .map(|p| p.as_slice())
-                .collect::<Vec<_>>(),
-        )
-        .execute(&pool)
-        .await
-        .expect("force identical updated_at on first two rows");
+        // Batch 2: tied pair at an identical old timestamp.
+        let tied_ts = chrono::Utc::now() - chrono::Duration::seconds(1000);
+        for pk in &all_pubkeys[199..] {
+            sqlx::query(
+                r#"
+                INSERT INTO community_bans
+                    (community_id, pubkey, banned, actor_pubkey, updated_at)
+                VALUES ($1, $2, true, $3, $4)
+                ON CONFLICT (community_id, pubkey) DO UPDATE SET
+                    banned = true,
+                    actor_pubkey = EXCLUDED.actor_pubkey,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+            )
+            .bind(community.as_uuid())
+            .bind(pk.as_slice())
+            .bind(actor_bytes.as_slice())
+            .bind(tied_ts)
+            .execute(&pool)
+            .await
+            .expect("insert tied row");
+        }
 
         let state = nip98_state_with_real_pool(pool).await;
         let operator_keys = test_operator_keys();
 
-        // Walk pages with limit=2 until nextCursor is null.
-        let mut seen_pubkeys: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut page_count = 0usize;
-        let mut cursor_token: Option<String> = None;
+        // ── assertion 1: limit=201 → 400 ─────────────────────────────────
+        let bad_path = format!("/members/restrictions?communityId={community_uuid}&limit=201");
+        let bad_auth = make_nostr_auth(&operator_keys, &bad_path);
+        let bad_response = status_for(
+            Arc::clone(&state),
+            Request::builder()
+                .method("GET")
+                .uri(&bad_path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, bad_auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            bad_response.status(),
+            StatusCode::BAD_REQUEST,
+            "limit=201 must return 400"
+        );
+
+        // ── assertion 2: default limit → exactly 200 items + non-null cursor ─
+        // (This is the falsifiable binding of default=200 and max=200.)
+        let first_path = format!("/members/restrictions?communityId={community_uuid}");
+        let first_auth = make_nostr_auth(&operator_keys, &first_path);
+        let first_response = status_for(
+            Arc::clone(&state),
+            Request::builder()
+                .method("GET")
+                .uri(&first_path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, first_auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            first_response.status(),
+            StatusCode::OK,
+            "default-limit request must return 200"
+        );
+        let first_body = axum::body::to_bytes(first_response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let first_page: serde_json::Value =
+            serde_json::from_slice(&first_body).expect("parse JSON");
+        let first_items = first_page["items"].as_array().expect("items array");
+        assert_eq!(
+            first_items.len(),
+            200,
+            "default limit must return exactly 200 items (binds default=200 and SQL cap)"
+        );
+        assert!(
+            first_page["nextCursor"].is_string(),
+            "200 items from 201 seeded → nextCursor must be non-null"
+        );
+
+        // Collect pubkeys from the first page.
+        let mut seen_pubkeys: std::collections::HashSet<String> = first_items
+            .iter()
+            .filter_map(|r| r["pubkey"].as_str().map(String::from))
+            .collect();
+        assert_eq!(
+            seen_pubkeys.len(),
+            200,
+            "first page must have 200 distinct pubkeys"
+        );
+
+        // ── assertion 3: walk remaining pages to exhaustion ───────────────
+        let mut cursor_token = first_page["nextCursor"].as_str().map(str::to_owned);
+        let mut page_count = 1usize; // already consumed first page above
 
         loop {
-            let path = match &cursor_token {
-                None => format!("/members/restrictions?communityId={community_uuid}&limit=2"),
-                Some(tok) => format!(
-                    "/members/restrictions?communityId={community_uuid}&limit=2&cursor={tok}"
-                ),
+            let tok = match &cursor_token {
+                Some(t) => t.clone(),
+                None => break,
             };
+            let path = format!("/members/restrictions?communityId={community_uuid}&cursor={tok}");
             let auth = make_nostr_auth(&operator_keys, &path);
             let response = status_for(
                 Arc::clone(&state),
@@ -2376,47 +2487,37 @@ mod postgres_tests {
                     .expect("request"),
             )
             .await;
-
             assert_eq!(
                 response.status(),
                 StatusCode::OK,
-                "page {page_count}: GET restrictions must return 200"
+                "continuation page {page_count}: must return 200"
             );
-
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("read body");
             let page: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON");
-
             let items = page["items"].as_array().expect("items array");
             assert!(
-                items.len() <= 2,
-                "page {page_count}: must not exceed the limit of 2; got {}",
+                items.len() <= 200,
+                "continuation page {page_count}: must not exceed cap; got {}",
                 items.len()
             );
-
             for item in items {
                 let pk = item["pubkey"].as_str().expect("pubkey str").to_owned();
                 assert!(
                     seen_pubkeys.insert(pk.clone()),
-                    "page {page_count}: pubkey {pk} appeared more than once across pages"
+                    "continuation page {page_count}: pubkey {pk} appeared more than once"
                 );
             }
-
             page_count += 1;
-
             cursor_token = page["nextCursor"].as_str().map(str::to_owned);
-            if cursor_token.is_none() {
-                break;
-            }
-
             assert!(
-                page_count <= 5,
-                "pagination must terminate within 5 pages for 5 rows"
+                page_count <= 10,
+                "pagination must terminate within 10 pages for 201 rows"
             );
         }
 
-        // Exactly-once coverage: every seeded pubkey must appear exactly once.
+        // ── assertion 4: exactly-once coverage ───────────────────────────
         let expected: std::collections::HashSet<String> =
             all_pubkeys.iter().map(hex::encode).collect();
         assert_eq!(
