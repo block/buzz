@@ -290,6 +290,7 @@ export function JoinPage() {
       <RoomView
         channelName={material.default_channel.name ?? "room"}
         channelId={material.default_channel.id}
+        rooms={material.rooms}
         communityName={material.community.name ?? ""}
         exportSecret={exportLocalNsec}
         host={material.community.host || resolved.host}

@@ -26,6 +26,9 @@ export type JoinMaterial = {
   community: { host: string; name?: string };
   invite_url: string;
   default_channel: { id: string; name?: string };
+  /** Operator-curated rooms for the phone switcher; the default first is
+   * conventional, not required — the join always lands on default_channel. */
+  rooms?: { id: string; name: string }[];
   note?: string;
 };
 
@@ -44,14 +47,22 @@ export async function fetchJoinMaterial(
     if (response.status === 404) return null;
     if (!response.ok) return null;
     const json = (await response.json()) as JoinMaterial;
-    if (
-      json?.v !== 1 ||
-      typeof json.invite_url !== "string" ||
-      !json.invite_url ||
-      typeof json.default_channel?.id !== "string" ||
-      !json.default_channel.id
-    ) {
-      return null;
+    const baseOk =
+      json?.v === 1 &&
+      typeof json.invite_url === "string" &&
+      json.invite_url.length > 0 &&
+      typeof json.default_channel?.id === "string" &&
+      json.default_channel.id.length > 0;
+    if (!baseOk) return null;
+    // rooms is optional; when present it must be well-formed or the whole
+    // material is refused — a malformed switcher is not a guessing game
+    if (json.rooms !== undefined) {
+      const roomsOk =
+        Array.isArray(json.rooms) &&
+        json.rooms.every(
+          (r) => typeof r?.id === "string" && typeof r?.name === "string",
+        );
+      if (!roomsOk) return null;
     }
     return json;
   } catch {

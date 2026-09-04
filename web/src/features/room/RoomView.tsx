@@ -1,10 +1,16 @@
 /**
  * RoomView — the phone-first landing room for join-by-address.
  *
- * After the claim, this is "in the room": the channel's history arriving
- * live over the authenticated subscription, a composer signed with the same
- * identity that claimed the invite, and the relay's verdicts rendered
- * verbatim whenever it says anything other than yes.
+ * Two founder-phone findings built in (2026-09-04):
+ * · NEVER SEND A SECRET — the composer refuses any message carrying the
+ *   bech32 secret prefix (nsec1…) before it leaves the phone, in plain
+ *   words; the relay refuses it again server-side (defense in depth). The
+ *   "copy the secret" control lives in ITS OWN SHEET, opened from the
+ *   header — away from the composer — so the one control that handles the
+ *   secret is never next to the control that broadcasts.
+ * · ROOM SWITCHER — the community's rooms (operator-curated via join.json)
+ *   render as chips under the header; tapping switches the live socket to
+ *   that room; the join lands in the default room.
  */
 
 import type {
@@ -15,6 +21,30 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import * as React from "react";
 import { openRoom, type RoomEvent, type RoomStatus } from "./nostr-room";
+
+export type RoomRef = { id: string; name: string };
+
+/**
+ * The bech32 secret-key TOKEN shape — the prefix plus at least 15 bech32
+ * digits (a real nsec is ~63). Not a bare substring: ordinary words that
+ * merely contain "nsec1" inside them must pass. Mirrors the relay-side
+ * content_leaks_secret so the two guards agree.
+ */
+const BECH32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+function looksLikeSecret(text: string): boolean {
+  let from = 0;
+  while (true) {
+    const at = text.indexOf("nsec1", from);
+    if (at === -1) return false;
+    let digits = 0;
+    for (let i = at + 5; i < text.length && BECH32.includes(text[i]); i++) {
+      digits++;
+    }
+    if (digits >= 15) return true;
+    from = at + 5;
+  }
+}
 
 function timeLabel(createdAt: number): string {
   const deltaSeconds = Math.max(0, Math.floor(Date.now() / 1000) - createdAt);
@@ -31,6 +61,7 @@ export function RoomView(props: {
   wsUrl: string;
   canonicalRelayUrl?: string;
   channelId: string;
+  rooms?: RoomRef[];
   npub: string;
   exportSecret: () => string;
   signer: (
@@ -44,20 +75,32 @@ export function RoomView(props: {
     wsUrl,
     canonicalRelayUrl,
     channelId,
+    rooms,
     npub,
     exportSecret,
     signer,
   } = props;
+
+  const [activeRoomId, setActiveRoomId] = React.useState(channelId);
+  const activeRoom = rooms?.find((r) => r.id === activeRoomId);
+  const activeRoomName = activeRoom?.name ?? channelName;
 
   const [events, setEvents] = React.useState<RoomEvent[]>([]);
   const [status, setStatus] = React.useState<RoomStatus>({
     state: "connecting",
   });
   const [draft, setDraft] = React.useState("");
+  const [refusal, setRefusal] = React.useState<string | null>(null);
   const [secretCopied, setSecretCopied] = React.useState(false);
+  const [keySheetOpen, setKeySheetOpen] = React.useState(false);
   const listRef = React.useRef<HTMLDivElement>(null);
-  const eventsRef = React.useRef<RoomEvent[]>([]);
-  eventsRef.current = events;
+
+  // Switching rooms resets the pane FIRST so the previous room's messages
+  // never bleed into the next room's read.
+  React.useEffect(() => {
+    setEvents([]);
+    setStatus({ state: "connecting" });
+  }, [activeRoomId]);
 
   const handleRef = React.useRef<{ send: (text: string) => void } | null>(null);
 
@@ -65,7 +108,7 @@ export function RoomView(props: {
     const roomHandle = openRoom({
       wsUrl,
       canonicalRelayUrl,
-      channelId,
+      channelId: activeRoomId,
       signer,
       onEvent: (event) => {
         setEvents((previous) =>
@@ -79,10 +122,9 @@ export function RoomView(props: {
       handleRef.current = null;
       roomHandle.close();
     };
-  }, [wsUrl, canonicalRelayUrl, channelId, signer]);
+  }, [wsUrl, canonicalRelayUrl, activeRoomId, signer]);
 
   React.useEffect(() => {
-    if (events.length === 0) return;
     const list = listRef.current;
     if (list) list.scrollTop = list.scrollHeight;
   }, [events]);
@@ -90,6 +132,13 @@ export function RoomView(props: {
   const send = () => {
     const text = draft.trim();
     if (!text) return;
+    if (looksLikeSecret(text)) {
+      setRefusal(
+        "That looks like a private key (nsec1…). Sending it would give it away to the whole room — a message cannot be unsent. Nobody legitimate will ever ask you to post a secret.",
+      );
+      return;
+    }
+    setRefusal(null);
     setDraft("");
     handleRef.current?.send(text);
   };
@@ -110,23 +159,55 @@ export function RoomView(props: {
           />
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold text-black">
-              #{channelName || "room"}
+              #{activeRoomName || "room"}
             </p>
             <p className="truncate text-xs text-zinc-500">
               {communityName || host} · {host}
             </p>
           </div>
-          <span className="ml-auto rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600">
-            {status.state === "live"
-              ? "live"
-              : status.state === "authenticating"
-                ? "authenticating…"
-                : status.state === "connecting"
-                  ? "connecting…"
-                  : status.state}
-          </span>
+          <button
+            className="ml-auto rounded-full bg-zinc-100 px-3 py-1 text-[11px] text-zinc-600"
+            onClick={() => setKeySheetOpen(true)}
+          >
+            key
+          </button>
         </div>
+        {rooms && rooms.length > 1 ? (
+          <nav
+            aria-label="rooms"
+            className="-mx-1 mt-2 flex gap-1.5 overflow-x-auto pb-1"
+          >
+            {rooms.map((room) => (
+              <button
+                key={room.id}
+                onClick={() => setActiveRoomId(room.id)}
+                className={`whitespace-nowrap rounded-full px-3 py-1.5 text-xs ${
+                  room.id === activeRoomId
+                    ? "bg-black font-semibold text-white"
+                    : "bg-zinc-100 text-zinc-600"
+                }`}
+              >
+                {room.name}
+              </button>
+            ))}
+          </nav>
+        ) : null}
       </header>
+
+      {refusal ? (
+        <p className="border-b border-amber-300 bg-amber-50 px-4 py-2 text-xs leading-relaxed text-amber-900">
+          {refusal}{" "}
+          <button
+            className="underline"
+            onClick={() => {
+              setRefusal(null);
+              setDraft("");
+            }}
+          >
+            clear the draft
+          </button>
+        </p>
+      ) : null}
 
       {status.state === "closed" || status.state === "offline" ? (
         <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
@@ -138,7 +219,7 @@ export function RoomView(props: {
         {events.length === 0 ? (
           <p className="pt-16 text-center text-sm text-zinc-400">
             {status.state === "live" || status.state === "closed"
-              ? "no messages yet — say hello"
+              ? `no messages here yet — ${activeRoomName} is listening`
               : "connecting to the room…"}
           </p>
         ) : null}
@@ -169,7 +250,7 @@ export function RoomView(props: {
               send();
             }
           }}
-          placeholder="say hello"
+          placeholder={`message #${activeRoomName || "room"}`}
           value={draft}
         />
         <Button
@@ -180,39 +261,54 @@ export function RoomView(props: {
         </Button>
       </div>
 
-      <details className="border-t border-zinc-100 px-4 py-2 text-xs text-zinc-500">
-        <summary className="cursor-pointer select-none">
-          {npub ? (
-            <>
-              you are <span className="font-mono">{truncatePubkey(npub)}</span>{" "}
-              — a key that lives in this browser. keep it?
-            </>
-          ) : (
-            "you are signing with your NIP-07 extension key"
-          )}
-        </summary>
-        <div className="mt-2 space-y-2 pb-2">
-          <p className="leading-relaxed">
-            This identity was made on this phone and is stored only in this
-            browser. To keep it beyond this browser, copy the secret and keep it
-            somewhere safe — anyone holding it is you.
-          </p>
-          <Button
-            className="h-8 bg-zinc-800 text-xs text-white hover:bg-zinc-700"
-            onClick={() => {
-              navigator.clipboard
-                .writeText(exportSecret())
-                .then(() => {
-                  setSecretCopied(true);
-                  setTimeout(() => setSecretCopied(false), 1500);
-                })
-                .catch(() => {});
-            }}
+      {keySheetOpen ? (
+        <div
+          className="fixed inset-0 z-40 flex flex-col justify-end bg-black/40"
+          onClick={() => setKeySheetOpen(false)}
+        >
+          <div
+            className="rounded-t-2xl bg-white px-5 pb-6 pt-4"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-label="your key"
           >
-            {secretCopied ? "copied ✓" : "copy the secret (nsec)"}
-          </Button>
+            <div className="mx-auto mb-3 h-1 w-10 rounded bg-zinc-300" />
+            <h2 className="text-sm font-semibold text-black">your key</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-600">
+              You are{" "}
+              <span className="font-mono">
+                {npub
+                  ? truncatePubkey(npub)
+                  : "signing with your NIP-07 extension key"}
+              </span>
+              . This identity was made on this phone and is stored only in this
+              browser. To keep it beyond this browser, copy the secret and keep
+              it somewhere safe — anyone holding it is you.{" "}
+              <b>Never paste it into a room.</b>
+            </p>
+            <Button
+              className="mt-3 h-10 w-full bg-zinc-900 text-sm text-white hover:bg-zinc-700"
+              onClick={() => {
+                navigator.clipboard
+                  .writeText(exportSecret())
+                  .then(() => {
+                    setSecretCopied(true);
+                    setTimeout(() => setSecretCopied(false), 1500);
+                  })
+                  .catch(() => {});
+              }}
+            >
+              {secretCopied ? "copied ✓" : "copy the secret (nsec)"}
+            </Button>
+            <Button
+              className="mt-2 h-10 w-full border border-zinc-200 bg-white text-sm text-black"
+              onClick={() => setKeySheetOpen(false)}
+            >
+              close
+            </Button>
+          </div>
         </div>
-      </details>
+      ) : null}
     </div>
   );
 }

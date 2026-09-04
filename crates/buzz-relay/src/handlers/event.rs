@@ -677,6 +677,20 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    // NEVER SEND A SECRET (2026-09-04): a channel message is a broadcast.
+    // A bech32 secret key pasted into it (nsec1...) IS the identity, and a
+    // broadcast cannot be unsent -- refuse it outright, in plain words.
+    // Defense in depth beside the client-side composer guard.
+    if content_leaks_secret(kind_u32, &event.content) {
+        reject("invalid");
+        conn.send(RelayMessage::ok(
+            &event_id_hex,
+            false,
+            "invalid: that looks like a private key (nsec1...) -- never send a secret into a room",
+        ));
+        return;
+    }
+
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
@@ -1163,8 +1177,63 @@ fn single_tag_content<'a>(event: &'a Event, tag_name: &str) -> Result<&'a str, S
     Ok(value)
 }
 
+/// The relay-side half of NEVER SEND A SECRET: kind 9 (channel message)
+/// content carrying a bech32 SECRET KEY is refused before ingest. The match
+/// is the token shape (the prefix followed by at least 15 bech32 digits), not
+/// a bare substring -- ordinary words that merely contain "nsec1" inside them
+/// must pass; a real nsec is ~63 chars and never shorter than ~20.
+pub(crate) fn content_leaks_secret(kind: u32, content: &str) -> bool {
+    if kind != buzz_core::kind::KIND_STREAM_MESSAGE {
+        return false;
+    }
+    const BECH32: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    let mut from = 0;
+    while let Some(at) = content[from..].find("nsec1") {
+        let after = &content[from + at + 5..];
+        let digits = after.chars().take_while(|c| BECH32.contains(*c)).count();
+        if digits >= 15 {
+            return true;
+        }
+        from += at + 5;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
+    use super::content_leaks_secret;
+    #[test]
+    fn secret_guard_refuses_nsec_in_channel_message() {
+        assert!(content_leaks_secret(
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            "here is my key nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq pasted by accident",
+        ));
+    }
+
+    #[test]
+    fn secret_guard_lets_normal_messages_through() {
+        assert!(!content_leaks_secret(
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            "hello everyone, welcome to the hive!",
+        ));
+        assert!(!content_leaks_secret(
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            "the word inseparable contains nsec1 inside it, tricky",
+        ));
+        assert!(!content_leaks_secret(
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            "nsec1 is the prefix, but this is far too short to be a key",
+        ));
+        assert!(content_leaks_secret(
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            "oops: nsec1qpzry9x8gf2tvdw0s3jn54khce6mua7lexamplepastefiftycharacterslong",
+        ));
+        assert!(!content_leaks_secret(
+            1,
+            "nsec1 on another kind is not a channel broadcast",
+        ));
+    }
+
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
