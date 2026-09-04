@@ -437,15 +437,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         Err(e) => error!("Failed to backfill d_tags: {e}"),
     }
 
-    let audit = if config.audit_enabled {
+    let (audit, audit_metrics_pool) = if config.audit_enabled {
         let audit_pool = connect_audit_pool(&db_config)
             .await
             .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
         info!("Audit service ready");
-        Some(AuditService::new(audit_pool))
+        let metrics_pool = audit_pool.clone();
+        (Some(AuditService::new(audit_pool)), Some(metrics_pool))
     } else {
         info!("Audit logging disabled by BUZZ_AUDIT_ENABLED");
-        None
+        (None, None)
     };
 
     let redis_pool = {
@@ -495,6 +496,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         .connect(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+    let search_metrics_pool = search_pool.clone();
     let search = SearchService::new(search_pool);
     info!(
         replica = config.read_database_url.is_some(),
@@ -1101,20 +1103,18 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             loop {
                 interval.tick().await;
                 let db_stats = pool_state.db.pool_stats();
-                let active = db_stats.size.saturating_sub(db_stats.idle);
-                metrics::gauge!("buzz_db_pool_size").set(db_stats.size as f64);
-                metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
-                metrics::gauge!("buzz_db_pool_active").set(active as f64);
-                metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
+                let read_stats = pool_state.db.read_pool_stats();
+                relay_metrics::record_db_pool_metrics(
+                    db_stats,
+                    read_stats,
+                    audit_metrics_pool
+                        .as_ref()
+                        .map(buzz_db::DbPoolStats::from_pool),
+                    buzz_db::DbPoolStats::from_pool(&search_metrics_pool),
+                );
                 pool_state.db.refresh_pool_waiter_metrics();
 
-                if let Some(read_stats) = pool_state.db.read_pool_stats() {
-                    let read_active = read_stats.size.saturating_sub(read_stats.idle);
-                    metrics::gauge!("buzz_db_read_pool_size").set(read_stats.size as f64);
-                    metrics::gauge!("buzz_db_read_pool_idle").set(read_stats.idle as f64);
-                    metrics::gauge!("buzz_db_read_pool_active").set(read_active as f64);
-                    metrics::gauge!("buzz_db_read_pool_max").set(read_stats.max as f64);
-
+                if read_stats.is_some() {
                     // Fence observability: 1 when replica routing is
                     // eligible, and the verified-freshness lag in seconds.
                     // Closed/stale fence reports open=0 with lag untouched.

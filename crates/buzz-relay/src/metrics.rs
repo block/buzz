@@ -255,6 +255,68 @@ pub(crate) fn describe_db_pool_metrics() {
         "buzz_db_pool_waiters",
         "Current tracked-operation database pool checkout attempts in progress by valid pool role and operation"
     );
+    metrics::describe_gauge!(
+        "buzz_db_pool_connections",
+        "Postgres pool connections by physical pool role and bounded utilization state"
+    );
+    metrics::describe_gauge!(
+        "buzz_db_pool_configured",
+        "Whether a physical Postgres pool role is configured, where 1 is configured and 0 is not configured"
+    );
+}
+
+/// Record fixed-cardinality utilization for every physical Postgres pool role.
+///
+/// Optional roles emit zero-valued utilization when absent so the unified
+/// scrape always contains four roles by four states plus four configured
+/// series. The original writer and reader gauges are also emitted unchanged
+/// for dashboard compatibility.
+pub fn record_db_pool_metrics(
+    writer: buzz_db::DbPoolStats,
+    reader: Option<buzz_db::DbPoolStats>,
+    audit: Option<buzz_db::DbPoolStats>,
+    search: buzz_db::DbPoolStats,
+) {
+    let pools = [Some(writer), reader, audit, Some(search)];
+    for (role, stats) in buzz_db::DbPoolRole::ALL.into_iter().zip(pools) {
+        let role = role.as_str();
+        let configured = stats.is_some();
+        let stats = stats.unwrap_or(buzz_db::DbPoolStats {
+            size: 0,
+            idle: 0,
+            max: 0,
+        });
+        metrics::gauge!("buzz_db_pool_configured", "pool_role" => role).set(if configured {
+            1.0
+        } else {
+            0.0
+        });
+        for (state, value) in [
+            ("size", stats.size),
+            ("idle", stats.idle),
+            ("active", stats.active()),
+            ("max", stats.max),
+        ] {
+            metrics::gauge!(
+                "buzz_db_pool_connections",
+                "pool_role" => role,
+                "state" => state,
+            )
+            .set(value as f64);
+        }
+    }
+
+    metrics::gauge!("buzz_db_pool_size").set(writer.size as f64);
+    metrics::gauge!("buzz_db_pool_idle").set(writer.idle as f64);
+    metrics::gauge!("buzz_db_pool_active").set(writer.active() as f64);
+    metrics::gauge!("buzz_db_pool_max").set(writer.max as f64);
+
+    if let Some(reader) = reader {
+        metrics::gauge!("buzz_db_read_pool_size").set(reader.size as f64);
+        metrics::gauge!("buzz_db_read_pool_idle").set(reader.idle as f64);
+        metrics::gauge!("buzz_db_read_pool_active").set(reader.active() as f64);
+        metrics::gauge!("buzz_db_read_pool_max").set(reader.max as f64);
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +404,140 @@ mod contract_tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn sample_value<'a>(scrape: &'a str, metric: &str, labels: &[(&str, &str)]) -> &'a str {
+        scrape
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!(r#"{key}="{value}""#)))
+            })
+            .and_then(|line| line.rsplit_once(' ').map(|(_, value)| value))
+            .unwrap_or_else(|| panic!("missing {metric} with {labels:?} in scrape:\n{scrape}"))
+    }
+
+    #[test]
+    fn production_pool_sampler_has_fixed_roles_utilization_and_compatibility_metrics() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::describe_db_pool_metrics();
+            super::record_db_pool_metrics(
+                buzz_db::DbPoolStats {
+                    size: 12,
+                    idle: 5,
+                    max: 20,
+                },
+                None,
+                None,
+                buzz_db::DbPoolStats {
+                    size: 4,
+                    idle: 1,
+                    max: 10,
+                },
+            );
+        });
+
+        let scrape = handle.render();
+        let utilization = scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_db_pool_connections{"))
+            .collect::<Vec<_>>();
+        let configured = scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_db_pool_configured{"))
+            .collect::<Vec<_>>();
+        assert_eq!(utilization.len(), 16, "unexpected scrape:\n{scrape}");
+        assert_eq!(configured.len(), 4, "unexpected scrape:\n{scrape}");
+
+        let roles = utilization
+            .iter()
+            .filter_map(|line| {
+                ["writer", "reader", "audit", "search"]
+                    .into_iter()
+                    .find(|role| line.contains(&format!(r#"pool_role="{role}""#)))
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            roles,
+            BTreeSet::from(["writer", "reader", "audit", "search"])
+        );
+        assert!(utilization
+            .iter()
+            .all(|line| label_keys(line) == BTreeSet::from(["pool_role", "state"])));
+
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_connections{",
+                &[("pool_role", "writer"), ("state", "active")]
+            ),
+            "7"
+        );
+        for state in ["size", "idle", "active", "max"] {
+            assert_eq!(
+                sample_value(
+                    &scrape,
+                    "buzz_db_pool_connections{",
+                    &[("pool_role", "reader"), ("state", state)]
+                ),
+                "0"
+            );
+        }
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_configured{",
+                &[("pool_role", "reader")]
+            ),
+            "0"
+        );
+        assert_eq!(sample_value(&scrape, "buzz_db_pool_size ", &[]), "12");
+        assert_eq!(sample_value(&scrape, "buzz_db_pool_idle ", &[]), "5");
+        assert_eq!(sample_value(&scrape, "buzz_db_pool_active ", &[]), "7");
+        assert_eq!(sample_value(&scrape, "buzz_db_pool_max ", &[]), "20");
+        assert!(!scrape.contains("buzz_db_read_pool_size"));
+    }
+
+    #[test]
+    fn production_pool_sampler_reports_configured_reader_and_legacy_reader_family() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::record_db_pool_metrics(
+                buzz_db::DbPoolStats {
+                    size: 1,
+                    idle: 1,
+                    max: 50,
+                },
+                Some(buzz_db::DbPoolStats {
+                    size: 9,
+                    idle: 2,
+                    max: 15,
+                }),
+                None,
+                buzz_db::DbPoolStats {
+                    size: 1,
+                    idle: 1,
+                    max: 10,
+                },
+            );
+        });
+
+        let scrape = handle.render();
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_configured{",
+                &[("pool_role", "reader")]
+            ),
+            "1"
+        );
+        assert_eq!(sample_value(&scrape, "buzz_db_read_pool_size ", &[]), "9");
+        assert_eq!(sample_value(&scrape, "buzz_db_read_pool_idle ", &[]), "2");
+        assert_eq!(sample_value(&scrape, "buzz_db_read_pool_active ", &[]), "7");
+        assert_eq!(sample_value(&scrape, "buzz_db_read_pool_max ", &[]), "15");
     }
 
     #[test]
