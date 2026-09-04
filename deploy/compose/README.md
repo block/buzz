@@ -30,6 +30,9 @@ keypair.
 - Default `BUZZ_IMAGE` tracks `ghcr.io/block/buzz:main` for early testing. Pin it to `ghcr.io/block/buzz:sha-<7>` or a semver release tag for production once available.
 - Keep `BUZZ_RELAY_PRIVATE_KEY`, `BUZZ_GIT_HOOK_HMAC_SECRET`, database/Redis,
   and S3 secrets stable across restarts.
+- Secrets live in coffer, not in git: `secrets/` and every `.env*` variant
+  except `.env.example` are gitignored, and `BUZZ_CF_DNS_TOKEN` reaches Caddy
+  only through the environment.
 - `RELAY_OWNER_PUBKEY` is intentionally not prefixed with `BUZZ_`; it must be a
   64-character hex Nostr pubkey when closed relay mode is enabled.
 - `BUZZ_AUTO_MIGRATE` is opt-in. Set `BUZZ_AUTO_MIGRATE=true` or run

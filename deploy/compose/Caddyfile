@@ -1,5 +1,13 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
+  tls {
+    dns cloudflare {env.BUZZ_CF_DNS_TOKEN}
+  }
+
+  handle /pair* {
+    reverse_proxy host.docker.internal:3011
+  }
+
   reverse_proxy relay:3000
 }
