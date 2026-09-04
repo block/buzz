@@ -53,6 +53,15 @@ test("message with agent mention lands in compose-time channel despite mid-send 
 }) => {
   const MESSAGE_TEXT = `send-binding-repro-${Date.now()}`;
 
+  // This case exercises a persistent address; ordinary Enter completion is
+  // one-time by default. Opt in before the bridge mounts the composer.
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "buzz.messages.keepMentionedAgentsPinned",
+      "true",
+    );
+  });
+
   // Install bridge with:
   //   - a managed agent that is NOT in general (forces add_channel_members path)
   //   - a 500ms delay on add_channel_members to open the race window
@@ -81,7 +90,7 @@ test("message with agent mention lands in compose-time channel despite mid-send 
   await expect(botRow).toBeVisible();
   await expect(botRow.getByText("not in channel")).toBeVisible();
   // Select BotA from the autocomplete
-  await input.press("Enter");
+  await botRow.click();
   await page.keyboard.type(` ${MESSAGE_TEXT}`);
 
   // Verify the inline mention and persistent address are present before submitting.
@@ -126,6 +135,31 @@ test("message with agent mention lands in compose-time channel despite mid-send 
   await expect(page.getByTestId("message-timeline")).toContainText(
     MESSAGE_TEXT,
   );
+
+  // The signed event must retain both the compose-time channel and exact key.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (text) =>
+          (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
+            .filter((event) => event.content.includes(text))
+            .map((event) => ({
+              channels: event.tags
+                .filter((tag) => tag[0] === "h")
+                .map((tag) => tag[1]),
+              recipients: event.tags
+                .filter((tag) => tag[0] === "p")
+                .map((tag) => tag[1]),
+            })),
+        MESSAGE_TEXT,
+      ),
+    )
+    .toEqual([
+      {
+        channels: ["9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
+        recipients: [OUT_OF_CHANNEL_BOT_PUBKEY],
+      },
+    ]);
 
   // --- Assert message did NOT land in agents (switched-to channel) ---
   await page.getByTestId("channel-agents").click();

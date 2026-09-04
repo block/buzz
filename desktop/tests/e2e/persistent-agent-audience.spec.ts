@@ -137,6 +137,76 @@ async function readOutgoingMentionPubkeys(page: Page, content: string) {
   }, content);
 }
 
+// Exercise the persistence/identity boundary after the duplicate-chip check.
+async function assertAuthoredDuplicateIdentity(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate((channelId) => {
+        for (const key of Object.keys(localStorage)) {
+          if (!key.startsWith("buzz-drafts.v2:")) continue;
+          const draft = JSON.parse(localStorage.getItem(key) ?? "{}")[
+            channelId
+          ];
+          if (draft) return draft.mentionRefs;
+        }
+        return null;
+      }, CHANNEL_ID),
+    )
+    .toEqual([{ displayName: "Morgarita", pubkey: AGENT_A, isAgent: true }]);
+  expect(
+    await page.evaluate(() =>
+      (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? []).filter(
+        (event) => event.kind === 9,
+      ),
+    ),
+  ).toEqual([]);
+
+  await openGeneral(page);
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await expect(input).toHaveText("@Morgarita authored duplicate");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_B}`),
+  ).toHaveCount(0);
+  await composer.getByTestId("send-message").click();
+  const expected = [{ content: "@Morgarita authored duplicate", p: [AGENT_A] }];
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
+          .filter((event) => event.kind === 9)
+          .map((event) => ({
+            content: event.content,
+            p: event.tags.filter((tag) => tag[0] === "p").map((tag) => tag[1]),
+          })),
+      ),
+    )
+    .toEqual(expected);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const events: { content: string; p: string[] }[] = [];
+        for (const entry of window.__BUZZ_E2E_COMMAND_LOG__ ?? []) {
+          if (entry.command !== "plugin:websocket|send") continue;
+          const data = (entry.payload as { message?: { data?: string } })
+            ?.message?.data;
+          if (!data) continue;
+          const frame = JSON.parse(data);
+          if (frame[0] !== "EVENT" || frame[1]?.kind !== 9) continue;
+          events.push({
+            content: frame[1].content,
+            p: frame[1].tags
+              .filter((tag: string[]) => tag[0] === "p")
+              .map((tag: string[]) => tag[1]),
+          });
+        }
+        return events;
+      }),
+    )
+    .toEqual(expected);
+}
+
 async function emitMockMessage(
   page: Page,
   content: string,
@@ -1318,6 +1388,7 @@ test("an authored duplicate leading mention survives draft restoration", async (
       }, CHANNEL_ID),
     )
     .toBe("@Morgarita authored duplicate");
+  await assertAuthoredDuplicateIdentity(page);
 });
 
 test("typed deletion preserves an identical authored mention in drafts", async ({
@@ -1469,6 +1540,12 @@ test("re-enabling an automatic mention preserves an authored duplicate after dra
       }, CHANNEL_ID),
     )
     .toBe("@Morgarita authored duplicate");
+  await openGeneral(page);
+  await expect(input).toHaveText("@Morgarita authored duplicate");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_B}`),
+  ).toHaveCount(0);
 });
 
 test("a restored multi-word automatic mention remains a chip with the caret after its space", async ({
