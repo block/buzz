@@ -1532,7 +1532,8 @@ pub async fn claim_stranded_action_batch(
               AND (action_lease_expires_at IS NULL OR action_lease_expires_at < now())
             RETURNING id, report_id, report_community_id, request_id, actor_pubkey,
                       actor_role, action, reason, timeout_until, state, step_marker,
-                      cancelled_by, error_message, created_at, updated_at
+                      cancelled_by, error_message, enforcement_target_pubkey,
+                      enforcement_channel_id, created_at, updated_at
             "#,
         )
         .bind(id)
