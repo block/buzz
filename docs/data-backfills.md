@@ -10,7 +10,7 @@ schema is available, may run automatically during relay startup or manually
 while the relay serves traffic, and survives process failure without losing or
 duplicating committed progress.
 
-The design has one durable lifecycle. PostgreSQL records the backfill identity,
+The design has one durable lifecycle. PostgreSQL records the stable backfill ID,
 immutable scan bound, monotonic checkpoint, state, current claim generation,
 bounded retry disposition, validation result, and diagnostics. Workers may be
 woken by queues or caches, but those systems carry no authority. Every data
@@ -58,11 +58,9 @@ runtime-authored migration language.
 ## Terminology
 
 - **Definition** — application code for one data transformation and its
-  validation. It declares a stable identity, a definition version, a typed
-  ordering key, a finite per-batch work bound, mutation logic, and validation
-  logic.
-- **Backfill** — the durable execution record for one definition identity and
-  version.
+  validation. It declares a stable backfill ID, a typed ordering key, a finite
+  per-batch work bound, mutation logic, and validation logic.
+- **Backfill** — the sole durable execution record for one stable backfill ID.
 - **Upper bound** — an inclusive, definition-typed boundary that makes the
   admitted source set finite, captured once before mutation and never changed.
 - **Checkpoint** — the greatest source position whose required mutations are
@@ -76,7 +74,7 @@ runtime-authored migration language.
   loss of ownership, pause, blockage, or error.
 - **Validation** — the definition-specific proof that all work through the upper
   bound has the required postcondition.
-- **Required automatic backfill** — an identity-version pair declared by the
+- **Required automatic backfill** — a stable backfill ID declared by the
   deployed application as participating in automatic startup readiness.
 - **Automatic mode** — the relay initiates required automatic backfills and
   gates serving on their validated completion.
@@ -95,7 +93,7 @@ re-reads PostgreSQL before acting.
 The durable record MUST remain compact. It contains only the information needed
 to establish:
 
-- definition identity and version;
+- stable backfill ID and optional bounded, informational definition metadata;
 - lifecycle state;
 - immutable upper bound and monotonic checkpoint in the definition's declared
   type;
@@ -110,16 +108,50 @@ state and attempts, never a second lifecycle store.
 
 ## Identity, bounds, and checkpoints
 
-### Stable, versioned identity
+### Stable execution identity
 
-A definition identity MUST be stable across builds and deployments. Its version
-MUST change whenever the source set, ordering, mutation semantics, or validation
-postcondition changes incompatibly. An implementation MUST NOT reuse an
-identity-version pair for different semantics.
+Each definition MUST declare a stable backfill ID. That ID alone names the
+durable execution, admin target, validation and completion record, and readiness
+obligation across builds and deployments. There MUST be exactly one durable
+backfill record and at most one readiness obligation for a stable ID.
 
-The identity-version pair names one logical execution. Validated completion is
-permanent for that pair. Running a materially different transformation requires
-a new version; it does not reset the old record.
+The latest deployed definition for a stable ID takes precedence. Revision,
+build, or version metadata MAY describe that definition for diagnostics, but is
+informational only: it MUST NOT create or key a second durable row, readiness
+obligation, runnable version, checkpoint, or completion. Deployment
+registration, not interpretation of those metadata strings, establishes which
+compatible definition is current.
+
+A materially different source set, ordering or checkpoint interpretation,
+mutation, or validation and completion contract requires a new stable backfill
+ID. A compatible correction MAY retain the ID only when every implementation
+allowed to execute during the rollout preserves the existing durable record's
+meaning. Validated completion is permanent for the stable ID; new work does not
+reset its record.
+
+### Rolling-version safety
+
+Registration MUST reconcile deployed definitions by stable ID before they may
+claim work. It MUST deterministically retain the latest deployed compatible
+definition for new claims; an older process registering later MUST NOT displace
+it or recreate an obligation. A worker MUST fail closed before claiming when its
+local definition is unknown or cannot safely interpret the durable bound,
+checkpoint, lifecycle, and completion contract.
+
+A compatible definition becoming current does not, by itself, revoke a valid
+claim held by an older compatible implementation. That owner may commit under
+the unchanged contract while its claim and generation remain valid. If a rollout
+cannot safely accept such a commit, it MUST first stop new claims and then wait
+for the claim to end or explicitly fence it through the lifecycle protocol
+before enabling the new implementation. Merely deploying a binary or changing
+informational metadata MUST NOT be treated as a fence.
+
+Every worker commit MUST still verify the current claim and generation. An older
+or unknown implementation that cannot satisfy the current execution contract
+MUST NOT claim, and a previously claimed worker that is explicitly fenced MUST
+have its mutation, checkpoint, validation, and completion writes rejected
+atomically. None of these rolling-deployment outcomes may create another durable
+execution or readiness obligation.
 
 ### Immutable upper bound
 
@@ -127,12 +159,12 @@ Before the first mutation, the engine MUST capture an upper bound in PostgreSQL.
 The definition MUST specify how that bound represents an empty admitted source
 set. Bound capture and the transition that first initiates execution MUST be
 atomic. Once captured, the bound MUST NOT be increased, decreased, or
-reinterpreted for that identity-version pair.
+reinterpreted for that stable backfill ID.
 
 The bound makes the execution finite and separates historical repair from live
 writes. Rows created beyond it are handled by normal application write paths or
-a later definition version. Schema and application behavior MUST remain correct
-for both repaired and not-yet-repaired rows during this overlap.
+a separate backfill with a new stable ID. Schema and application behavior MUST
+remain correct for both repaired and not-yet-repaired rows during this overlap.
 
 ### Monotonic typed checkpoints
 
@@ -339,7 +371,8 @@ second lifecycle, synthesize success, or treat cached state as authoritative.
 
 The authorized admin API and client UI MUST expose:
 
-- a list of known definition identities and versions;
+- a list of known stable backfill IDs with any informational definition
+  metadata;
 - detail for one backfill, including lifecycle state, immutable bound,
   checkpoint-derived progress, current ownership disposition, retry eligibility,
   and timestamps;
@@ -380,7 +413,7 @@ expose a generic `cancel`: pause already provides safe interruption while
 preserving committed progress. A future destructive recovery mechanism would
 require a separate specification, stronger authorization, explicit audit
 semantics, and proof that live and stale owners cannot commit across it. A new
-definition version is the normal way to supersede incompatible work.
+stable backfill ID is the normal way to introduce incompatible work.
 
 ### Authorization and auditability
 
@@ -393,7 +426,7 @@ same effective operator restriction and MUST NOT claim individual actor
 attribution they do not possess.
 
 Every accepted or rejected control attempt MUST be auditable with the actor or
-effective authority source, backfill identity-version, request correlation,
+effective authority source, stable backfill ID, request correlation,
 prior and resulting state, claim generation when relevant, time, and a bounded
 outcome or diagnostic code. An accepted control mutation and its audit record,
 or a durable intent to append that record, MUST commit atomically. An unaudited
@@ -449,21 +482,28 @@ At minimum, the suite covers:
 5. **Stale owner.** Pause, expiry, or takeover occurs while an old worker is in
    flight; its target mutation, checkpoint, and completion attempts are rejected
    at the commit seam.
-6. **Validation.** Reaching the bound cannot complete without validation;
+6. **Rolling version.** Two application versions register compatible definitions
+   for the same stable ID through the production registration and claim path.
+   They retain one durable row and one readiness obligation, an older late
+   registration cannot displace the latest compatible definition for new
+   claims, and an existing older compatible claim remains valid until the
+   protocol fences it. An unknown or incompatible worker cannot claim, and an
+   older owner cannot commit incompatibly after that fence.
+7. **Validation.** Reaching the bound cannot complete without validation;
    validation failure is durable and repeatable, and only successful validation
    reaches immutable `completed`.
-7. **Bounded failure.** Persistent execution error reaches a terminal `failed`
+8. **Bounded failure.** Persistent execution error reaches a terminal `failed`
    or `blocked` disposition rather than an unbounded retry loop; operator retry
    preserves bound and checkpoint.
-8. **Admin authorization.** Unauthorized reads and controls fail before
+9. **Admin authorization.** Unauthorized reads and controls fail before
    protected state is returned or mutated; community roles alone grant no
    deployment-wide authority.
-9. **Admin idempotency.** Duplicate, concurrent, and lost-response control
+10. **Admin idempotency.** Duplicate, concurrent, and lost-response control
    requests converge without duplicate starts, generation reuse, or bound
    recapture; conflicts return current state.
-10. **Client projection.** The UI renders server/PostgreSQL state, preserves
+11. **Client projection.** The UI renders server/PostgreSQL state, preserves
    unknown and failure states honestly, and sends only the supported controls.
-11. **Configuration matrix.** All four schema/backfill control combinations are
+12. **Configuration matrix.** All four schema/backfill control combinations are
     exercised through real startup and readiness paths. Automatic mode gates
     until validation; manual mode never adds the backfill gate; schema safety
     remains independently enforced.
@@ -492,7 +532,7 @@ specification.
 
 | Specification responsibility | Buzz component correspondence |
 |---|---|
-| Definition registry, lifecycle engine, PostgreSQL durable store, claim and generation fencing, checkpoint transactions, retry policy, and validation | The new `buzz-backfill` crate owns all backfill concepts and durable behavior. |
+| Stable-ID definition registration and rolling compatibility, lifecycle engine, PostgreSQL durable store, claim and generation fencing, checkpoint transactions, retry policy, and validation | The new `buzz-backfill` crate owns all backfill concepts and durable behavior. |
 | Basic writer-database and transaction access used to make mutation and checkpoint one commit | `buzz-db` supplies narrow database/transaction primitives. It does not acquire backfill records, states, policy, or orchestration, and it does not expose its connection pool. |
 | Automatic discovery/execution, the independent configuration controls, startup ordering, and the serving-readiness input | `buzz-relay` composes the backfill engine with existing startup, configuration, and readiness coordination. |
 | Authorized list/detail reads, safe lifecycle commands, typed conflicts, audit integration, and bounded diagnostics | The relay's deployment-admin interfaces expose the server contract; operator tooling consumes that contract rather than accessing backfill tables directly. |
@@ -506,11 +546,11 @@ concern; no Nostr event or NIP is introduced.
 
 ## Summary
 
-Buzz data backfills are finite, versioned PostgreSQL state machines. An immutable
-upper bound and monotonic typed checkpoint define progress; one transaction binds
-each mutation to its checkpoint; and a monotonic claim generation rejects stale
-owners after pause, crash, or takeover. Validation, not scan exhaustion, makes
-completion durable.
+Buzz data backfills are finite PostgreSQL state machines keyed only by stable
+backfill ID. An immutable upper bound and monotonic typed checkpoint define
+progress; one transaction binds each mutation to its checkpoint; and a
+monotonic claim generation rejects stale owners after pause, crash, or takeover.
+Validation, not scan exhaustion, makes completion durable.
 
 Schema migration and automatic execution remain independent. Automatic mode
 gates serving on validated completion; manual mode preserves readiness and is
