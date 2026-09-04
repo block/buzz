@@ -71,6 +71,24 @@ pub struct Config {
     /// recognised attempt to post to Buzz. Default off; Desktop opts
     /// shared-compute agents in via `BUZZ_AGENT_REQUIRE_REPLY=1`.
     pub require_reply: bool,
+    /// Retries after a response is truncated at the provider's output-token
+    /// limit. goose marks such responses (`output_token_limit_reached`) but
+    /// leaves the policy to the caller; without a bounded recovery here the
+    /// truncated text would simply end the turn mid-thought. `0` disables
+    /// recovery. Set via `BUZZ_AGENT_MAX_TOKEN_RECOVERIES`, default 3 —
+    /// the same knob and default as the pre-goose agent.
+    pub max_token_recoveries: u32,
+    /// Byte budget for the conversation carried across turns.
+    ///
+    /// goose's compaction frees *model context* by marking old messages
+    /// agent-invisible — it deletes nothing, so a long-lived session's
+    /// in-memory history grows without bound. This cap evicts the oldest
+    /// **agent-invisible** messages (already summarized away; the model
+    /// never sees them again) once the stored history exceeds it. Messages
+    /// still visible to the model are never evicted — their size is bounded
+    /// by token-based compaction. Set via `BUZZ_AGENT_MAX_HISTORY_BYTES`,
+    /// default 16 MiB — the same knob and default as the pre-goose agent.
+    pub max_history_bytes: usize,
 
     // ---- Databricks model-discovery fields -------------------------------
     // Goose owns provider auth for the agent loop, but the desktop model
@@ -236,6 +254,13 @@ impl Config {
             system_prompt,
             goose_mode: parse_approval(env_str("BUZZ_AGENT_APPROVAL").as_deref()),
             require_reply: env_str("BUZZ_AGENT_REQUIRE_REPLY").is_some_and(|v| v != "0"),
+            max_token_recoveries: env_parse("BUZZ_AGENT_MAX_TOKEN_RECOVERIES").unwrap_or(3),
+            max_history_bytes: env_parse("BUZZ_AGENT_MAX_HISTORY_BYTES")
+                // Pre-goose default and floor: 16 MiB, and never below 1 MiB
+                // so a misconfigured tiny budget cannot evict a conversation
+                // the model still needs summarized context from.
+                .filter(|n| *n >= 1024 * 1024)
+                .unwrap_or(16 * 1024 * 1024),
             // Discovery-only; the agent loop resolves providers through goose.
             provider: Provider::default(),
             api_key: String::new(),
@@ -257,6 +282,8 @@ impl Config {
             system_prompt: None,
             goose_mode: GooseMode::default(),
             require_reply: false,
+            max_token_recoveries: 0,
+            max_history_bytes: 16 * 1024 * 1024,
             provider,
             api_key,
             base_url,

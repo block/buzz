@@ -134,6 +134,69 @@ fn spawn_hanging_tool_provider() -> String {
     format!("http://{addr}")
 }
 
+/// Provider that accepts the completion POST but never sends response
+/// headers, modelling a queued or wedged gateway.
+///
+/// `/models` still answers so session setup succeeds; only the completion
+/// request stalls. The socket is parked, not closed: a closed socket is a
+/// *fast* failure, and the scenario under test is the slow one.
+fn spawn_header_stalling_provider() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    std::thread::spawn(move || {
+        let mut parked: Vec<std::net::TcpStream> = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    break;
+                }
+                let t = line.trim_end();
+                if t.is_empty() {
+                    break;
+                }
+                if let Some(v) = t
+                    .strip_prefix("content-length: ")
+                    .or_else(|| t.strip_prefix("Content-Length: "))
+                {
+                    content_length = v.parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            use std::io::Read;
+            let _ = reader.read_exact(&mut body);
+
+            if request_line.contains("/models") {
+                let payload = json!({ "object": "list", "data": [] }).to_string();
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.flush();
+                continue;
+            }
+
+            // A completion request: hold the connection open with no headers.
+            parked.push(stream);
+        }
+    });
+
+    format!("http://{addr}")
+}
+
 struct Harness {
     child: Child,
     stdin: std::process::ChildStdin,
@@ -465,6 +528,70 @@ fn cancel_propagates_notifications_cancelled_to_mcp() {
         saw,
         "MCP server never received notifications/cancelled — a hung tool would \
          keep running after the turn ended"
+    );
+}
+
+/// Cancellation must interrupt stream *construction*, not just consumption.
+///
+/// Goose's `Provider::stream()` awaits the HTTP POST — response headers
+/// included — before returning the stream, so a queued or wedged gateway
+/// stalls the turn before there is any stream to select over. The loop must
+/// cover that await with the same cancellation/keepalive select it uses for
+/// chunks, or `session/cancel` is deferred until headers arrive or the
+/// provider timeout expires. This is the pre-headers stall the between-chunks
+/// tests cannot reach.
+#[test]
+fn cancel_during_header_stall_returns_promptly() {
+    let base_url = spawn_header_stalling_provider();
+    let home = tempfile::tempdir().expect("home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    // A long provider timeout, so a prompt response inside the deadline can
+    // only come from cancellation — not from the request timing out.
+    let mut h = Harness::start_with_env(
+        &base_url,
+        home.path(),
+        &[("BUZZ_AGENT_LLM_TIMEOUT_SECS", "300")],
+    );
+
+    let id = h.request("initialize", json!({ "protocolVersion": 2 }));
+    let _ = h.await_response(id);
+    let id = h.request(
+        "session/new",
+        json!({ "cwd": cwd.path().to_str().unwrap(), "mcpServers": [] }),
+    );
+    let (resp, _) = h.await_response(id);
+    let session_id = resp["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session/new failed: {resp}"))
+        .to_string();
+
+    let id = h.request(
+        "session/prompt",
+        json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "say hello" }],
+        }),
+    );
+
+    // Let the completion POST reach the provider and park pre-headers. There
+    // is no ack channel from the stalling provider, so this is a generous
+    // fixed wait; too short only makes the test weaker, never flaky-failing.
+    std::thread::sleep(Duration::from_secs(2));
+    h.notify("session/cancel", json!({ "sessionId": session_id }));
+
+    let started = Instant::now();
+    let (resp, _) = h.await_response(id);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "cancel during a pre-headers provider stall took {elapsed:?}; \
+         stream construction is not covered by the cancellation select"
+    );
+    assert_eq!(
+        resp["result"]["stopReason"], "cancelled",
+        "expected stopReason=cancelled: {resp}"
     );
 }
 

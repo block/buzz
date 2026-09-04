@@ -155,15 +155,15 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
 | `BUZZ_AGENT_MAX_ROUNDS` | `1000` | Tool-loop iteration cap. `0` is treated as unset and uses the safe 1000-round default. |
 | `BUZZ_AGENT_MAX_OUTPUT_TOKENS` | `65536` | Desired per-call ceiling. Set this at or below the served model's output limit for each agent deployment. Proactive handoff is independently based on 90% of `BUZZ_AGENT_MAX_CONTEXT_TOKENS`. |
-| `BUZZ_AGENT_MAX_TOKEN_RECOVERIES` | — | **No longer read.** buzz's own truncation-recovery loop went with its request transport; goose owns retries. |
+| `BUZZ_AGENT_MAX_TOKEN_RECOVERIES` | `3` | Retries after a successful response is truncated at the output-token limit (goose marks these; buzz discards the truncated tool calls, replays the text, and asks the model to continue in smaller steps). `0` disables recovery; the finite value and `BUZZ_AGENT_MAX_ROUNDS` prevent infinite retries. |
 | `BUZZ_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
-| `BUZZ_AGENT_MAX_HANDOFFS` | — | **No longer read.** goose's compaction replaced the handoff mechanism it bounded. |
+| `BUZZ_AGENT_MAX_HANDOFFS` | — | **No longer read.** goose's compaction replaced the handoff mechanism it bounded. Compaction is bounded structurally instead of by a count: at most one proactive compaction per inference, and at most 3 reactive compactions per turn after a provider context-overflow rejection. |
 | `BUZZ_AGENT_LLM_TIMEOUT_SECS` | goose's own (600 s) | Per-request timeout. goose owns provider transport and reads this **per provider**, so buzz projects the value onto the variable belonging to the configured provider — `OPENAI_TIMEOUT` (which covers `relay-mesh` and the other OpenAI-wire providers), `ANTHROPIC_TIMEOUT`, `OLLAMA_TIMEOUT`, `LITELLM_TIMEOUT`. Providers goose gives no timeout knob (databricks) cannot honour it. |
 | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds, enforced by Buzz's direct RMCP registry. |
 | `BUZZ_AGENT_MAX_PARALLEL_TOOLS` | — | **No longer read.** All of a round's tool calls are dispatched concurrently; there is no cap to configure. |
 | `BUZZ_AGENT_MAX_SESSIONS` | unlimited | Max concurrent ACP sessions. Sessions are cheap; default has no cap. |
 | `BUZZ_AGENT_MAX_LINE_BYTES` | — | **No longer read.** The frame cap is a fixed 16 MiB protocol limit (`config.rs::MAX_LINE_BYTES`). |
-| `BUZZ_AGENT_MAX_HISTORY_BYTES` | — | **No longer read.** Byte-based eviction is replaced by goose's token-aware compaction; size the window with `BUZZ_AGENT_MAX_CONTEXT_TOKENS`. |
+| `BUZZ_AGENT_MAX_HISTORY_BYTES` | `16777216` | 16 MiB byte budget for the conversation carried across turns. Compaction hides superseded messages from the model rather than deleting them; once the stored history exceeds this budget, the oldest already-hidden messages are evicted. Model-visible messages are never evicted (token-aware compaction bounds those). Values below 1 MiB are ignored. |
 | `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES` | `51200` | 50 KiB per-result cap on tool-output text, enforced by Buzz's direct RMCP registry. |
 | `BUZZ_AGENT_REQUIRE_REPLY` | `0` (`1` on mesh) | `1` enables the [reply guard](#reply-guard) — remind the model to publish when a turn is about to end with nothing posted to Buzz. Desktop defaults it to `1` for Buzz shared-compute agents. |
 | `BUZZ_AGENT_STOP_MAX_REJECTIONS` | `3` | Max consecutive `_Stop` vetoes per turn. `0` disables the `_Stop` veto entirely. |

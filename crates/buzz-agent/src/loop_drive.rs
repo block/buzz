@@ -55,6 +55,11 @@ use crate::types::{AgentError, StopReason};
 use goose_agent::machine::StateMachine;
 use goose_agent::operation::{ConversationEffect, Emitter};
 
+/// Injected after a response is truncated at the provider's output-token
+/// limit, asking the model to continue in smaller steps. Wording carried over
+/// from the pre-goose agent (`agent.rs::MAX_TOKENS_RECOVERY_MESSAGE`).
+const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response reached the model's output token limit and was truncated. Any incomplete tool calls were discarded and were not run. Stop prolonged internal reasoning now. Use the available tools immediately: write a script or artifact to a file and run it in small, verifiable steps instead of emitting the entire solution inline. Continue the task concisely from the preserved text.";
+
 /// buzz's state machine, spelled once.
 ///
 /// goose made `StateMachine` generic over the session and effect types when the
@@ -137,6 +142,9 @@ pub struct TurnContext<'a> {
     /// ACP protocol version negotiated at `initialize`, fixed for the
     /// connection. Selects the `session/request_permission` wire shape.
     pub protocol_version: u32,
+    /// Retries after a response is truncated at the provider's output-token
+    /// limit (`BUZZ_AGENT_MAX_TOKEN_RECOVERIES`). `0` disables recovery.
+    pub max_token_recoveries: u32,
 }
 
 /// Drive one `session/prompt` turn to completion.
@@ -168,6 +176,7 @@ pub async fn run_turn(
     let max_rounds = ctx.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS);
     let mut reflections = 0usize;
     let mut context_recoveries = 0u32;
+    let mut max_tokens_recoveries = 0u32;
 
     // Every loop decision is a goose `Operation` -- see
     // `PLANS/BUZZ_OPERATIONS_MIGRATION.md`. Two machines, because they run at
@@ -242,7 +251,16 @@ pub async fn run_turn(
             }
         }
 
-        match round(&ctx, &mut state, &mut tokens, &mut reflections).await {
+        match round(
+            &ctx,
+            &mut state,
+            &mut tokens,
+            &mut reflections,
+            &compaction,
+            &mut max_tokens_recoveries,
+        )
+        .await
+        {
             Err(AgentError::LlmContextExceeded(error)) => {
                 const MAX_CONTEXT_RECOVERIES_PER_TURN: u32 = 3;
                 if context_recoveries >= MAX_CONTEXT_RECOVERIES_PER_TURN {
@@ -403,6 +421,8 @@ async fn round(
     state: &mut crate::turn_state::TurnState,
     tokens: &mut super::agent::TurnTokens,
     reflections: &mut usize,
+    compaction: &crate::ops::BuzzCompactionOperation,
+    max_tokens_recoveries: &mut u32,
 ) -> Result<Round, AgentError> {
     let conversation = state.conversation();
 
@@ -414,6 +434,10 @@ async fn round(
             // Goose's compaction gate needs current conversation occupancy,
             // not the turn-cumulative sum of each round's full context.
             state.set_total_tokens(total_tokens);
+            // The inference succeeded, so the provider accepted the current
+            // context: re-arm the proactive compaction gate's no-progress
+            // guard for the next round.
+            compaction.note_inference();
             message
         }
         // Cancellation discards a partial inference but still has to preserve
@@ -422,6 +446,46 @@ async fn round(
         // A provider that returns nothing is not a turn we can continue.
         None => return Ok(Round::Stopped(StopReason::EndTurn)),
     };
+
+    // A response truncated at the output-token limit describes an incomplete
+    // assistant turn, not a completed one. Never execute tool calls from it:
+    // although one may parse as valid, a later call (or surrounding
+    // instructions) may have been cut off. Persist only the text so the
+    // history stays valid without fabricated tool results, then — within a
+    // bounded budget — ask the model to continue in smaller steps. This is
+    // main's `BUZZ_AGENT_MAX_TOKEN_RECOVERIES` behaviour rebuilt on goose's
+    // `output_token_limit_reached` metadata.
+    if assistant.metadata.output_token_limit_reached {
+        assistant
+            .content
+            .retain(|content| !matches!(content, MessageContent::ToolRequest(_)));
+        // A truncated response may have carried nothing but the discarded
+        // tool calls. Strict providers reject empty assistant turns, so only
+        // persist what remains when something remains.
+        if !assistant.content.is_empty() {
+            state.push(assistant);
+        }
+        if *max_tokens_recoveries >= ctx.max_token_recoveries {
+            tracing::warn!(
+                recoveries = *max_tokens_recoveries,
+                max_recoveries = ctx.max_token_recoveries,
+                "provider repeatedly hit output token limit; recovery budget exhausted"
+            );
+            return Ok(Round::Stopped(StopReason::MaxTokens));
+        }
+        *max_tokens_recoveries += 1;
+        tracing::warn!(
+            recovery = *max_tokens_recoveries,
+            max_recoveries = ctx.max_token_recoveries,
+            "provider hit output token limit; asking model to continue in smaller steps"
+        );
+        state.push(
+            Message::user()
+                .with_text(MAX_TOKENS_RECOVERY_MESSAGE)
+                .agent_only(),
+        );
+        return Ok(Round::Continued);
+    }
 
     let tool_call_count = assistant
         .content
@@ -525,21 +589,40 @@ async fn infer(
         .map_err(|error| AgentError::Llm(format!("system prompt: {error}")))?;
     let tools = ctx.mcp.rmcp_tools();
 
-    let mut stream = provider
-        .stream(
-            &model_config,
-            &system_prompt,
-            conversation.messages(),
-            &tools,
-        )
-        .await
-        .map_err(classify_provider_error)?;
-
-    let mut accumulated: Option<Message> = None;
-    let mut response_total: Option<i32> = None;
     let mut keepalive = tokio::time::interval(crate::agent::KEEPALIVE_INTERVAL);
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     keepalive.tick().await; // first tick is immediate; discard it
+
+    // `Provider::stream` is not lazy: goose's implementations await the HTTP
+    // POST — retries included — before returning the stream, so a gateway
+    // that accepts the request but withholds response headers stalls right
+    // here. The select keeps that wait cancellable and keeps the harness's
+    // idle clock alive, exactly as the consumption loop below does; without
+    // it, `session/cancel` during a queued or wedged request could not take
+    // effect until headers arrived or the provider timeout fired.
+    let stream_future = provider.stream(
+        &model_config,
+        &system_prompt,
+        conversation.messages(),
+        &tools,
+    );
+    tokio::pin!(stream_future);
+    let mut stream = loop {
+        tokio::select! {
+            _ = keepalive.tick() => {
+                crate::agent::emit_keepalive(ctx.session_id, ctx.wire_tx).await;
+            }
+            _ = ctx.cancel.cancelled() => {
+                return Ok(None);
+            }
+            result = &mut stream_future => {
+                break result.map_err(classify_provider_error)?;
+            }
+        }
+    };
+
+    let mut accumulated: Option<Message> = None;
+    let mut response_total: Option<i32> = None;
 
     loop {
         tokio::select! {
@@ -590,6 +673,11 @@ async fn infer(
 /// Text arrives fragmented and must be coalesced or the persisted history
 /// contains one message per token; tool calls arrive whole and are appended.
 fn merge_chunk(target: &mut Message, chunk: Message) {
+    // goose's stream decoders may deliver `output_token_limit_reached` on a
+    // trailing marker message with no content of its own (see e.g.
+    // `formats/anthropic.rs`); the flag must survive accumulation or the
+    // max-tokens recovery above can never observe it.
+    target.metadata.output_token_limit_reached |= chunk.metadata.output_token_limit_reached;
     for content in chunk.content {
         match (target.content.last_mut(), &content) {
             (Some(MessageContent::Text(last)), MessageContent::Text(new)) => {

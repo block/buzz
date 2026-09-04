@@ -565,6 +565,12 @@ pub struct BuzzCompactionOperation {
     model: crate::model::SessionModel,
     mcp: Arc<McpRegistry>,
     hook_extension: Option<String>,
+    /// Whether this turn has compacted since the last successful inference.
+    ///
+    /// Shared across clones so the loop's forced-compaction path and the
+    /// proactive gate observe the same fact. See [`Self::run`] for the
+    /// no-progress rule this feeds.
+    compacted_since_inference: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BuzzCompactionOperation {
@@ -577,6 +583,7 @@ impl BuzzCompactionOperation {
             model,
             mcp,
             hook_extension,
+            compacted_since_inference: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -615,9 +622,29 @@ impl BuzzCompactionOperation {
     /// Compact immediately, bypassing the proactive occupancy gate.
     ///
     /// The loop uses this after a provider reports that the context is already
-    /// too large, matching Buzz main's reactive recovery path.
+    /// too large, matching Buzz main's reactive recovery path. The bypass is
+    /// deliberate: the proactive gate *predicts* overflow, but a provider
+    /// rejection is overflow already observed, and the caller bounds these
+    /// attempts with its own recovery counter.
     pub async fn force(&self, conversation: &Conversation) -> Result<Vec<ConversationEffect>> {
+        // A forced compaction also consumes the proactive budget: the next
+        // start-machine pass would otherwise see the same over-threshold
+        // estimate and immediately summarize the summary.
+        self.compacted_since_inference
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.compact(conversation).await
+    }
+
+    /// Record that an inference completed, re-arming the proactive gate.
+    ///
+    /// Called by the loop after each successful model response. Until then, a
+    /// second proactive compaction is refused (see [`Self::run`]): compacting
+    /// a conversation that was itself just produced by compaction cannot free
+    /// meaningful space — the preserved user prompt is carried verbatim — so
+    /// re-firing would burn summary requests without advancing the task.
+    pub fn note_inference(&self) {
+        self.compacted_since_inference
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -646,6 +673,26 @@ impl Operation<TurnSession, ConversationEffect> for BuzzCompactionOperation {
             context_limit,
             threshold,
         ) {
+            return not_applicable();
+        }
+
+        // No-progress guard. A compaction preserves the latest user prompt
+        // verbatim, so a prompt that alone exceeds the byte-estimated
+        // threshold would trip the gate again immediately — and again, and
+        // again, each pass a full summary request with no inference between
+        // them. One proactive compaction per inference is the budget: if the
+        // post-compaction estimate still exceeds the threshold, the next
+        // inference must be allowed to try (the estimate is deliberately
+        // conservative and the provider may well accept), and a genuine
+        // overflow then takes the bounded reactive path in `run_turn`.
+        if self
+            .compacted_since_inference
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                target: "buzz_agent::compaction",
+                "conversation still over threshold after compaction; deferring to the provider"
+            );
             return not_applicable();
         }
 

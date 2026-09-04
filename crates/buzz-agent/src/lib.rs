@@ -654,6 +654,7 @@ async fn session_prompt(app: &Arc<App>, id: Value, params: Value, wire_tx: &Wire
             hook_extension: hook_extension.as_deref(),
             require_reply: app.cfg.require_reply,
             max_rounds: app.cfg.max_rounds,
+            max_token_recoveries: app.cfg.max_token_recoveries,
             prompt: &prompt,
             steers: &steers,
             working_dir,
@@ -675,7 +676,11 @@ async fn session_prompt(app: &Arc<App>, id: Value, params: Value, wire_tx: &Wire
         sessions.get_mut(&p.session_id).map(|s| {
             // Carry the turn's conversation forward. Without this the next
             // prompt starts from an empty history and the agent forgets what
-            // it just said.
+            // it just said. Bounded: compaction hides old messages rather
+            // than deleting them, so a long-lived session sheds the oldest
+            // hidden ones once the buffer exceeds its byte budget.
+            let mut conversation = conversation;
+            crate::turn_state::evict_hidden_history(&mut conversation, app.cfg.max_history_bytes);
             s.history = conversation;
             s.busy = false;
             s.active_run_id = None;

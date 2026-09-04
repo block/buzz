@@ -52,6 +52,9 @@ enum Reply {
     /// `finish_reason` and no `[DONE]`. Models a provider or proxy dropping
     /// mid-stream, which is not the same as any HTTP status.
     TruncatedStream,
+    /// A well-formed turn whose `finish_reason` is `length`: the model hit
+    /// its output-token ceiling and the response text was cut off.
+    OutputTokenLimit,
 }
 
 /// A provider that answers from a script, one entry per request.
@@ -122,6 +125,7 @@ fn spawn_scripted_provider(script: Vec<Reply>) -> (String, Arc<AtomicUsize>) {
 
             let response = match reply {
                 Reply::Ok => sse_ok(),
+                Reply::OutputTokenLimit => sse_output_token_limit(),
                 Reply::RateLimited => error_response(
                     429,
                     "Too Many Requests",
@@ -213,6 +217,42 @@ fn sse_ok() -> String {
     )
 }
 
+/// A turn cut off at the output-token limit: one content chunk, then a
+/// `finish_reason: "length"` terminator with usage.
+fn sse_output_token_limit() -> String {
+    let chunk = |delta: Value, finish: Value, usage: Value| {
+        let mut c = json!({
+            "id": "chatcmpl-truncated-output",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "fake-model",
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+        });
+        if !usage.is_null() {
+            c["usage"] = usage;
+        }
+        format!("data: {c}\n\n")
+    };
+    let body = format!(
+        "{}{}data: [DONE]\n\n",
+        chunk(
+            json!({ "role": "assistant", "content": "The full solution is: step one," }),
+            Value::Null,
+            Value::Null
+        ),
+        chunk(
+            json!({}),
+            json!("length"),
+            json!({ "prompt_tokens": 11, "completion_tokens": 9, "total_tokens": 20 })
+        ),
+    );
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
 fn error_response(status: u16, reason: &str, extra_headers: Option<&str>, payload: &str) -> String {
     format!(
         "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{}connection: close\r\n\r\n{payload}",
@@ -230,8 +270,13 @@ struct Harness {
 
 impl Harness {
     fn start(base_url: &str, home: &std::path::Path) -> Self {
+        Self::start_with_env(base_url, home, &[])
+    }
+
+    fn start_with_env(base_url: &str, home: &std::path::Path, env: &[(&str, &str)]) -> Self {
         let exe = env!("CARGO_BIN_EXE_buzz-agent");
-        let mut child = Command::new(exe)
+        let mut command = Command::new(exe);
+        command
             .env("BUZZ_AGENT_PROVIDER", "openai-compat")
             .env("BUZZ_AGENT_MODEL", "fake-model")
             .env("OPENAI_COMPAT_API_KEY", "test-key")
@@ -253,9 +298,12 @@ impl Harness {
             .env("RUST_LOG", "warn")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn buzz-agent");
+            .stderr(Stdio::inherit());
+        // Test-specific overrides win over the defaults above.
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("spawn buzz-agent");
 
         let stdin = child.stdin.take().expect("stdin");
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
@@ -329,6 +377,10 @@ impl Drop for Harness {
 /// hang is the failure mode most worth catching here, and without a deadline it
 /// would present as the whole suite stalling rather than as one failed test.
 fn prompt_once(script: Vec<Reply>) -> (Value, usize) {
+    prompt_once_with_env(script, &[])
+}
+
+fn prompt_once_with_env(script: Vec<Reply>, env: &'static [(&str, &str)]) -> (Value, usize) {
     let (base_url, hits) = spawn_scripted_provider(script);
     let hits_for_assert = Arc::clone(&hits);
 
@@ -336,7 +388,7 @@ fn prompt_once(script: Vec<Reply>) -> (Value, usize) {
     let worker = std::thread::spawn(move || {
         let home = tempfile::tempdir().expect("tempdir");
         let cwd = tempfile::tempdir().expect("cwd");
-        let mut h = Harness::start(&base_url, home.path());
+        let mut h = Harness::start_with_env(&base_url, home.path(), env);
         let session_id = h.open_session(cwd.path());
 
         let id = h.request(
@@ -443,6 +495,71 @@ fn server_error_ends_the_turn_and_stops_retrying() {
     );
 }
 
+/// A prompt that alone exceeds the compaction threshold must not spin the
+/// proactive compactor.
+///
+/// Compaction preserves the latest user text verbatim, so when that text by
+/// itself trips the byte-estimated occupancy gate, every "successful"
+/// compaction leaves the estimate over threshold and the start machine would
+/// fire again — an unbounded run of summary requests with no inference
+/// between them (reproduced pre-fix: 8 consecutive summaries, zero normal
+/// requests). The budget is one proactive compaction per inference: after
+/// that, the request goes to the provider, whose acceptance or context-400 is
+/// the authoritative verdict the estimate can only approximate.
+#[test]
+fn oversized_prompt_does_not_spin_proactive_compaction() {
+    let (base_url, hits) = spawn_scripted_provider(vec![]);
+    let hits_for_assert = Arc::clone(&hits);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = tempfile::tempdir().expect("cwd");
+        // A 1000-token limit with a ~2000-byte prompt: the conservative
+        // one-byte-per-token estimate keeps the conversation over threshold
+        // no matter how many times it is summarized.
+        let mut h = Harness::start_with_env(
+            &base_url,
+            home.path(),
+            &[
+                ("GOOSE_CONTEXT_LIMIT", "1000"),
+                ("BUZZ_AGENT_MAX_ROUNDS", "1"),
+            ],
+        );
+        let session_id = h.open_session(cwd.path());
+
+        let id = h.request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": "x".repeat(2000) }],
+            }),
+        );
+        let resp = h.await_response(id);
+        let _ = tx.send(resp);
+        drop(h);
+    });
+
+    let resp = rx
+        .recv_timeout(Duration::from_secs(90))
+        .expect("session/prompt never answered — proactive compaction is spinning");
+    worker.join().expect("harness thread panicked");
+    let hits = hits_for_assert.load(Ordering::SeqCst);
+
+    let stop = assert_turn_ended(&resp, "oversized prompt");
+    assert!(
+        stop.is_some(),
+        "an oversized-but-accepted prompt must still complete the turn: {resp}"
+    );
+    // At most one summary plus the inference itself (and the retry margin of
+    // one more pair). Pre-fix this was 8+ summary requests and no inference.
+    assert!(
+        (1..=4).contains(&hits),
+        "provider saw {hits} completion request(s): proactive compaction must be \
+         bounded per inference, not free-running"
+    );
+}
+
 #[test]
 fn context_overflow_compacts_and_retries_the_turn() {
     // First request overflows. The next request is the compaction summary, and
@@ -457,6 +574,62 @@ fn context_overflow_compacts_and_retries_the_turn() {
     assert!(
         hits >= 3,
         "provider saw {hits} completion request(s): expected overflow, summary, and retried turn"
+    );
+}
+
+/// A response truncated at the output-token limit must be retried, and the
+/// retry completes the turn.
+///
+/// goose marks such responses (`finish_reason: length` →
+/// `output_token_limit_reached`) but leaves the recovery policy to the
+/// embedder. Main recovered with `BUZZ_AGENT_MAX_TOKEN_RECOVERIES`; this pins
+/// the rebuilt equivalent: the truncated text is preserved, a continue nudge
+/// is injected, and the next inference finishes the turn — rather than the
+/// truncated fragment silently ending it.
+#[test]
+fn output_token_limit_is_recovered_within_the_turn() {
+    // The harness default of 2 rounds exists for the failure suites; recovery
+    // legitimately consumes a round per retry, so give this turn headroom.
+    let (resp, hits) = prompt_once_with_env(
+        vec![Reply::OutputTokenLimit, Reply::Ok],
+        &[("BUZZ_AGENT_MAX_ROUNDS", "8")],
+    );
+
+    let stop = assert_turn_ended(&resp, "output-token limit then recovery");
+    assert_eq!(
+        stop.as_deref(),
+        Some("end_turn"),
+        "a recovered truncation must complete the turn normally: {resp}"
+    );
+    assert!(
+        hits >= 2,
+        "provider saw {hits} completion request(s): the truncated response was \
+         not retried, so the turn ended mid-thought"
+    );
+}
+
+/// A model that hits the output-token limit on every attempt must stop with a
+/// bounded budget, and report `max_tokens` rather than a normal end of turn.
+#[test]
+fn persistent_output_token_limit_is_bounded_and_reported() {
+    // Rounds deliberately exceed the recovery budget so the stop reason below
+    // is proven to come from the recovery bound, not the round gate.
+    let (resp, hits) = prompt_once_with_env(
+        vec![Reply::OutputTokenLimit; 12],
+        &[("BUZZ_AGENT_MAX_ROUNDS", "10")],
+    );
+
+    let stop = assert_turn_ended(&resp, "persistent output-token limit");
+    assert_eq!(
+        stop.as_deref(),
+        Some("max_tokens"),
+        "an exhausted recovery budget must surface as max_tokens: {resp}"
+    );
+    // Initial attempt + default budget of 3 recoveries.
+    assert!(
+        (1..=4).contains(&hits),
+        "provider saw {hits} completion request(s): truncation recovery must be \
+         bounded by BUZZ_AGENT_MAX_TOKEN_RECOVERIES, not free-running"
     );
 }
 
