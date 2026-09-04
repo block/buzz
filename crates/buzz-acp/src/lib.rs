@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod agent_profile;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -2716,6 +2717,36 @@ async fn tokio_main() -> Result<()> {
         } else {
             subscribed_channel_ids.insert(*channel_id);
             tracing::info!("subscribed to channel {channel_id}");
+        }
+    }
+
+    let profile_rest = relay.rest_client();
+    match agent_profile::reconcile_agent_profile(
+        &profile_rest,
+        &config.keys,
+        &channel_info_map,
+        &config.respond_to,
+        &config.respond_to_allowlist,
+        startup_owner.as_deref(),
+        config.channel_add_policy,
+    )
+    .await
+    {
+        Ok(agent_profile::ReconcileOutcome::Published(event_id)) => {
+            tracing::info!(event_id, "reconciled kind:10100 agent directory profile");
+        }
+        Ok(agent_profile::ReconcileOutcome::Unchanged) => {
+            tracing::info!("kind:10100 agent directory profile is current");
+        }
+        Ok(agent_profile::ReconcileOutcome::SkippedNoChannelAddPolicy) => {
+            tracing::warn!(
+                "kind:10100 agent directory profile is missing and was not published: \
+                 set BUZZ_ACP_CHANNEL_ADD_POLICY to the agent's current relay policy \
+                 (anyone, owner_only, or nobody) for the first reconciliation"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to reconcile kind:10100 agent directory profile");
         }
     }
 
@@ -8926,6 +8957,7 @@ mod build_mcp_servers_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
+            channel_add_policy: None,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -9152,6 +9184,7 @@ mod error_outcome_emission_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            channel_add_policy: None,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
