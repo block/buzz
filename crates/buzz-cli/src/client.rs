@@ -1286,7 +1286,6 @@ impl BuzzClient {
         let sha256 = hex::encode(Sha256::digest(&bytes));
 
         // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
-        // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
         let upload_timeout = if mime.starts_with("video/") {
             Duration::from_secs(600)
         } else {
@@ -1294,19 +1293,22 @@ impl BuzzClient {
         };
         let url = format!("{}/upload", self.relay_url);
         let upload_body = bytes::Bytes::from(bytes);
+        // One signed authorization is one logical upload event. Reuse it across
+        // transport retries so the relay's durable moderation record keeps the
+        // same idempotency identity even when a retry crosses a clock second.
+        let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
 
         // The full upload operation — network send AND response body read — lives inside
         // with_retry_body so that a dropped body after 200 headers is retried with the
-        // same file bytes and a fresh Blossom auth per attempt.
+        // same file bytes and signed upload authorization.
         let result: Result<BlobDescriptor, CliError> = self
             .with_retry_body(|| {
                 let upload_body = upload_body.clone();
                 let url = url.clone();
                 let mime = mime.clone();
                 let sha256 = sha256.clone();
+                let auth_header = auth_header.clone();
                 async move {
-                    let auth_header =
-                        sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
                     let mut request = self
                         .http
                         .put(&url)
@@ -1358,8 +1360,8 @@ impl BuzzClient {
             let legacy_url = legacy_url.clone();
             let mime = mime.clone();
             let sha256 = sha256.clone();
+            let auth_header = auth_header.clone();
             async move {
-                let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
                 let resp = self
                     .with_auth_tag(
                         self.http
@@ -1751,7 +1753,8 @@ mod retry_tests {
 mod retry_policy_tests {
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::extract::State;
@@ -1818,6 +1821,69 @@ mod retry_policy_tests {
         EventBuilder::new(Kind::TextNote, "hi")
             .sign_with_keys(keys)
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_retry_reuses_the_same_signed_authorization() {
+        type StateData = (Arc<AtomicU32>, Arc<Mutex<Vec<String>>>);
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
+        let state = (attempts.clone(), authorizations.clone());
+        let app = Router::new()
+            .route(
+                "/upload",
+                axum::routing::put(
+                    |State((attempts, authorizations)): State<StateData>,
+                     headers: HeaderMap,
+                     _body: Body| async move {
+                        let authorization = headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap()
+                            .to_string();
+                        authorizations.lock().unwrap().push(authorization);
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                        if attempt == 1 {
+                            // Cross a Nostr timestamp boundary before the retry.
+                            tokio::time::sleep(Duration::from_millis(1_100)).await;
+                            Response::builder()
+                                .status(StatusCode::SERVICE_UNAVAILABLE)
+                                .body(Body::from("retry"))
+                                .unwrap()
+                        } else {
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header("content-type", "application/json")
+                                .body(Body::from(
+                                    r#"{"url":"http://localhost/media/a.bin","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":3,"type":"application/octet-stream","uploaded":1}"#,
+                                ))
+                                .unwrap()
+                        }
+                    },
+                ),
+            )
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = test_client(&format!("http://{addr}"));
+        let mut file = tempfile::Builder::new().suffix(".ics").tempfile().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Buzz//Test//EN\r\nEND:VCALENDAR\r\n",
+        )
+        .unwrap();
+        client
+            .upload_file(file.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let authorizations = authorizations.lock().unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(authorizations.len(), 2);
+        assert_eq!(authorizations[0], authorizations[1]);
     }
 
     /// A moderation command (kind 9040) that fails the first attempt with HTTP 429

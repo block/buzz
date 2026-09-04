@@ -188,7 +188,7 @@ pub fn validate_file_content(
     // not send hints. Sidecars are keyed only by the byte hash, so the same
     // bytes must never alternate between `.bin` and `.ics` classifications.
     if signals_calendar_content(bytes) {
-        return validate_calendar_content(bytes, config);
+        return validate_calendar_upload(bytes, config);
     }
 
     // ISO-BMFF permits arbitrary major brands, so `infer` cannot enumerate all
@@ -242,9 +242,21 @@ pub fn validate_file_content_with_hints(
     extension: Option<&str>,
 ) -> Result<(String, String), MediaError> {
     if declared_mime == Some("text/calendar") || extension == Some("ics") {
-        return validate_calendar_content(bytes, config);
+        return validate_calendar_upload(bytes, config);
     }
     validate_file_content(bytes, config)
+}
+
+fn validate_calendar_upload(
+    bytes: &[u8],
+    config: &MediaConfig,
+) -> Result<(String, String), MediaError> {
+    validate_calendar_content(bytes, config)?;
+    if config.calendar_classification_enabled {
+        Ok(("text/calendar".to_string(), "ics".to_string()))
+    } else {
+        Ok(("application/octet-stream".to_string(), "bin".to_string()))
+    }
 }
 
 fn signals_calendar_content(bytes: &[u8]) -> bool {
@@ -1204,6 +1216,7 @@ mod tests {
             max_video_bytes: 524_288_000,
             max_file_bytes: 104_857_600,
             public_base_url: String::new(),
+            calendar_classification_enabled: true,
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
@@ -2890,6 +2903,32 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn test_calendar_rollout_gate_keeps_strict_validation_but_legacy_classification() {
+        let mut config = test_config();
+        config.calendar_classification_enabled = false;
+        let calendar =
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nSUMMARY:Safe rollout\r\nEND:VCALENDAR\r\n";
+
+        assert_eq!(
+            validate_file_content_with_hints(
+                calendar,
+                &config,
+                Some("text/calendar"),
+                Some("ics"),
+            )
+            .unwrap(),
+            ("application/octet-stream".to_string(), "bin".to_string())
+        );
+        assert!(validate_file_content_with_hints(
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\n",
+            &config,
+            Some("text/calendar"),
+            Some("ics"),
+        )
+        .is_err());
     }
 
     #[test]

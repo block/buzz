@@ -78,6 +78,7 @@
           "items": { "type": "string" }
         },
         "ephemeralTtlOverride": { "type": "integer", "minimum": 0 },
+        "calendarClassificationReady": { "type": "boolean" },
         "command": {
           "type": "array",
           "items": { "type": "string" },
