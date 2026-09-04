@@ -6351,6 +6351,16 @@ mod postgres_tests {
         );
 
         // Seed an enabled workflow owned by the kicked user so we can verify disable.
+        // Seed a user row first: required by the workflows FK
+        // (community_id, owner_pubkey) → users (community_id, pubkey).
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id)
+        .bind(&author)
+        .execute(&pool)
+        .await
+        .expect("seed user row for workflow owner");
         let workflow_id = state
             .db
             .create_workflow(
@@ -8028,6 +8038,17 @@ mod postgres_tests {
             vec![channel_id],
         );
 
+        // Seed a user row for the target: required by the workflows FK
+        // (community_id, owner_pubkey) → users (community_id, pubkey).
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("seed user row for workflow owner");
+
         // Seed an enabled owned workflow; disable must be asserted after recovery.
         let workflow_id = state
             .db
@@ -8281,6 +8302,17 @@ mod postgres_tests {
             vec![nostr::Filter::new()],
             vec![channel_id],
         );
+
+        // Seed a user row for the target: required by the workflows FK
+        // (community_id, owner_pubkey) → users (community_id, pubkey).
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("seed user row for workflow owner");
 
         let workflow_id = state
             .db
