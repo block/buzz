@@ -20,6 +20,8 @@ import {
 
 type WorkflowActionsMenuProps = {
   isEnabled: boolean;
+  isTriggering?: boolean;
+  triggerLabel?: string;
   isTogglingEnabled?: boolean;
   onDelete: () => void;
   onDuplicate: () => void;
@@ -31,6 +33,8 @@ type WorkflowActionsMenuProps = {
 
 export function WorkflowActionsMenu({
   isEnabled,
+  isTriggering = false,
+  triggerLabel = "Trigger",
   isTogglingEnabled = false,
   onDelete,
   onDuplicate,
@@ -53,9 +57,9 @@ export function WorkflowActionsMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={onTrigger}>
+        <DropdownMenuItem disabled={isTriggering} onClick={onTrigger}>
           <Play className="mr-2 h-4 w-4" />
-          Trigger
+          {isTriggering ? "Triggering…" : triggerLabel}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onEdit}>
           <Pencil className="mr-2 h-4 w-4" />

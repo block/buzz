@@ -2113,6 +2113,18 @@ pub async fn ingest_event(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    ingest_event_at(state, tenant, event, auth, chrono::Utc::now().timestamp()).await
+}
+
+// Explicit admission time keeps elapsed-time replay tests on the complete
+// production pipeline without modifying signed bytes or sleeping 15 minutes.
+pub(super) async fn ingest_event_at(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    auth: IngestAuth,
+    now: i64,
+) -> Result<IngestResult, IngestError> {
     // Captured before `event` moves into the inner fn: the stored-events
     // counter below is emitted at this shared seam so WebSocket and HTTP
     // transports are counted identically.
@@ -2128,7 +2140,7 @@ pub async fn ingest_event(
         "ingest_event_exited_without_trace",
     );
 
-    let result = ingest_event_inner(state, &tracer, tenant, event, auth).await;
+    let result = ingest_event_inner(state, &tracer, tenant, event, auth, now).await;
 
     // Fleet-wide stored counter: kind + author_type only, no community tag
     // (see the cardinality rationale on buzz_events_received_total —
@@ -2173,6 +2185,7 @@ async fn ingest_event_inner(
     tenant: &TenantContext,
     event: Event,
     auth: IngestAuth,
+    now: i64,
 ) -> Result<IngestResult, IngestError> {
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
@@ -2232,9 +2245,12 @@ async fn ingest_event_inner(
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
     const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
-    let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    let outside_freshness_window = (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS;
+    // Only manual triggers have a committed-result recovery contract. Expired
+    // triggers still pass all envelope/auth checks below, then take a read-only
+    // path: they must never fall through to fresh command admission.
+    if outside_freshness_window && kind_u32 != KIND_WORKFLOW_TRIGGER {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -2283,7 +2299,14 @@ async fn ingest_event_inner(
         )));
     }
 
-    // Command kinds are routed AFTER signature verification, timestamp check,
+    if outside_freshness_window {
+        return super::command_executor::recover_workflow_trigger(
+            tenant, state, &event, &auth, tracer,
+        )
+        .await;
+    }
+
+    // Fresh command admission follows signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
         return super::command_executor::handle_command(tenant, state, event, auth).await;

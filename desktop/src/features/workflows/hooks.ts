@@ -15,7 +15,6 @@ import {
   getWorkflow,
   getWorkflowRuns,
   grantApproval,
-  triggerWorkflow,
   updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
 
@@ -210,19 +209,6 @@ export function useDeleteWorkflowMutation(workflowId: string) {
     mutationFn: () => deleteWorkflow(workflowId),
     onSuccess: () => {
       invalidateWorkflowListQueries(queryClient);
-    },
-  });
-}
-
-export function useTriggerWorkflowMutation(workflowId: string) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: () => triggerWorkflow(workflowId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: workflowRunsQueryKey(workflowId),
-      });
     },
   });
 }

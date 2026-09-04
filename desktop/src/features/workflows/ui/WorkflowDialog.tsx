@@ -1,3 +1,5 @@
+import { useWorkflowTriggerOperation } from "../useWorkflowTriggerOperation";
+import { WorkflowTriggerFeedback } from "./WorkflowTriggerFeedback";
 import * as React from "react";
 import { Check, Code, Pencil, X } from "lucide-react";
 import { useBlocker } from "@tanstack/react-router";
@@ -67,7 +69,6 @@ type WorkflowDialogProps = {
   onEditWorkflow: (workflowId: string) => void;
   onEditorPaneChange: (pane: WorkflowEditorPane) => void;
   onOpenChange: (open: boolean) => void;
-  onTriggerWorkflow: (workflowId: string) => void;
   open: boolean;
   pane: WorkflowEditorPane;
   workflow?: Workflow | null;
@@ -222,7 +223,6 @@ export function WorkflowDialog({
   onEditWorkflow,
   onEditorPaneChange,
   onOpenChange,
-  onTriggerWorkflow,
   open,
   pane,
   workflow,
@@ -230,6 +230,7 @@ export function WorkflowDialog({
   const formBuilderRef = React.useRef<WorkflowFormBuilderHandle>(null);
   const workflowSnapshotRef = React.useRef(workflow);
   const workflowSnapshot = workflowSnapshotRef.current;
+  const trigger = useWorkflowTriggerOperation(workflowSnapshot?.id ?? "");
   const channelId =
     mode === "edit" && workflowSnapshot?.channelId
       ? workflowSnapshot.channelId
@@ -650,7 +651,13 @@ export function WorkflowDialog({
                       )
                     }
                     onToggleEnabled={handleToggleWorkflowEnabled}
-                    onTrigger={() => onTriggerWorkflow(workflowSnapshot.id)}
+                    onTrigger={() => void trigger.run().catch(() => {})}
+                    isTriggering={
+                      trigger.status === "pending" || !trigger.ready
+                    }
+                    triggerLabel={
+                      trigger.status === "error" ? "Retry trigger" : "Trigger"
+                    }
                   />
                 </>
               ) : null}
@@ -667,6 +674,13 @@ export function WorkflowDialog({
               </DialogClose>
             </div>
           </DialogHeader>
+          {mode === "edit" && workflowSnapshot ? (
+            <WorkflowTriggerFeedback
+              state={trigger}
+              onRetry={() => void trigger.run().catch(() => {})}
+              onNewRun={() => void trigger.run(true).catch(() => {})}
+            />
+          ) : null}
 
           <div className="min-h-0 flex-1">
             <WorkflowFormBuilder

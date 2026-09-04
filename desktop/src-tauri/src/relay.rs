@@ -620,7 +620,7 @@ pub struct AgentProfileInfo {
 // ── Signed-event submission ─────────────────────────────────────────────────
 
 mod get;
-pub use get::get_relay_json;
+pub use get::{get_relay_json, get_relay_json_at_with_keys};
 
 mod submit;
 pub use submit::{

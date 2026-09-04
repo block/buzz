@@ -409,6 +409,33 @@ pub async fn get_workflow(
     row_to_workflow_record(row)
 }
 
+/// Fetch and share-lock one workflow on an existing transaction.
+///
+/// Definition replacement updates this row, so holding this lock through run
+/// creation keeps revision validation and the dependent run atomic.
+pub async fn get_workflow_for_share_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    id: Uuid,
+) -> Result<WorkflowRecord> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
+               status::text AS status, enabled, created_at, updated_at
+        FROM workflows
+        WHERE community_id = $1 AND id = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| DbError::NotFound(format!("workflow {id}")))?;
+
+    row_to_workflow_record(row)
+}
+
 /// List workflows for a channel, ordered newest first.
 ///
 /// `limit` is capped at [`LIST_MAX_LIMIT`]. Pass `None` to use [`LIST_DEFAULT_LIMIT`].
@@ -817,6 +844,34 @@ pub async fn delete_workflow_for_owner(
 
 // -- Workflow Run CRUD --------------------------------------------------------
 
+/// Insert a new exact-revision workflow run on the caller's transaction.
+pub async fn create_workflow_run_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    definition_event_id: &[u8],
+    trigger_event_id: Option<&[u8]>,
+    trigger_context: Option<&serde_json::Value>,
+) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO workflow_runs
+            (community_id, id, workflow_id, definition_event_id, status, trigger_event_id, current_step, execution_trace, trigger_context)
+        VALUES ($1, $2, $3, $4, 'pending', $5, 0, '[]', $6)
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(workflow_id)
+    .bind(definition_event_id)
+    .bind(trigger_event_id)
+    .bind(trigger_context)
+    .execute(&mut **tx)
+    .await?;
+    Ok(id)
+}
+
 /// Insert a new workflow run. Returns the new run's UUID.
 ///
 /// `trigger_context` is the serialized `TriggerContext` for this run. It is stored
@@ -849,6 +904,24 @@ pub async fn create_workflow_run(
     .await?;
 
     Ok(id)
+}
+
+/// Find the committed result of a manual trigger within its tenant and workflow.
+/// The command event and run commit atomically, so a retry can recover this ID.
+pub async fn get_workflow_run_id_by_trigger(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    trigger_event_id: &[u8],
+) -> Result<Option<Uuid>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2 AND trigger_event_id = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(trigger_event_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 /// Fetch a single workflow run by ID, scoped to its community.
@@ -1297,6 +1370,56 @@ pub async fn find_by_owner_and_name(
 // -- Run and approval Db API --------------------------------------------------
 
 impl Db {
+    /// Recover the committed run ID for an exact manual-trigger retry.
+    #[datastore_span(name = "get_workflow_run_id_by_trigger", system = "postgresql")]
+    pub async fn get_workflow_run_id_by_trigger(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        trigger_event_id: &[u8],
+    ) -> Result<Option<Uuid>> {
+        crate::workflow::get_workflow_run_id_by_trigger(
+            &self.pool,
+            community_id,
+            workflow_id,
+            trigger_event_id,
+        )
+        .await
+    }
+
+    /// Fetch and share-lock one workflow on an existing transaction.
+    #[datastore_span(name = "get_workflow_for_share_in_transaction", system = "postgresql")]
+    pub async fn get_workflow_for_share_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        id: Uuid,
+    ) -> Result<crate::workflow::WorkflowRecord> {
+        crate::workflow::get_workflow_for_share_in_transaction(tx, community_id, id).await
+    }
+
+    /// Create an exact-revision workflow run on an existing transaction.
+    #[datastore_span(name = "create_workflow_run_in_transaction", system = "postgresql")]
+    pub async fn create_workflow_run_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        definition_event_id: &[u8],
+        trigger_event_id: Option<&[u8]>,
+        trigger_context: Option<&serde_json::Value>,
+    ) -> Result<Uuid> {
+        crate::workflow::create_workflow_run_in_transaction(
+            tx,
+            community_id,
+            workflow_id,
+            definition_event_id,
+            trigger_event_id,
+            trigger_context,
+        )
+        .await
+    }
+
     /// Create a new workflow run.
     #[datastore_span(name = "create_workflow_run", system = "postgresql")]
     pub async fn create_workflow_run(

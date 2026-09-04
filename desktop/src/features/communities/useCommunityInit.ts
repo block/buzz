@@ -92,6 +92,10 @@ async function resetCommunityState({
   // scope assertion is a current-state check, so a start held across a
   // round-trip is valid again once A is re-applied — the map entry is its only
   // duplicate guard.
+  // workflowTriggerOperations also deliberately survives A→B→A. It retains
+  // exact signed requests after ambiguous delivery, keyed by relay + signer +
+  // workflow, with a 256-entry cap (only confirmed successes may be evicted).
+  // Clearing it here would turn an old Retry into a distinct, duplicate run.
   resetDetachedToastScope();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();

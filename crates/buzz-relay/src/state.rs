@@ -628,6 +628,9 @@ impl Default for ConnectionManager {
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
 pub struct AppState {
+    // Keep unit-test repository/cache paths alive until the state is dropped.
+    #[cfg(test)]
+    pub(crate) test_git_directory: Option<Arc<tempfile::TempDir>>,
     /// Relay configuration.
     pub config: Arc<Config>,
     /// Database connection pool.
@@ -781,6 +784,16 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Isolate workflow fixture caches before constructing state: cache startup
+    /// sweeps stale sessions, so inherited/default paths are not safe fixtures.
+    #[cfg(test)]
+    pub(crate) fn workflow_test_git_directory(config: &mut Config) -> Arc<tempfile::TempDir> {
+        let directory = Arc::new(tempfile::tempdir().expect("isolated workflow fixture git paths"));
+        config.git_repo_path = directory.path().join("repos");
+        config.git_pack_cache_path = directory.path().join("pack-cache");
+        directory
+    }
+
     /// Constructs `AppState` from its component services.
     ///
     /// Returns `(state, audit_shutdown)`. The caller should call
@@ -921,6 +934,8 @@ impl AppState {
             )),
             git_store,
             git_pack_cache,
+            #[cfg(test)]
+            test_git_directory: None,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             readiness: Arc::new(crate::readiness::ReadinessCoordinator::default()),
@@ -2540,4 +2555,37 @@ pub(crate) mod tests {
             other => panic!("expected a restart close frame, got {other:?}"),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn workflow_fixture_cache_does_not_sweep_inherited_sessions() {
+    let inherited = tempfile::tempdir().expect("external inherited cache");
+    let session = inherited.path().join("session-existing");
+    std::fs::create_dir(&session).expect("session");
+    let sentinel = session.join("sentinel");
+    std::fs::write(&sentinel, b"preserve").expect("sentinel");
+    let heartbeat = std::fs::File::create(session.join(".heartbeat")).expect("heartbeat");
+    heartbeat
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)),
+        )
+        .expect("stale heartbeat");
+    let mut config = Config::from_env().expect("config");
+    config.git_pack_cache_path = inherited.path().to_path_buf();
+    let directory = AppState::workflow_test_git_directory(&mut config);
+    assert!(config.git_pack_cache_path.starts_with(directory.path()));
+    assert!(config.git_repo_path.starts_with(directory.path()));
+    let cache =
+        crate::api::git::pack_cache::GitPackCache::new(&config.git_pack_cache_path, 1024, 1)
+            .expect("cache");
+    assert_eq!(
+        std::fs::read(&sentinel).expect("inherited session survives"),
+        b"preserve"
+    );
+    let disposable = directory.path().to_path_buf();
+    drop(cache);
+    drop(directory);
+    assert!(!disposable.exists());
 }

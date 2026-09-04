@@ -1164,6 +1164,26 @@ pub(crate) async fn get_event_by_id_with_operation(
     }
 }
 
+/// Fetch a single live event by ID on the caller's transaction.
+pub async fn get_event_by_id_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+) -> Result<Option<StoredEvent>> {
+    let row = sqlx::query(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id_bytes)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match row {
+        Some(r) => row_to_stored_event(r),
+        None => Ok(None),
+    }
+}
+
 /// Fetches the latest global (non-channel, `channel_id IS NULL`) replaceable event
 /// for a (kind, pubkey) pair.
 ///
@@ -1528,6 +1548,17 @@ pub async fn insert_event_with_thread_metadata(
 }
 
 impl Db {
+    /// Fetch a live event by ID using the caller's transaction.
+    #[datastore_span(name = "get_event_by_id_in_transaction", system = "postgresql")]
+    pub async fn get_event_by_id_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id_in_transaction(tx, community_id, id_bytes).await
+    }
+
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
     #[datastore_span(name = "insert_event", system = "postgresql")]
     pub async fn insert_event(

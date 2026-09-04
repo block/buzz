@@ -1658,10 +1658,42 @@ pub fn build_workflow_delete(
     build_delete_addressable(KIND_WORKFLOW_DEF, author_pubkey, &workflow_id.to_string())
 }
 
-/// Build a workflow trigger event (kind 46020).
-pub fn build_workflow_trigger(workflow_id: Uuid) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["d", &workflow_id.to_string()])?];
-    Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_TRIGGER as u16), "").tags(tags))
+/// Build a workflow trigger event (kind 46020) bound to an exact signed revision.
+///
+/// Each call creates a new operation, even within the same second. Retain and
+/// resubmit the signed event when retrying that operation; do not rebuild it.
+pub fn build_workflow_trigger(
+    workflow_id: Uuid,
+    definition_event_id: &str,
+) -> Result<EventBuilder, SdkError> {
+    workflow_trigger_builder(workflow_id, definition_event_id, "")
+}
+
+/// Build a distinct workflow trigger operation with JSON object inputs.
+/// Retry by resubmitting the signed event, as with [`build_workflow_trigger`].
+pub fn build_workflow_trigger_with_inputs(
+    workflow_id: Uuid,
+    definition_event_id: &str,
+    inputs: &serde_json::Map<String, serde_json::Value>,
+) -> Result<EventBuilder, SdkError> {
+    let content = serde_json::Value::Object(inputs.clone()).to_string();
+    check_content(&content, 64 * 1024)?;
+    workflow_trigger_builder(workflow_id, definition_event_id, &content)
+}
+
+fn workflow_trigger_builder(
+    workflow_id: Uuid,
+    definition_event_id: &str,
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    let revision = check_hex_exact(definition_event_id, 64, "definition_event_id")?;
+    let tags = vec![
+        tag(&["d", &workflow_id.to_string()])?,
+        tag(&["e", &revision])?,
+        // Event IDs hash the unsigned fields, not the randomized signature.
+        tag(&["request-id", &Uuid::new_v4().to_string()])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_TRIGGER as u16), content).tags(tags))
 }
 
 /// Build a workflow approval event — kind 46030 (grant) or 46031 (deny).
@@ -4113,9 +4145,39 @@ mod tests {
     #[test]
     fn workflow_trigger_happy_path() {
         let wid = uuid();
-        let ev = sign(build_workflow_trigger(wid).unwrap());
+        let ev = sign(build_workflow_trigger(wid, &"ab".repeat(32)).unwrap());
         assert_eq!(ev.kind.as_u16(), 46020);
         assert!(has_tag(&ev, "d", &wid.to_string()));
+        assert!(has_tag(&ev, "e", &"ab".repeat(32)));
+        assert!(build_workflow_trigger(wid, "not-an-event-id").is_err());
+    }
+
+    #[test]
+    fn workflow_trigger_invocations_in_one_second_have_distinct_ids() {
+        let keys = nostr::Keys::generate();
+        let workflow_id = uuid();
+        let revision = "ab".repeat(32);
+        let timestamp = nostr::Timestamp::from(1_700_000_000);
+        let first = build_workflow_trigger(workflow_id, &revision).unwrap();
+        let replay = first
+            .clone()
+            .custom_created_at(timestamp)
+            .sign_with_keys(&keys)
+            .unwrap();
+        let first = first
+            .custom_created_at(timestamp)
+            .sign_with_keys(&keys)
+            .unwrap();
+        let second = build_workflow_trigger(workflow_id, &revision)
+            .unwrap()
+            .custom_created_at(timestamp)
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(first.id, replay.id, "retry the same built operation");
+        assert_ne!(
+            first.id, second.id,
+            "new invocations must not become replays"
+        );
     }
 
     #[test]

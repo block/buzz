@@ -318,16 +318,6 @@ pub async fn delete_workflow(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn trigger_workflow(
-    workflow_id: String,
-    state: State<'_, AppState>,
-) -> Result<WorkflowTriggerWire, String> {
-    let builder = events::build_workflow_trigger(&workflow_id)?;
-    let result = submit_event(builder, &state).await?;
-    trigger_wire_from_message(workflow_id, &result.message)
-}
-
 // ── Approvals ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -371,7 +361,7 @@ pub async fn deny_approval(
 
 // ── Helpers (pure, unit-tested in workflows_tests.rs) ─────────────────────────
 
-fn trigger_wire_from_message(
+pub(super) fn trigger_wire_from_message(
     workflow_id: String,
     message: &str,
 ) -> Result<WorkflowTriggerWire, String> {

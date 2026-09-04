@@ -14667,6 +14667,22 @@ export function maybeInstallE2eTauriMocks() {
         return handleDeleteWorkflow(
           payload as Parameters<typeof handleDeleteWorkflow>[0],
         );
+      case "prepare_workflow_trigger": {
+        // UI-only bridge. Native HTTP tests verify actual signing and replay.
+        const args = payload as {
+          workflowId: string;
+          expectedSignerPubkey: string;
+        };
+        return {
+          id: crypto.randomUUID(),
+          pubkey: args.expectedSignerPubkey,
+          created_at: Math.floor(Date.now() / 1000),
+          kind: 46020,
+          tags: [["d", args.workflowId]],
+          content: "",
+          sig: "mock-trigger-signature",
+        };
+      }
       case "trigger_workflow":
         return handleTriggerWorkflow(
           payload as Parameters<typeof handleTriggerWorkflow>[0],
