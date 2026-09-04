@@ -59,7 +59,8 @@ runtime-authored migration language.
 
 - **Definition** — application code for one data transformation and its
   validation. It declares a stable identity, a definition version, a typed
-  ordering key, mutation logic, and validation logic.
+  ordering key, a finite per-batch work bound, mutation logic, and validation
+  logic.
 - **Backfill** — the durable execution record for one definition identity and
   version.
 - **Upper bound** — an inclusive, definition-typed boundary that makes the
@@ -151,13 +152,35 @@ checkpoint and no later than the upper bound. If the ordering key alone is not
 unique, the definition MUST use a stable compound ordering that does not skip or
 repeat tied rows ambiguously.
 
+### Bounded batches
+
+Each definition MUST declare a finite upper bound on the work admitted to one
+batch. The engine MUST enforce that bound on the production selection and
+mutation path; it is not an advisory tuning value. Work whose consumption can
+grow with the admitted source set MUST be constrained by the definition's bound
+or by a stricter finite implementation bound.
+
+Each batch transaction and its lock-holding interval MUST have bounded duration.
+Workers MUST observe cancellation, timeout, and pause intent cooperatively at
+transaction and batch boundaries, MUST NOT begin another batch after observing
+that intent, and MUST arrange for an interrupted open transaction to roll back.
+Generation fencing remains authoritative when pause races with an in-flight
+transaction.
+
+If the engine cannot honor the declared work bound or a transaction, lock, or
+interruption bound, it MUST commit neither partial mutations nor a checkpoint.
+It MUST report and transition the attempt according to the bounded failure
+policy rather than widening the batch, retaining locks indefinitely, or
+continuing unbounded.
+
 ## Transaction and ownership invariants
 
 ### Mutation and checkpoint atomicity
 
 Every batch's data mutations and checkpoint advance MUST commit in the same
 PostgreSQL transaction. If any mutation, checkpoint write, ownership check, or
-commit fails, the entire batch MUST roll back.
+commit fails, or if cancellation or timeout interrupts the transaction, the
+entire batch MUST roll back.
 
 This yields two required properties:
 
@@ -411,30 +434,36 @@ At minimum, the suite covers:
 1. **Claim race.** Concurrent workers contend for one eligible backfill; only one
    generation can commit, and eventual takeover preserves a single monotonic
    checkpoint.
-2. **Rollback.** A failure after target mutation but before commit leaves both
+2. **Bounded batch.** Through the production engine and store, an admitted data
+   set larger than one batch causes the first transaction to advance only within
+   the definition's declared bound and to release before the next transaction.
+   Cancellation or timeout rolls back both target mutations and checkpoint. The
+   test MUST observe the transaction boundary and MUST fail if enforcement of
+   the declared bound is removed.
+3. **Rollback.** A failure after target mutation but before commit leaves both
    target data and checkpoint unchanged; a checkpoint failure also rolls back
    target mutation.
-3. **Restart.** Process termination before and after a batch commit, and during
+4. **Restart.** Process termination before and after a batch commit, and during
    validation, reconstructs progress solely from PostgreSQL and resumes without
    recapturing the bound.
-4. **Stale owner.** Pause, expiry, or takeover occurs while an old worker is in
+5. **Stale owner.** Pause, expiry, or takeover occurs while an old worker is in
    flight; its target mutation, checkpoint, and completion attempts are rejected
    at the commit seam.
-5. **Validation.** Reaching the bound cannot complete without validation;
+6. **Validation.** Reaching the bound cannot complete without validation;
    validation failure is durable and repeatable, and only successful validation
    reaches immutable `completed`.
-6. **Bounded failure.** Persistent execution error reaches a terminal `failed`
+7. **Bounded failure.** Persistent execution error reaches a terminal `failed`
    or `blocked` disposition rather than an unbounded retry loop; operator retry
    preserves bound and checkpoint.
-7. **Admin authorization.** Unauthorized reads and controls fail before
+8. **Admin authorization.** Unauthorized reads and controls fail before
    protected state is returned or mutated; community roles alone grant no
    deployment-wide authority.
-8. **Admin idempotency.** Duplicate, concurrent, and lost-response control
+9. **Admin idempotency.** Duplicate, concurrent, and lost-response control
    requests converge without duplicate starts, generation reuse, or bound
    recapture; conflicts return current state.
-9. **Client projection.** The UI renders server/PostgreSQL state, preserves
+10. **Client projection.** The UI renders server/PostgreSQL state, preserves
    unknown and failure states honestly, and sends only the supported controls.
-10. **Configuration matrix.** All four schema/backfill control combinations are
+11. **Configuration matrix.** All four schema/backfill control combinations are
     exercised through real startup and readiness paths. Automatic mode gates
     until validation; manual mode never adds the backfill gate; schema safety
     remains independently enforced.
