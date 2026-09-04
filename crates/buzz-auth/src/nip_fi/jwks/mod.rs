@@ -753,16 +753,29 @@ pub struct ToggleJwksFetcher {
     /// When `true` the fetcher returns a minimal valid JWKS body; when `false`
     /// it returns `JwksFetchError::NetworkError`.
     pub available: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Fired (via `notify_one`) after every fetch attempt completes, whether
+    /// successful or not. Tests can await this to deterministically observe
+    /// that the fetch loop executed a given attempt before proceeding.
+    pub fetch_done: std::sync::Arc<tokio::sync::Notify>,
+    /// Incremented on every fetch attempt (success or failure). Tests can
+    /// read this non-blocking value after a `tokio::time::advance` to assert
+    /// that the loop executed the expected number of attempts, which is
+    /// reliable even when `start_paused` would auto-advance time past a
+    /// `notified().await` call.
+    pub attempt_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 impl ToggleJwksFetcher {
     /// Construct a new `ToggleJwksFetcher`. Pass `initial` as the starting
-    /// availability state; the shared `available` flag can be flipped from the
-    /// test after construction.
+    /// availability state; `available`, `fetch_done`, and `attempt_count` are
+    /// all externally observable and can be driven from the test after
+    /// construction.
     pub fn new(initial: bool) -> Self {
         Self {
             available: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(initial)),
+            fetch_done: std::sync::Arc::new(tokio::sync::Notify::new()),
+            attempt_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
@@ -785,12 +798,17 @@ impl JwksFetcher for ToggleJwksFetcher {
             r#""use":"sig","alg":"ES256","kid":"toggle-kid"}]}"#
         );
         let available = self.available.load(std::sync::atomic::Ordering::SeqCst);
+        let fetch_done = std::sync::Arc::clone(&self.fetch_done);
+        let attempt_count = std::sync::Arc::clone(&self.attempt_count);
         async move {
-            if available {
+            attempt_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let result = if available {
                 Ok(TOGGLE_JWKS.to_string())
             } else {
                 Err(JwksFetchError::NetworkError)
-            }
+            };
+            fetch_done.notify_one();
+            result
         }
     }
 }
