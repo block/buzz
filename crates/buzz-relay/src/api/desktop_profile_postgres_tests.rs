@@ -2,7 +2,7 @@
 use super::postgres_tests::bridge_handler_test_state;
 use super::*;
 use axum::{body::Body, http::Request};
-use buzz_core::kind::{KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE};
+use buzz_core::kind::{KIND_DESKTOP_CAPABILITIES, KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde_json::json;
 use tower::ServiceExt;
@@ -76,6 +76,12 @@ async fn desktop_observation_authenticated_owner_query_and_private_storage() {
     assert_private_desktop(KIND_DESKTOP_OBSERVATION).await;
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn desktop_capabilities_authenticated_owner_query_and_private_storage() {
+    assert_private_desktop(KIND_DESKTOP_CAPABILITIES).await;
+}
+
 async fn assert_private_desktop(kind: u32) {
     let mut state = bridge_handler_test_state()
         .await
@@ -99,6 +105,10 @@ async fn assert_private_desktop(kind: u32) {
     let id = profile.id.clone();
     let event = if kind == KIND_DESKTOP_PROFILE {
         profile.sign(&owner).unwrap()
+    } else if kind == KIND_DESKTOP_CAPABILITIES {
+        buzz_core::desktop_capabilities::DesktopCapabilities::new(profile, vec![])
+            .sign(&owner)
+            .unwrap()
     } else {
         buzz_core::desktop_observation::DesktopObservation::new(profile)
             .sign(&owner)

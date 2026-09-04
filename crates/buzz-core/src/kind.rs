@@ -122,6 +122,8 @@ pub const KIND_DESKTOP_PROFILE: u32 = 30180;
 
 /// Owner-private, per-Desktop last-heard observation; not online or readiness.
 pub const KIND_DESKTOP_OBSERVATION: u32 = 30181;
+/// Owner-private built-in runtime facts per Desktop, not agent readiness.
+pub const KIND_DESKTOP_CAPABILITIES: u32 = 30182;
 
 /// Kinds whose stored events are readable only by their author.
 ///
@@ -138,6 +140,7 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_DESKTOP_PROFILE,
     KIND_DESKTOP_OBSERVATION,
+    KIND_DESKTOP_CAPABILITIES,
 ];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
@@ -669,6 +672,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_DESKTOP_PROFILE,
     KIND_DESKTOP_OBSERVATION,
+    KIND_DESKTOP_CAPABILITIES,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,

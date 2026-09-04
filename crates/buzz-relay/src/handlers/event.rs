@@ -2220,6 +2220,11 @@ mod tests {
             assert_author_only_fanout(buzz_core::kind::KIND_DESKTOP_OBSERVATION).await;
         }
 
+        #[tokio::test]
+        async fn desktop_capabilities_delivers_to_author_only() {
+            assert_author_only_fanout(buzz_core::kind::KIND_DESKTOP_CAPABILITIES).await;
+        }
+
         async fn assert_author_only_fanout(kind: u32) {
             let state = test_state().await;
 

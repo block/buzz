@@ -556,6 +556,8 @@ pub fn run() {
             read_desktop_profiles,
             prepare_desktop_observation,
             read_desktop_observations,
+            prepare_desktop_capabilities,
+            read_desktop_capabilities,
             get_nsec,
             generate_backup_passphrase,
             create_ncryptsec_backup,
