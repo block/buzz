@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "name": "Review Squad",
+  "members": [
+    {
+      "member_key": "reviewer",
+      "display_name": "First Reviewer",
+      "system_prompt": "Review first."
+    },
+    {
+      "member_key": "reviewer",
+      "display_name": "Second Reviewer",
+      "system_prompt": "Review second."
+    }
+  ]
+}

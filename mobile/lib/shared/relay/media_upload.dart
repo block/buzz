@@ -17,11 +17,15 @@ import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 
+part 'media_upload/platform_bindings.dart';
+part 'media_upload/helpers.dart';
+
 const _mediaUploadPath = '/upload';
 const _legacyMediaUploadPath = '/media/upload';
 const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
+const _packageVoiceNoteForUploadMethod = 'packageVoiceNoteForUpload';
 const _generateVideoPosterMethod = 'generateVideoPoster';
 const _transcodeImageToJpegMethod = 'transcodeImageToJpeg';
 const _requiresLegacyMediaStoragePermissionMethod =
@@ -44,17 +48,6 @@ final _mediaUploadPlatformChannel = MethodChannel(
   _mediaUploadPlatformChannelName,
 );
 
-/// Whether saving media needs Android's pre-scoped-storage runtime permission.
-Future<bool> requiresLegacyMediaStoragePermission() async {
-  if (defaultTargetPlatform != TargetPlatform.android) {
-    return false;
-  }
-  return await _mediaUploadPlatformChannel.invokeMethod<bool>(
-        _requiresLegacyMediaStoragePermissionMethod,
-      ) ??
-      false;
-}
-
 const _allowedImageMimeTypes = {
   'image/jpeg',
   'image/png',
@@ -62,11 +55,15 @@ const _allowedImageMimeTypes = {
   'image/webp',
 };
 const _allowedVideoMimeTypes = {'video/mp4'};
+const _allowedAudioMimeTypes = {'audio/mp4', 'audio/m4a', 'audio/aac'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
 const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
+
+/// Captures one image with the system camera, or returns null when cancelled.
+typedef PickCameraImage = Future<XFile?> Function();
 
 /// Selects multiple gallery images for upload in picker order.
 typedef PickGalleryImages = Future<List<XFile>> Function();
@@ -76,6 +73,9 @@ typedef SanitizeImageBytes =
     Future<Uint8List> Function(Uint8List bytes, String mimeType);
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
 typedef TranscodeVideoToMp4 = Future<String> Function(String filePath);
+
+/// Packages a recorded voice-note file into its upload container.
+typedef PackageVoiceNoteForUpload = Future<String> Function(String filePath);
 
 /// Generates poster-frame bytes for the video at [filePath], when available.
 typedef GenerateVideoPoster = Future<Uint8List?> Function(String filePath);
@@ -174,6 +174,24 @@ class BlobDescriptor {
     filename: value,
   );
 
+  /// Returns a descriptor carrying canonical packaged voice-note metadata.
+  BlobDescriptor withVoiceNoteMetadata({
+    required String filename,
+    required double fallbackDurationSeconds,
+  }) => BlobDescriptor(
+    url: url,
+    sha256: sha256,
+    size: size,
+    type: type,
+    uploaded: uploaded,
+    dim: dim,
+    blurhash: blurhash,
+    thumb: thumb,
+    duration: duration ?? fallbackDurationSeconds,
+    image: image,
+    filename: filename,
+  );
+
   /// Returns a descriptor with [value] as its NIP-71 video poster URL.
   BlobDescriptor withImage(String value) => BlobDescriptor(
     url: url,
@@ -204,12 +222,14 @@ class BlobDescriptor {
   ];
 
   String toMarkdownImage() {
-    if (type.startsWith('video/')) return '![video]($url)';
-    if (type.startsWith('image/')) return '![image]($url)';
     final label = (filename ?? 'file').replaceAllMapped(
       RegExp(r'[\\\[\]]'),
       (match) => '\\${match[0]}',
     );
+    if (type.startsWith('audio/')) return '![audio]($url)';
+    if (_isPackagedVoiceNote(type, filename)) return '[$label]($url)';
+    if (type.startsWith('video/')) return '![video]($url)';
+    if (type.startsWith('image/')) return '![image]($url)';
     return '[$label]($url)';
   }
 }
@@ -218,12 +238,14 @@ class MediaUploadService {
   final String _baseUrl;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
+  final PickCameraImage? _pickCameraImage;
   final PickGalleryImages _pickGalleryImages;
   final PickGalleryVideo _pickGalleryVideo;
   final PickAttachmentFile? _pickAttachmentFile;
   final SanitizeImageBytes _sanitizeImageBytes;
   final TranscodeImageToJpeg _transcodeImageToJpeg;
   final TranscodeVideoToMp4 _transcodeVideoToMp4;
+  final PackageVoiceNoteForUpload _packageVoiceNoteForUpload;
   final GenerateVideoPoster _generateVideoPoster;
   final ReadClipboardImage _readClipboardImage;
   final DateTime Function() _now;
@@ -234,12 +256,14 @@ class MediaUploadService {
     required String baseUrl,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
+    PickCameraImage? pickCameraImage,
     PickGalleryImages? pickGalleryImages,
     required PickGalleryVideo pickGalleryVideo,
     PickAttachmentFile? pickAttachmentFile,
     SanitizeImageBytes? sanitizeImageBytes,
     TranscodeImageToJpeg? transcodeImageToJpeg,
     TranscodeVideoToMp4? transcodeVideoToMp4,
+    PackageVoiceNoteForUpload? packageVoiceNoteForUpload,
     GenerateVideoPoster? generateVideoPoster,
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
@@ -247,6 +271,7 @@ class MediaUploadService {
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
+       _pickCameraImage = pickCameraImage,
        _pickGalleryImages =
            pickGalleryImages ??
            (() async {
@@ -259,6 +284,8 @@ class MediaUploadService {
        _transcodeImageToJpeg =
            transcodeImageToJpeg ?? _transcodePickedImageToJpeg,
        _transcodeVideoToMp4 = transcodeVideoToMp4 ?? _transcodePickedVideoToMp4,
+       _packageVoiceNoteForUpload =
+           packageVoiceNoteForUpload ?? _packagePickedVoiceNoteForUpload,
        _generateVideoPoster = generateVideoPoster ?? _generatePickedVideoPoster,
        _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
@@ -273,6 +300,23 @@ class MediaUploadService {
 
   Future<BlobDescriptor?> pickAndUploadImage() async {
     final pickedImage = await _pickGalleryImage();
+    if (pickedImage == null) return null;
+    return uploadImage(pickedImage);
+  }
+
+  /// Opens the system photo library without uploading the selected image.
+  Future<XFile?> pickGalleryImage() => _pickGalleryImage();
+
+  /// Opens the system camera without uploading the captured image.
+  Future<XFile?> captureImage() async => _pickCameraImage?.call();
+
+  /// Produces displayable, sanitized image bytes before an upload begins.
+  Future<Uint8List> prepareImageBytes(XFile image) async =>
+      (await _prepareUploadImage(image)).bytes;
+
+  /// Opens the system camera and uploads the captured image.
+  Future<BlobDescriptor?> captureAndUploadImage() async {
+    final pickedImage = await _pickCameraImage?.call();
     if (pickedImage == null) return null;
     return uploadImage(pickedImage);
   }
@@ -418,6 +462,48 @@ class MediaUploadService {
     final pickedVideo = await pickGalleryVideo();
     if (pickedVideo == null) return null;
     return uploadVideo(pickedVideo);
+  }
+
+  /// Packages a recorded AAC voice note in the canonical MP4 envelope.
+  Future<BlobDescriptor> uploadVoiceNote(
+    XFile voiceNote, {
+    required Duration duration,
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    _throwIfCancelled(cancellationToken);
+    final mimeType = voiceNote.mimeType ?? 'audio/mp4';
+    if (!_allowedAudioMimeTypes.contains(mimeType)) {
+      throw Exception('unsupported voice note type: $mimeType');
+    }
+    String? packagedPath;
+    try {
+      packagedPath = await _packageVoiceNoteForUpload(voiceNote.path);
+      _throwIfCancelled(cancellationToken);
+      final bytes = await File(packagedPath).readAsBytes();
+      if (bytes.isEmpty) throw Exception('Voice note is empty.');
+      if (bytes.length > _maxFileSizeBytes) {
+        throw Exception('Voice note is too large. Maximum is 100MB.');
+      }
+      final descriptor = await _uploadPreparedBytes(
+        bytes,
+        mimeType: 'video/mp4',
+        onProgress: onProgress,
+        cancellationToken: cancellationToken,
+      );
+      return descriptor.withVoiceNoteMetadata(
+        filename: _voiceNoteMp4Filename(voiceNote.name),
+        fallbackDurationSeconds: duration.inMilliseconds / 1000,
+      );
+    } finally {
+      if (packagedPath != null && packagedPath != voiceNote.path) {
+        try {
+          await File(packagedPath).delete();
+        } on FileSystemException {
+          // Best-effort temp file cleanup.
+        }
+      }
+    }
   }
 
   /// Opens the system document picker for a generic file attachment.
@@ -704,6 +790,23 @@ String _safeAttachmentFilename(String filename) {
   return safeBasename.isEmpty ? 'file' : safeBasename;
 }
 
+String _voiceNoteMp4Filename(String filename) {
+  final safe = _safeAttachmentFilename(filename);
+  final withoutExtension = safe.replaceFirst(RegExp(r'\.[^.]*$'), '');
+  final stem = withoutExtension.toLowerCase().startsWith('voice-note-')
+      ? withoutExtension
+      : 'voice-note-$withoutExtension';
+  return '$stem.mp4';
+}
+
+bool _isPackagedVoiceNote(String mimeType, String? filename) {
+  final normalized = filename?.toLowerCase();
+  return mimeType == 'video/mp4' &&
+      normalized != null &&
+      normalized.startsWith('voice-note-') &&
+      normalized.endsWith('.mp4');
+}
+
 Stream<List<int>> _uploadByteStream(
   Uint8List bytes,
   ValueChanged<double>? onProgress,
@@ -872,128 +975,3 @@ bool _looksLikeHeicOrHeif(Uint8List bytes) {
 
   return false;
 }
-
-bool _startsWith(Uint8List bytes, List<int> prefix) {
-  if (bytes.length < prefix.length) return false;
-  for (var i = 0; i < prefix.length; i++) {
-    if (bytes[i] != prefix[i]) return false;
-  }
-  return true;
-}
-
-bool _matchesAscii(Uint8List bytes, int offset, String value) {
-  final codeUnits = ascii.encode(value);
-  if (bytes.length < offset + codeUnits.length) return false;
-  for (var i = 0; i < codeUnits.length; i++) {
-    if (bytes[offset + i] != codeUnits[i]) return false;
-  }
-  return true;
-}
-
-int _readUint32BigEndian(Uint8List bytes, int offset) {
-  return (bytes[offset] << 24) |
-      (bytes[offset + 1] << 16) |
-      (bytes[offset + 2] << 8) |
-      bytes[offset + 3];
-}
-
-int _readUint32LittleEndian(Uint8List bytes, int offset) {
-  return bytes[offset] |
-      (bytes[offset + 1] << 8) |
-      (bytes[offset + 2] << 16) |
-      (bytes[offset + 3] << 24);
-}
-
-Future<Uint8List?> _readPlatformClipboardImage() async {
-  return _mediaUploadPlatformChannel.invokeMethod<Uint8List>(
-    _readClipboardImageMethod,
-  );
-}
-
-Future<Uint8List?> _generatePickedVideoPoster(String filePath) {
-  return _mediaUploadPlatformChannel.invokeMethod<Uint8List>(
-    _generateVideoPosterMethod,
-    filePath,
-  );
-}
-
-Future<String> _transcodePickedVideoToMp4(String filePath) async {
-  final result = await _mediaUploadPlatformChannel.invokeMethod<String>(
-    _transcodeVideoToMp4Method,
-    filePath,
-  );
-  if (result == null || result.isEmpty) {
-    throw Exception('Failed to convert video to MP4.');
-  }
-  if (defaultTargetPlatform == TargetPlatform.android) {
-    final source = File(result);
-    final destination = File(
-      '$result.faststart-${DateTime.now().microsecondsSinceEpoch}.mp4',
-    );
-    try {
-      await rewriteMp4ForFastStart(source, destination);
-      await source.delete();
-      return destination.path;
-    } catch (_) {
-      try {
-        await destination.delete();
-      } on FileSystemException {
-        // Best-effort cleanup; preserve the original platform error.
-      }
-      rethrow;
-    }
-  }
-  return result;
-}
-
-Future<Uint8List> _transcodePickedImageToJpeg(Uint8List bytes) async {
-  return _invokeRequiredPlatformBytesMethod(
-    _transcodeImageToJpegMethod,
-    arguments: bytes,
-    errorMessage: 'failed to convert image for upload',
-  );
-}
-
-Future<Uint8List> _sanitizePickedImageBytes(
-  Uint8List bytes,
-  String mimeType,
-) async {
-  return _invokeRequiredPlatformBytesMethod(
-    _sanitizeImageForUploadMethod,
-    arguments: {'bytes': bytes, 'mimeType': mimeType},
-    errorMessage: 'failed to sanitize image for upload',
-  );
-}
-
-Future<Uint8List> _invokeRequiredPlatformBytesMethod(
-  String method, {
-  Object? arguments,
-  required String errorMessage,
-}) async {
-  final result = await _mediaUploadPlatformChannel.invokeMethod<Uint8List>(
-    method,
-    arguments,
-  );
-  if (result == null || result.isEmpty) {
-    throw Exception(errorMessage);
-  }
-  return result;
-}
-
-final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
-  final config = ref.watch(relayConfigProvider);
-  final picker = ImagePicker();
-  final service = MediaUploadService(
-    baseUrl: config.baseUrl,
-    nsec: config.nsec,
-    pickGalleryImage: () => picker.pickImage(
-      source: ImageSource.gallery,
-      requestFullMetadata: false,
-    ),
-    pickGalleryImages: () => picker.pickMultiImage(requestFullMetadata: false),
-    pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
-    pickAttachmentFile: file_selector.openFile,
-  );
-  ref.onDispose(service.dispose);
-  return service;
-});

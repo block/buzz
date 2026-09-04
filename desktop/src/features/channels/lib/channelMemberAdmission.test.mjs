@@ -22,8 +22,8 @@ test("open channels accept adds from anyone, member or not", () => {
   );
 });
 
-test("private channels accept adds only from owners/admins", () => {
-  for (const selfRole of ["owner", "admin"]) {
+test("private channels accept adds from every active member role", () => {
+  for (const selfRole of ["owner", "admin", "member", "bot", "guest"]) {
     assert.equal(
       canAddChannelMembers({
         channelType: "stream",
@@ -35,17 +35,15 @@ test("private channels accept adds only from owners/admins", () => {
     );
   }
 
-  for (const selfRole of ["member", "bot", "guest", null]) {
-    assert.equal(
-      canAddChannelMembers({
-        channelType: "stream",
-        visibility: "private",
-        selfRole,
-      }),
-      false,
-      `${selfRole} must not be able to add`,
-    );
-  }
+  assert.equal(
+    canAddChannelMembers({
+      channelType: "stream",
+      visibility: "private",
+      selfRole: null,
+    }),
+    false,
+    "a non-member must not be able to add",
+  );
 });
 
 test("DMs never accept adds, even from an owner", () => {
@@ -67,13 +65,13 @@ test("DMs never accept adds, even from an owner", () => {
   );
 });
 
-test("unknown visibility fails closed for non-elevated callers", () => {
+test("unknown visibility fails closed", () => {
   assert.equal(
     canAddChannelMembers({ channelType: "stream", selfRole: "member" }),
     false,
   );
   assert.equal(
     canAddChannelMembers({ channelType: "stream", selfRole: "owner" }),
-    true,
+    false,
   );
 });

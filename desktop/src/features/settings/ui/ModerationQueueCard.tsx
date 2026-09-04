@@ -1,6 +1,9 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ChevronDown, ShieldAlert } from "lucide-react";
 import { useMemo } from "react";
 import { toast } from "sonner";
+
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 
 import {
   useModerationAuditQuery,
@@ -222,7 +225,12 @@ function ReporterLine({
         </span>
       </div>
       {report.note ? (
-        <p className="mt-1 text-xs text-muted-foreground">{report.note}</p>
+        <p
+          className="mt-1 text-xs text-muted-foreground/70"
+          data-settings-subcopy
+        >
+          {report.note}
+        </p>
       ) : null}
     </div>
   );
@@ -264,7 +272,10 @@ function ResolveMenu({
           >
             <div className="flex flex-col">
               <span className="text-sm font-medium">{option.label}</span>
-              <span className="text-xs text-muted-foreground">
+              <span
+                className="text-xs text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 {option.description}
               </span>
             </div>
@@ -357,6 +368,7 @@ function QueueGroupCard({
 }
 
 function QueueTab() {
+  const queryClient = useQueryClient();
   const reportsQuery = useModerationReportsQuery({ status: "open" });
   const auditQuery = useModerationAuditQuery();
   const resolveMutation = useResolveReportMutation();
@@ -400,6 +412,12 @@ function QueueTab() {
       // report open (retryable, no orphan decision row). Only after the paired
       // 9040/9005/9001 lands do we resolve every open report about this target.
       await enforceResolution(group, action, banMutation.mutateAsync);
+      if (action === "kick" && group.channelId != null) {
+        // The kick writes the roster directly (no member mutation); without
+        // this, the kicked identity stays in the cached roster for the
+        // freshness window.
+        await invalidateChannelMembersRosters(queryClient, [group.channelId]);
+      }
       await Promise.all(
         openReports.map((report) =>
           resolveMutation.mutateAsync({
@@ -483,7 +501,9 @@ function AuditRow({
         </span>
       </div>
       {action.publicReason ? (
-        <p className="text-xs text-muted-foreground">{action.publicReason}</p>
+        <p className="text-xs text-muted-foreground/70" data-settings-subcopy>
+          {action.publicReason}
+        </p>
       ) : null}
     </div>
   );

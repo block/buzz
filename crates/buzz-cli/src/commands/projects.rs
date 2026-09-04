@@ -4,8 +4,10 @@
 //!   1. Fetch the caller's own live head via `kinds:[30621] + authors:[self] + #d:[slug]`.
 //!   2. Mutate the tag set (strip `auth`, apply change).
 //!   3. Re-validate the full envelope through Layer A before submitting.
-//!   4. Set `created_at = head.created_at + 1` (never wall-clock) to avoid
-//!      overwriting a concurrently advancing head.
+//!   4. Set `created_at = max(client_now, head.created_at + 1)` so the
+//!      replacement dominates the observed head and uses wall clock for
+//!      ordinary stale heads. Unusually future heads may still hit the relay's
+//!      timestamp-drift guard until time advances.
 //!
 //! Limitations recorded in this phase:
 //!   - Relay hints are read-preserved but not authored (`--repo` carries
@@ -19,11 +21,59 @@ use buzz_sdk::{
     build_delete_addressable, build_project, build_project_with_tags, ProjectMemberCoord,
     PROJECT_D_MAX_LEN,
 };
-use nostr::{Event, EventBuilder, Tag, Timestamp};
+use nostr::{Event, EventBuilder, PublicKey, Tag, Timestamp};
 
+use crate::agent_management::{build_project_channel, CreateProjectChannelDraft};
 use crate::client::BuzzClient;
 use crate::commands::parse_write_response;
+use crate::commands::project_channel::{
+    repo_id_from_project_slug, require_repo_channel_binding, truncate_repo_name,
+};
+use crate::commands::repos::{build_create_announcement, fetch_own_repo_announcement};
 use crate::error::CliError;
+
+async fn cmd_add_channel_draft(
+    client: &BuzzClient,
+    home_channel: String,
+    name: String,
+    description: Option<String>,
+    visibility: String,
+    ttl_seconds: Option<u64>,
+    template_name: Option<String>,
+) -> Result<(), CliError> {
+    let owner_hex = client
+        .auth_tag_owner_hex()
+        .ok_or_else(|| CliError::Auth("project channel requests require BUZZ_AUTH_TAG".into()))?;
+    let owner = PublicKey::parse(&owner_hex)
+        .map_err(|error| CliError::Auth(format!("invalid owner attestation: {error}")))?;
+    let built = build_project_channel(
+        client.keys(),
+        &owner,
+        CreateProjectChannelDraft {
+            home_channel_id: home_channel,
+            name,
+            description,
+            visibility,
+            ttl_seconds,
+            template_name,
+        },
+    )?;
+    let response = client.publish_ephemeral_event(built.event).await?;
+    let mut output: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| CliError::Other(format!("invalid relay response: {error}")))?;
+    if let Some(object) = output.as_object_mut() {
+        object.insert("request_id".into(), built.request_id.into());
+        object.insert("action".into(), "add-channel".into());
+        object.insert("saved".into(), false.into());
+        object.insert(
+            "message".into(),
+            "Project channel draft sent to Buzz Desktop for owner review. The channel is not created until the owner approves it."
+                .into(),
+        );
+    }
+    println!("{output}");
+    Ok(())
+}
 
 // ── Buzz repo-ID grammar (bare --repo shorthand) ─────────────────────────────
 
@@ -61,9 +111,141 @@ fn parse_events(json: &str) -> Result<Vec<Event>, CliError> {
         .map_err(|e| CliError::Other(format!("failed to parse relay response: {e}")))
 }
 
-/// Fetch the caller's own live kind:30621 head for `slug`.
-async fn fetch_own_project(client: &BuzzClient, slug: &str) -> Result<Option<Event>, CliError> {
-    fetch_project(client, slug, None).await
+/// Fetch listed kind:30621 heads whose `buzz-channel` is `channel`.
+fn project_tags_match_channel<'a>(tags: impl IntoIterator<Item = &'a Tag>, channel: &str) -> bool {
+    tags.into_iter()
+        .any(|tag| tag_name(tag) == Some("buzz-channel") && tag_value(tag) == Some(channel))
+}
+
+pub(crate) const PROJECT_QUERY_EVENT_BOUND: u32 = 10_000;
+
+pub(crate) async fn fetch_projects_for_channel(
+    client: &BuzzClient,
+    channel: &str,
+) -> Result<Vec<Event>, CliError> {
+    fetch_projects_for_channel_bounded(client, channel, PROJECT_QUERY_EVENT_BOUND).await
+}
+
+async fn fetch_projects_for_channel_bounded(
+    client: &BuzzClient,
+    channel: &str,
+    max_events: u32,
+) -> Result<Vec<Event>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [KIND_PROJECT],
+        "#buzz-channel": [channel],
+    });
+    let events: Vec<Event> = client
+        .query_all_bounded(filter, max_events)
+        .await?
+        .into_iter()
+        .map(|event| {
+            serde_json::from_value(event)
+                .map_err(|e| CliError::Other(format!("failed to parse relay response: {e}")))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(events
+        .into_iter()
+        .filter(|event| project_tags_match_channel(event.tags.iter(), channel))
+        .collect())
+}
+
+fn project_is_unlisted(event: &Event) -> bool {
+    event.tags.iter().any(|tag| {
+        matches!(
+            tag.as_slice(),
+            [name, value, ..] if name == "buzz-visibility" && value == "unlisted"
+        )
+    })
+}
+
+fn project_slug(event: &Event) -> Option<String> {
+    event.tags.iter().find_map(|tag| match tag.as_slice() {
+        [name, value, ..] if name == "d" && !value.is_empty() => Some(value.clone()),
+        _ => None,
+    })
+}
+
+/// Add repos to a project the caller owns. Returns the relay write JSON.
+pub async fn add_repos_to_own_project(
+    client: &BuzzClient,
+    slug: &str,
+    repos: &[String],
+) -> Result<String, CliError> {
+    validate_project_slug(slug)?;
+    let caller_pubkey = client.keys().public_key().to_hex();
+
+    let new_members: Vec<ProjectMemberCoord> = repos
+        .iter()
+        .map(|r| expand_repo_coord(r, &caller_pubkey))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut seen = std::collections::HashSet::new();
+    for m in &new_members {
+        if !seen.insert(m.coord.clone()) {
+            return Err(CliError::Usage(format!(
+                "duplicate --repo coordinate in this invocation: {:?}",
+                m.coord
+            )));
+        }
+    }
+
+    let head = fetch_own_project(client, slug)
+        .await?
+        .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
+    let next_ts = next_timestamp(&head, Timestamp::now())?;
+
+    let mut tags: Vec<Tag> = head.tags.iter().cloned().collect();
+    let existing_coords: std::collections::HashSet<String> = head
+        .tags
+        .iter()
+        .filter(|t| tag_name(t) == Some("a"))
+        .filter_map(|t| tag_value(t).map(String::from))
+        .collect();
+    let mut added = 0usize;
+    for m in &new_members {
+        if !existing_coords.contains(m.coord.as_str()) {
+            let parts = m.to_tag_parts();
+            let parts_ref: Vec<&str> = parts.iter().map(String::as_str).collect();
+            tags.push(
+                Tag::parse(parts_ref.iter().copied())
+                    .map_err(|e| CliError::Other(format!("member tag construction failed: {e}")))?,
+            );
+            added += 1;
+        }
+    }
+
+    if added == 0 {
+        return Err(CliError::Conflict(format!(
+            "all requested repositories are already members of project {slug:?}"
+        )));
+    }
+
+    let builder = rebuild_project(&head.content, tags, next_ts)?;
+    let event = client.sign_event(builder)?;
+    client.submit_event(event).await
+}
+
+/// If this channel is already a project the caller owns, attach `repo_id`.
+pub async fn try_add_own_repo_to_channel_project(
+    client: &BuzzClient,
+    channel: &str,
+    repo_id: &str,
+) -> Result<(), CliError> {
+    let projects = fetch_projects_for_channel(client, channel).await?;
+    let caller = client.keys().public_key().to_hex();
+    let Some(event) = projects.iter().find(|candidate| {
+        candidate.pubkey.to_hex().eq_ignore_ascii_case(&caller) && !project_is_unlisted(candidate)
+    }) else {
+        return Ok(());
+    };
+    let Some(slug) = project_slug(event) else {
+        return Ok(());
+    };
+    match add_repos_to_own_project(client, &slug, &[repo_id.to_string()]).await {
+        Ok(_) | Err(CliError::Conflict(_)) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Fetch a project head by slug and optional owner pubkey.
@@ -91,6 +273,11 @@ async fn fetch_project(
     Ok(events.into_iter().next())
 }
 
+/// Fetch the caller's own live kind:30621 head for `slug`.
+async fn fetch_own_project(client: &BuzzClient, slug: &str) -> Result<Option<Event>, CliError> {
+    fetch_project(client, slug, None).await
+}
+
 // ── Tag helpers ───────────────────────────────────────────────────────────────
 
 fn tag_name(tag: &Tag) -> Option<&str> {
@@ -108,25 +295,45 @@ fn make_tag(parts: &[&str]) -> Result<Tag, CliError> {
 
 // ── Submit helper ─────────────────────────────────────────────────────────────
 
-async fn submit_project(client: &BuzzClient, builder: EventBuilder) -> Result<(), CliError> {
+/// Submit a project event and print the relay's write response.
+///
+/// `link_slug` carries the project's d-tag on creates whose slug fits the
+/// `buzz://` link charset; the response then also carries a `link` field,
+/// which renders as a rich preview card in Buzz Desktop when included in a
+/// chat message — agents announce projects with it (see base_prompt.md).
+async fn submit_project(
+    client: &BuzzClient,
+    builder: EventBuilder,
+    link_slug: Option<&str>,
+) -> Result<(), CliError> {
     let event = client.sign_event(builder)?;
+    let owner = event.pubkey.to_hex();
     let raw = client.submit_event(event).await?;
-    println!(
-        "{}",
-        parse_write_response(&raw, "project changed concurrently; retry")?
-    );
+    let response = parse_write_response(&raw, "project changed concurrently; retry")?;
+    match link_slug {
+        Some(slug) => crate::client::print_create_response(
+            &response,
+            "link",
+            &crate::links::project_link(&owner, slug),
+        ),
+        None => println!("{response}"),
+    }
     Ok(())
 }
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
-/// Advance the `created_at` counter off an observed head.
-fn next_timestamp(head: &Event) -> Result<Timestamp, CliError> {
-    head.created_at
+/// Choose the later of client wall clock and the instant after the observed head.
+///
+/// The relay remains authoritative for timestamp drift: a sufficiently future
+/// head can require a timestamp that the relay will temporarily reject.
+fn next_timestamp(head: &Event, now: Timestamp) -> Result<Timestamp, CliError> {
+    let after_head = head
+        .created_at
         .as_secs()
         .checked_add(1)
-        .map(Timestamp::from)
-        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))
+        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))?;
+    Ok(Timestamp::from(after_head.max(now.as_secs())))
 }
 
 /// Strip `auth` from a tag list and pass the resulting envelope through
@@ -165,10 +372,17 @@ pub async fn cmd_create(
     let caller_pubkey = client.keys().public_key().to_hex();
 
     // Expand and validate repo coordinates.
-    let members: Vec<ProjectMemberCoord> = repos
+    let mut members: Vec<ProjectMemberCoord> = repos
         .iter()
         .map(|r| expand_repo_coord(r, &caller_pubkey))
         .collect::<Result<Vec<_>, _>>()?;
+
+    if members.is_empty() && channel.is_none() {
+        return Err(CliError::Usage(
+            "pass --channel to create a default repository, or --repo to attach an existing one"
+                .into(),
+        ));
+    }
 
     // Dedupe: preserve first occurrence, reject duplicates with Usage.
     let mut seen = std::collections::HashSet::new();
@@ -203,11 +417,45 @@ pub async fn cmd_create(
             "project {slug:?} already exists; use 'buzz projects update' to modify it"
         )));
     }
+    if let Some(channel) = channel {
+        if let Some(existing) = fetch_projects_for_channel(client, channel)
+            .await?
+            .into_iter()
+            .find(|event| {
+                event.pubkey.to_hex().eq_ignore_ascii_case(&caller_pubkey)
+                    && !project_is_unlisted(event)
+            })
+        {
+            let existing_slug = project_slug(&existing).unwrap_or_else(|| slug.to_string());
+            return Err(CliError::Conflict(format!(
+                "you already own project {existing_slug:?} for channel {channel}; update that project instead"
+            )));
+        }
+    }
+
+    if members.is_empty() {
+        let home = channel.ok_or_else(|| {
+            CliError::Usage(
+                "pass --channel to create a default repository, or --repo to attach an existing one"
+                    .into(),
+            )
+        })?;
+        let repo_id = ensure_default_create_repo(client, slug, name, description, home).await?;
+        members.push(expand_repo_coord(&repo_id, &caller_pubkey)?);
+    }
 
     // ── Build via Layer B (enforces all writer policy) ────────────────────
     let builder = build_project(slug, name, description, &members, channel, visibility)
         .map_err(|e| CliError::Usage(e.to_string()))?;
-    submit_project(client, builder).await
+
+    // Slugs wider than the link charset stay linkless rather than emitting a
+    // `link` no client can parse.
+    submit_project(
+        client,
+        builder,
+        crate::links::is_linkable_dtag(slug).then_some(slug),
+    )
+    .await
 }
 
 /// `buzz projects get`
@@ -264,63 +512,10 @@ pub async fn cmd_add_repo(
     slug: &str,
     repos: &[String],
 ) -> Result<(), CliError> {
-    validate_project_slug(slug)?;
-    let caller_pubkey = client.keys().public_key().to_hex();
-
-    // ── Local validation before any .await ────────────────────────────────
-    let new_members: Vec<ProjectMemberCoord> = repos
-        .iter()
-        .map(|r| expand_repo_coord(r, &caller_pubkey))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Dedupe within this invocation: first occurrence wins, duplicate → Usage.
-    let mut seen = std::collections::HashSet::new();
-    for m in &new_members {
-        if !seen.insert(m.coord.clone()) {
-            return Err(CliError::Usage(format!(
-                "duplicate --repo coordinate in this invocation: {:?}",
-                m.coord
-            )));
-        }
-    }
-
-    // ── Network: fetch head ───────────────────────────────────────────────
-    let head = fetch_own_project(client, slug)
-        .await?
-        .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
-    let next_ts = next_timestamp(&head)?;
-
-    // Build the new tag set: keep existing tags (including hinted members),
-    // append new members only if not already present (by coordinate).
-    let mut tags: Vec<Tag> = head.tags.iter().cloned().collect();
-    let existing_coords: std::collections::HashSet<String> = head
-        .tags
-        .iter()
-        .filter(|t| tag_name(t) == Some("a"))
-        .filter_map(|t| tag_value(t).map(String::from))
-        .collect();
-    let mut added = 0usize;
-    for m in &new_members {
-        if !existing_coords.contains(m.coord.as_str()) {
-            let parts = m.to_tag_parts();
-            let parts_ref: Vec<&str> = parts.iter().map(String::as_str).collect();
-            tags.push(
-                Tag::parse(parts_ref.iter().copied())
-                    .map_err(|e| CliError::Other(format!("member tag construction failed: {e}")))?,
-            );
-            added += 1;
-        }
-    }
-
-    // All requested coordinates were already present — no change to publish.
-    if added == 0 {
-        return Err(CliError::Conflict(format!(
-            "all requested repositories are already members of project {slug:?}"
-        )));
-    }
-
-    let builder = rebuild_project(&head.content, tags, next_ts)?;
-    submit_project(client, builder).await
+    let raw = add_repos_to_own_project(client, slug, repos).await?;
+    let response = parse_write_response(&raw, "project changed concurrently; retry")?;
+    println!("{response}");
+    Ok(())
 }
 
 /// `buzz projects remove-repo`
@@ -342,7 +537,7 @@ pub async fn cmd_remove_repo(
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
-    let next_ts = next_timestamp(&head)?;
+    let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     // Verify all requested repos exist in the project.
     let existing_coords: std::collections::HashSet<String> = head
@@ -383,7 +578,7 @@ pub async fn cmd_remove_repo(
 
     // Single rebuild validates the full envelope and strips any remaining auth.
     let builder = rebuild_project(&head.content, tags, next_ts)?;
-    submit_project(client, builder).await
+    submit_project(client, builder, None).await
 }
 
 /// `buzz projects update`
@@ -434,7 +629,7 @@ pub async fn cmd_update(
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
-    let next_ts = next_timestamp(&head)?;
+    let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     // Build the new tag set. For each singleton metadata field:
     //   - setter present: replace value (strip old, append new)
@@ -484,14 +679,14 @@ pub async fn cmd_update(
     let builder = build_project_with_tags(&head.content, tags)
         .map_err(|e| CliError::Other(format!("envelope validation failed: {e}")))?
         .custom_created_at(next_ts);
-    submit_project(client, builder).await
+    submit_project(client, builder, None).await
 }
 
 /// `buzz projects delete`
 ///
 /// Head-based and verified:
 ///   1. Fetch own live head — `NotFound` if absent.
-///   2. Build tombstone at `head.created_at + 1`.
+///   2. Build tombstone at `max(client_now, head.created_at + 1)`.
 ///   3. Submit.
 ///   4. Re-query the coordinate; if a newer head survived → `Conflict`.
 pub async fn cmd_delete(client: &BuzzClient, slug: &str) -> Result<(), CliError> {
@@ -500,7 +695,7 @@ pub async fn cmd_delete(client: &BuzzClient, slug: &str) -> Result<(), CliError>
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
-    let next_ts = next_timestamp(&head)?;
+    let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     let pubkey_hex = client.keys().public_key().to_hex();
     let tombstone = build_delete_addressable(KIND_PROJECT, &pubkey_hex, slug)
@@ -522,6 +717,56 @@ pub async fn cmd_delete(client: &BuzzClient, slug: &str) -> Result<(), CliError>
 
     println!("{}", serde_json::json!({ "deleted": slug, "status": "ok" }));
     Ok(())
+}
+
+async fn ensure_default_create_repo(
+    client: &BuzzClient,
+    slug: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    channel: &str,
+) -> Result<String, CliError> {
+    let repo_id = repo_id_from_project_slug(slug)?;
+    if let Some(existing) = fetch_own_repo_announcement(client, &repo_id).await? {
+        require_repo_channel_binding(&existing, channel)?;
+        return Ok(repo_id);
+    }
+    let raw_name = name.unwrap_or(slug);
+    let display_name = truncate_repo_name(raw_name);
+    let builder = build_create_announcement(
+        &repo_id,
+        Some(&display_name),
+        description,
+        &[],
+        None,
+        &[],
+        Some(channel),
+    )?;
+    let event = client.sign_event(builder)?;
+    let raw = client.submit_event(event).await?;
+    let winner = fetch_own_repo_announcement(client, &repo_id).await?;
+    verify_default_repo_write(&raw, winner.as_ref(), channel)?;
+    Ok(repo_id)
+}
+
+pub(crate) fn verify_default_repo_write(
+    raw: &str,
+    winner: Option<&Event>,
+    channel: &str,
+) -> Result<(), CliError> {
+    match parse_write_response(
+        raw,
+        "default repository changed concurrently; checking the winning head",
+    ) {
+        Ok(_) | Err(CliError::Conflict(_)) => {}
+        Err(error) => return Err(error),
+    }
+    let winner = winner.ok_or_else(|| {
+        CliError::Conflict(
+            "default repository write was not authoritative; retry project creation".into(),
+        )
+    })?;
+    require_repo_channel_binding(winner, channel)
 }
 
 // ── Validation helpers ────────────────────────────────────────────────────────
@@ -578,6 +823,25 @@ pub async fn dispatch(cmd: crate::ProjectsCmd, client: &BuzzClient) -> Result<()
         ProjectsCmd::Get { slug, owner } => cmd_get(client, &slug, owner.as_deref()).await,
         ProjectsCmd::List { owner, limit } => cmd_list(client, owner.as_deref(), limit).await,
         ProjectsCmd::AddRepo { slug, repo } => cmd_add_repo(client, &slug, &repo).await,
+        ProjectsCmd::AddChannel {
+            home_channel,
+            name,
+            description,
+            visibility,
+            ttl,
+            template,
+        } => {
+            cmd_add_channel_draft(
+                client,
+                home_channel,
+                name,
+                description,
+                visibility.to_string(),
+                ttl,
+                template,
+            )
+            .await
+        }
         ProjectsCmd::RemoveRepo { slug, repo } => cmd_remove_repo(client, &slug, &repo).await,
         ProjectsCmd::Update {
             slug,
@@ -617,10 +881,225 @@ mod tests {
 
     use super::*;
 
+    async fn run_default_repo_create_race(
+        winning_channel: &str,
+    ) -> (Result<(), CliError>, Vec<u16>) {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let requested_channel = "11111111-1111-4111-8111-111111111111";
+        let keys = nostr::Keys::generate();
+        let winner = build_create_announcement(
+            "app",
+            Some("App"),
+            None,
+            &[],
+            None,
+            &[],
+            Some(winning_channel),
+        )
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+        let winner_json = serde_json::to_value(winner).unwrap();
+        let posted_kinds = Arc::new(Mutex::new(Vec::new()));
+        let server_kinds = posted_kinds.clone();
+        let repo_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_repo_queries = repo_queries.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 65_536];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let (status, body) = if request.starts_with("POST /query ") {
+                    let is_repo_query = request.contains("30617");
+                    let repo_query_index = is_repo_query.then(|| {
+                        server_repo_queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    });
+                    if repo_query_index == Some(1) {
+                        ("200 OK", serde_json::json!([winner_json]).to_string())
+                    } else {
+                        ("200 OK", "[]".to_string())
+                    }
+                } else if request.starts_with("POST /events ") {
+                    let json_start = request.find("\r\n\r\n").unwrap() + 4;
+                    let event: serde_json::Value =
+                        serde_json::from_str(&request[json_start..]).unwrap();
+                    let kind = event["kind"].as_u64().unwrap() as u16;
+                    server_kinds.lock().unwrap().push(kind);
+                    if kind == buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16 {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "event_id": event["id"], "accepted": true, "message": "duplicate"
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "event_id": event["id"], "accepted": true, "message": ""
+                            })
+                            .to_string(),
+                        )
+                    }
+                } else {
+                    ("404 Not Found", "{}".to_string())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = crate::client::BuzzClient::new(base_url, keys, None, None).unwrap();
+        let result = cmd_create(
+            &client,
+            "app",
+            &[],
+            Some("App"),
+            None,
+            Some(requested_channel),
+            None,
+        )
+        .await;
+        server.abort();
+        let kinds = posted_kinds.lock().unwrap().clone();
+        (result, kinds)
+    }
+
+    #[tokio::test]
+    async fn create_does_not_publish_project_after_default_repo_loses_to_foreign_home() {
+        let (result, posted_kinds) =
+            run_default_repo_create_race("22222222-2222-4222-8222-222222222222").await;
+
+        assert!(matches!(result, Err(CliError::Conflict(_))));
+        assert_eq!(
+            posted_kinds,
+            vec![buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16],
+            "the command must stop before publishing kind:30621"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_is_idempotent_when_dominated_default_repo_winner_matches_home() {
+        let (result, posted_kinds) =
+            run_default_repo_create_race("11111111-1111-4111-8111-111111111111").await;
+
+        result.expect("matching winning repo head permits project publication");
+        assert_eq!(
+            posted_kinds,
+            vec![
+                buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16,
+                buzz_core::kind::KIND_PROJECT as u16,
+            ]
+        );
+    }
+
     // ── Coordinate expansion ──────────────────────────────────────────────────
 
     const OWNER_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OWNER_B_HEX: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[tokio::test]
+    async fn project_lookup_scopes_the_production_query_before_the_global_bound() {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel = "11111111-1111-4111-8111-111111111111";
+        let request_body = Arc::new(Mutex::new(None));
+        let captured_body = request_body.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0; 65_536];
+            let read = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+            let body = request.split("\r\n\r\n").nth(1).unwrap().to_owned();
+            *captured_body.lock().unwrap() = Some(body);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+                )
+                .await
+                .unwrap();
+        });
+        let client =
+            crate::client::BuzzClient::new(base_url, nostr::Keys::generate(), None, None).unwrap();
+
+        let projects = fetch_projects_for_channel(&client, channel).await.unwrap();
+        assert!(projects.is_empty());
+        server.await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request_body.lock().unwrap().as_deref().unwrap()).unwrap();
+        assert_eq!(body[0]["#buzz-channel"], serde_json::json!([channel]));
+        assert_eq!(body[0]["kinds"], serde_json::json!([KIND_PROJECT]));
+    }
+
+    #[tokio::test]
+    async fn channel_scoping_prevents_unrelated_heads_from_consuming_the_bound() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel = "11111111-1111-4111-8111-111111111111";
+        let target = build_project("target", None, None, &[], Some(channel), None)
+            .unwrap()
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let decoy_channel = "22222222-2222-4222-8222-222222222222";
+        let decoys = ["decoy-a", "decoy-b"].map(|slug| {
+            build_project(slug, None, None, &[], Some(decoy_channel), None)
+                .unwrap()
+                .sign_with_keys(&nostr::Keys::generate())
+                .unwrap()
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0; 65_536];
+            let read = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+            let body = request.split("\r\n\r\n").nth(1).unwrap();
+            let filter: serde_json::Value = serde_json::from_str(body).unwrap();
+            let response_body = if filter[0]["#buzz-channel"] == serde_json::json!([channel]) {
+                serde_json::to_string(&[target]).unwrap()
+            } else {
+                serde_json::to_string(&decoys).unwrap()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client =
+            crate::client::BuzzClient::new(base_url, nostr::Keys::generate(), None, None).unwrap();
+
+        let projects = fetch_projects_for_channel_bounded(&client, channel, 1)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(project_slug(&projects[0]).as_deref(), Some("target"));
+    }
+
+    #[test]
+    fn project_channel_matching_ignores_unrelated_claims() {
+        let expected = "11111111-1111-4111-8111-111111111111";
+        let tags = make_head_tags(&[
+            make_test_tag(&["buzz-channel", "22222222-2222-4222-8222-222222222222"]),
+            make_test_tag(&["name", "Unrelated"]),
+        ]);
+        assert!(!project_tags_match_channel(tags.iter(), expected));
+
+        let tags = make_head_tags(&[make_test_tag(&["buzz-channel", expected])]);
+        assert!(project_tags_match_channel(tags.iter(), expected));
+    }
 
     #[test]
     fn expand_repo_coord_bare_expands_with_caller_pubkey() {
@@ -979,31 +1458,51 @@ mod tests {
 
     // ── next_timestamp ordering ───────────────────────────────────────────────
 
-    /// `next_timestamp` must return `head.created_at + 1` regardless of the wall
-    /// clock.  NIP-MP Deletion rule: a tombstone older than the live head does
-    /// NOT remove it, so we must advance strictly off the observed head — never
-    /// use wall-clock time, which could be behind a head that was bumped
-    /// multiple times in the same second.
-    #[test]
-    fn next_timestamp_returns_head_plus_one_when_head_is_ahead_of_wall_clock() {
-        // Build a minimal signed event with a created_at far in the future.
+    fn project_head_at(created_at: u64) -> Event {
         let keys = nostr::Keys::generate();
-        let far_future_ts = Timestamp::from(9_999_999_999u64); // year 2286
         let tags = vec![
             make_test_tag(&["d", "platform"]),
             make_test_tag(&["a", &format!("30617:{OWNER_HEX}:buzz")]),
         ];
-        let builder = rebuild_project("", tags, far_future_ts).expect("valid head envelope");
-        let head = builder.sign_with_keys(&keys).expect("sign");
-        // Verify the event actually has our future timestamp.
-        assert_eq!(head.created_at, far_future_ts);
+        rebuild_project("", tags, Timestamp::from(created_at))
+            .expect("valid head envelope")
+            .sign_with_keys(&keys)
+            .expect("sign")
+    }
 
-        // next_timestamp must return far_future + 1, not now().
-        let next = next_timestamp(&head).expect("no overflow");
-        assert_eq!(
-            next.as_secs(),
-            far_future_ts.as_secs() + 1,
-            "tombstone must be strictly after head, even when head is far in the future"
+    #[test]
+    fn next_timestamp_uses_later_of_wall_clock_and_after_head() {
+        let cases = [
+            ("stale head", 100, 1_000, 1_000),
+            ("head equal to now", 1_000, 1_000, 1_001),
+            ("future head", 1_500, 1_000, 1_501),
+            ("last timestamp inside future boundary", 1_899, 1_000, 1_900),
+            (
+                "future boundary cannot be dominated inside the window",
+                1_900,
+                1_000,
+                1_901,
+            ),
+        ];
+
+        for (name, head_ts, now, expected) in cases {
+            let head = project_head_at(head_ts);
+            let next = next_timestamp(&head, Timestamp::from(now)).expect("no overflow");
+
+            assert_eq!(next.as_secs(), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn next_timestamp_rejects_overflowing_head() {
+        let head = project_head_at(u64::MAX);
+
+        let err = next_timestamp(&head, Timestamp::from(1_000u64))
+            .expect_err("maximum timestamp cannot be advanced");
+
+        assert!(
+            matches!(err, CliError::Other(ref message) if message == "project timestamp cannot be advanced"),
+            "unexpected error: {err}"
         );
     }
 
@@ -1047,6 +1546,24 @@ mod tests {
         let keys = nostr::Keys::generate();
         crate::client::BuzzClient::new("http://127.0.0.1:9".into(), keys, None, None)
             .expect("client construction")
+    }
+
+    /// Creating without --repo or --channel must fail locally; the default
+    /// repository needs a home channel to bind as git ACL.
+    #[tokio::test]
+    async fn create_without_repo_or_channel_returns_usage_before_any_network_call() {
+        let client = discard_client();
+        let err = cmd_create(&client, "my-slug", &[], None, None, None, None)
+            .await
+            .expect_err("missing repo and channel must fail");
+        assert!(
+            matches!(err, CliError::Usage(_)),
+            "expected CliError::Usage, got {err:?}"
+        );
+        assert!(
+            format!("{err}").contains("--channel"),
+            "Usage message must mention --channel, got {err:?}"
+        );
     }
 
     /// Invalid visibility token must return Usage before touching the relay.

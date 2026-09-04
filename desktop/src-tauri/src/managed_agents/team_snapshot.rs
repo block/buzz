@@ -240,6 +240,8 @@ mod tests {
             instructions: None,
             persona_ids: vec![],
             is_builtin: false,
+            shared: false,
+            catalog_source: None,
             source_dir: None,
             is_symlink: false,
             symlink_target: None,
@@ -252,6 +254,7 @@ mod tests {
     /// Build a minimal `ManagedAgentRecord` for use as a team member.
     fn agent_record(name: &str) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            description: None,
             pubkey: format!("{name}-pubkey"),
             name: name.to_string(),
             display_name: Some(format!("{name} Display")),
@@ -283,6 +286,7 @@ mod tests {
             runtime_pid: None,
             backend: BackendKind::Local,
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -306,9 +310,11 @@ mod tests {
             source_team_persona_slug: Some("SENTINEL_SLUG".to_string()), // MUST NOT appear
             definition_respond_to: None,
             catalog_source: None,
+            team_catalog_source: None,
             definition_respond_to_allowlist: vec![],
             definition_parallelism: None,
             relay_mesh: None,
+            effort_level: None,
         }
     }
 

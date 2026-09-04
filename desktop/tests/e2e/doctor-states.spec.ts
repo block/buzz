@@ -161,7 +161,7 @@ test.describe("Doctor panel state screenshots", () => {
           ),
       ),
     );
-    expect(rowHeights[2]).toBeGreaterThan(rowHeights[0]);
+    expect(Math.abs(rowHeights[2] - rowHeights[0])).toBeLessThanOrEqual(1);
     const [gooseColors, codexColors] = await Promise.all(
       ["goose", "codex"].map((runtimeId) =>
         page.getByTestId(`doctor-runtime-${runtimeId}`).evaluate((element) => {
@@ -173,13 +173,19 @@ test.describe("Doctor panel state screenshots", () => {
         }),
       ),
     );
-    expect(codexColors).toEqual(gooseColors);
+    expect(codexColors.backgroundColor).toBe(gooseColors.backgroundColor);
+    for (const runtimeId of ["goose", "codex"]) {
+      await expect(page.getByTestId(`doctor-runtime-${runtimeId}`)).toHaveCSS(
+        "border-radius",
+        "0px",
+      );
+    }
     await expect(
       page
         .getByRole("heading", { name: "Agent runtimes", exact: true })
         .locator("..")
         .locator(".."),
-    ).toHaveCSS("align-items", "center");
+    ).toHaveCSS("align-items", "flex-end");
     for (const runtimeId of ["goose", "claude", "buzz-agent"]) {
       await expect(
         page.getByTestId(`doctor-runtime-menu-${runtimeId}`),
@@ -212,14 +218,12 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
       "CLI needed",
     );
-    await expect(
-      page.getByTestId("doctor-runtime-guidance-codex"),
-    ).toContainText("Buzz talks to Codex through the Codex CLI.");
-    await expect(
-      page
-        .getByTestId("doctor-runtime-guidance-codex")
-        .getByRole("button", { name: "CLI setup guide" }),
-    ).toBeVisible();
+    await expect(page.getByTestId("doctor-runtime-guidance-codex")).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("doctor-runtime-codex")).not.toContainText(
+      "Buzz talks to Codex through the Codex CLI.",
+    );
 
     await runtimeList.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
@@ -295,12 +299,7 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(row).not.toContainText("Not authenticated");
     await expect(row).not.toContainText("Run `codex login` to authenticate.");
-    await expect(row).toHaveCSS(
-      "height",
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => getComputedStyle(element).height),
-    );
+    await expect(row).toHaveCSS("min-height", "64px");
     await page.getByTestId("doctor-runtime-menu-codex").click();
     await expect(
       page.getByRole("menuitem", { name: "CLI setup guide" }),
@@ -642,12 +641,7 @@ test.describe("Doctor panel state screenshots", () => {
     );
     await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(row).not.toContainText("Not authenticated");
-    await expect(row).toHaveCSS(
-      "height",
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => getComputedStyle(element).height),
-    );
+    await expect(row).toHaveCSS("min-height", "64px");
     await page.getByTestId("doctor-runtime-menu-codex").click();
     await expect(
       page.getByRole("menuitem", { name: "Sign in with ChatGPT" }),
@@ -695,12 +689,7 @@ test.describe("Doctor panel state screenshots", () => {
     const row = page.getByTestId("doctor-runtime-claude");
     await expect(row).toBeVisible({ timeout: 10_000 });
     await expect(row).not.toContainText("Not authenticated");
-    await expect(row).toHaveCSS(
-      "height",
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => getComputedStyle(element).height),
-    );
+    await expect(row).toHaveCSS("min-height", "64px");
     await page.getByTestId("doctor-runtime-menu-claude").click();
     await expect(
       page.getByRole("menuitem", { name: "CLI setup guide" }),

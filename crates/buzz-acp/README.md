@@ -147,17 +147,31 @@ Controls which authors' events the harness forwards to the agent. Events from di
 | `anyone` | Forward all events (no author filtering). |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
 
+Relay-signed workflow messages delegate to their recorded owner only when they
+explicitly target this agent with authenticated workflow-mention provenance.
+The owner tag means that owner scheduled the workflow; it does not claim that
+the owner authored every word after template rendering. ACP verifies the
+provenance against the relay's NIP-11 `self` key, then evaluates the owner under
+the same author policy as ordinary messages. Legacy workflow messages and
+workflow output without an explicit agent mention remain attributed to the relay
+signer. `nobody` remains absolute.
+
 The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
 
 | Command | Effect |
 |---------|--------|
 | `!shutdown` | Gracefully exits the harness. |
-| `!cancel` | Cancels the current in-flight turn for that channel, if any. |
-| `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session. |
+| `!cancel` | Cancels the current in-flight turn for the command's resolved session scope, if any. |
+| `!rotate` | Rotates the ACP session for the command's resolved session scope. If a turn is in flight, it is cancelled and that scoped session is invalidated when the task returns; otherwise the cached scoped session is invalidated immediately. The next queued/received event in that scope starts a fresh session. |
 
-Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
+Under the default `channel` policy, a session scope is the whole channel, so these commands retain their channel-wide behavior. Under the `thread` policy, post the command as a reply in the target thread so `!cancel` or `!rotate` affects only that thread. DMs remain one conversation scope. `!cancel` is a no-op when its scope is idle.
 
-Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
+Owner control commands must be kind:9 stream messages from the owner, must have body exactly `!cancel`, `!rotate`, or `!shutdown` after trimming, and must mention this agent with a separate `p` tag. They are consumed by the harness instead of being forwarded to the agent. An inline `@Name` changes the body and does not match. With the Buzz CLI, target a thread while preserving the exact command body by passing the mention separately:
+
+```bash
+buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
+  --mention <agent-pubkey> --content '!cancel'
+```
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
 
@@ -269,7 +283,7 @@ Buzz Desktop supports registering any ACP-speaking agent tool as a selectable ru
 
 **Tier-1 — compiled-in runtimes** (Goose, Claude Code, Codex, Buzz Agent): have auto-installers, auth probes, and first-class onboarding. Their IDs (`goose`, `claude`, `codex`, `buzz-agent`) are reserved and cannot be overridden.
 
-**Tier-2 — preset catalog** (Cursor, Oh My Pi, Grok Build, OpenCode, Kimi Code, Amp, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
+**Tier-2 — preset catalog** (Cursor, Oh My Pi, Pi, Grok Build, OpenCode, Kimi Code, Amp, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery/presets.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
 
 > **Note — OpenClaw:** `openclaw acp` is a Gateway-backed bridge; PATH availability shows "Available" even when the OpenClaw Gateway daemon is not running. This is expected tier-2 semantics (same class as a preset with unconfigured auth). The Gateway URL is configured via `OPENCLAW_GATEWAY_URL` (or the equivalent env var from OpenClaw's docs) — set it in the agent's **env vars** in Edit Agent, not in the definition env (the preset definition carries no env entries). Note that `openclaw acp` executes tools inside the Gateway daemon, not the Desktop process, so Desktop-injected `BUZZ_*` env vars do NOT reach the execution locus unless you also set them on the Gateway's own environment.
 
@@ -313,10 +327,9 @@ Invalid files (bad JSON, unknown id, empty command) are skipped with a warning a
 To add a new runtime to the tier-2 gallery:
 
 1. **Verify the ACP entrypoint** from the vendor's own documentation — do not rely on a PR description alone. Test with the actual binary.
-2. **Add a `HarnessDefinition` entry** to the `PRESET_HARNESSES` slice in `desktop/src-tauri/src/managed_agents/discovery.rs`. Fill `id`, `label`, `command`, `args`, `install_instructions_url`, `install_hint`. Leave `env` empty unless the harness requires a specific env var to enable ACP mode.
-3. **Add the preset id to `BUILTIN_IDS`** in `desktop/src-tauri/src/managed_agents/custom_harnesses.rs` so custom JSON files cannot shadow it.
-4. **Add a bundled logo** (64×64 PNG or optimised SVG) to `desktop/public/harness-logos/<id>.png` and add a corresponding entry to `PRESET_LOGOS` in `desktop/src/features/onboarding/ui/RuntimeIcon.tsx`. Record the source and license in `desktop/public/harness-logos/CREDITS.md`. Only bundle a mark whose upstream license permits redistribution; skipping this step is caught by `presetLogos.test.mjs`, which asserts every `PRESET_HARNESSES` id has a mapped logo that exists on disk.
-5. Run `cargo test --lib` and `just desktop-typecheck` to verify everything compiles.
+2. **Add a `PresetHarness` entry** to the `PRESET_HARNESSES` slice in `desktop/src-tauri/src/managed_agents/discovery/presets.rs`. Fill `id`, `label`, `command`, `args`, `install_instructions_url`, `install_hint`, and `underlying_cli` when the command wraps a separately installed CLI. Preset ids are automatically reserved so custom JSON files cannot shadow them.
+3. **Add a bundled logo** (64×64 PNG or optimised SVG) to `desktop/public/harness-logos/<id>.png` and add a corresponding entry to `PRESET_LOGOS` in `desktop/src/features/onboarding/ui/RuntimeIcon.tsx`. Record the source and license in `desktop/public/harness-logos/CREDITS.md`. Only bundle a mark whose upstream license permits redistribution; skipping this step is caught by `presetLogos.test.mjs`, which asserts every `PRESET_HARNESSES` id has a mapped logo that exists on disk.
+4. Run `cargo test --lib` and `just desktop-typecheck` to verify everything compiles.
 
 The built-in `BUILTIN_IDS` set (`goose`, `claude`, `codex`, `buzz-agent`, and all current preset ids) is the reserved namespace; every other id is available for custom harnesses.
 

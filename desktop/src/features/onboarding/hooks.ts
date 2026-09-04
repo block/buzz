@@ -31,6 +31,11 @@ import {
   updateChannel,
 } from "@/shared/api/tauri";
 
+// Adapter: resolves the full channel list without the not-modified short-circuit.
+// Onboarding paths run once and always need fresh data.
+const getChannelsList = (): Promise<Channel[]> =>
+  getChannels(null).then((payload) => payload.channels ?? []);
+
 const STARTER_CHANNEL_SETUP_TOAST_ID = "starter-channel-setup-error";
 
 export type ChannelInitResult =
@@ -85,7 +90,7 @@ export async function initializeStarterChannels(
     try {
       starterChannels = await ensureStarterChannels({
         ensureStarterChannels: ensureStarterChannelsCommand,
-        getChannels,
+        getChannels: getChannelsList,
       });
     } catch (error) {
       // Public starter channels are optional. Owners may have deliberately
@@ -99,7 +104,7 @@ export async function initializeStarterChannels(
         createChannel,
         deleteChannel,
         getChannelMembers,
-        getChannels,
+        getChannels: getChannelsList,
         updateChannel,
       },
       {
@@ -163,7 +168,7 @@ async function refreshChannelsCache(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
   try {
-    queryClient.setQueryData(channelsQueryKey, await getChannels());
+    queryClient.setQueryData(channelsQueryKey, await getChannelsList());
   } catch {
     // The next mounted channels query can still retry; this cache refresh is
     // only here to avoid a blank Home flash after first-run setup.

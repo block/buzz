@@ -114,6 +114,10 @@ function storageKey(): string {
     : legacyStorageKey();
 }
 
+export function getDraftStoreScope(): string {
+  return storageKey();
+}
+
 function legacyStorageKey(): string {
   return `${LEGACY_DRAFT_STORE_KEY_PREFIX}:${currentPubkey}`;
 }

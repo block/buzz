@@ -5,23 +5,19 @@
 //! `close_window` item in both the File and Window submenus, and muda gives
 //! that item a Cmd+W key equivalent bound to `performClose:`.
 //!
-//! Two consequences, both wrong for Buzz:
+//! That default cannot express Buzz's context-dependent behavior:
 //!
 //! 1. `CloseRequested` on the main window is intercepted in `lib.rs` and turned
-//!    into hide-to-tray, so Cmd+W never closed a window -- it hid the whole
-//!    app. That is already redundant with Cmd+H (Hide), which stays.
+//!    into hide-to-tray. Cmd+W should take that path in normal Buzz mode.
 //! 2. macOS resolves a menu key equivalent before the webview receives any key
 //!    event, so Buzz Term could never bind Cmd+W to "close this terminal tab"
 //!    while the accelerator was claimed here.
 //!
 //! So this module builds the standard menu minus both `close_window` items.
-//! Everything else matches `Menu::default()` deliberately: the goal is to drop
-//! one item, not to design a menu.
-//!
-//! If hide-on-Cmd+W is ever wanted back in Buzz mode, the revisit path is to
-//! restore the item and disable it while the terminal owns input (a disabled
-//! item does not consume its key equivalent) -- at the cost of an owner->Rust
-//! IPC hop this approach does not need.
+//! Everything else matches `Menu::default()` deliberately. The webview routes
+//! Cmd+W conditionally instead: Buzz Term consumes it in capture phase while
+//! it owns input, and `useCloseWindowShortcut` closes the current window in
+//! normal Buzz mode.
 
 #[cfg(target_os = "macos")]
 use tauri::menu::{

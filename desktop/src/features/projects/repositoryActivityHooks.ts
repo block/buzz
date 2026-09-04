@@ -3,6 +3,7 @@ import * as React from "react";
 
 import {
   fetchRepositoryActivitySummaries,
+  PROJECT_ACTIVITY_STALE_TIME_MS,
   type Project,
 } from "@/features/projects/hooks";
 
@@ -27,6 +28,6 @@ export function useRepositoryActivitySummariesQuery(projects: Project[]) {
     enabled: repoAddresses.length > 0,
     queryKey: ["projects", "activity-summaries", "repositories", repoAddresses],
     queryFn: () => fetchRepositoryActivitySummaries(repositories),
-    staleTime: 30_000,
+    staleTime: PROJECT_ACTIVITY_STALE_TIME_MS,
   });
 }

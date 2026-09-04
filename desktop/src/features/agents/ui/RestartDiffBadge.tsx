@@ -88,8 +88,8 @@ function ChangeDescription({ change }: { change: RestartChange }) {
 const TOOLTIP_CAP = 6;
 
 /**
- * `tooltip` — renders inside the dark `bg-primary` tooltip; uses
- *   `text-primary-foreground` variants for contrast there.
+ * `tooltip` — renders inside the semantic secondary tooltip surface; uses
+ *   `text-secondary-foreground` variants for contrast there.
  * `inline`  — renders inside the amber Runtime banner or other light
  *   surfaces; inherits foreground from the container instead.
  */
@@ -107,10 +107,10 @@ function DiffList({
     cap !== undefined && entries.length > cap ? entries.length - cap : 0;
 
   const valueClass =
-    variant === "tooltip" ? "text-primary-foreground/80" : "text-foreground";
+    variant === "tooltip" ? "text-secondary-foreground/80" : "text-foreground";
   const overflowClass =
     variant === "tooltip"
-      ? "text-primary-foreground/60"
+      ? "text-secondary-foreground/60"
       : "text-muted-foreground";
 
   return (
@@ -180,7 +180,7 @@ export function RestartDiffBadge({
       <TooltipContent className="max-w-72 text-xs" side="bottom">
         <p className="mb-1.5 font-semibold">Config changed since last start:</p>
         <DiffList cap={TOOLTIP_CAP} entries={restartDiff} />
-        <p className="mt-1.5 text-primary-foreground/70">
+        <p className="mt-1.5 text-secondary-foreground/70">
           {autoRestartEnabled ? AUTO_RESTART_ON_BLURB : AUTO_RESTART_OFF_BLURB}
         </p>
       </TooltipContent>

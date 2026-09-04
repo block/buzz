@@ -45,6 +45,40 @@ pub(crate) fn apply_agent_display_env(command: &mut std::process::Command, title
     }
 }
 
+/// Env var carrying the startup replay floor to the harness. Shared with the
+/// provider deploy path (`commands::agents::provider_deploy`) so the local
+/// spawn and the remote `launch.policy_env` injection name the key from one
+/// place.
+pub(crate) const REPLAY_FLOOR_ENV_VAR: &str = "BUZZ_ACP_REPLAY_FLOOR";
+
+/// Apply the publish-first replay floor: inject [`REPLAY_FLOOR_ENV_VAR`] from
+/// `replay_floor_unix` (or leave the key untouched if `None`).
+///
+/// Must be called **after** `descriptor.env` is written so this send's floor
+/// wins over any user-supplied `BUZZ_ACP_REPLAY_FLOOR` entry — the same
+/// authority ordering [`super::apply_effort_env`] asserts for effort, and the
+/// same shadow strip `apply_replay_floor` performs on the provider payload's
+/// `launch.env` tier. Without it a persona/global/agent env entry would
+/// override the floor and the harness's startup watermark would be computed
+/// from a stale (or `now`-clamped future) value, missing the mention that
+/// triggered the spawn.
+///
+/// When `replay_floor_unix` is `None` there is no floor to assert; the key is
+/// left as `descriptor.env` wrote it, matching the provider path where a
+/// user-supplied `launch.env` value passes through on a floorless deploy. The
+/// caller strips the ambient parent-process value before the `descriptor.env`
+/// loop, so `None` never inherits a floor from the environment Desktop itself
+/// was launched with.
+pub(crate) fn apply_replay_floor_env(
+    command: &mut std::process::Command,
+    replay_floor_unix: Option<u64>,
+) {
+    if let Some(floor) = replay_floor_unix {
+        command.env(REPLAY_FLOOR_ENV_VAR, floor.to_string());
+    }
+    // None: no floor to assert — leave whatever descriptor.env wrote intact.
+}
+
 /// Resolve the session title for an agent: its `display_name` when it has one,
 /// otherwise its unique `name` handle. `None` when both are blank, so the
 /// caller clears the env var rather than exporting an empty title.
@@ -74,9 +108,91 @@ pub(crate) fn resolve_session_title(display_name: Option<&str>, name: &str) -> O
         .find(|value| !value.is_empty())
 }
 
+/// Build the `RUST_LOG` value forwarded to the agent child: keep an existing
+/// filter that already mentions `buzz_acp`, append `buzz_acp=info` to any other
+/// non-empty filter, and default to `buzz_acp=info` when unset.
+pub(crate) fn child_rust_log_filter() -> String {
+    match std::env::var("RUST_LOG") {
+        Ok(existing) if existing.contains("buzz_acp") => existing,
+        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
+        _ => "buzz_acp=info".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_session_title;
+    use super::{apply_replay_floor_env, resolve_session_title, REPLAY_FLOOR_ENV_VAR};
+
+    fn replay_floor_of(cmd: &std::process::Command) -> Option<String> {
+        cmd.get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(REPLAY_FLOOR_ENV_VAR))
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+    }
+
+    /// The publish-first floor must win over a persona/global/agent env entry
+    /// written by the `descriptor.env` loop. Before the post-loop application
+    /// the saved value shadowed the floor and the harness booted blind to the
+    /// mention that triggered the spawn.
+    #[test]
+    fn caller_replay_floor_wins_over_user_env_collision() {
+        let mut cmd = std::process::Command::new("true");
+        // Simulate the descriptor.env loop writing a saved user value.
+        cmd.env(REPLAY_FLOOR_ENV_VAR, "1");
+
+        apply_replay_floor_env(&mut cmd, Some(1_756_600_000));
+
+        assert_eq!(
+            replay_floor_of(&cmd).as_deref(),
+            Some("1756600000"),
+            "this send's floor must win over the user-supplied value"
+        );
+    }
+
+    /// No caller floor: the user value passes through, matching the provider
+    /// payload path where a floorless deploy leaves `launch.env` untouched.
+    #[test]
+    fn user_replay_floor_env_survives_when_no_caller_floor() {
+        let mut cmd = std::process::Command::new("true");
+        cmd.env(REPLAY_FLOOR_ENV_VAR, "1756600000");
+
+        apply_replay_floor_env(&mut cmd, None);
+
+        assert_eq!(
+            replay_floor_of(&cmd).as_deref(),
+            Some("1756600000"),
+            "a user-supplied floor must survive when the caller supplies none"
+        );
+    }
+
+    /// The ambient strip the spawn does before the `descriptor.env` loop must
+    /// stay stripped when neither the caller nor user env supplies a floor.
+    #[test]
+    fn removed_replay_floor_stays_removed_without_caller_floor() {
+        let mut cmd = std::process::Command::new("true");
+        // Simulate the spawn's pre-loop ambient strip with no user env entry.
+        cmd.env_remove(REPLAY_FLOOR_ENV_VAR);
+
+        apply_replay_floor_env(&mut cmd, None);
+
+        assert_eq!(
+            replay_floor_of(&cmd),
+            None,
+            "a floorless spawn must not inherit an ambient parent-process floor"
+        );
+    }
+
+    /// A caller floor re-asserts the key even after the pre-loop ambient strip
+    /// removed it — the common publish-first send with no saved user entry.
+    #[test]
+    fn caller_replay_floor_injected_after_ambient_strip() {
+        let mut cmd = std::process::Command::new("true");
+        cmd.env_remove(REPLAY_FLOOR_ENV_VAR);
+
+        apply_replay_floor_env(&mut cmd, Some(42));
+
+        assert_eq!(replay_floor_of(&cmd).as_deref(), Some("42"));
+    }
 
     #[test]
     fn resolve_session_title_prefers_display_name() {

@@ -44,7 +44,12 @@ export function DraggableChannelRow({
       ref={setNodeRef}
       {...attributes}
       {...listeners}
-      className={cn("touch-none", isDragging && "opacity-30")}
+      className={cn(
+        "touch-none transition-[opacity,transform] duration-100 ease-out motion-reduce:transition-none",
+        isDragging && "opacity-30",
+      )}
+      data-sidebar-draggable-channel
+      data-sidebar-drag-state={isDragging ? "dragging" : undefined}
     >
       {children}
     </div>
@@ -150,6 +155,8 @@ export function DragOverlayChannel({ name }: { name: string }) {
     <div
       data-buzz-flat
       className="flex cursor-grabbing items-center gap-2 rounded-md bg-sidebar px-2 py-1.5 text-sm text-sidebar-foreground opacity-90 shadow-lg ring-1 ring-sidebar-border"
+      data-sidebar-drag-overlay
+      data-testid="sidebar-channel-drag-overlay"
     >
       <Hash className="h-4 w-4 shrink-0 text-sidebar-foreground/60" />
       <span className="truncate">{name}</span>
@@ -162,6 +169,8 @@ export function DragOverlaySection({ name }: { name: string }) {
     <div
       data-buzz-flat
       className="flex cursor-grabbing items-center gap-1 rounded-md bg-sidebar px-2 py-1 text-xs font-medium uppercase tracking-wider text-sidebar-foreground/60 opacity-90 shadow-lg ring-1 ring-sidebar-border"
+      data-sidebar-drag-overlay
+      data-testid="sidebar-section-drag-overlay"
     >
       <span>{name}</span>
     </div>

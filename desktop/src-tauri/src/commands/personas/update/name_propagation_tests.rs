@@ -5,6 +5,7 @@ use super::*;
 
 fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        description: None,
         pubkey: format!("pubkey-{name}"),
         name: name.to_string(),
         persona_id: Some(persona_id.to_string()),
@@ -31,6 +32,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -54,10 +56,12 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
@@ -133,6 +137,52 @@ fn test_rename_only_affects_linked_persona() {
         records[1].name, "Paul",
         "unrelated persona's instance untouched"
     );
+}
+
+#[test]
+fn description_only_update_syncs_without_mutating_record_and_preserves_legacy_persona_avatar() {
+    let mut record = agent("persona-1", "Paul", Some("Paul"));
+    record.avatar_url = None;
+    record.slug = Some("persona-1".to_string());
+    let before = record.clone();
+    let mut persona = record
+        .clone()
+        .to_definition_view()
+        .expect("test record projects to a definition");
+    persona.id = "persona-1".to_string();
+    persona.avatar_url = Some("https://example.com/paul.png".to_string());
+
+    let update = prepare_linked_profile_update(&mut record, &persona, false, false, true);
+
+    assert!(update.profile_sync_required, "about-only edits must sync");
+    assert!(
+        !update.record_changed,
+        "about-only edits must not write the agent store"
+    );
+    assert_eq!(
+        record, before,
+        "description-only edits leave instance bytes untouched"
+    );
+    assert_eq!(
+        update.profile_avatar.as_deref(),
+        Some("https://example.com/paul.png"),
+        "complete kind:0 replacement must not clear a legacy agent avatar"
+    );
+}
+
+#[test]
+fn unchanged_identity_needs_neither_store_write_nor_profile_sync() {
+    let mut record = agent("persona-1", "Paul", Some("Paul"));
+    record.slug = Some("persona-1".to_string());
+    let persona = record
+        .clone()
+        .to_definition_view()
+        .expect("test record projects to a definition");
+
+    let update = prepare_linked_profile_update(&mut record, &persona, false, false, false);
+
+    assert!(!update.record_changed);
+    assert!(!update.profile_sync_required);
 }
 
 #[test]

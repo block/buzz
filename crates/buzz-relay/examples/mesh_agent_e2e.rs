@@ -112,10 +112,12 @@ async fn run() -> anyhow::Result<()> {
         Err(e) => record("P1 explicit-model chat", false, e.to_string()),
     }
 
-    // P2: auto — router picks the model.
+    // P2: the virtual `mesh` model — exactly what apply_relay_mesh_env now puts
+    // on the wire for shared compute. With one served model there is no
+    // committee, so this proves MeshLLM's degrade_to_single_model path.
     let r = agent_chat(
         &base,
-        "auto",
+        "mesh",
         None,
         "Reply with exactly one word: PONG",
         &[],
@@ -123,11 +125,15 @@ async fn run() -> anyhow::Result<()> {
     .await;
     match r {
         Ok(text) => record(
-            "P2 auto-model chat",
+            "P2 virtual-mesh chat (degrades to single model)",
             text.to_uppercase().contains("PONG"),
             text,
         ),
-        Err(e) => record("P2 auto-model chat", false, e.to_string()),
+        Err(e) => record(
+            "P2 virtual-mesh chat (degrades to single model)",
+            false,
+            e.to_string(),
+        ),
     }
 
     // P3: regression — an output budget no served model's context can hold
@@ -139,7 +145,7 @@ async fn run() -> anyhow::Result<()> {
     // GLM-4.7-Flash.
     let r = agent_chat(
         &base,
-        &served_id,
+        "mesh",
         Some("150000"),
         "Reply with exactly one word: PONG",
         &[],
@@ -169,7 +175,7 @@ async fn run() -> anyhow::Result<()> {
     );
     let mcp = vec![("dev".to_string(), repo_bin("buzz-dev-mcp")?)];
     let (r, marker) =
-        agent_chat_with_marker(&base, &served_id, None, &prompt, &mcp, &marker_name).await;
+        agent_chat_with_marker(&base, "mesh", None, &prompt, &mcp, &marker_name).await;
     let file_ok = std::fs::read_to_string(&marker)
         .map(|c| c.contains("BUZZ_OK"))
         .unwrap_or(false);
@@ -270,7 +276,9 @@ async fn agent_chat_in_isolated_home(
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
-        // Exactly the environment apply_relay_mesh_env() supplies.
+        // The transport subset of apply_relay_mesh_env(): provider, base URL,
+        // model, key, and chat API. Not BUZZ_AGENT_REQUIRE_REPLY, which needs
+        // Buzz's publish tools to mean anything.
         .env("BUZZ_AGENT_PROVIDER", "openai")
         .env("BUZZ_AGENT_MODEL", model)
         .env("OPENAI_COMPAT_BASE_URL", base)

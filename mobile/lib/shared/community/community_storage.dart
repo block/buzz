@@ -51,6 +51,7 @@ class CommunityStorage {
         relayUrl: legacyUrl,
         pubkey: legacyPubkey,
         nsec: legacyNsec,
+        sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
       );
 
       await _saveList([community]);

@@ -484,7 +484,7 @@ async fn execute_relay_admin_command(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 

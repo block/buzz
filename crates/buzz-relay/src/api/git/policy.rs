@@ -462,7 +462,7 @@ pub fn generate_hook_hmac(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
 
     fn make_request() -> HookCallbackRequest {

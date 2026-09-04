@@ -35,6 +35,41 @@ async function waitForMockLiveSubscription(page: Page, channelName: string) {
     .toBe(true);
 }
 
+async function emitMockMessage(
+  page: Page,
+  content: string,
+  parentEventId?: string,
+  createdAt?: number,
+  extraTags?: string[][],
+): Promise<string> {
+  const eventId = await page.evaluate(
+    ({ body, createdAt: timestamp, parent, tags }) => {
+      const event = (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            createdAt?: number;
+            parentEventId?: string;
+            extraTags?: string[][];
+          }) => { id?: string } | undefined;
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: body,
+        createdAt: timestamp,
+        parentEventId: parent,
+        extraTags: tags,
+      });
+      return event?.id ?? null;
+    },
+    { body: content, createdAt, parent: parentEventId, tags: extraTags },
+  );
+
+  if (!eventId) throw new Error("Expected mock message event id");
+  return eventId;
+}
+
 function imageImetaTag({
   dim,
   filename,
@@ -175,6 +210,68 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
     .first();
   await expectCornerRadiusPx(lightboxSurface, 16);
   await expectSmoothCorners(lightboxSurface);
+  await expect(page.getByRole("button", { name: "Zoom out" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Zoom in" })).toBeEnabled();
+
+  // Clicking the image zooms to the secondary level instead of dismissing the
+  // dialog, and the clicked image point remains under the cursor.
+  await waitForAnimations(page);
+  const lightboxImage = dialog.locator(`img[src*="${IMAGE_SHAS[0]}"]`);
+  const initialImageBox = await lightboxImage.boundingBox();
+  if (!initialImageBox) {
+    throw new Error("Expected lightbox image to have a layout box");
+  }
+  const clickPoint = {
+    x: initialImageBox.x + initialImageBox.width * 0.25,
+    y: initialImageBox.y + initialImageBox.height * 0.35,
+  };
+  await page.mouse.click(clickPoint.x, clickPoint.y);
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("175%", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Image zoom" })).toHaveValue(
+    "1.75",
+  );
+  await waitForAnimations(page);
+  const zoomedImageBox = await lightboxImage.boundingBox();
+  if (!zoomedImageBox) {
+    throw new Error("Expected zoomed lightbox image to have a layout box");
+  }
+  expect(zoomedImageBox.width).toBeCloseTo(initialImageBox.width * 1.75, 0);
+  expect(zoomedImageBox.height).toBeCloseTo(initialImageBox.height * 1.75, 0);
+  expect(
+    Math.abs(
+      zoomedImageBox.x + initialImageBox.width * 0.25 * 1.75 - clickPoint.x,
+    ),
+  ).toBeLessThan(2);
+  expect(
+    Math.abs(
+      zoomedImageBox.y + initialImageBox.height * 0.35 * 1.75 - clickPoint.y,
+    ),
+  ).toBeLessThan(2);
+
+  // A second image click toggles back to the centered 1× view.
+  await page.mouse.click(clickPoint.x, clickPoint.y);
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("100%", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Image zoom" })).toHaveValue(
+    "1",
+  );
+
+  await page.getByRole("button", { name: "Zoom in" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("115%", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Image zoom" })).toHaveValue(
+    "1.15",
+  );
+  await expect(
+    page.getByRole("slider", { name: "Image zoom" }),
+  ).toHaveAttribute("step", "0.15");
+  await page.getByRole("button", { name: "Zoom out" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("100%", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Image zoom" })).toHaveValue(
+    "1",
+  );
   await expect(
     page.getByRole("button", { name: "Previous image" }),
   ).toHaveCount(0);
@@ -254,6 +351,310 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
   expect(
     Math.abs(closingFrameStyle.height - currentThumbnailBox.height),
   ).toBeLessThan(2);
+});
+
+test("thread lightbox navigates images across messages", async ({ page }) => {
+  await installNoDimImageRoutes(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const threadTimestamp = Math.floor(Date.now() / 1000) - 10;
+  const rootId = await emitMockMessage(
+    page,
+    ["thread gallery root", `![root](${NO_DIM_WIDE_URL})`].join("\n"),
+    undefined,
+    threadTimestamp,
+  );
+  await emitMockMessage(
+    page,
+    ["thread gallery reply one", `![reply one](${NO_DIM_WIDE_URL})`].join("\n"),
+    rootId,
+    threadTimestamp + 1,
+  );
+  await emitMockMessage(
+    page,
+    ["thread gallery reply two", `![reply two](${NO_DIM_SECOND_URL})`].join(
+      "\n",
+    ),
+    rootId,
+    threadTimestamp + 2,
+  );
+
+  const threadSummary = page.locator(
+    `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
+  );
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+
+  const panel = page.getByTestId("message-thread-panel");
+  await expect(panel).toBeVisible();
+  const replies = panel.getByTestId("message-thread-replies");
+  const finalImage = replies
+    .getByTestId("message-row")
+    .filter({ hasText: "thread gallery reply two" })
+    .getByTestId("message-image-lightbox-trigger");
+  await finalImage.click();
+
+  const dialog = page.getByRole("dialog");
+  const position = dialog.getByRole("status");
+  await expect(dialog.locator(`img[src="${NO_DIM_SECOND_URL}"]`)).toBeVisible();
+  await expect(position).toHaveText("3 / 3");
+  await expect(position).toHaveAttribute("aria-label", "Image 3 of 3");
+  await expect(dialog.getByRole("button", { name: "Next image" })).toHaveCount(
+    0,
+  );
+
+  await page.keyboard.press("ArrowLeft");
+  await expect(dialog.getByRole("img", { name: "reply one" })).toBeVisible();
+  await expect(position).toHaveText("2 / 3");
+
+  const replyOneImage = replies
+    .getByTestId("message-row")
+    .filter({ hasText: "thread gallery reply one" })
+    .getByTestId("message-image-lightbox-trigger");
+  const replyOneThumbnailBox = await replyOneImage.locator("img").boundingBox();
+  if (!replyOneThumbnailBox) {
+    throw new Error("Expected duplicate reply thumbnail to have a layout box");
+  }
+  const lightboxFrame = page.locator("[data-image-lightbox-frame]");
+  await page.waitForTimeout(500);
+  await page.mouse.click(20, 20);
+  const closingFrameBox = await lightboxFrame.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) {
+      throw new Error("Expected HTML lightbox frame");
+    }
+    return {
+      height: Number.parseFloat(element.style.height),
+      left: Number.parseFloat(element.style.left),
+      top: Number.parseFloat(element.style.top),
+      width: Number.parseFloat(element.style.width),
+    };
+  });
+  expect(Math.abs(closingFrameBox.left - replyOneThumbnailBox.x)).toBeLessThan(
+    2,
+  );
+  expect(Math.abs(closingFrameBox.top - replyOneThumbnailBox.y)).toBeLessThan(
+    2,
+  );
+  expect(
+    Math.abs(closingFrameBox.width - replyOneThumbnailBox.width),
+  ).toBeLessThan(2);
+  expect(
+    Math.abs(closingFrameBox.height - replyOneThumbnailBox.height),
+  ).toBeLessThan(2);
+  await expect(dialog).toHaveCount(0);
+
+  await finalImage.click();
+  await expect(position).toHaveText("3 / 3");
+  await page.keyboard.press("ArrowLeft");
+  await expect(position).toHaveText("2 / 3");
+
+  await dialog.getByRole("button", { name: "Previous image" }).click();
+  await expect(dialog.getByRole("img", { name: "root" })).toBeVisible();
+  await expect(position).toHaveText("1 / 3");
+  await expect(
+    dialog.getByRole("button", { name: "Previous image" }),
+  ).toHaveCount(0);
+});
+
+test("thread gallery includes only currently rendered media", async ({
+  page,
+}) => {
+  await installNoDimImageRoutes(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const timestamp = Math.floor(Date.now() / 1000) - 10;
+  const rootId = await emitMockMessage(
+    page,
+    ["rendered gallery root", `![root](${NO_DIM_WIDE_URL})`].join("\n"),
+    undefined,
+    timestamp,
+  );
+  const branchId = await emitMockMessage(
+    page,
+    ["rendered branch", `![branch](${NO_DIM_PORTRAIT_URL})`].join("\n"),
+    rootId,
+    timestamp + 1,
+  );
+  await emitMockMessage(
+    page,
+    ["collapsed child", `![child](${NO_DIM_SECOND_URL})`].join("\n"),
+    branchId,
+    timestamp + 2,
+  );
+  await emitMockMessage(
+    page,
+    ["rendered sibling", `![sibling](${NO_DIM_WIDE_URL})`].join("\n"),
+    rootId,
+    timestamp + 3,
+  );
+
+  await page
+    .locator(
+      `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
+    )
+    .click();
+  const replies = page
+    .getByTestId("message-thread-panel")
+    .getByTestId("message-thread-replies");
+  await expect(
+    replies.getByTestId("message-row").filter({ hasText: "collapsed child" }),
+  ).toHaveCount(0);
+
+  await replies
+    .getByTestId("message-row")
+    .filter({ hasText: "rendered sibling" })
+    .getByTestId("message-image-lightbox-trigger")
+    .click();
+
+  const dialog = page.getByRole("dialog");
+  const position = dialog.getByRole("status");
+  await expect(position).toHaveText("3 / 3");
+  await dialog.getByRole("button", { name: "Previous image" }).click();
+  await expect(dialog.getByRole("img", { name: "branch" })).toBeVisible();
+  await expect(position).toHaveText("2 / 3");
+  await expect(dialog.getByRole("img", { name: "child" })).toHaveCount(0);
+});
+
+test("preview-first galleries retain Markdown image actions", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/6705";
+  await installMockBridge(page, {
+    uploadDescriptors: [
+      {
+        url: `http://localhost:3000/media/${IMAGE_SHAS[2]}.png`,
+        sha256: IMAGE_SHAS[2],
+        size: 3456,
+        type: "image/png",
+        uploaded: Math.floor(Date.now() / 1000),
+        dim: "140x140",
+        filename: "preview.png",
+      },
+    ],
+  });
+  await installNoDimImageRoutes(page);
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="140" height="140"><rect width="100%" height="100%" fill="#60a5fa"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.appearance.linkPreviewStyle", "rich");
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general");
+
+  const timestamp = Math.floor(Date.now() / 1000) - 10;
+  const rootId = await emitMockMessage(
+    page,
+    "preview action root",
+    undefined,
+    timestamp,
+  );
+  await emitMockMessage(
+    page,
+    [
+      `preview action reply ${previewUrl}`,
+      `![body image](${NO_DIM_WIDE_URL})`,
+    ].join("\n"),
+    rootId,
+    timestamp + 1,
+    [
+      [
+        "link-preview",
+        "snapshot",
+        "1",
+        previewUrl,
+        "Preview title",
+        "Example",
+        "Preview description",
+        `http://localhost:3000/media/${IMAGE_SHAS[2]}.png`,
+        IMAGE_SHAS[2],
+        "",
+        "",
+      ],
+    ],
+  );
+
+  await page
+    .locator(
+      `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
+    )
+    .click();
+  const reply = page
+    .getByTestId("message-thread-panel")
+    .getByTestId("message-row")
+    .filter({ hasText: "preview action reply" });
+  await reply.getByRole("button", { name: /Zoom image: Preview from/ }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("status")).toHaveText("2 / 2");
+  await dialog.getByRole("button", { name: "Previous image" }).click();
+  const bodyImage = dialog.getByRole("img", { name: "body image" });
+  await expect(bodyImage).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Download image" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("download_image");
+
+  await bodyImage.click({ button: "right" });
+  await dialog.getByRole("button", { name: "Copy image" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("copy_image_to_clipboard");
+});
+
+test("adjacent channel messages remain separate image galleries", async ({
+  page,
+}) => {
+  await installNoDimImageRoutes(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(
+    page,
+    ["separate gallery one", `![one](${NO_DIM_WIDE_URL})`].join("\n"),
+  );
+  await emitMockMessage(
+    page,
+    ["separate gallery two", `![two](${NO_DIM_PORTRAIT_URL})`].join("\n"),
+  );
+
+  const firstRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "separate gallery one" })
+    .last();
+  await firstRow.getByTestId("message-image-lightbox-trigger").click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("status")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Next image" })).toHaveCount(
+    0,
+  );
 });
 
 test("hidden spoiler images are excluded from gallery navigation until revealed", async ({

@@ -10,6 +10,7 @@ import type {
   ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import type { Channel } from "@/shared/api/types";
+import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ForumChannelContentProps = {
@@ -20,7 +21,10 @@ type ForumChannelContentProps = {
   onClosePost: () => void;
   onCloseProfilePanel: () => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
-  onOpenProfilePanel: (pubkey: string) => void;
+  onOpenProfilePanel: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
   onPanelResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onProfilePanelTabChange: (
     tab: ProfilePanelTab,
@@ -38,6 +42,8 @@ type ForumChannelContentProps = {
   profilePanelView: ProfilePanelView;
   selectedPostId: string | null;
   targetReplyId: string | null;
+  targetSearchMessageId?: string;
+  targetSearchQuery?: string;
 };
 
 /**
@@ -67,6 +73,8 @@ export function ForumChannelContent({
   profilePanelView,
   selectedPostId,
   targetReplyId,
+  targetSearchMessageId,
+  targetSearchQuery,
 }: ForumChannelContentProps) {
   return (
     <>
@@ -84,6 +92,8 @@ export function ForumChannelContent({
               onSelectPost={onSelectPost}
               selectedPostId={selectedPostId}
               targetReplyId={targetReplyId}
+              targetSearchMessageId={targetSearchMessageId}
+              targetSearchQuery={targetSearchQuery}
             />
           </React.Suspense>
         </section>
@@ -97,7 +107,6 @@ export function ForumChannelContent({
           >
             <React.Suspense fallback={null}>
               <UserProfilePanel
-                callerChannelId={channel.id}
                 currentPubkey={currentPubkey}
                 isSinglePanelView={false}
                 layout="split"

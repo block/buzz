@@ -16,6 +16,7 @@ fn inert_pipeline(cancel: Arc<AtomicBool>) -> TtsPipeline {
         tts_active: Arc::new(AtomicBool::new(false)),
         shutdown,
         cancel,
+        human_floor: HumanFloor::new(),
         voice_cancel: Arc::new(AtomicBool::new(false)),
         voice: Arc::new(std::sync::Mutex::new("reference_sample".to_string())),
         voice_generation: Arc::new(AtomicU64::new(1)),
@@ -24,6 +25,7 @@ fn inert_pipeline(cancel: Arc<AtomicBool>) -> TtsPipeline {
         speaker_cancel: Arc::new(std::sync::Mutex::new(None)),
         playback_probe: PlaybackProbe::new(),
         voice_change_ack: Arc::new(std::sync::Mutex::new(None)),
+        broadcasters: TtsBroadcasters::default(),
         thread: Some(thread),
     }
 }
@@ -169,6 +171,7 @@ fn an_in_hand_post_change_message_survives_cancellation() {
     ));
     text_tx
         .send(QueuedText {
+            floor_epoch: 0,
             generation: voice_generation.load(Ordering::Acquire),
             route_id: 1,
             speaker_pubkey: None,
@@ -183,6 +186,7 @@ fn an_in_hand_post_change_message_survives_cancellation() {
     let active = AtomicBool::new(true);
     let mut deferred_text = VecDeque::from([
         QueuedText {
+            floor_epoch: 0,
             generation: 1,
             route_id: 2,
             speaker_pubkey: None,
@@ -191,6 +195,7 @@ fn an_in_hand_post_change_message_survives_cancellation() {
             text: "old message".to_string(),
         },
         QueuedText {
+            floor_epoch: 0,
             generation: voice_generation.load(Ordering::Acquire),
             route_id: 3,
             speaker_pubkey: None,
@@ -250,6 +255,7 @@ fn superseding_voice_change_removes_earlier_deferred_messages() {
     )
     .expect("first voice change");
     deferred_text.push_back(QueuedText {
+        floor_epoch: 0,
         generation: voice_generation.load(Ordering::Acquire),
         route_id: 4,
         speaker_pubkey: None,
@@ -299,6 +305,7 @@ fn barge_in_clears_deferred_voice_change_messages() {
     let voice_change_ack = Arc::new(std::sync::Mutex::new(None));
     let (_text_tx, text_rx) = std::sync::mpsc::channel();
     let mut deferred_text = VecDeque::from([QueuedText {
+        floor_epoch: 0,
         generation: 2,
         route_id: 5,
         speaker_pubkey: None,
@@ -343,6 +350,7 @@ fn barge_in_during_a_voice_change_clears_post_change_messages() {
     )
     .expect("voice change");
     deferred_text.push_back(QueuedText {
+        floor_epoch: 0,
         generation: voice_generation.load(Ordering::Acquire),
         route_id: 6,
         speaker_pubkey: None,
@@ -375,6 +383,7 @@ fn a_sender_captured_before_voice_change_is_stale_even_if_it_sends_after_drain()
     let old_sender = TtsTextSender {
         text_tx,
         generation: voice_generation.load(Ordering::Acquire),
+        human_floor: HumanFloor::new(),
         speaker_generations: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     let shutdown = AtomicBool::new(false);

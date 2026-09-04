@@ -284,21 +284,25 @@ export function useUserProfileQuery(pubkey?: string) {
 
 // Per-pubkey resolution cache backing `useUsersBatchQuery`'s delta fetch.
 // `summary: null` records a relay-confirmed miss so unknown pubkeys aren't
-// re-requested every page. Entries older than the hook's 60s staleTime are
-// treated as unresolved and refetched.
-type UsersBatchEntry = {
+// re-requested every page. Entries older than the hook's 10-minute staleTime
+// are treated as unresolved and refetched.
+export type UsersBatchEntry = {
   summary: UserProfileSummary | null;
   fetchedAt: number;
 };
 
-const usersBatchEntryKey = (pubkey: string) => ["users-batch-entry", pubkey];
+export const usersBatchEntryKey = (pubkey: string) => [
+  "users-batch-entry",
+  pubkey,
+];
 
 /**
  * Drop the per-pubkey delta-fetch entries so the next `useUsersBatchQuery`
  * run re-fetches these profiles from the relay. Must be called anywhere a
  * specific profile (or a containing `users-batch` query) is invalidated —
  * otherwise the re-run resolves from the still-fresh-looking entry and
- * renders the stale name/avatar for up to the entry's 60s freshness window.
+ * renders the stale name/avatar for up to the entry's 10-minute freshness
+ * window.
  * Synchronous, so callers can evict before awaiting aggregate invalidations.
  */
 export function evictUsersBatchEntries(
@@ -348,7 +352,7 @@ export function useUsersBatchQuery(
         const entry = queryClient.getQueryData<UsersBatchEntry>(
           usersBatchEntryKey(pubkey),
         );
-        if (entry && now - entry.fetchedAt < 60_000) {
+        if (entry && now - entry.fetchedAt < 10 * 60_000) {
           if (entry.summary) profiles[pubkey] = entry.summary;
           else missing.push(pubkey);
         } else {
@@ -381,8 +385,21 @@ export function useUsersBatchQuery(
         relayUrl,
         normalizedPubkeys,
       ),
-    staleTime: 60_000,
+    staleTime: 10 * 60_000,
     gcTime: 5 * 60 * 1_000,
+    // Override the global defaults: a cold channel needs profiles to render
+    // correctly, so a single failed attempt must not leave raw npubs/broken
+    // mention chips until the user manually kicks the channel. Three attempts
+    // with exponential backoff cover the common transient-relay case.
+    //
+    // After the retry budget exhausts, a window-focus event recovers the
+    // query — but only when it is already in an error state. Gating on
+    // query.state.status === "error" prevents unnecessary refetches for
+    // successful batches on every focus event, which broke the profile-hover
+    // E2E smoke test when unconditional focus-refetch was set.
+    retry: 3,
+    retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 30_000),
+    refetchOnWindowFocus: (query) => query.state.status === "error",
   });
 
   // Seed individual "user-profile" cache entries so avatar clicks are instant

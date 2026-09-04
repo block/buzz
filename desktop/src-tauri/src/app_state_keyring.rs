@@ -7,7 +7,12 @@ fn dev_keyring_service(configured: Option<String>) -> String {
 }
 
 pub(crate) fn keyring_service() -> &'static str {
-    if cfg!(debug_assertions) {
+    if crate::build_identity::is_demo_build() {
+        static DEMO_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        DEMO_SERVICE
+            .get_or_init(|| crate::build_identity::keyring_service().into_owned())
+            .as_str()
+    } else if cfg!(debug_assertions) {
         static DEV_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         DEV_SERVICE
             .get_or_init(|| dev_keyring_service(std::env::var("BUZZ_DEV_KEYRING_SERVICE").ok()))

@@ -122,7 +122,10 @@ function PairingSteps({ step }: { step: PairingStep }) {
         />
         <div className="min-w-0 pt-0.5">
           <p className="text-base font-medium">Scan QR code</p>
-          <p className="mt-1 text-sm text-muted-foreground/80">
+          <p
+            className="mt-1 text-sm text-muted-foreground/70"
+            data-settings-subcopy
+          >
             Open Buzz on your mobile device and scan the code shown here.
           </p>
         </div>
@@ -136,7 +139,10 @@ function PairingSteps({ step }: { step: PairingStep }) {
         />
         <div className="min-w-0 pt-0.5">
           <p className="text-base font-medium">Confirm mobile code</p>
-          <p className="mt-1 text-sm text-muted-foreground/80">
+          <p
+            className="mt-1 text-sm text-muted-foreground/70"
+            data-settings-subcopy
+          >
             Check that the six-digit code matches on both devices, then confirm
             it.
           </p>
@@ -156,7 +162,10 @@ function PairingSteps({ step }: { step: PairingStep }) {
           <p className="text-base font-medium">
             {isPaired ? "Paired" : "Pair your mobile app"}
           </p>
-          <p className="mt-1 text-sm text-muted-foreground/80">
+          <p
+            className="mt-1 text-sm text-muted-foreground/70"
+            data-settings-subcopy
+          >
             {isPaired
               ? "Your mobile app is now connected to this relay."
               : "Your mobile app will connect after you confirm the code."}
@@ -398,6 +407,7 @@ export function MobilePairingCard({
       <SettingsOptionGroup
         className="w-full [container-type:inline-size]"
         data-testid="mobile-pairing-card"
+        surface="soft"
       >
         {/* Persistent polite live region. The pairing steps swap the QR view
             for the inline code confirmation asynchronously, and a screen

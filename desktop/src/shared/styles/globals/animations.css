@@ -186,9 +186,14 @@
   transform-origin: center;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .buzz-avatar-squish {
+    animation: none;
+  }
+}
+
 .buzz-shimmer {
   --buzz-shimmer-duration: 2600ms;
-  --buzz-shimmer-band: 250%;
   --buzz-shimmer-highlight: color-mix(
     in srgb,
     hsl(var(--background)) 60%,
@@ -196,49 +201,58 @@
   );
   --buzz-shimmer-spread: 2rem;
 
-  animation: buzz-shimmer var(--buzz-shimmer-duration) linear infinite;
-  background-clip: text;
-  background-image:
-    linear-gradient(
-      90deg,
-      transparent calc(50% - var(--buzz-shimmer-spread)),
-      var(--buzz-shimmer-highlight) 50%,
-      transparent calc(50% + var(--buzz-shimmer-spread))
-    ),
-    linear-gradient(hsl(var(--muted-foreground)), hsl(var(--muted-foreground)));
-  background-position:
-    100% 0,
-    0 0;
-  background-repeat: no-repeat;
-  background-size:
-    var(--buzz-shimmer-band) 100%,
-    100% 100%;
-  color: transparent;
+  color: hsl(var(--muted-foreground));
   display: inline-block;
+  position: relative;
+}
+
+/*
+ * The highlight lives on an aria-hidden overlay child that duplicates the
+ * label text and animates ONLY opacity. The previous implementation animated
+ * background-position under -webkit-background-clip: text, which WebKit
+ * cannot run on the compositor: every animation frame forced a full document
+ * style resolve + compositing-hierarchy walk, burning ~20% CPU at rest
+ * whenever a large timeline was mounted with a working agent. Opacity is
+ * compositor-accelerated: the layer paints once and the pulse runs outside
+ * the web process's main thread. A real element (not ::after generated
+ * content) is used so the duplicate text can be aria-hidden — pseudo-element
+ * text is inconsistently exposed to screen readers and cannot be hidden.
+ */
+.buzz-shimmer > .buzz-shimmer-overlay {
+  animation: buzz-shimmer var(--buzz-shimmer-duration) ease-in-out infinite;
+  background-clip: text;
+  background-image: linear-gradient(
+    90deg,
+    transparent calc(50% - var(--buzz-shimmer-spread)),
+    var(--buzz-shimmer-highlight) 50%,
+    transparent calc(50% + var(--buzz-shimmer-spread))
+  );
+  color: transparent;
+  inset: 0;
+  overflow: inherit;
+  padding: inherit;
+  position: absolute;
+  text-overflow: inherit;
+  white-space: inherit;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
 @keyframes buzz-shimmer {
-  0% {
-    background-position:
-      100% 0,
-      0 0;
+  0%,
+  100% {
+    opacity: 0;
   }
 
-  100% {
-    background-position:
-      0 0,
-      0 0;
+  50% {
+    opacity: 1;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .buzz-shimmer {
+  .buzz-shimmer > .buzz-shimmer-overlay {
     animation: none;
-    background: none;
-    color: hsl(var(--muted-foreground));
-    -webkit-text-fill-color: currentcolor;
+    display: none;
   }
 }
 

@@ -1,5 +1,10 @@
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 
 import {
   addChannelMembers,
@@ -27,31 +32,54 @@ import type {
   Channel,
   ChannelDetail,
   CreateChannelInput,
-  OpenDmInput,
   SetChannelPurposeInput,
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
+import type {
+  GetChannelsPayload,
+  OpenDmInput,
+} from "@/shared/api/tauriChannels";
+import { mergeConcurrentChannelRecency } from "@/features/channels/lib/channelRecencyMerge";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
 import {
-  readChannelSnapshot,
+  inspectChannelSnapshot,
+  type ChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
+import {
+  CHANNEL_MEMBERS_STALE_TIME_MS,
+  channelMembersQueryKey,
+} from "@/features/channels/rosterFreshness";
+import { dmVisibilityQueryKeyFor } from "@/features/channels/useHiddenDmIds";
 
 export const channelsQueryKey = ["channels"] as const;
+/** Keeps focused polling at the established one-minute cadence. */
+export const CHANNELS_REFETCH_INTERVAL_MS = 60_000;
+/** Suppresses the expensive focus refetch until the channel list is old. */
+export const CHANNELS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the channels query; consumed by focusRefetchPolicy.test.mjs. */
+export const channelsFocusRefetchPolicy = {
+  staleTime: CHANNELS_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: false,
+} as const;
+/**
+ * Authoritative server list/hash pair. Presentation mutations may patch
+ * `channelsQueryKey`, but may never change or be persisted with this hash.
+ */
+const channelsSnapshotPairKey = ["channels", "_snapshot-pair"] as const;
 const channelDetailQueryKey = (channelId: string) =>
   ["channels", channelId, "detail"] as const;
-const channelMembersQueryKey = (channelId: string) =>
-  ["channels", channelId, "members"] as const;
 const channelTypeOrder = {
   stream: 0,
   forum: 1,
   dm: 2,
 } as const;
 
-function sortChannels(channels: Channel[]) {
+export function sortChannels(channels: Channel[]) {
   const uniqueChannels = new Map<string, Channel>();
 
   for (const channel of channels) {
@@ -67,6 +95,73 @@ function sortChannels(channels: Channel[]) {
     }
 
     return left.name.localeCompare(right.name);
+  });
+}
+
+export const CHANNELS_SNAPSHOT_DIAGNOSTIC_MARK =
+  "buzz:sidebar:snapshot-diagnostic";
+export const CHANNELS_FULL_SIDEBAR_PAINT_MARK =
+  "buzz:sidebar:full-list-painted";
+export const CHANNELS_BOOT_TO_FULL_SIDEBAR_MEASURE =
+  "buzz:sidebar:boot-to-full-list-painted";
+
+const markedSnapshotKeys = new Set<string>();
+const measuredSidebarKeys = new Set<string>();
+const scheduledSidebarKeys = new Set<string>();
+
+function sidebarMeasurementKey(relayUrl: string, ownerPubkey: string): string {
+  return `${relayUrl}\u0000${ownerPubkey.toLowerCase()}`;
+}
+
+function markSnapshotDiagnostic(
+  relayUrl: string,
+  ownerPubkey: string,
+  diagnostics: ReturnType<typeof inspectChannelSnapshot>["diagnostics"],
+): void {
+  if (typeof performance === "undefined") return;
+  const key = sidebarMeasurementKey(relayUrl, ownerPubkey);
+  if (markedSnapshotKeys.has(key)) return;
+  markedSnapshotKeys.add(key);
+  performance.mark(CHANNELS_SNAPSHOT_DIAGNOSTIC_MARK, {
+    detail: { ...diagnostics, relayUrl },
+  });
+  console.info("[sidebar-perf] snapshot", { ...diagnostics, relayUrl });
+}
+
+function measureFullSidebarPaint(
+  relayUrl: string,
+  ownerPubkey: string,
+  channelCount: number,
+): void {
+  if (typeof performance === "undefined") return;
+  const key = sidebarMeasurementKey(relayUrl, ownerPubkey);
+  if (measuredSidebarKeys.has(key) || scheduledSidebarKeys.has(key)) return;
+  scheduledSidebarKeys.add(key);
+
+  // The channels have committed to the shared query cache; two animation frames
+  // put the mark after React's sidebar DOM commit and the browser's next paint.
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      scheduledSidebarKeys.delete(key);
+      if (measuredSidebarKeys.has(key)) return;
+      measuredSidebarKeys.add(key);
+      performance.mark(CHANNELS_FULL_SIDEBAR_PAINT_MARK, {
+        detail: { channelCount, relayUrl },
+      });
+      performance.measure(CHANNELS_BOOT_TO_FULL_SIDEBAR_MEASURE, {
+        detail: { channelCount, relayUrl },
+        duration: performance.now(),
+        start: 0,
+      });
+      const measure = performance
+        .getEntriesByName(CHANNELS_BOOT_TO_FULL_SIDEBAR_MEASURE)
+        .at(-1);
+      console.info("[sidebar-perf] full list painted", {
+        channelCount,
+        durationMs: measure?.duration,
+        relayUrl,
+      });
+    });
   });
 }
 
@@ -190,34 +285,226 @@ function setChannelArchivedState(
   );
 }
 
+/**
+ * Overlays `last_messages` timestamps onto channels without creating new object
+ * references for channels whose `lastMessageAt` is unchanged. Preserving
+ * references lets React Query's structural sharing skip re-renders for
+ * channels that received no new messages. Exported for unit testing.
+ */
+export function applyLastMessages(
+  channels: Channel[],
+  lastMessages: Record<string, string>,
+): Channel[] {
+  return channels.map((channel) => {
+    const newTs = lastMessages[channel.id] ?? null;
+    if (channel.lastMessageAt === newTs) {
+      return channel;
+    }
+    return { ...channel, lastMessageAt: newTs };
+  });
+}
+
+/**
+ * A failed identity read must disable persisted snapshots, not the live channel
+ * request. The backend still resolves its authoritative current identity.
+ */
+export function canFetchChannelsForIdentity(
+  ownerPubkey: string | null,
+  identityReadFailed: boolean,
+): boolean {
+  return ownerPubkey !== null || identityReadFailed;
+}
+
+/** A hashless retry must return a full list before it can become authoritative. */
+export function requireFullChannelList(channels: Channel[] | null): Channel[] {
+  if (channels === null) {
+    throw new Error("get_channels returned no list for a hashless request");
+  }
+  return channels;
+}
+
+export type RefreshChannelsQueryOptions = {
+  queryClient: QueryClient;
+  initialSnapshotPair: ChannelSnapshot | null;
+  relayUrl: string | null;
+  ownerPubkey: string | null;
+  fetchChannels?: (knownHash: string | null) => Promise<GetChannelsPayload>;
+  persistSnapshot?: typeof writeChannelSnapshot;
+};
+
+/**
+ * Revalidates the channel query while preserving live recency updates that land
+ * during the request. Exported so the production query/cache interleaving can
+ * be regression-tested without replacing it with a helper-only simulation.
+ */
+export async function refreshChannelsQuery({
+  queryClient,
+  initialSnapshotPair,
+  relayUrl,
+  ownerPubkey,
+  fetchChannels = getChannels,
+  persistSnapshot = writeChannelSnapshot,
+}: RefreshChannelsQueryOptions): Promise<Channel[]> {
+  // Revalidation uses only an authoritative list/hash pair. The displayed
+  // channels cache is intentionally ignored because successful mutations
+  // patch it before the relay's list/hash has necessarily caught up.
+  const cachedPair =
+    queryClient.getQueryData<ChannelSnapshot>(channelsSnapshotPairKey) ??
+    initialSnapshotPair;
+  const knownHash = cachedPair?.hash ?? null;
+
+  const channelsAtRequestStart =
+    queryClient.getQueryData<Channel[]>(channelsQueryKey);
+  const payload = await fetchChannels(knownHash);
+
+  // A not-modified response is usable only when it echoes the exact hash
+  // that described the available list. Any other hash/list pairing fails
+  // slow-never-wrong by retrying without a hash.
+  const hasMatchingNotModifiedResponse =
+    payload.channels === null &&
+    knownHash !== null &&
+    payload.hash === knownHash;
+  const pairChannels =
+    payload.channels ??
+    (hasMatchingNotModifiedResponse ? cachedPair?.channels : undefined);
+
+  if (!pairChannels) {
+    // Missing cache or a mismatched not-modified response: discard the hash
+    // and fetch a complete authoritative list before updating persistence.
+    const full = await fetchChannels(null);
+    const authoritativeChannels = sortChannels(
+      applyLastMessages(
+        requireFullChannelList(full.channels),
+        full.lastMessages,
+      ),
+    );
+    const displayedAtSettlement =
+      queryClient.getQueryData<Channel[]>(channelsQueryKey);
+    const sorted = sortChannels(
+      mergeConcurrentChannelRecency(
+        authoritativeChannels,
+        displayedAtSettlement,
+        channelsAtRequestStart,
+      ),
+    );
+    const pair = { channels: authoritativeChannels, hash: full.hash };
+    queryClient.setQueryData(channelsSnapshotPairKey, pair);
+    if (relayUrl && ownerPubkey) {
+      persistSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
+    }
+    return sorted;
+  }
+
+  const authoritativeChannels = sortChannels(
+    applyLastMessages(pairChannels, payload.lastMessages),
+  );
+  const pair = {
+    channels: authoritativeChannels,
+    hash: payload.hash,
+  };
+  queryClient.setQueryData(channelsSnapshotPairKey, pair);
+  // Merge against the displayed cache at settlement so a newer live
+  // timestamp cannot be rolled back by an older request result. This is
+  // required for both full-list and matching not-modified responses.
+  const displayedAtSettlement =
+    queryClient.getQueryData<Channel[]>(channelsQueryKey);
+  const refreshedForDisplay =
+    payload.channels === null
+      ? sortChannels(
+          applyLastMessages(
+            displayedAtSettlement ?? authoritativeChannels,
+            payload.lastMessages,
+          ),
+        )
+      : authoritativeChannels;
+  const sorted = sortChannels(
+    mergeConcurrentChannelRecency(
+      refreshedForDisplay,
+      displayedAtSettlement,
+      channelsAtRequestStart,
+    ),
+  );
+  if (relayUrl && ownerPubkey) {
+    persistSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
+  }
+  return sorted;
+}
+
 export function useChannelsQuery(options?: { enabled?: boolean }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? null;
+  // CommunityQueryProvider remounts its QueryClient for every community. Only
+  // the active identity may authorize a persisted snapshot: Community.pubkey
+  // is creation-time display metadata and can be stale after identity changes.
+  const identityQuery = useIdentityQuery();
+  const ownerPubkey = identityQuery.data?.pubkey ?? null;
+  const queryClient = useQueryClient();
+  const snapshotRead = React.useMemo(
+    () =>
+      relayUrl && ownerPubkey
+        ? inspectChannelSnapshot(relayUrl, ownerPubkey)
+        : null,
+    [ownerPubkey, relayUrl],
+  );
+  const snapshot = snapshotRead?.snapshot ?? null;
+  const initialSnapshotPair = React.useMemo(
+    () =>
+      snapshot
+        ? { channels: sortChannels(snapshot.channels), hash: snapshot.hash }
+        : null,
+    [snapshot],
+  );
+  React.useEffect(() => {
+    if (relayUrl && ownerPubkey && snapshotRead && options?.enabled !== false) {
+      markSnapshotDiagnostic(relayUrl, ownerPubkey, snapshotRead.diagnostics);
+    }
+  }, [options?.enabled, ownerPubkey, relayUrl, snapshotRead]);
+  const refetchInterval = useFocusedRefetchInterval(
+    CHANNELS_REFETCH_INTERVAL_MS,
+  );
 
-  return useQuery({
-    enabled: options?.enabled ?? true,
+  const query = useQuery({
+    enabled:
+      (options?.enabled ?? true) &&
+      relayUrl !== null &&
+      canFetchChannelsForIdentity(ownerPubkey, identityQuery.isError),
     queryKey: channelsQueryKey,
-    queryFn: async () => {
-      const channels = sortChannels(await getChannels());
-      if (relayUrl) {
-        writeChannelSnapshot(relayUrl, channels);
-      }
-      return channels;
-    },
-    // Paint the sidebar instantly from the last-known list for this relay, then
-    // revalidate. initialDataUpdatedAt:0 marks the seed as already-stale so the
-    // background refetch still fires immediately.
-    initialData: relayUrl
-      ? () => {
-          const snapshot = readChannelSnapshot(relayUrl);
-          return snapshot ? sortChannels(snapshot) : undefined;
-        }
-      : undefined,
+    queryFn: () =>
+      refreshChannelsQuery({
+        queryClient,
+        initialSnapshotPair,
+        relayUrl,
+        ownerPubkey,
+      }),
+    // Paint the complete persisted list immediately. `initialDataUpdatedAt: 0`
+    // deliberately keeps it stale so every boot still validates against the
+    // relay; queryFn reads the matching hash from the same atomic document.
+    initialData: initialSnapshotPair?.channels,
     initialDataUpdatedAt: 0,
-    staleTime: 60_000,
-    refetchInterval: 60_000,
-    refetchIntervalInBackground: false,
+    refetchInterval,
+    ...channelsFocusRefetchPolicy,
   });
+
+  React.useEffect(() => {
+    if (
+      relayUrl &&
+      ownerPubkey &&
+      query.isSuccess &&
+      query.fetchStatus === "idle" &&
+      query.dataUpdatedAt > 0
+    ) {
+      measureFullSidebarPaint(relayUrl, ownerPubkey, query.data.length);
+    }
+  }, [
+    query.data,
+    query.dataUpdatedAt,
+    query.fetchStatus,
+    query.isSuccess,
+    ownerPubkey,
+    relayUrl,
+  ]);
+
+  return query;
 }
 
 export function useCreateChannelMutation() {
@@ -244,6 +531,12 @@ export function useCreateChannelMutation() {
 
 export function useOpenDmMutation() {
   const queryClient = useQueryClient();
+  const { activeCommunity } = useCommunities();
+  const identityQuery = useIdentityQuery();
+  const dmVisibilityKey = dmVisibilityQueryKeyFor(
+    activeCommunity?.relayUrl,
+    identityQuery.data?.pubkey,
+  );
 
   return useMutation({
     mutationFn: (input: OpenDmInput) => openDm(input),
@@ -251,26 +544,39 @@ export function useOpenDmMutation() {
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
         upsertCachedChannel(current, openedChannel),
       );
+      queryClient.setQueryData<Set<string>>(dmVisibilityKey, (current) => {
+        const next = new Set(current);
+        next.delete(openedChannel.id);
+        return next;
+      });
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      // The relay-returned DM is already in the cache. Mark the list stale so
+      // the normal live/poll refresh can reconcile it later without putting a
+      // full get_channels round-trip on the critical path to the conversation.
+      void queryClient.invalidateQueries({
+        queryKey: channelsQueryKey,
+        refetchType: "none",
+      });
+      void queryClient.invalidateQueries({ queryKey: dmVisibilityKey });
     },
   });
 }
 
 /**
- * Waits for any active channel-list refresh to settle, then restores a
- * relay-returned channel to the shared cache before a caller depends on it for
- * navigation.
+ * Reasserts a relay-returned channel in the shared cache before a caller
+ * depends on it for navigation. The open-DM mutation already made the relay
+ * write authoritative, so cancel any older list read and stay local rather
+ * than blocking on a read-after-write channel-list refresh.
  */
 export function useUpsertCachedChannel() {
   const queryClient = useQueryClient();
 
   return React.useCallback(
     async (channel: Channel) => {
-      await queryClient.refetchQueries({
+      await queryClient.cancelQueries({
         queryKey: channelsQueryKey,
-        type: "active",
+        exact: true,
       });
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
         reconcileRefreshedCachedChannel(current, channel),
@@ -282,6 +588,12 @@ export function useUpsertCachedChannel() {
 
 export function useHideDmMutation() {
   const queryClient = useQueryClient();
+  const { activeCommunity } = useCommunities();
+  const identityQuery = useIdentityQuery();
+  const dmVisibilityKey = dmVisibilityQueryKeyFor(
+    activeCommunity?.relayUrl,
+    identityQuery.data?.pubkey,
+  );
 
   return useMutation({
     mutationFn: (channelId: string) => hideDm(channelId),
@@ -298,8 +610,16 @@ export function useHideDmMutation() {
         queryClient.setQueryData(channelsQueryKey, context.previous);
       }
     },
+    onSuccess: (_data, channelId) => {
+      queryClient.setQueryData<Set<string>>(dmVisibilityKey, (current) =>
+        new Set(current).add(channelId),
+      );
+    },
     onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: channelsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: dmVisibilityKey }),
+      ]);
     },
   });
 }
@@ -336,7 +656,7 @@ export function useChannelMembersQuery(
 
       return getChannelMembers(channelId);
     },
-    staleTime: 30_000,
+    staleTime: CHANNEL_MEMBERS_STALE_TIME_MS,
   });
 }
 
@@ -500,32 +820,6 @@ export function useDeleteChannelMutation(channelId: string | null) {
         queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
       ]);
     },
-  });
-}
-
-/**
- * Whether the signed-in identity may add *another* identity to this channel,
- * per {@link canAddChannelMembers}. Both queries are the ones the channel UI
- * already holds, so this shares their cache rather than fetching again.
- */
-export function useCanAddChannelMembers(channelId: string | null) {
-  const channelsQuery = useChannelsQuery();
-  const membersQuery = useChannelMembersQuery(channelId);
-  const identityQuery = useIdentityQuery();
-
-  const channel =
-    channelsQuery.data?.find((candidate) => candidate.id === channelId) ?? null;
-  const selfPubkey = identityQuery.data?.pubkey ?? null;
-  const selfRole = selfPubkey
-    ? (membersQuery.data?.find(
-        (member) => member.pubkey.toLowerCase() === selfPubkey.toLowerCase(),
-      )?.role ?? null)
-    : null;
-
-  return canAddChannelMembers({
-    channelType: channel?.channelType,
-    visibility: channel?.visibility,
-    selfRole,
   });
 }
 

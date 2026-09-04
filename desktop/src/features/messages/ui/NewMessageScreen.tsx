@@ -263,6 +263,11 @@ export function NewMessageScreen() {
           content,
           mentionPubkeys,
           mediaTags,
+          // A newly opened DM is not subscribed yet, so publish its first
+          // message through the acknowledged HTTP path. This avoids holding
+          // the entire navigation on a WebSocket OK frame that staging may
+          // never deliver.
+          transport: "http",
         });
       } catch (error) {
         preparedDirectMessageRef.current = null;

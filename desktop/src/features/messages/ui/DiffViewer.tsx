@@ -2,6 +2,8 @@ import { Diff, Hunk, type ViewType } from "react-diff-view";
 import "react-diff-view/style/index.css";
 import { useMemo } from "react";
 
+import { buildSearchResultPreview } from "@/features/search/lib/searchMatch";
+import { HighlightedSearchText } from "@/features/search/ui/HighlightedSearchText";
 import {
   countDiffFileChanges,
   DIFF_TYPE_LABELS,
@@ -18,6 +20,7 @@ type DiffViewerProps = {
   fallbackFilePath?: string;
   viewType?: ViewType;
   className?: string;
+  searchQuery?: string;
 };
 
 function FileChangeBadge({
@@ -46,16 +49,20 @@ export function DiffViewer({
   fallbackFilePath,
   viewType = "unified",
   className,
+  searchQuery,
 }: DiffViewerProps) {
   const { files, parseError } = useMemo(
     () => parseUnifiedDiff(content),
     [content],
   );
+  const searchPreview = searchQuery
+    ? buildSearchResultPreview(content, searchQuery, 160)
+    : null;
 
   if (parseError) {
     return (
       <pre className="p-3 whitespace-pre-wrap font-mono text-xs text-muted-foreground">
-        {content}
+        <HighlightedSearchText query={searchQuery ?? ""} text={content} />
       </pre>
     );
   }
@@ -70,6 +77,17 @@ export function DiffViewer({
 
   return (
     <div className={cn("buzz-diff-theme", className)}>
+      {searchPreview ? (
+        <pre
+          className="mb-3 whitespace-pre-wrap rounded-lg bg-muted/35 p-2 font-mono text-xs text-muted-foreground"
+          data-testid="diff-search-preview"
+        >
+          <HighlightedSearchText
+            query={searchQuery ?? ""}
+            text={searchPreview}
+          />
+        </pre>
+      ) : null}
       <div className="space-y-3">
         {files.map((file) => {
           const label = getDiffFileLabel(file, fallbackFilePath);

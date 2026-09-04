@@ -20,14 +20,18 @@ import {
 
 type WorkflowDetailPanelProps = {
   workflowId: string;
-  onClose: () => void;
-  onEdit: (workflow: Workflow) => void;
+  onClose?: () => void;
+  onEdit?: (workflow: Workflow) => void;
+  showDefinition?: boolean;
+  showHeader?: boolean;
 };
 
 export function WorkflowDetailPanel({
   workflowId,
   onClose,
   onEdit,
+  showDefinition = true,
+  showHeader = true,
 }: WorkflowDetailPanelProps) {
   const workflowQuery = useWorkflowQuery(workflowId);
   const runsQuery = useWorkflowRunsQuery(workflowId);
@@ -44,6 +48,16 @@ export function WorkflowDetailPanel({
     ? getWorkflowTriggerSummary(workflow.definition)
     : null;
   const workflowStatus = workflow ? getWorkflowDisplayStatus(workflow) : null;
+  const triggerError = errorMessage(
+    triggerMutation.error,
+    "The relay did not create a workflow run.",
+  );
+  const runsError = errorMessage(
+    runsQuery.error,
+    "Run history could not be loaded.",
+  );
+  const selectedRunIsPendingHistory =
+    selectedRunId !== null && !runs.some((run) => run.id === selectedRunId);
 
   async function handleTrigger() {
     try {
@@ -56,70 +70,86 @@ export function WorkflowDetailPanel({
 
   return (
     <div
-      className="flex h-full flex-col border-l bg-background pt-4"
+      className={
+        showHeader
+          ? "flex h-full flex-col border-l bg-background pt-4"
+          : "flex h-full flex-col"
+      }
       data-testid="workflow-detail-panel"
     >
-      <div className="flex items-center justify-between border-b px-4 py-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            {workflow ? (
-              <h3 className="truncate text-sm font-semibold">
-                {workflow.name}
-              </h3>
-            ) : (
-              <Skeleton className="h-4 w-36" />
-            )}
-            {workflowStatus ? <RunStatusBadge status={workflowStatus} /> : null}
+      {showHeader ? (
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              {workflow ? (
+                <h3 className="truncate text-sm font-semibold">
+                  {workflow.name}
+                </h3>
+              ) : (
+                <Skeleton className="h-4 w-36" />
+              )}
+              {workflowStatus ? (
+                <RunStatusBadge status={workflowStatus} />
+              ) : null}
+            </div>
+            {workflowDescription ? (
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {workflowDescription}
+              </p>
+            ) : workflowQuery.isLoading ? (
+              <Skeleton className="mt-1 h-3 w-full max-w-64" />
+            ) : null}
+            {triggerSummary ? (
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {triggerSummary}
+              </p>
+            ) : workflowQuery.isLoading ? (
+              <Skeleton className="mt-1 h-3 w-40" />
+            ) : null}
           </div>
-          {workflowDescription ? (
-            <p className="mt-1 truncate text-xs text-muted-foreground">
-              {workflowDescription}
-            </p>
-          ) : workflowQuery.isLoading ? (
-            <Skeleton className="mt-1 h-3 w-full max-w-64" />
-          ) : null}
-          {triggerSummary ? (
-            <p className="mt-1 truncate text-xs text-muted-foreground">
-              {triggerSummary}
-            </p>
-          ) : workflowQuery.isLoading ? (
-            <Skeleton className="mt-1 h-3 w-40" />
-          ) : null}
-        </div>
-        <div className="flex items-center gap-1">
-          {workflow ? (
+          <div className="flex items-center gap-1">
+            {workflow && onEdit ? (
+              <Button
+                onClick={() => onEdit(workflow)}
+                size="sm"
+                variant="outline"
+              >
+                <Pencil className="mr-1 h-4 w-4" />
+                Edit
+              </Button>
+            ) : null}
             <Button
-              onClick={() => onEdit(workflow)}
+              disabled={triggerMutation.isPending || workflowQuery.isLoading}
+              onClick={() => void handleTrigger()}
               size="sm"
               variant="outline"
             >
-              <Pencil className="mr-1 h-4 w-4" />
-              Edit
+              <Play className="mr-1 h-4 w-4" />
+              {triggerMutation.isPending ? "Triggering..." : "Trigger"}
             </Button>
-          ) : null}
-          <Button
-            disabled={triggerMutation.isPending || workflowQuery.isLoading}
-            onClick={() => void handleTrigger()}
-            size="sm"
-            variant="outline"
-          >
-            <Play className="mr-1 h-4 w-4" />
-            {triggerMutation.isPending ? "Triggering..." : "Trigger"}
-          </Button>
-          <Button
-            aria-label="Close detail panel"
-            onClick={onClose}
-            size="icon"
-            variant="ghost"
-          >
-            <X className="h-4 w-4" />
-          </Button>
+            {onClose ? (
+              <Button
+                aria-label="Close detail panel"
+                onClick={onClose}
+                size="icon"
+                variant="ghost"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {triggerMutation.isError ? (
-        <div className="border-b px-4 py-2 text-xs text-red-400">
-          Failed to trigger workflow
+        <div
+          className="border-b px-4 py-2 text-xs text-destructive"
+          role="alert"
+        >
+          <p className="font-medium">Failed to trigger workflow</p>
+          <p className="mt-1 break-words text-muted-foreground">
+            {triggerError}
+          </p>
         </div>
       ) : null}
 
@@ -128,21 +158,59 @@ export function WorkflowDetailPanel({
         data-scroll-restoration-id={`workflow-detail:${workflowId}`}
       >
         {workflow ? (
-          <div className="space-y-4 p-4">
-            <div>
-              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Definition
-              </h4>
-              <pre className="max-h-64 overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs leading-relaxed">
-                {JSON.stringify(workflow.definition, null, 2)}
-              </pre>
-            </div>
+          <div
+            className={
+              showHeader ? "space-y-4 p-4" : "space-y-4 px-5 pb-5 pt-2"
+            }
+          >
+            {showDefinition ? (
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Definition
+                </h4>
+                <pre className="max-h-64 overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs leading-relaxed">
+                  {JSON.stringify(workflow.definition, null, 2)}
+                </pre>
+              </div>
+            ) : null}
 
             <div>
-              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Run History
-              </h4>
-              {runs.length === 0 ? (
+              {showHeader ? (
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Run History
+                </h4>
+              ) : null}
+              {runsQuery.isError ? (
+                <div
+                  className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                  role="alert"
+                >
+                  <p className="font-medium">Failed to load run history</p>
+                  <p className="mt-1 break-words">{runsError}</p>
+                </div>
+              ) : runsQuery.isLoading ? (
+                <div
+                  className="space-y-2"
+                  aria-label="Loading run history"
+                  role="status"
+                >
+                  <Skeleton className="h-16 w-full rounded-xl" />
+                </div>
+              ) : selectedRunIsPendingHistory ? (
+                <div
+                  className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs"
+                  data-testid="workflow-run-created"
+                  role="status"
+                >
+                  <p className="font-medium">Run created</p>
+                  <p className="mt-1 break-all font-mono text-muted-foreground">
+                    {selectedRunId}
+                  </p>
+                  <p className="mt-1 text-muted-foreground">
+                    Waiting for its persisted trace…
+                  </p>
+                </div>
+              ) : runs.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No runs yet.</p>
               ) : (
                 <div className="space-y-2">
@@ -151,6 +219,10 @@ export function WorkflowDetailPanel({
                     const duration = formatRunDuration(
                       run.startedAt,
                       run.completedAt,
+                    );
+                    const failureReason = workflowRunFailureReason(
+                      run.errorCode,
+                      run.errorMessage,
                     );
 
                     return (
@@ -205,9 +277,9 @@ export function WorkflowDetailPanel({
                                   </span>
                                 ) : null}
                               </div>
-                              {run.errorMessage ? (
+                              {failureReason ? (
                                 <p className="mt-2 break-words pl-6 text-xs text-destructive">
-                                  {run.errorMessage}
+                                  {failureReason}
                                 </p>
                               ) : null}
                             </div>
@@ -247,7 +319,11 @@ export function WorkflowDetailPanel({
             <p className="text-sm text-red-400">Failed to load workflow</p>
           </div>
         ) : (
-          <div className="space-y-4 p-4">
+          <div
+            className={
+              showHeader ? "space-y-4 p-4" : "space-y-4 px-5 pb-5 pt-2"
+            }
+          >
             <div>
               <Skeleton className="mb-2 h-4 w-28" />
               <Skeleton className="h-40 w-full rounded-xl" />
@@ -264,6 +340,30 @@ export function WorkflowDetailPanel({
       </div>
     </div>
   );
+}
+
+function workflowRunFailureReason(
+  errorCode: string | null,
+  diagnostic: string | null,
+) {
+  if (diagnostic?.trim()) return diagnostic;
+  if (!errorCode) return null;
+  const knownReasons: Record<string, string> = {
+    approval_denied: "Approval was denied.",
+    approval_expired: "Approval expired before the workflow could continue.",
+    external_outcome_unknown:
+      "The external action may have completed, but its outcome could not be confirmed.",
+    run_interrupted: "The run was interrupted before it could finish.",
+  };
+  return (
+    knownReasons[errorCode] ?? `Run failed (${errorCode.replace(/_/g, " ")}).`
+  );
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.trim().length > 0
+    ? error.message
+    : fallback;
 }
 
 function formatRunDuration(

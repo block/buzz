@@ -37,6 +37,7 @@ type DefaultConfigStepProps = {
   actions: DefaultConfigStepActions;
   direction: OnboardingTransitionDirection;
   draft: DefaultConfigDraft | null;
+  onSavingChange?: (isSaving: boolean) => void;
   readyRuntimeIds: readonly string[];
 };
 
@@ -305,6 +306,7 @@ export function DefaultConfigStep({
   actions,
   direction,
   draft,
+  onSavingChange,
   readyRuntimeIds,
 }: DefaultConfigStepProps) {
   const [persistenceState, setPersistenceState] = React.useState<{
@@ -313,6 +315,11 @@ export function DefaultConfigStep({
   }>({ canComplete: false, commit: () => Promise.resolve() });
   const [isSaving, setIsSaving] = React.useState(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    onSavingChange?.(isSaving);
+    return () => onSavingChange?.(false);
+  }, [isSaving, onSavingChange]);
 
   const handleComplete = React.useCallback(async () => {
     if (isSaving) return;
@@ -369,38 +376,24 @@ export function DefaultConfigStep({
       </div>
 
       <OnboardingFooter>
-        {/* Keep Next centered while the optional action sits beside it. */}
-        <div className="relative flex items-center justify-center">
-          <Button
-            className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
-            data-testid="onboarding-finish"
-            disabled={!persistenceState.canComplete || isSaving}
-            onClick={() => void handleComplete()}
-            type="button"
-          >
-            {isSaving ? "Saving…" : "Next"}
-          </Button>
-          <Button
-            className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 text-sm fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
-            data-testid="onboarding-config-skip"
-            disabled={isSaving}
-            onClick={handleSkip}
-            type="button"
-            variant="ghost"
-          >
-            Skip for now
-          </Button>
-        </div>
-
         <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
-          data-testid="onboarding-back"
+          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
+          data-testid="onboarding-finish"
+          disabled={!persistenceState.canComplete || isSaving}
+          onClick={() => void handleComplete()}
+          type="button"
+        >
+          {isSaving ? "Saving…" : "Next"}
+        </Button>
+        <Button
+          className="h-9 whitespace-nowrap rounded-full px-6 text-sm hover:bg-foreground/10"
+          data-testid="onboarding-config-skip"
           disabled={isSaving}
-          onClick={actions.back}
+          onClick={handleSkip}
           type="button"
           variant="ghost"
         >
-          Back
+          Skip for now
         </Button>
 
         {saveError ? (
@@ -412,12 +405,6 @@ export function DefaultConfigStep({
             Couldn’t save model settings. {saveError} Try again.
           </p>
         ) : null}
-
-        <p className="text-xs text-foreground/50">
-          Configure default models in{" "}
-          <span className="text-foreground/70">Settings → Agents</span> after
-          setup.
-        </p>
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );

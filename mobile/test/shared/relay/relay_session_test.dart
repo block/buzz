@@ -105,6 +105,91 @@ void main() {
     );
   });
 
+  test('queryRelay rotates the client after a timeout', () async {
+    final clients = <_ControlledHttpClient>[];
+    final session = RelaySessionNotifier(
+      httpClientFactory: () {
+        final client = _ControlledHttpClient();
+        clients.add(client);
+        return client;
+      },
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(
+            baseUrl: 'https://relay.example',
+            nsec: nostr.Keys.generate().nsec,
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    await expectLater(
+      session.queryRelay(const [], timeout: Duration.zero),
+      throwsA(isA<TimeoutException>()),
+    );
+    expect(clients.single.closed, isTrue);
+
+    final nextQuery = session.queryRelay(const []);
+    expect(clients, hasLength(2));
+    clients.last.complete(http.Response('[]', 200));
+
+    expect(await nextQuery, isEmpty);
+    expect(clients.last.closed, isFalse);
+  });
+
+  test(
+    'queryRelay defers closing a timed-out client until peer queries finish',
+    () async {
+      final clients = <_QueuedControlledHttpClient>[];
+      final session = RelaySessionNotifier(
+        httpClientFactory: () {
+          final client = _QueuedControlledHttpClient();
+          clients.add(client);
+          return client;
+        },
+      );
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              nsec: nostr.Keys.generate().nsec,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      await Future<void>.delayed(Duration.zero);
+
+      final timedOutQuery = session.queryRelay(
+        const [],
+        timeout: const Duration(milliseconds: 10),
+      );
+      final peerQuery = session.queryRelay(const []);
+      expect(clients.single.requestCount, 2);
+
+      await expectLater(timedOutQuery, throwsA(isA<TimeoutException>()));
+      expect(clients.single.closed, isFalse);
+
+      final nextQuery = session.queryRelay(const []);
+      expect(clients, hasLength(2));
+      clients.first.complete(1, http.Response('[]', 200));
+      expect(await peerQuery, isEmpty);
+      expect(clients.first.closed, isTrue);
+
+      clients.last.complete(0, http.Response('[]', 200));
+      expect(await nextQuery, isEmpty);
+      expect(clients.last.closed, isFalse);
+    },
+  );
+
   test('queryRelay arms the rate-limit gate from a 429 retry hint', () async {
     final gateTimers = <_ManualTimer>[];
     final gate = RelayRateLimitGate(
@@ -664,6 +749,61 @@ void main() {
     },
   );
 
+  test('retryable CLOSED reports retrying until replay is ready', () async {
+    final timers = <_ManualTimer>[];
+    final socket = _RecordingRelaySocket();
+    final deliveredEvents = <NostrEvent>[];
+    final statuses = <RelaySubscriptionStatus>[];
+    final session = RelaySessionNotifier(
+      retryTimerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        timers.add(timer);
+        return timer;
+      },
+    );
+    session.debugAttachSocketForTest(socket);
+
+    final subscribe = session.subscribeWithStatus(
+      _channelFilter,
+      deliveredEvents.add,
+      onStatusChanged: (status) {
+        if (status == RelaySubscriptionStatus.ready) {
+          expect(deliveredEvents, hasLength(statuses.isEmpty ? 0 : 1));
+        }
+        statuses.add(status);
+      },
+    );
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+    expect(statuses, [RelaySubscriptionStatus.ready]);
+
+    session.debugHandleMessage(['CLOSED', 'l-1', 'error: relay overloaded']);
+    expect(statuses, [
+      RelaySubscriptionStatus.ready,
+      RelaySubscriptionStatus.retrying,
+    ]);
+
+    timers.single.fire();
+    await Future<void>.delayed(Duration.zero);
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _event(createdAt: 30).toJson(),
+    ]);
+    expect(statuses, [
+      RelaySubscriptionStatus.ready,
+      RelaySubscriptionStatus.retrying,
+    ]);
+
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    expect(statuses, [
+      RelaySubscriptionStatus.ready,
+      RelaySubscriptionStatus.retrying,
+      RelaySubscriptionStatus.ready,
+    ]);
+    unsubscribe();
+  });
+
   test('CLOSED retries back off and reset after EOSE', () async {
     final timers = <_ManualTimer>[];
     final socket = _RecordingRelaySocket();
@@ -893,6 +1033,42 @@ void main() {
       inInclusiveRange(3990, 4000),
     );
     expect(gateTimers.single.duration, const Duration(seconds: 4));
+    unsubscribe();
+  });
+
+  test('rate-limited live CLOSED honors an immediate retry hint', () async {
+    final retryTimers = <_ManualTimer>[];
+    final gateTimers = <_ManualTimer>[];
+    final gate = RelayRateLimitGate(
+      timerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        gateTimers.add(timer);
+        return timer;
+      },
+    );
+    final session = RelaySessionNotifier(
+      rateLimitGate: gate,
+      retryTimerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        retryTimers.add(timer);
+        return timer;
+      },
+    );
+    final socket = _RecordingRelaySocket();
+    session.debugAttachSocketForTest(socket);
+    final subscribe = session.subscribe(_channelFilter, (_) {});
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+
+    session.debugHandleMessage([
+      'CLOSED',
+      'l-1',
+      'rate-limited: quota exceeded; retry in 0s',
+    ]);
+
+    expect(retryTimers.single.duration, const Duration(seconds: 1));
+    expect(gateTimers, isEmpty);
+    expect(gate.isActive, isFalse);
     unsubscribe();
   });
 
@@ -1206,6 +1382,203 @@ void main() {
     expect(closedMessages, ['restricted: no longer valid']);
     unsubscribe();
   });
+
+  // The relay rejects an over-quota EVENT on the OK channel rather than with a
+  // bare NOTICE, because a NOTICE carries no event id and `_pendingEvents` is
+  // keyed by one — nothing settled, so the publish could only time out. The
+  // gate arming that used to depend on the NOTICE has to happen here too.
+  test(
+    'a rate-limited OK rejection fails the publish and arms the gate',
+    () async {
+      final gateTimers = <_ManualTimer>[];
+      final gate = RelayRateLimitGate(
+        now: () => DateTime(2026),
+        timerFactory: (duration, callback) {
+          final timer = _ManualTimer(duration, callback);
+          gateTimers.add(timer);
+          return timer;
+        },
+      );
+      final session = RelaySessionNotifier(rateLimitGate: gate);
+      session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+      final publish = session.publish(_event());
+      session.debugHandleMessage([
+        'OK',
+        'event-1',
+        false,
+        'rate-limited: quota exceeded; retry in 4s',
+      ]);
+
+      await expectLater(publish, throwsA(isA<Exception>()));
+      expect(
+        gate.isActive,
+        isTrue,
+        reason:
+            'back-pressure now arrives on the OK channel — without arming here '
+            'the client fails the send and retries into the same quota',
+      );
+      expect(gateTimers.single.duration, const Duration(seconds: 4));
+    },
+  );
+
+  test(
+    'publish waits out the rate-limit gate before timeout registration and send',
+    () async {
+      final gateTimers = <_ManualTimer>[];
+      final gate = RelayRateLimitGate(
+        now: () => DateTime(2026),
+        timerFactory: (duration, callback) {
+          final timer = _ManualTimer(duration, callback);
+          gateTimers.add(timer);
+          return timer;
+        },
+      );
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier(rateLimitGate: gate);
+      session.debugAttachSocketForTest(socket);
+
+      final firstPublish = session.publish(_event(id: 'event-a'));
+      session.debugHandleMessage([
+        'OK',
+        'event-a',
+        false,
+        'rate-limited: quota exceeded; retry in 4s',
+      ]);
+      await expectLater(firstPublish, throwsA(isA<Exception>()));
+
+      var secondSettled = false;
+      final secondPublish = session.publish(
+        _event(id: 'event-b'),
+        timeout: Duration.zero,
+      );
+      unawaited(secondPublish.whenComplete(() => secondSettled = true));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        socket.messages.where((message) => message.first == 'EVENT'),
+        hasLength(1),
+        reason: 'the next EVENT must remain unsent while the gate is active',
+      );
+      expect(
+        secondSettled,
+        isFalse,
+        reason:
+            'the publish timeout must not start until after the gate expires',
+      );
+
+      gateTimers.single.fire();
+      await Future<void>.microtask(() {});
+
+      final events = socket.messages
+          .where((message) => message.first == 'EVENT')
+          .toList();
+      expect(events, hasLength(2));
+      expect((events.last[1] as Map<String, dynamic>)['id'], 'event-b');
+      session.debugHandleMessage(['OK', 'event-b', true, '']);
+      expect((await secondPublish).id, 'event-b');
+    },
+  );
+
+  test(
+    'a gated publish is cancelled if the connection changes while waiting',
+    () async {
+      final gateTimers = <_ManualTimer>[];
+      final gate = RelayRateLimitGate(
+        now: () => DateTime(2026),
+        timerFactory: (duration, callback) {
+          final timer = _ManualTimer(duration, callback);
+          gateTimers.add(timer);
+          return timer;
+        },
+      );
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier(rateLimitGate: gate);
+      session.debugAttachSocketForTest(socket);
+      gate.activate(4);
+
+      final publish = session.publish(_event(id: 'event-b'));
+      session.debugSupersedeConnection();
+      gateTimers.single.fire();
+
+      await expectLater(publish, throwsA(isA<StateError>()));
+      expect(socket.messages, isEmpty);
+    },
+  );
+
+  test('an ordinary OK rejection does not arm the gate', () async {
+    final gate = RelayRateLimitGate(now: () => DateTime(2026));
+    final session = RelaySessionNotifier(rateLimitGate: gate);
+    session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+    final publish = session.publish(_event());
+    session.debugHandleMessage([
+      'OK',
+      'event-1',
+      false,
+      'invalid: bad signature',
+    ]);
+
+    await expectLater(publish, throwsA(isA<Exception>()));
+    expect(
+      gate.isActive,
+      isFalse,
+      reason: 'only `rate-limited:` rejections signal back-pressure',
+    );
+  });
+}
+
+class _ControlledHttpClient extends http.BaseClient {
+  final _response = Completer<http.StreamedResponse>();
+  bool closed = false;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      _response.future;
+
+  void complete(http.Response response) {
+    _response.complete(
+      http.StreamedResponse(
+        Stream.value(response.bodyBytes),
+        response.statusCode,
+        headers: response.headers,
+        reasonPhrase: response.reasonPhrase,
+        request: response.request,
+      ),
+    );
+  }
+
+  @override
+  void close() => closed = true;
+}
+
+class _QueuedControlledHttpClient extends http.BaseClient {
+  final List<Completer<http.StreamedResponse>> _responses = [];
+  bool closed = false;
+
+  int get requestCount => _responses.length;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    final response = Completer<http.StreamedResponse>();
+    _responses.add(response);
+    return response.future;
+  }
+
+  void complete(int requestIndex, http.Response response) {
+    _responses[requestIndex].complete(
+      http.StreamedResponse(
+        Stream.value(response.bodyBytes),
+        response.statusCode,
+        headers: response.headers,
+        reasonPhrase: response.reasonPhrase,
+        request: response.request,
+      ),
+    );
+  }
+
+  @override
+  void close() => closed = true;
 }
 
 class _QueryHarness {
@@ -1295,9 +1668,9 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   RelayConfig build() => RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
 }
 
-NostrEvent _event({int createdAt = 20}) {
+NostrEvent _event({int createdAt = 20, String id = 'event-1'}) {
   return NostrEvent(
-    id: 'event-1',
+    id: id,
     pubkey: 'alice',
     createdAt: createdAt,
     kind: EventKind.streamMessageV2,

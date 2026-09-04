@@ -1,0 +1,25 @@
+schema_version = "1.3"
+
+[task]
+name = "buzz-native/cross-thread-requests"
+description = "Keep two concurrent top-level requests in one channel isolated and reply to each exact thread."
+authors = [{ name = "Buzz" }]
+keywords = ["buzz-native", "threading", "batching", "concurrency"]
+
+[metadata]
+evaluation_layer = "workflow"
+difficulty = "hard"
+category = "collaboration"
+tags = ["threading", "batching", "concurrency", "routing"]
+
+[agent]
+timeout_sec = 300.0
+
+[verifier]
+timeout_sec = 30.0
+
+[environment]
+network_mode = "public"
+cpus = 1
+memory_mb = 1024
+storage_mb = 1024

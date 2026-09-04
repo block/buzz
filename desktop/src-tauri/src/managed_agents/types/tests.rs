@@ -442,6 +442,21 @@ fn managed_agent_record_without_key_deserializes_empty() {
     .expect("keyring-backed record without inline key should deserialize");
 
     assert_eq!(record.private_key_nsec, "");
+    assert!(
+        !record.provider_policy_pending,
+        "pre-pending stores must deserialize as acknowledged"
+    );
+}
+
+#[test]
+fn pending_provider_policy_round_trips() {
+    let mut record = sample_agent_record();
+    record.provider_policy_pending = true;
+
+    let json = serde_json::to_string(&record).expect("serialize pending policy");
+    let reloaded: ManagedAgentRecord = serde_json::from_str(&json).expect("reload pending policy");
+
+    assert!(reloaded.provider_policy_pending);
 }
 
 fn sample_agent_record() -> ManagedAgentRecord {
@@ -472,6 +487,7 @@ fn sample_agent_record() -> ManagedAgentRecord {
 
 fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        description: None,
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
@@ -486,6 +502,7 @@ fn sample_persona() -> AgentDefinition {
         source_team: Some("team-1".to_string()),
         source_team_persona_slug: Some("helper".to_string()),
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: [("K".to_string(), "v".to_string())].into_iter().collect(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),

@@ -1,12 +1,15 @@
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { enqueueBackgroundMediaUpload } from "@/features/messages/lib/backgroundMediaUploadStore";
+import { hasMention } from "@/features/messages/lib/hasMention";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
+import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import {
   buildOutgoingMessage,
   type ImetaMedia,
   mergeOutgoingTags,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
+import { mergeOutgoingTagsWithReferenceMentions } from "@/features/messages/ui/useMentionSendFlow.helpers";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
@@ -16,18 +19,28 @@ type EditDraft = {
   pendingImeta: ImetaMedia[];
   queuedAttachments: QueuedMediaAttachment[];
   spoileredAttachmentUrls: Set<string>;
+  unresolvedMentionPubkeys: string[];
 };
 
-type SubmitMessageEditOptions = Omit<EditDraft, "mentionRefs"> & {
+type SubmitMessageEditOptions = Omit<
+  EditDraft,
+  "mentionRefs" | "unresolvedMentionPubkeys"
+> & {
   clearComposer: () => void;
   customEmoji: ReadonlyArray<CustomEmoji>;
   extractMentionPubkeys: (content: string) => string[];
   getMentionRefs: (content: string) => DraftMentionRef[];
   editTargetId: string;
+  enqueueUpload?: typeof enqueueBackgroundMediaUpload;
+  editTarget: Pick<
+    MessageComposerEditTarget,
+    "mentionRefs" | "unresolvedMentionPubkeys"
+  >;
   originalContent: string;
   ownerPubkey: string | null;
   restoreComposer: (draft: EditDraft) => void;
   restoreMentionRefs: (refs: DraftMentionRef[]) => void;
+  revalidateMentionPubkeys: (pubkeys: readonly string[]) => Promise<string[]>;
   shouldRestoreComposer: () => boolean;
   setDeferredUploadPending: (isPending: boolean) => void;
   save: (
@@ -39,12 +52,13 @@ type SubmitMessageEditOptions = Omit<EditDraft, "mentionRefs"> & {
   setUploadError: (message: string) => void;
 };
 
-/** Clear an edited message immediately, then upload and save captured state. */
 export async function submitMessageEdit({
   clearComposer,
   content,
   customEmoji,
   editTargetId,
+  enqueueUpload = enqueueBackgroundMediaUpload,
+  editTarget,
   extractMentionPubkeys,
   getMentionRefs,
   originalContent,
@@ -53,18 +67,26 @@ export async function submitMessageEdit({
   queuedAttachments,
   restoreComposer,
   restoreMentionRefs,
+  revalidateMentionPubkeys,
   setDeferredUploadPending,
   shouldRestoreComposer,
   save,
   setUploadError,
   spoileredAttachmentUrls,
 }: SubmitMessageEditOptions): Promise<void> {
+  const currentMentionRefs = editTarget.mentionRefs ?? [];
   const draft: EditDraft = {
     content,
-    mentionRefs: getMentionRefs(content),
+    mentionRefs: [
+      ...getMentionRefs(content),
+      ...currentMentionRefs.filter((ref) =>
+        hasMention(content, ref.displayName),
+      ),
+    ],
     pendingImeta: [...pendingImeta],
     queuedAttachments: [...queuedAttachments],
     spoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
+    unresolvedMentionPubkeys: [...(editTarget.unresolvedMentionPubkeys ?? [])],
   };
   const restoreDraft = () => {
     if (shouldRestoreComposer()) {
@@ -93,17 +115,30 @@ export async function submitMessageEdit({
         ),
       ]),
     );
-    const outgoingTags =
+    const outgoingTags = mergeOutgoingTagsWithReferenceMentions(
       mergeOutgoingTags(
         mediaTags,
         buildCustomEmojiTags(finalContent, customEmoji),
-      ) ?? [];
+      ),
+      [
+        ...draft.mentionRefs.map(({ pubkey }) => pubkey),
+        ...draft.unresolvedMentionPubkeys,
+      ],
+    );
     if (signal?.aborted) return;
-    await save(finalContent, outgoingTags, addedMentionPubkeys, editTargetId);
+    const revalidatedMentionPubkeys =
+      await revalidateMentionPubkeys(addedMentionPubkeys);
+    if (signal?.aborted) return;
+    await save(
+      finalContent,
+      outgoingTags,
+      revalidatedMentionPubkeys,
+      editTargetId,
+    );
   };
 
   if (hasQueuedAttachments) {
-    enqueueBackgroundMediaUpload({
+    enqueueUpload({
       attachments: draft.queuedAttachments,
       onComplete: async (uploaded, signal) => {
         try {

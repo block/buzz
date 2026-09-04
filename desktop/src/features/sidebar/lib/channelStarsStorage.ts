@@ -1,4 +1,5 @@
 const STORAGE_KEY_PREFIX = "buzz-channel-stars.v1";
+export const MAX_CHANNEL_STAR_ENTRIES = 500;
 
 export type ChannelStarEntry = {
   starred: boolean;
@@ -45,7 +46,7 @@ export function parseStarPayload(json: unknown): ChannelStarStore | null {
           ),
         )
       : {};
-  return { version: 1, channels };
+  return boundStarStore({ version: 1, channels });
 }
 
 export function readChannelStarsStore(pubkey: string): ChannelStarStore {
@@ -64,12 +65,43 @@ export function readChannelStarsStore(pubkey: string): ChannelStarStore {
   }
 }
 
+export function boundStarStore(
+  store: ChannelStarStore,
+  preservedKey?: string,
+): ChannelStarStore {
+  const preservedEntry =
+    preservedKey === undefined ? undefined : store.channels[preservedKey];
+  const entries = Object.entries(store.channels).filter(
+    ([channelId]) => channelId !== preservedKey,
+  );
+  if (entries.length + (preservedEntry ? 1 : 0) <= MAX_CHANNEL_STAR_ENTRIES)
+    return store;
+  entries.sort(([leftId, left], [rightId, right]) => {
+    if (left.updatedAt !== right.updatedAt)
+      return left.updatedAt - right.updatedAt;
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  });
+  const retainedEntries = entries.slice(
+    -(MAX_CHANNEL_STAR_ENTRIES - (preservedEntry ? 1 : 0)),
+  );
+  if (preservedEntry && preservedKey !== undefined) {
+    retainedEntries.push([preservedKey, preservedEntry]);
+  }
+  return {
+    ...store,
+    channels: Object.fromEntries(retainedEntries),
+  };
+}
+
 export function writeChannelStarsStore(
   pubkey: string,
   store: ChannelStarStore,
 ): boolean {
   try {
-    window.localStorage.setItem(storageKey(pubkey), JSON.stringify(store));
+    window.localStorage.setItem(
+      storageKey(pubkey),
+      JSON.stringify(boundStarStore(store)),
+    );
     return true;
   } catch {
     return false;
@@ -94,7 +126,7 @@ export function mergeStores(
       merged[id] = (l ?? r) as ChannelStarEntry;
     }
   }
-  return { version: 1, channels: merged };
+  return boundStarStore({ version: 1, channels: merged });
 }
 
 export function starredChannelIdsFromStore(

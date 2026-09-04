@@ -4,8 +4,9 @@ import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItem
 import { Button } from "@/shared/ui/button";
 
 const SECTION_LABELS: Record<ProjectWorkItemSection, string> = {
+  assignments: "assignments",
   comments: "comments",
-  "pull-request-updates": "pull request updates",
+  "pull-request-updates": "review updates",
   statuses: "statuses",
 };
 
@@ -27,14 +28,20 @@ export function ProjectsWorkItemsLoadNotice({
 }: ProjectsWorkItemsLoadNoticeProps) {
   if (!error && failedSections.length === 0) return null;
 
+  const displaySubject =
+    subject === "pull requests"
+      ? "reviews"
+      : subject === "issues"
+        ? "tasks"
+        : subject;
   const detailSubject =
     subject === "pull requests"
-      ? "pull request"
+      ? "review"
       : subject === "issues"
-        ? "issue"
+        ? "task"
         : subject;
   const title = error
-    ? `Could not load ${subject}.`
+    ? `Could not load ${displaySubject}.`
     : `Some ${detailSubject} details could not be loaded.`;
   const description = error
     ? error instanceof Error

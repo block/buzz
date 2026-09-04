@@ -103,6 +103,7 @@ fn policy_for(path: &str) -> MaskPolicy {
         //   acp_command / command / mcp_command — resolved binary names
         //   session_title                       — display chrome
         //   model / provider                    — catalog ids
+        //   effort_level                        — non-secret effort enum
         //   respond_to / respond_to_allowlist   — gate mode + pubkeys
         //   idle_timeout_seconds / max_turn_duration_seconds / parallelism
         //                                       — numeric limits

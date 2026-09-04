@@ -7,11 +7,11 @@ import {
   canManageCommunityMembers,
   shouldWarnMissingMembershipSnapshot,
 } from "@/shared/api/relayMembers";
-import { getFeature } from "@/shared/features/manifest";
 import {
+  getFeature,
   resolveEnabled,
   useFeatureSnapshot,
-} from "@/shared/features/useFeatureEnabled";
+} from "@/shared/features";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -137,7 +137,10 @@ export function SettingsView({
       // stable and renders unconditionally (fail-open).
       if (s.featureGate) {
         const feature = getFeature(s.featureGate);
-        if (feature && !resolveEnabled(s.featureGate, featureState)) {
+        if (
+          feature &&
+          !resolveEnabled(s.featureGate, featureState, feature.defaultEnabled)
+        ) {
           return false;
         }
       }
@@ -215,8 +218,12 @@ export function SettingsView({
       >
         <div
           aria-hidden="true"
-          className={cn("shrink-0", topChromeBackdrop.height)}
+          className={cn(
+            "shrink-0 cursor-default select-none",
+            topChromeBackdrop.height,
+          )}
           data-tauri-drag-region
+          data-testid="settings-sidebar-top-chrome"
         />
         <SidebarHeader
           className="cursor-default select-none pb-0 pt-3"
@@ -318,8 +325,12 @@ export function SettingsView({
       >
         <div
           aria-hidden="true"
-          className={cn("relative z-10 shrink-0", topChromeBackdrop.height)}
+          className={cn(
+            "relative z-10 shrink-0 cursor-default select-none",
+            topChromeBackdrop.height,
+          )}
           data-tauri-drag-region
+          data-testid="settings-top-chrome"
         />
         <div
           className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-content-edge"

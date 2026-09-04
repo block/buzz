@@ -4,9 +4,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, find_managed_agent_mut,
-        load_managed_agents, load_personas, save_managed_agents, sync_managed_agent_processes,
-        ManagedAgentSummary,
+        current_instance_id, find_managed_agent_mut, load_managed_agents, save_managed_agents,
+        sync_managed_agent_processes, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -14,8 +13,15 @@ use crate::{
 #[tauri::command]
 pub fn set_agent_managed_profiles(enabled: bool, state: State<'_, AppState>) {
     state
-        .managed_agent_profile_reconcile_enabled
+        .managed_agent_profile_reconcile_enabled()
         .store(!enabled, Ordering::Release);
+}
+
+#[tauri::command]
+pub fn set_thread_scoped_acp_sessions(enabled: bool, state: State<'_, AppState>) {
+    state
+        .thread_scoped_acp_sessions_enabled()
+        .store(enabled, Ordering::Release);
 }
 
 #[tauri::command]
@@ -56,14 +62,7 @@ pub async fn set_managed_agent_start_on_app_launch(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(
-            &app,
-            record,
-            &runtimes,
-            &personas,
-            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-        )
+        super::agents::summarize_from_disk(&app, record, &runtimes)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -107,14 +106,7 @@ pub async fn set_managed_agent_auto_restart(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(
-            &app,
-            record,
-            &runtimes,
-            &personas,
-            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-        )
+        super::agents::summarize_from_disk(&app, record, &runtimes)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?

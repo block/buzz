@@ -1,4 +1,6 @@
 /// NIP-42 authentication handler.
+pub mod admin_action_worker;
+pub mod admin_outbox_worker;
 pub mod auth;
 /// Subscription close (CLOSE) handler.
 pub mod close;
@@ -30,6 +32,8 @@ pub mod push_lease;
 pub mod relay_admin;
 /// NIP-56 report (kind:1984) validation + moderation queue persistence.
 pub mod report;
+/// HTTP report-resolution orchestrations for the deployment admin API (Phase 2).
+pub mod report_resolution;
 /// REQ handler — subscribe, deliver historical events, then EOSE.
 pub mod req;
 /// NIP-29 and NIP-25 side-effect handlers.

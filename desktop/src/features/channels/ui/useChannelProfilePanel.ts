@@ -2,9 +2,12 @@ import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useOpenDmMutation } from "@/features/channels/hooks";
+import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 
 type UseChannelProfilePanelOptions = {
   closeAgentSession: () => void;
+  openProfilePanel: (pubkey: string, options?: ProfilePanelOpenOptions) => void;
+  requireThreadEditResolution: () => boolean;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
   setOpenThreadHeadId: (value: string | null) => void;
@@ -15,6 +18,8 @@ type UseChannelProfilePanelOptions = {
 
 export function useChannelProfilePanel({
   closeAgentSession,
+  openProfilePanel,
+  requireThreadEditResolution,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
   setOpenThreadHeadId,
@@ -26,21 +31,23 @@ export function useChannelProfilePanel({
   const openDmMutation = useOpenDmMutation();
 
   const handleOpenProfilePanel = React.useCallback(
-    (pubkey: string) => {
+    (pubkey: string, options?: ProfilePanelOpenOptions) => {
+      if (!requireThreadEditResolution()) return;
       setOpenThreadHeadId(null);
       setExpandedThreadReplyIds(new Set());
       setThreadScrollTargetId(null);
       setThreadReplyTargetId(null);
       closeAgentSession();
       setChannelManagementOpen(false);
-      setProfilePanelPubkey(pubkey);
+      openProfilePanel(pubkey, options);
     },
     [
       closeAgentSession,
+      openProfilePanel,
+      requireThreadEditResolution,
       setChannelManagementOpen,
       setExpandedThreadReplyIds,
       setOpenThreadHeadId,
-      setProfilePanelPubkey,
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     ],

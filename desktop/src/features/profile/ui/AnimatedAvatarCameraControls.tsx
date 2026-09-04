@@ -58,7 +58,7 @@ export function AnimatedAvatarCameraControls({
           {helpText}
         </p>
       ) : null}
-      <div className="h-14 pt-2">
+      <div className={cn("h-14 pt-2", compact && "flex justify-center")}>
         {onRetry ? (
           <Button
             className={cn(
@@ -77,9 +77,9 @@ export function AnimatedAvatarCameraControls({
           <Button
             asChild
             className={cn(
-              "h-12 w-full rounded-xl",
-              compact &&
-                "bg-[rgb(var(--buzz-onboarding-avatar-accent-bg))] text-[rgb(var(--buzz-onboarding-avatar-accent-fg))] hover:bg-[rgb(var(--buzz-onboarding-avatar-accent-bg))]",
+              compact
+                ? "h-[2.375rem] rounded-full bg-[rgb(var(--buzz-onboarding-avatar-action-bg))] px-6 text-sm font-medium text-[rgb(var(--buzz-onboarding-avatar-action-fg))] hover:bg-[color:rgb(var(--buzz-onboarding-avatar-action-bg)_/_0.9)]"
+                : "h-12 w-full rounded-xl",
             )}
             data-testid={`${testIdPrefix}-animated-record`}
             disabled={disabled}

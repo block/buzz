@@ -30,17 +30,19 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, model_in_catalog,
-    resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
-    StopReason, SystemPromptTransport,
+    extract_model_config_options, extract_model_state, extract_thought_level_config_id,
+    model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
+    ModelSwitchMethod, StopReason, SystemPromptTransport,
 };
-use crate::config::{compose_session_title, DedupMode, PermissionMode};
+use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
 use crate::observer;
+use crate::prompt_project::{pick_authoritative_project_home, PromptProjectInfo};
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+use crate::scope::SessionScope;
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -50,9 +52,19 @@ const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
 /// Metadata stored per in-flight task for panic recovery.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SuccessfulSteerDelivery {
+    pub event_id: String,
+    pub session_id: String,
+}
+
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Session scope of the in-flight turn (mid-turn steer/signal routing and
+    /// scope-to-worker affinity target this). `None` for heartbeat tasks.
+    /// Invariant when `Some`: `scope.channel_id() == channel_id.unwrap()`.
+    pub scope: Option<SessionScope>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -67,6 +79,10 @@ pub struct TaskMeta {
     /// tasks only — all prompt tasks install a steer channel regardless
     /// of the agent's name.
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    /// Successful non-cancelling steers acknowledged while this task owned the
+    /// live session. The session ID prevents a late ack from contaminating a
+    /// replacement session after task return.
+    pub successful_steer_deliveries: HashSet<SuccessfulSteerDelivery>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -78,55 +94,103 @@ pub struct AgentModelCapabilities {
     pub config_options_raw: Vec<serde_json::Value>,
     /// Unstable: SessionModelState from session/new.
     pub available_models_raw: Option<serde_json::Value>,
+    /// B5: configId for the `thought_level` category option, if the adapter
+    /// advertised one in session/new. Resolved at session time so the
+    /// spawn-scoped effort application forwards the adapter's real configId
+    /// instead of hardcoding it. `None` when the adapter advertises no
+    /// `thought_level` option.
+    pub thought_level_config_id: Option<String>,
 }
 
-/// Per-channel session IDs and turn counters.
+/// Successful deliveries associated with one live channel session.
+#[derive(Default)]
+pub struct ChannelDeliveryState {
+    /// Whether a legacy user message has successfully carried standing context.
+    pub standing_context_sent: bool,
+    /// Buzz event IDs already delivered to this ACP session, either as trigger
+    /// events or conversation context.
+    pub delivered_event_ids: HashSet<String>,
+}
+
+/// Per-channel session IDs, turn counters, and delivery state.
 ///
 /// Separated from `OwnedAgent` so the state machine is testable without
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
-    /// channel_id → session_id
-    pub sessions: HashMap<Uuid, String>,
+    /// session scope → session_id
+    pub sessions: HashMap<SessionScope, String>,
     pub heartbeat_session: Option<String>,
-    /// Per-channel turn counters for proactive session rotation.
+    /// Per-scope turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
-    pub turn_counts: HashMap<Uuid, u32>,
+    pub turn_counts: HashMap<SessionScope, u32>,
     /// Turn counter for the heartbeat session.
     pub heartbeat_turn_count: u32,
-    /// channel_id → rendered NIP-AE core prompt section, populated once at
+    /// Whether the live heartbeat session has successfully received `<base>`.
+    pub heartbeat_standing_context_sent: bool,
+    /// session scope → rendered NIP-AE core prompt section, populated once at
     /// session creation per Tyler's spec (no mid-session refresh).
-    pub core_sections: HashMap<Uuid, String>,
-    /// channel_id → rendered `[Channel Canvas]` metadata section.
+    pub core_sections: HashMap<SessionScope, String>,
+    /// session scope → rendered `<channel-canvas>` metadata section.
     ///
     /// Populated once before session creation (same lifecycle as `core_sections`).
     /// Absent when the channel has no canvas, the canvas content is blank, or the
     /// fetch fails — all fail open. Cleared on session invalidation alongside
     /// `core_sections` so the next session picks up any canvas change.
-    pub canvas_sections: HashMap<Uuid, String>,
+    pub canvas_sections: HashMap<SessionScope, String>,
+    /// Per-scope successful-delivery state. Created with the ACP session and
+    /// cleared atomically with every invalidation path.
+    pub deliveries: HashMap<SessionScope, ChannelDeliveryState>,
 }
 
 impl SessionState {
     /// Invalidate the session (and turn counter) for a specific prompt source.
     pub fn invalidate(&mut self, source: &PromptSource) {
         match source {
-            PromptSource::Channel(cid) => {
-                self.invalidate_channel(cid);
+            PromptSource::Channel(scope) => {
+                self.invalidate_scope(scope);
             }
             PromptSource::Heartbeat => {
                 self.heartbeat_session = None;
                 self.heartbeat_turn_count = 0;
+                self.heartbeat_standing_context_sent = false;
             }
         }
     }
 
-    /// Invalidate a single channel's session and turn counter.
-    /// Returns `true` if the channel had an active session.
-    pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
-        self.turn_counts.remove(channel_id);
-        self.core_sections.remove(channel_id);
-        self.canvas_sections.remove(channel_id);
-        self.sessions.remove(channel_id).is_some()
+    /// Invalidate a single session scope's session and turn counter.
+    /// Returns `true` if the scope had an active session.
+    pub fn invalidate_scope(&mut self, scope: &SessionScope) -> bool {
+        self.turn_counts.remove(scope);
+        self.core_sections.remove(scope);
+        self.canvas_sections.remove(scope);
+        self.deliveries.remove(scope);
+        self.sessions.remove(scope).is_some()
+    }
+
+    /// Invalidate every session scope belonging to `channel_id` (channel-wide
+    /// cleanup, e.g. when the agent is removed from a channel). Returns the
+    /// number of scopes that had an active session.
+    pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> usize {
+        let scopes: Vec<SessionScope> = self
+            .sessions
+            .keys()
+            .chain(self.turn_counts.keys())
+            .chain(self.core_sections.keys())
+            .chain(self.canvas_sections.keys())
+            .chain(self.deliveries.keys())
+            .filter(|s| s.channel_id() == *channel_id)
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut count = 0;
+        for scope in scopes {
+            if self.invalidate_scope(&scope) {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
@@ -135,16 +199,31 @@ impl SessionState {
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
+        self.heartbeat_standing_context_sent = false;
         self.core_sections.clear();
         self.canvas_sections.clear();
+        self.deliveries.clear();
+    }
+
+    pub(crate) fn mark_scope_delivery_success(
+        &mut self,
+        scope: SessionScope,
+        standing_context_sent: bool,
+        event_ids: impl IntoIterator<Item = String>,
+    ) {
+        let delivery = self.deliveries.entry(scope).or_default();
+        delivery.standing_context_sent |= standing_context_sent;
+        delivery.delivered_event_ids.extend(event_ids);
     }
 
     #[cfg(test)]
     fn has_channel_state(&self, channel_id: &Uuid) -> bool {
-        self.sessions.contains_key(channel_id)
-            || self.turn_counts.contains_key(channel_id)
-            || self.core_sections.contains_key(channel_id)
-            || self.canvas_sections.contains_key(channel_id)
+        let matches = |s: &SessionScope| s.channel_id() == *channel_id;
+        self.sessions.keys().any(matches)
+            || self.turn_counts.keys().any(matches)
+            || self.core_sections.keys().any(matches)
+            || self.canvas_sections.keys().any(matches)
+            || self.deliveries.keys().any(matches)
     }
 }
 
@@ -162,6 +241,28 @@ pub struct OwnedAgent {
     /// desktop reader to distinguish a genuine runtime override from a stale
     /// session whose persona model was edited. Reset on spawn/restart.
     pub model_overridden: bool,
+    /// Opaque per-pick `request_id` from the live `SwitchModel` that set
+    /// `desired_model`, echoed on the late `control_result` frame so the
+    /// Desktop ModelPicker can correlate it to the pick that fired the switch.
+    /// `None` for config/persona-derived models (no live pick to correlate).
+    pub desired_model_request_id: Option<String>,
+    /// True when a busy-path live switch is awaiting its deferred apply: the
+    /// switch was delivered to an in-flight turn (`sent` ack), the turn was
+    /// cancelled+requeued, and the real apply runs at the next session. On that
+    /// apply, `create_session_and_apply_model` emits a positive terminal
+    /// `control_result` (success) so the Desktop learns the outcome instead of
+    /// inferring it from timeout silence. The idle path never sets this — it
+    /// already emits its terminal immediately — so this gate prevents a
+    /// double-emit there. Consumed (reset) at apply time.
+    pub desired_model_pending_ack: bool,
+    /// Persisted startup effort value from `BUZZ_ACP_EFFORT_LEVEL` (carried from
+    /// the Desktop record via `Config.effort_level`). Held per-worker and applied
+    /// once, at the first session creation, by pairing with the adapter's
+    /// advertised `thought_level` configId. This is spawn-scoped only — there is
+    /// no pool-level effort state and no live mid-conversation effort switching.
+    /// Non-fatal when absent or when the adapter does not advertise
+    /// `thought_level`.
+    pub startup_effort: Option<String>,
     /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
     pub agent_name: String,
     /// Whether Goose accepted its custom system-prompt method. `None` probes on
@@ -229,6 +330,13 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// Authoritative directory of which worker most recently owned each session
+    /// scope's provider session. Survives while a worker is checked out (its
+    /// `SessionState` is invisible to the pool then), so a busy owner does not
+    /// cause another worker to open a duplicate session for the same thread.
+    /// Best-effort: stale entries (rotation, crash/respawn) self-heal on the
+    /// next dispatch and are pruned on channel-wide session invalidation.
+    session_owners: HashMap<SessionScope, usize>,
 }
 
 /// Result returned by a completed prompt task.
@@ -243,10 +351,38 @@ pub struct PromptResult {
 }
 
 /// Whether the prompt came from a channel event or a heartbeat.
+///
+/// The channel variant carries the full [`SessionScope`] resolved at admission
+/// (conversation or thread), not just the channel id, so completion and
+/// invalidation target the exact session. Use [`channel_id`](PromptSource::channel_id)
+/// where only the channel is needed.
 #[derive(Debug)]
 pub enum PromptSource {
-    Channel(Uuid),
+    Channel(SessionScope),
     Heartbeat,
+}
+
+impl PromptSource {
+    /// The channel this prompt belongs to, or `None` for heartbeats.
+    pub fn channel_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Channel(scope) => Some(scope.channel_id()),
+            Self::Heartbeat => None,
+        }
+    }
+
+    /// The exact session scope this prompt belongs to, or `None` for
+    /// heartbeats. Callers that must target the precise thread (e.g. clearing a
+    /// typing indicator on completion) use this rather than [`channel_id`], so a
+    /// finishing turn never disturbs a sibling thread in the same channel.
+    ///
+    /// [`channel_id`]: PromptSource::channel_id
+    pub fn scope(&self) -> Option<&SessionScope> {
+        match self {
+            Self::Channel(scope) => Some(scope),
+            Self::Heartbeat => None,
+        }
+    }
 }
 
 /// Apply state effects for Race 1, where a control signal arrives just after the
@@ -263,7 +399,7 @@ fn apply_completed_before_control_signal(
     // the fresh session applies the new model on its next creation.
     if matches!(
         control_signal,
-        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+        ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
     ) {
         state.invalidate(source);
     }
@@ -271,7 +407,7 @@ fn apply_completed_before_control_signal(
 
 /// Control signal for an in-flight channel turn.
 ///
-/// Not `Copy`: `SwitchModel` carries an owned `String`. Callers must clone when
+/// Not `Copy`: `SwitchModel` carries owned `String`s. Callers must clone when
 /// a value is needed after a move, or match by reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlSignal {
@@ -294,7 +430,14 @@ pub enum ControlSignal {
     /// setting `OwnedAgent::desired_model` before invalidation; the requeued
     /// turn re-creates the session and re-applies `desired_model`. Runtime-only
     /// — never persisted, gone on restart/respawn.
-    SwitchModel(String),
+    ///
+    /// Carries `(model_id, request_id)`: the opaque per-pick `request_id`
+    /// originates in the Desktop ModelPicker and is echoed on every
+    /// `control_result` frame so a replayed result cannot settle a later pick.
+    SwitchModel {
+        model_id: String,
+        request_id: Option<String>,
+    },
 }
 
 /// Goose-native non-cancelling steer request, sent from the main loop to an
@@ -408,7 +551,7 @@ pub enum SteerAck {
     /// The agent returned a successful response to the steer request.
     /// The main loop must drop the withheld event (`remove_event`) — it
     /// has been delivered via the non-cancelling path.
-    Success,
+    Success { session_id: String },
     /// The steer was attempted but failed. Delivery state for the
     /// underlying message is unknown after prompt completion; the main
     /// loop must release the withheld event and fall back to the
@@ -438,6 +581,9 @@ pub enum TimeoutKind {
 pub enum PromptOutcome {
     Ok(StopReason),
     Error(AcpError),
+    /// Local relay state could not establish project authority. The ACP
+    /// process is healthy; preserve the batch for bounded retry.
+    ProjectContextIndeterminate(String),
     AgentExited,
     Timeout(TimeoutKind),
     /// Intentional cancel via `!cancel` command or interrupt mode.
@@ -461,12 +607,26 @@ pub enum PromptOutcome {
 /// into every task.
 /// Shared channel-metadata resolver for startup-known and dynamically joined channels.
 ///
-/// Successful lazy lookups are cached for every consumer (author gate, prompt
-/// context, canvas, and setup mode). Unknown metadata is never cached as a
-/// non-DM: callers can fail closed and a later event retries resolution.
+/// Successful lazy lookups are cached for fail-closed classification and as a
+/// fallback during relay degradation. Prompt turns refresh metadata through
+/// [`ChannelInfoResolver::resolve`] so edits reach a running harness. Unknown
+/// metadata is never cached as a non-DM: callers can fail closed and a later
+/// event retries resolution.
+#[derive(Debug, Clone)]
+struct CachedProjectInfo {
+    fetched_at: std::time::Instant,
+    value: Option<PromptProjectInfo>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProjectLookupError(String);
+
+const PROJECT_INFO_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug, Clone)]
 pub struct ChannelInfoResolver {
     cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, PromptChannelInfo>>>,
+    projects: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, CachedProjectInfo>>>,
     rest_client: RestClient,
 }
 
@@ -483,17 +643,20 @@ impl ChannelInfoResolver {
                     PromptChannelInfo {
                         name: info.name,
                         channel_type: info.channel_type,
+                        description: info.description,
+                        project: None,
                     },
                 ))
             })
             .collect();
         Self {
             cache: std::sync::Arc::new(std::sync::RwLock::new(cache)),
+            projects: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             rest_client,
         }
     }
 
-    pub async fn resolve(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+    pub async fn resolve_channel_metadata(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
         if let Some(info) = self
             .cache
             .read()
@@ -502,12 +665,93 @@ impl ChannelInfoResolver {
         {
             return Some(info);
         }
-
         let info = fetch_channel_info(channel_id, &self.rest_client).await?;
         if let Ok(mut cache) = self.cache.write() {
             cache.insert(channel_id, info.clone());
         }
         Some(info)
+    }
+
+    /// Resolve channel context for a prompt turn.
+    ///
+    /// Prompt-visible metadata is refreshed on every turn rather than served
+    /// indefinitely from startup discovery. Channel descriptions and names can
+    /// be edited while the harness is running; the next prompt must use the
+    /// relay's current kind-39000 event. On a transient refresh failure, retain
+    /// the last known metadata so an otherwise healthy turn can still proceed.
+    pub async fn resolve(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<Option<PromptChannelInfo>, ProjectLookupError> {
+        let cached = self
+            .cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned());
+        // A cached value makes this a refresh, not first-time discovery: use
+        // one bounded attempt so relay degradation cannot add the full retry
+        // window to every prompt. Unknown channels still use the retrying lazy
+        // fetch below because callers must fail closed without metadata.
+        let refreshed = if cached.is_some() {
+            fetch_channel_info_once(channel_id, &self.rest_client).await
+        } else {
+            fetch_channel_info(channel_id, &self.rest_client).await
+        };
+        let mut info = match refreshed {
+            Some(fresh) => {
+                if let Ok(mut cache) = self.cache.write() {
+                    cache.insert(channel_id, fresh.clone());
+                }
+                fresh
+            }
+            None => match cached {
+                Some(cached) => cached,
+                None => return Ok(None),
+            },
+        };
+        info.project = self.lookup_project(channel_id).await?;
+        Ok(Some(info))
+    }
+
+    async fn lookup_project(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<Option<PromptProjectInfo>, ProjectLookupError> {
+        let cached = self
+            .projects
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned());
+        if let Some(fresh) = cached
+            .as_ref()
+            .filter(|cached| cached.fetched_at.elapsed() < PROJECT_INFO_CACHE_TTL)
+        {
+            return Ok(fresh.value.clone());
+        }
+        let fetched = match fetch_project_home_for_channel(channel_id, &self.rest_client).await {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                if let Some(project) = cached.and_then(|stale| stale.value) {
+                    tracing::warn!(
+                        channel_id = %channel_id,
+                        "project context refresh failed; retaining stale project: {}",
+                        error.0
+                    );
+                    return Ok(Some(project));
+                }
+                return Err(error);
+            }
+        };
+        if let Ok(mut cache) = self.projects.write() {
+            cache.insert(
+                channel_id,
+                CachedProjectInfo {
+                    fetched_at: std::time::Instant::now(),
+                    value: fetched.clone(),
+                },
+            );
+        }
+        Ok(fetched)
     }
 }
 
@@ -522,18 +766,16 @@ pub struct PromptContext {
     pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
-    /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
-    /// on `session/new`. Never part of the prompt.
+    /// Sanitized agent name used to compose `_meta.sessionTitle` on session/new.
+    /// Channel sessions add the channel name; thread sessions also add the root
+    /// ID prefix. Never part of the prompt.
     pub session_title: Option<String>,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
-    /// Base prompt content, or `None` if `--no-base-prompt` was passed.
-    ///
-    /// `'static` because `PromptContext` is `Arc`-shared across async tasks.
-    /// Content from `--base-prompt-file` is promoted via `Box::leak` in `main.rs`
-    /// after validated file read in `Config::from_cli()`. The compiled-in default
-    /// (`include_str!`) is inherently `'static`.
-    pub base_prompt: Option<&'static str>,
+    /// Base instructions with the configured policy's Session Model appended,
+    /// assembled once and shared by modern and legacy ACP standing context.
+    /// `None` when `--no-base-prompt` was passed.
+    pub base_prompt: Option<String>,
     pub cwd: String,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
@@ -554,7 +796,7 @@ pub struct PromptContext {
     /// Whether NIP-AE agent core memory injection is enabled. When false,
     /// the per-session core engram fetch is skipped and `core_sections`
     /// remains empty for every channel, so `format_prompt` renders no
-    /// `[Agent Memory — core]` section. On by default; disabled via
+    /// `<core-memory>` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
@@ -581,21 +823,50 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            session_owners: HashMap::new(),
         }
     }
 
-    /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
+    /// Record which worker is handling `scope` so a later dispatch can detect a
+    /// busy owner and avoid opening a duplicate session on another worker.
+    pub fn record_scope_owner(&mut self, scope: SessionScope, agent_index: usize) {
+        self.session_owners.insert(scope, agent_index);
+    }
+
+    /// True when this scope should be **held** (left queued) rather than
+    /// dispatched to a fresh worker, because the worker that owns its provider
+    /// session is currently checked out (busy on another turn).
     ///
-    /// Pass 1: prefer an agent that already has a session for `channel_id`.
+    /// Only holds when no idle worker already holds the session
+    /// ([`has_session_for`](Self::has_session_for) is false): if an idle owner
+    /// exists, [`try_claim`](Self::try_claim) reuses it directly. Holding waits
+    /// for the busy owner to return so its exact session (and tool/turn
+    /// context) is reused, instead of forking a second session for the thread.
+    pub fn should_hold_for_busy_owner(&self, scope: &SessionScope) -> bool {
+        if self.has_session_for(scope) {
+            return false;
+        }
+        match self.session_owners.get(scope) {
+            Some(&owner_idx) => self.task_map.values().any(|m| m.agent_index == owner_idx),
+            None => false,
+        }
+    }
+
+    /// Try to claim an idle agent for the given session scope (or heartbeat if
+    /// `None`).
+    ///
+    /// Pass 1: prefer an agent that already has a session for this exact scope
+    /// (thread affinity — repeated activity in a thread reuses that thread's
+    /// provider session).
     /// Pass 2: any idle agent.
     ///
     /// Returns `None` if all agents are checked out.
-    pub fn try_claim(&mut self, channel_id: Option<Uuid>) -> Option<OwnedAgent> {
-        // Pass 1: prefer agent with existing session for this channel.
-        if let Some(cid) = channel_id {
+    pub fn try_claim(&mut self, scope: Option<&SessionScope>) -> Option<OwnedAgent> {
+        // Pass 1: prefer agent with existing session for this scope.
+        if let Some(scope) = scope {
             let idx = self.agents.iter().position(|slot| {
                 slot.as_ref()
-                    .map(|a| a.state.sessions.contains_key(&cid))
+                    .map(|a| a.state.sessions.contains_key(scope))
                     .unwrap_or(false)
             });
             if let Some(i) = idx {
@@ -629,12 +900,12 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
-    /// Whether any idle agent already has a session for `channel_id`.
+    /// Whether any idle agent already has a session for `scope`.
     /// Used to compute `affinity_hit` before calling `try_claim`.
-    pub fn has_session_for(&self, channel_id: Uuid) -> bool {
+    pub fn has_session_for(&self, scope: &SessionScope) -> bool {
         self.agents.iter().any(|slot| {
             slot.as_ref()
-                .map(|a| a.state.sessions.contains_key(&channel_id))
+                .map(|a| a.state.sessions.contains_key(scope))
                 .unwrap_or(false)
         })
     }
@@ -680,13 +951,13 @@ impl AgentPool {
     /// event and let normal dispatch handle delivery.
     pub fn send_steer(
         &mut self,
-        channel_id: Uuid,
+        scope: &SessionScope,
         request: SteerRequest,
     ) -> Result<(), SteerError> {
         let meta = self
             .task_map
             .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .find(|m| m.scope.as_ref() == Some(scope))
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
@@ -694,6 +965,40 @@ impl AgentPool {
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
             .map_err(|e| SteerError::Transport(e.to_string()))
+    }
+
+    /// Durably associate a successful steer with the exact ACP session that
+    /// accepted it. Acks may arrive before or after the prompt result: while
+    /// the task is in flight we stage the delivery in `TaskMeta`; after return
+    /// we write directly to the idle agent's matching live-session ledger.
+    pub fn record_successful_steer(
+        &mut self,
+        scope: &SessionScope,
+        event_id: String,
+        session_id: String,
+    ) -> bool {
+        if let Some(meta) = self
+            .task_map
+            .values_mut()
+            .find(|meta| meta.scope.as_ref() == Some(scope))
+        {
+            meta.successful_steer_deliveries
+                .insert(SuccessfulSteerDelivery {
+                    event_id,
+                    session_id,
+                });
+            return true;
+        }
+
+        let Some(agent) = self.agents.iter_mut().flatten().find(|agent| {
+            agent.state.sessions.get(scope).map(String::as_str) == Some(session_id.as_str())
+        }) else {
+            return false;
+        };
+        agent
+            .state
+            .mark_scope_delivery_success(scope.clone(), false, [event_id]);
+        true
     }
 
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
@@ -743,17 +1048,65 @@ impl AgentPool {
         let mut count = 0;
         for slot in &mut self.agents {
             if let Some(agent) = slot.as_mut() {
-                if agent.state.invalidate_channel(&channel_id) {
+                // Channel-wide: clears every child thread scope for the channel.
+                count += agent.state.invalidate_channel(&channel_id);
+            }
+        }
+        // Drop every scope-owner entry for this channel so the directory does
+        // not grow without bound and cannot strand a held batch behind a stale
+        // owner after the channel's sessions are gone.
+        self.session_owners
+            .retain(|scope, _| scope.channel_id() != channel_id);
+        count
+    }
+
+    /// Invalidate the session for one exact scope across every worker, and drop
+    /// its scope-owner entry. The scope-precise counterpart of
+    /// [`invalidate_channel_sessions`](Self::invalidate_channel_sessions): under
+    /// thread policy an idle `!rotate` in thread A must rotate only thread A's
+    /// session, leaving sibling threads in the same channel untouched. Under the
+    /// default channel policy the scope is `Conversation(channel_id)` — the sole
+    /// scope for the channel — so this matches the channel-wide behavior.
+    /// Returns the number of workers that held a session for the scope.
+    pub fn invalidate_scope_session(&mut self, scope: &SessionScope) -> usize {
+        let mut count = 0;
+        for slot in &mut self.agents {
+            if let Some(agent) = slot.as_mut() {
+                if agent.state.invalidate_scope(scope) {
                     count += 1;
                 }
             }
         }
+        self.session_owners.remove(scope);
         count
     }
 
+    /// Whether a channel-only control could name more than one session scope.
+    ///
+    /// Include idle and checked-out sessions, not just active turns: selecting
+    /// the first worker for an idle model switch is equally ambiguous. Stale
+    /// ownership entries may conservatively reject a control until reconciled.
+    pub fn channel_control_is_ambiguous(&self, channel_id: Uuid) -> bool {
+        let mut scopes = self
+            .session_owners
+            .keys()
+            .chain(
+                self.agents
+                    .iter()
+                    .flatten()
+                    .flat_map(|a| a.state.sessions.keys()),
+            )
+            .chain(self.task_map.values().filter_map(|m| m.scope.as_ref()))
+            .filter(|scope| scope.channel_id() == channel_id);
+        let Some(first) = scopes.next() else {
+            return false;
+        };
+        scopes.any(|scope| scope != first)
+    }
+
     /// Idle-path model switch: set `desired_model` on the idle agent for
-    /// `channel_id` and invalidate its session so the next turn re-creates the
-    /// session under the new model.
+    /// `channel_id` and invalidate its exact session scope so the next turn
+    /// re-creates that session under the new model.
     ///
     /// Pre-cancel guard: the desired model is validated against the agent's
     /// cached catalog *before* the session is invalidated, so an unsupported
@@ -768,13 +1121,27 @@ impl AgentPool {
         &mut self,
         channel_id: Uuid,
         model_id: &str,
+        request_id: Option<String>,
     ) -> IdleSwitchResult {
-        let Some(agent) = self
-            .agents
-            .iter_mut()
-            .flatten()
-            .find(|a| a.state.sessions.contains_key(&channel_id))
+        if self.channel_control_is_ambiguous(channel_id) {
+            return IdleSwitchResult::AmbiguousTarget;
+        }
+        let Some((agent_index, scope)) =
+            self.agents.iter().enumerate().find_map(|(index, slot)| {
+                slot.as_ref().and_then(|agent| {
+                    agent
+                        .state
+                        .sessions
+                        .keys()
+                        .find(|scope| scope.channel_id() == channel_id)
+                        .cloned()
+                        .map(|scope| (index, scope))
+                })
+            })
         else {
+            return IdleSwitchResult::NoIdleAgent;
+        };
+        let Some(agent) = self.agents.get_mut(agent_index).and_then(Option::as_mut) else {
             return IdleSwitchResult::NoIdleAgent;
         };
 
@@ -792,7 +1159,11 @@ impl AgentPool {
 
         agent.desired_model = Some(model_id.to_string());
         agent.model_overridden = true;
-        agent.state.invalidate_channel(&channel_id);
+        // Carry the pick's correlator so a deferred-validation miss on the next
+        // turn's session creation emits a late frame the Desktop can match.
+        agent.desired_model_request_id = request_id;
+        agent.state.invalidate_scope(&scope);
+        self.session_owners.remove(&scope);
         IdleSwitchResult::Switched
     }
 }
@@ -800,7 +1171,9 @@ impl AgentPool {
 /// Outcome of [`AgentPool::switch_idle_agent_model`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdleSwitchResult {
-    /// `desired_model` set and the channel session invalidated.
+    /// More than one session scope belongs to this channel; nothing changed.
+    AmbiguousTarget,
+    /// `desired_model` set and the selected session invalidated.
     Switched,
     /// Desired model is not in the agent's cached catalog — pick rejected,
     /// session untouched.
@@ -859,21 +1232,19 @@ const UNKNOWN_CHANNEL_NAME: &str = "unknown";
 /// startup cache already refuses `channel_type == "unknown"` for the same
 /// reason.
 ///
-/// Renames do not retitle live sessions, and a **channel** rename is stickier
-/// than an agent rename: `invalidate_channel` drops the session but not the
-/// resolver's cached entry, so a renamed channel keeps its old suffix until the
-/// process restarts. An agent rename lands on the next spawn (the desktop
-/// restart badge covers it — see `spawn_config_hash`).
+/// Renames do not retitle an already-live session. Prompt-turn resolution does
+/// refresh channel metadata, so a later session spawn uses the current channel
+/// name without requiring a harness restart. An agent rename lands on the next
+/// spawn (the desktop restart badge covers it — see `spawn_config_hash`).
 async fn resolve_new_session_channel_context(
-    channel_info: &ChannelInfoResolver,
-    channel_id: Uuid,
+    channel_info: Option<&PromptChannelInfo>,
 ) -> (bool, Option<String>, Option<String>) {
-    let Some(info) = channel_info.resolve(channel_id).await else {
+    let Some(info) = channel_info else {
         return (true, None, None);
     };
     let is_dm = info.channel_type == "dm";
-    let title_channel = (!is_dm && info.name != UNKNOWN_CHANNEL_NAME).then_some(info.name);
-    (is_dm, title_channel, Some(info.channel_type))
+    let title_channel = (!is_dm && info.name != UNKNOWN_CHANNEL_NAME).then(|| info.name.clone());
+    (is_dm, title_channel, Some(info.channel_type.clone()))
 }
 
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
@@ -882,41 +1253,56 @@ async fn resolve_new_session_channel_context(
 /// On error from `session_new_full()`, returns the `AcpError` — caller handles
 /// error reporting. Model-switch failures are logged and gracefully ignored
 /// (the agent proceeds with its default model).
+struct NewSessionChannelContext<'a> {
+    huddle_instructions: Option<&'a str>,
+    canvas: Option<&'a str>,
+    name: Option<&'a str>,
+    scope: Option<&'a SessionScope>,
+    channel_type: Option<&'a str>,
+}
+
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     agent_core: Option<&str>,
-    agent_canvas: Option<&str>,
-    channel_name: Option<&str>,
-    channel_id: Option<Uuid>,
-    channel_type: Option<&str>,
+    channel: NewSessionChannelContext<'_>,
 ) -> Result<String, AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
     // Goose receives it through the custom request below. Legacy agents receive
     // the same content as user-message sections via `format_prompt`. Core carries
-    // its own `[Agent Memory — core]` header, and canvas carries its own
-    // `[Channel Canvas]` header; both are appended with a blank-line separator.
+    // its own `<core-memory>` boundary, and canvas carries its own
+    // `<channel-canvas>` boundary; both are appended with a blank-line separator.
     let is_goose = agent.agent_name == "goose";
     let combined_system_prompt = with_canvas(
-        with_core(
-            with_team(
-                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
-                ctx.team_instructions.as_deref(),
+        with_huddle_instructions(
+            with_core(
+                with_team(
+                    framed_system_prompt(
+                        &ctx.cwd,
+                        ctx.base_prompt.as_deref(),
+                        ctx.system_prompt.as_deref(),
+                    ),
+                    ctx.team_instructions.as_deref(),
+                ),
+                agent_core,
             ),
-            agent_core,
+            channel.huddle_instructions,
         ),
-        agent_canvas,
+        channel.canvas,
     );
 
-    let session_title = ctx
-        .session_title
-        .as_deref()
-        .map(|agent_name| compose_session_title(agent_name, channel_name));
+    let session_title = ctx.session_title.as_deref().map(|agent_name| {
+        compose_scoped_session_title(
+            agent_name,
+            channel.name,
+            channel.scope.and_then(SessionScope::root_event_id),
+        )
+    });
     let mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
-        channel_id,
-        channel_type,
+        channel.scope.map(SessionScope::channel_id),
+        channel.channel_type,
         ctx.session_title.as_deref(),
     );
 
@@ -960,17 +1346,94 @@ async fn create_session_and_apply_model(
         agent.model_capabilities = Some(AgentModelCapabilities {
             config_options_raw: extract_model_config_options(&resp.raw),
             available_models_raw: extract_model_state(&resp.raw),
+            thought_level_config_id: extract_thought_level_config_id(&resp.raw),
         });
     }
 
-    // Apply desired_model if set, matching against the fresh session/new response.
-    // Track whether the switch succeeded so session_config_captured reflects
-    // the post-switch state (not the pre-switch desired state).
-    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
+    // Apply desired_model if set, matching against the fresh session/new
+    // response. `post_switch_snapshot` drives everything downstream:
+    //   `Some(value)` → a switch applied; `value` is the adapter's post-switch
+    //                   RPC response, whose `configOptions` describe the target
+    //                   model. Effort resolution and the Desktop capture both
+    //                   read it so they converge on the model the session is
+    //                   actually running, not the pre-switch default.
+    //   `None`        → no switch, or the adapter rejected/does-not-know the
+    //                   model; the session/new snapshot is cached as-is and
+    //                   `switch_succeeded` stays false.
+    let post_switch_snapshot: Option<serde_json::Value> = if let Some(ref desired) =
+        agent.desired_model
+    {
+        // Consume the busy-path pending-ack once for this apply: only the
+        // `Applied` arm turns it into a positive terminal; the rejection and
+        // unsupported arms already emit their own correlated failure frame, so
+        // taking it here keeps a leftover flag from firing a spurious success
+        // on some later unrelated session.
+        let pending_ack = std::mem::take(&mut agent.desired_model_pending_ack);
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
-                true
+                match apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?
+                {
+                    ModelSwitchOutcome::Applied(switch_result) => {
+                        // The adapter rebuilds `session.configOptions` for the
+                        // target model and echoes them here. Refresh capabilities
+                        // from that authoritative snapshot when present so the
+                        // idle-switch guard and the panel reflect the target
+                        // model; drop to `None` (re-derive next session) when the
+                        // adapter returned no options so a pre-switch snapshot is
+                        // never mistaken for the target model's.
+                        if switch_result
+                            .get("configOptions")
+                            .is_some_and(|v| !v.is_null())
+                        {
+                            agent.model_capabilities = Some(AgentModelCapabilities {
+                                config_options_raw: extract_model_config_options(&switch_result),
+                                available_models_raw: extract_model_state(&switch_result),
+                                thought_level_config_id: extract_thought_level_config_id(
+                                    &switch_result,
+                                ),
+                            });
+                        } else {
+                            agent.model_capabilities = None;
+                        }
+                        // Busy-path deferred switch: emit a positive terminal so
+                        // the Desktop confirms success from a real frame instead
+                        // of inferring it from timeout silence. Gated on the
+                        // pending-ack flag so the idle path (which already acked
+                        // `switched` immediately) does not double-emit.
+                        if pending_ack {
+                            agent.acp.observe(
+                                "control_result",
+                                serde_json::json!({
+                                    "type": "switch_model",
+                                    "status": "switched",
+                                    "modelId": desired,
+                                    "requestId": agent.desired_model_request_id,
+                                }),
+                            );
+                        }
+                        Some(switch_result)
+                    }
+                    ModelSwitchOutcome::Rejected => {
+                        // The adapter explicitly rejected the switch: the session
+                        // is still on its default model. Surface a terminal
+                        // failure so the Desktop ModelPicker rejects the live pick
+                        // instead of falsely reporting success, and preserve the
+                        // pre-switch capabilities the session is really running.
+                        agent.acp.observe(
+                            "control_result",
+                            serde_json::json!({
+                                "type": "switch_model",
+                                "status": "failure",
+                                "modelId": desired,
+                                // Echo the pick's request_id so the Desktop can
+                                // correlate this late frame to the operation
+                                // that fired it, and ignore replayed results.
+                                "requestId": agent.desired_model_request_id,
+                            }),
+                        );
+                        None
+                    }
+                }
             }
             None => {
                 tracing::warn!(
@@ -987,26 +1450,64 @@ async fn create_session_and_apply_model(
                         "type": "switch_model",
                         "status": "unsupported_model",
                         "modelId": desired,
+                        // Echo the pick's request_id (see the failure arm).
+                        "requestId": agent.desired_model_request_id,
                     }),
                 );
-                false
+                None
             }
         }
     } else {
-        false
+        None
     };
+    let switch_succeeded = post_switch_snapshot.is_some();
+
+    // Apply the worker's spawn-scoped startup effort, if configured and the
+    // running model advertises a `thought_level` option. Runs on every session
+    // creation (config options are per-session), mirroring the model-switch
+    // application above. The held value comes from `BUZZ_ACP_EFFORT_LEVEL` and
+    // never mutates — there is no pool-level effort state and no live switching.
+    // Reads the post-switch snapshot so the configId is discovered on the model
+    // the session is actually running; computed BEFORE the capture emission so
+    // the cached configOptions tell the truth about the running session.
+    let effort_snapshot = post_switch_snapshot.as_ref().unwrap_or(&resp.raw);
+    let effort_outcome = apply_startup_effort(agent, effort_snapshot, &resp.session_id).await?;
 
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
     // post-switch state. modelOverridden reflects whether the switch actually
-    // applied — false on the unsupported arm so the panel doesn't show a
-    // stale override badge.
+    // applied — false on the rejected/unsupported arms so the panel doesn't show
+    // a stale override badge.
+    //
+    // configOptions come from the post-switch snapshot on a successful switch
+    // (the target model's option set) and the session/new snapshot otherwise.
+    // Truthful capture: after a successful effort application the snapshot still
+    // carries the pre-set `currentValue`, so patch the applied option to the
+    // value the session is actually running. A rejected effort or a model with
+    // no `thought_level` option leaves the snapshot untouched.
+    let config_options_for_cache = {
+        let mut opts = effort_snapshot
+            .get("configOptions")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if let Some(StartupEffortOutcome::Applied { config_id, value }) = &effort_outcome {
+            patch_config_option_current_value(&mut opts, config_id, value);
+        }
+        opts
+    };
     agent.acp.observe(
         "session_config_captured",
         serde_json::json!({
-            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "configOptions": config_options_for_cache,
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
-            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
+            // `models` must come from the SAME snapshot as configOptions — the
+            // post-switch snapshot on a successful switch, session/new otherwise.
+            // Taking it from `resp.raw` here would emit the target model's option
+            // set alongside the pre-switch model identity, so the desktop panel
+            // would report the old model as live after an applied switch. When a
+            // successful target response omits `models`, this emits Null rather
+            // than falling back to the pre-switch `resp.raw.models`.
+            "models": effort_snapshot.get("models").cloned().unwrap_or(serde_json::Value::Null),
             "modelOverridden": agent.model_overridden && switch_succeeded,
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
@@ -1017,7 +1518,7 @@ async fn create_session_and_apply_model(
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
-    // are safely skipped — the harness rejects interactive permission requests.
+    // are safely skipped — the harness auto-approves via handle_permission_request.
     if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
@@ -1055,18 +1556,35 @@ fn mcp_servers_with_git_origin(
     servers
 }
 
+/// Outcome of a live model-switch RPC returned by [`apply_model_switch`].
+///
+/// `Applied` and `Rejected` are distinct outcomes and must not be collapsed:
+/// the caller needs to know whether the session is now on the target model
+/// before deciding what capabilities to cache and whether to surface a failure.
+#[derive(Debug)]
+enum ModelSwitchOutcome {
+    /// The adapter accepted the switch. Carries the RPC response value, which
+    /// may include refreshed `configOptions` for the target model.
+    Applied(serde_json::Value),
+    /// The adapter returned an application-level error (e.g. JSON error,
+    /// unrecognised model). The session is still on its default model;
+    /// pre-switch capabilities must be preserved.
+    Rejected,
+}
+
 /// Send the appropriate ACP model-switch request with a timeout.
 ///
-/// On timeout or error, logs a warning and returns — the caller proceeds
-/// with the agent's default model. This is intentionally non-fatal: a stale
-/// response from a timed-out request is safely ignored by `read_until_response`
-/// (non-matching JSON-RPC IDs are skipped).
+/// Transport-class errors propagate as `Err` so the caller respawns the agent
+/// rather than reuse a poisoned stdio stream. An application-level rejection is
+/// non-fatal but distinct from success: it returns [`ModelSwitchOutcome::Rejected`]
+/// so the caller preserves pre-switch capabilities and tells Desktop the pick
+/// failed instead of silently claiming the switch landed.
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
     desired: &str,
     method: &ModelSwitchMethod,
-) -> Result<(), AcpError> {
+) -> Result<ModelSwitchOutcome, AcpError> {
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
@@ -1091,11 +1609,15 @@ async fn apply_model_switch(
     .await;
 
     match result {
-        Ok(Ok(_)) => {
+        // Return the RPC result so the caller can consume the post-switch
+        // capability snapshot the adapter echoes (claude-agent-acp rebuilds
+        // `session.configOptions` on a model change and returns them here).
+        Ok(Ok(value)) => {
             tracing::info!(
                 target: "pool::model",
                 "applied model {desired} via {method_label} on session {session_id}"
             );
+            Ok(ModelSwitchOutcome::Applied(value))
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent instead of reusing a poisoned one.
@@ -1108,14 +1630,18 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "fatal error setting model {desired} via {method_label}: {e}"
             );
-            return Err(e);
+            Err(e)
         }
-        // Application-level errors (Json, etc.) — agent is fine, just uses default model.
+        // Application-level errors (Json, etc.) — the adapter explicitly
+        // rejected the switch; the session is still on its default model.
+        // Distinct from a successful switch that returned no configOptions:
+        // the caller must preserve pre-switch capabilities here.
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "pool::model",
                 "failed to set model {desired} via {method_label}: {e} — proceeding with agent default"
             );
+            Ok(ModelSwitchOutcome::Rejected)
         }
         Err(_) => {
             // Outer timeout fired — the inner send_request may have left the
@@ -1124,13 +1650,130 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "model set via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
+            Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
         }
     }
-    Ok(())
 }
 
-/// Check whether the agent's `session/new` response advertises a given mode ID
+/// Outcome of applying a worker's spawn-scoped startup effort at session creation.
+///
+/// Drives truthful capture: only `Applied` patches the cached `currentValue`.
+/// `Rejected` (adapter refused) and the `None` return (model advertises no
+/// `thought_level` option, or no effort was configured) leave the session/new
+/// snapshot untouched so the panel reflects the session's real state.
+enum StartupEffortOutcome {
+    Applied { config_id: String, value: String },
+    Rejected,
+}
+
+/// Apply the worker's held `startup_effort` via `session/set_config_option`, if
+/// set and the current model advertises a `thought_level` option.
+///
+/// Returns `Ok(None)` when there is nothing to apply (no configured effort, or
+/// the model has no `thought_level` option) or `Ok(Some(_))` describing whether
+/// the adapter accepted the value. Transport-class errors propagate as `Err` so
+/// the caller respawns the worker rather than reuse a poisoned stream — mirroring
+/// [`apply_model_switch`]'s classification. Application-level rejection is
+/// non-fatal: the session proceeds on the model's default effort.
+async fn apply_startup_effort(
+    agent: &mut OwnedAgent,
+    session_new_result: &serde_json::Value,
+    session_id: &str,
+) -> Result<Option<StartupEffortOutcome>, AcpError> {
+    let Some(value) = agent.startup_effort.clone() else {
+        return Ok(None);
+    };
+    let Some(config_id) = extract_thought_level_config_id(session_new_result) else {
+        tracing::info!(
+            target: "pool::effort",
+            "startup effort {value} configured but model advertises no thought_level option — leaving agent default"
+        );
+        return Ok(None);
+    };
+
+    let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
+        agent
+            .acp
+            .session_set_config_option(session_id, &config_id, &value)
+            .await
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            tracing::info!(
+                target: "pool::effort",
+                "applied startup effort {value} via configId={config_id} on session {session_id}"
+            );
+            Ok(Some(StartupEffortOutcome::Applied { config_id, value }))
+        }
+        // Transport-class errors may have corrupted the stdio stream — propagate
+        // so the caller can respawn the agent instead of reusing a poisoned one.
+        Ok(Err(e @ AcpError::Io(_)))
+        | Ok(Err(e @ AcpError::WriteTimeout(_)))
+        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Protocol(_)))
+        | Ok(Err(e @ AcpError::AgentExited)) => {
+            tracing::error!(
+                target: "pool::effort",
+                "fatal error applying startup effort {value} via configId={config_id}: {e}"
+            );
+            Err(e)
+        }
+        // Application-level rejection (e.g. Json) — agent is fine, uses default effort.
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "pool::effort",
+                "adapter rejected startup effort {value} via configId={config_id}: {e} — proceeding with agent default"
+            );
+            Ok(Some(StartupEffortOutcome::Rejected))
+        }
+        Err(_) => {
+            // Outer timeout fired — the inner send_request may have left the
+            // stream in an unknown state. Treat as transport error.
+            tracing::error!(
+                target: "pool::effort",
+                "startup effort {value} via configId={config_id} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
+            );
+            Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
+        }
+    }
+}
+
+/// Patch the `currentValue` of the configOption whose `configId`/`id` matches
+/// `config_id` in a session/new `configOptions` array, in place.
+///
+/// Used by truthful capture: a successful `session/set_config_option` is not
+/// reflected in the original session/new snapshot, so the accepted value is
+/// written back before the snapshot is cached. A no-op when `options` is not an
+/// array or no entry matches (the id came from the same array, so a match is
+/// expected in practice).
+fn patch_config_option_current_value(
+    options: &mut serde_json::Value,
+    config_id: &str,
+    value: &str,
+) {
+    let Some(arr) = options.as_array_mut() else {
+        return;
+    };
+    for opt in arr {
+        let matches = opt
+            .get("configId")
+            .or_else(|| opt.get("id"))
+            .and_then(|v| v.as_str())
+            == Some(config_id);
+        if matches {
+            opt["currentValue"] = serde_json::Value::String(value.to_string());
+            return;
+        }
+    }
+}
+
+/// Set the session permission mode via `session/set_config_option`.
+///
+/// Non-fatal for most errors: logs and proceeds. The agent falls back
+/// to its default permission mode (`"default"`), which still works via
+/// Check if the agent's `session/new` response advertises a given mode ID
 /// in `result.modes.availableModes[].id`. Returns `false` if the modes
 /// field is absent or the mode isn't listed.
 fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) -> bool {
@@ -1146,11 +1789,7 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
         .unwrap_or(false)
 }
 
-/// Set the session permission mode via `session/set_config_option`.
-///
-/// Non-fatal for most errors: logs and proceeds. The agent falls back to its
-/// default mode, and any interactive permission request is rejected by
-/// `handle_permission_request`.
+/// per-tool auto-approval in `handle_permission_request`.
 ///
 /// **Fatal exception:** if the agent process exits (e.g., goose crashes on
 /// unrecognized methods), returns `Err(AgentExited)` so the caller can respawn.
@@ -1190,7 +1829,7 @@ async fn apply_permission_mode(
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "pool::permission",
-                "failed to set permission mode {wire:?}: {e} — falling back to per-tool rejection"
+                "failed to set permission mode {wire:?}: {e} — falling back to per-tool auto-approval"
             );
         }
         Err(_) => {
@@ -1205,112 +1844,83 @@ async fn apply_permission_mode(
     Ok(())
 }
 
-/// Prepend the `[Base]` section to a user-message body for legacy agents.
+/// Prepend a legacy agent's standing context to a user-message body.
 ///
-/// Legacy agents (`protocol_version < 2`) don't receive `base_prompt` via the
-/// system role in `session/new`, so it must ride along in the user message.
-/// Agents with `protocol_version >= 2`, or any agent without a `base_prompt`,
-/// get `body` unchanged. The gate lives here so the heartbeat and
-/// initial-message dispatch paths can't drift apart again.
-pub(crate) fn prepend_base_for_legacy(
+/// Legacy agents (`protocol_version < 2`) don't receive standing context via
+/// the system role in `session/new`, so it must ride along in the user message
+/// — in the session's *first* one, and never again. Agents with
+/// `protocol_version >= 2`, or an empty [`StandingContext`], get `body`
+/// unchanged. Both legacy dispatch paths (initial message, heartbeat) go
+/// through this one gate so they can't drift apart again.
+///
+/// A heartbeat passes base only: it has no channel, so there is no core or
+/// canvas to carry, and it has never been given the persona.
+pub(crate) fn prepend_standing_for_legacy(
     protocol_version: u32,
-    base_prompt: Option<&str>,
+    standing: &crate::queue::StandingContext<'_>,
     body: &str,
 ) -> String {
-    match base_prompt {
-        Some(bp) if protocol_version < 2 => {
-            format!("{}\n\n{body}", crate::queue::base_section(bp))
-        }
-        _ => body.to_string(),
+    if protocol_version >= 2 {
+        return body.to_string();
     }
-}
-
-/// Prepend the `[Channel Canvas]` section to the legacy initial-message body.
-///
-/// Protocol-v2 agents already receive the canvas in `systemPrompt`; only
-/// legacy (protocol_version < 2) agents need it injected here so it arrives
-/// before the first prompt — the same "every turn" semantics as per-turn core.
-/// Heartbeats never have an initial_message, so the caller is responsible for
-/// not passing a canvas when `source` is `Heartbeat`.
-pub(crate) fn prepend_canvas_for_legacy(
-    protocol_version: u32,
-    agent_canvas: Option<&str>,
-    body: &str,
-) -> String {
-    match agent_canvas {
-        Some(canvas) if protocol_version < 2 => format!("{canvas}\n\n{body}"),
-        _ => body.to_string(),
+    let sections = standing.sections();
+    if sections.is_empty() {
+        return body.to_string();
     }
+    format!("{}\n\n{body}", sections.join("\n\n"))
 }
 
 /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
-/// header, keeping the base/persona boundary recoverable downstream.
+/// paired tag, keeping the base/workspace/persona boundaries recoverable downstream.
 ///
-/// The header framing matches the legacy per-turn path (`queue::base_section`
-/// for `[Base]`, `[System]\n{...}` for the persona) so the desktop observer can
-/// split the combined value into labeled sub-sections. Each prompt is wrapped
-/// only when present, so a persona-only agent yields `[System]\n{persona}`
-/// rather than an unlabeled blob that would be mislabeled as `[Base]`.
-///
-/// Prepends a `[Workspace]` section naming the agent's absolute working
-/// directory. The base prompt describes the workspace layout but never its
-/// absolute root, so without this anchor a model fills the gap by searching
-/// `$HOME` (triggering macOS TCC prompts) or by inventing its own workspace
-/// directory. The line is emitted only when a real base prompt is present and
-/// `cwd` is an absolute path other than the `/` fallback — naming `/` as the
-/// workspace would itself invite a `$HOME`-wide scan.
+/// The static base remains first for prompt-prefix caching. When a base is
+/// present, the dynamic workspace anchor follows it and precedes the user-owned
+/// agent instructions. A persona-only agent still yields
+/// `<system>…</system>` rather than an unlabeled blob that would be mistaken
+/// for `<base>`.
 fn framed_system_prompt(
     cwd: &str,
     base_prompt: Option<&str>,
     system_prompt: Option<&str>,
 ) -> Option<String> {
-    let body = match (base_prompt, system_prompt) {
+    match (base_prompt, system_prompt) {
         (Some(bp), Some(sp)) => Some(format!(
-            "{}\n\n[System]\n{sp}",
-            crate::queue::base_section(bp)
+            "{}\n\n{}\n\n{}",
+            crate::queue::base_section(bp),
+            workspace_section(cwd),
+            crate::prompt_framing::semantic_section("system", sp),
         )),
-        (Some(bp), None) => Some(crate::queue::base_section(bp)),
-        (None, Some(sp)) => Some(format!("[System]\n{sp}")),
+        (Some(bp), None) => Some(format!(
+            "{}\n\n{}",
+            crate::queue::base_section(bp),
+            workspace_section(cwd)
+        )),
+        (None, Some(sp)) => Some(crate::prompt_framing::semantic_section("system", sp)),
         (None, None) => None,
-    }?;
-    // Anchor the workspace only when a base prompt is present — the workspace
-    // section grounds the base prompt's layout description, so it is meaningless
-    // for a persona-only (`[System]`-only) agent that never received that layout.
-    match (base_prompt, workspace_section(cwd)) {
-        (Some(_), Some(workspace)) => Some(format!("{workspace}\n\n{body}")),
-        _ => Some(body),
     }
 }
 
-/// Render the `[Workspace]` grounding section, or `None` when `cwd` is unusable.
-///
-/// Skips relative paths and the `/` fallback (`std::env::current_dir()` resolves
-/// to `/` on failure): a `/`-rooted workspace line would actively encourage the
-/// `$HOME`-wide scan this section exists to prevent.
-fn workspace_section(cwd: &str) -> Option<String> {
-    if cwd != "/" && cwd.starts_with('/') {
-        Some(format!(
-            "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
-             files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
-             `OUTBOX/` — and any repositories you clone (under `{cwd}/REPOS/`) live \
-             here. This is where you already are; do not search `$HOME` or other \
-             directories for them."
-        ))
-    } else {
-        None
-    }
+fn workspace_section(cwd: &str) -> String {
+    crate::prompt_framing::semantic_section(
+        "workspace",
+        &format!("Current working directory: {cwd}"),
+    )
 }
 
-/// Append the team-owned instruction section after `[System]` and before core memory.
+/// Append the team-owned instruction section after `<system>` and before core memory.
 fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
     let instructions = instructions
         .map(str::trim)
         .filter(|value| !value.is_empty());
     match (prompt, instructions) {
-        (Some(prompt), Some(instructions)) => {
-            Some(format!("{prompt}\n\n[Team Instructions]\n{instructions}"))
-        }
-        (None, Some(instructions)) => Some(format!("[Team Instructions]\n{instructions}")),
+        (Some(prompt), Some(instructions)) => Some(format!(
+            "{prompt}\n\n{}",
+            crate::prompt_framing::semantic_section("team-instructions", instructions)
+        )),
+        (None, Some(instructions)) => Some(crate::prompt_framing::semantic_section(
+            "team-instructions",
+            instructions,
+        )),
         (Some(prompt), None) => Some(prompt),
         (None, None) => None,
     }
@@ -1318,28 +1928,61 @@ fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<Strin
 
 /// Append the agent's core memory section onto the framed system prompt.
 ///
-/// Core already carries its own `[Agent Memory — core]` header from
+/// Core already carries its own `<core-memory>` boundary from
 /// `engram_fetch::build_core_section`, so it is joined with a blank-line
 /// separator and never re-labeled. Either side may be absent.
 fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
+    let core = core.map(|core| {
+        crate::prompt_framing::normalize_semantic_section(
+            "core-memory",
+            "Agent Memory — core",
+            core,
+        )
+    });
     match (framed, core) {
         (Some(framed), Some(core)) => Some(format!("{framed}\n\n{core}")),
         (Some(framed), None) => Some(framed),
-        (None, Some(core)) => Some(core.to_string()),
+        (None, Some(core)) => Some(core),
         (None, None) => None,
     }
 }
 
-/// Append the `[Channel Canvas]` metadata section onto the accumulated system prompt.
+/// Append owner-signed huddle instructions to this channel session's system prompt.
+fn with_huddle_instructions(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (prompt, instructions) {
+        (Some(prompt), Some(instructions)) => Some(format!(
+            "{prompt}\n\n{}",
+            crate::prompt_framing::semantic_section("huddle-instructions", instructions)
+        )),
+        (None, Some(instructions)) => Some(crate::prompt_framing::semantic_section(
+            "huddle-instructions",
+            instructions,
+        )),
+        (Some(prompt), None) => Some(prompt),
+        (None, None) => None,
+    }
+}
+
+/// Append the `<channel-canvas>` metadata section onto the accumulated system prompt.
 ///
-/// The canvas section already carries its `[Channel Canvas]` header (from
+/// The canvas section already carries its `<channel-canvas>` boundary (from
 /// `render_canvas_section`), so it is joined with a blank-line separator.
 /// Either side may be absent.
 fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
+    let canvas = canvas.map(|canvas| {
+        crate::prompt_framing::normalize_semantic_section(
+            "channel-canvas",
+            "Channel Canvas",
+            canvas,
+        )
+    });
     match (prompt, canvas) {
         (Some(prompt), Some(canvas)) => Some(format!("{prompt}\n\n{canvas}")),
         (Some(prompt), None) => Some(prompt),
-        (None, Some(canvas)) => Some(canvas.to_string()),
+        (None, Some(canvas)) => Some(canvas),
         (None, None) => None,
     }
 }
@@ -1398,13 +2041,10 @@ pub async fn run_prompt_task(
 ) {
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
-        Some(b) => PromptSource::Channel(b.channel_id),
+        Some(b) => PromptSource::Channel(b.scope.clone()),
         None => PromptSource::Heartbeat,
     };
-    let observer_channel_id = match &source {
-        PromptSource::Channel(channel_id) => Some(*channel_id),
-        PromptSource::Heartbeat => None,
-    };
+    let observer_channel_id = source.channel_id();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -1475,9 +2115,36 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // Resolve project authority exactly once, before any ACP session creation or
+    // initial-message delivery. An indeterminate result is a local relay-state
+    // outcome: fail closed and preserve the batch without poisoning the healthy
+    // ACP process.
+    let resolved_channel_info = match &source {
+        PromptSource::Channel(scope) => match ctx.channel_info.resolve(scope.channel_id()).await {
+            Ok(info) => info,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %scope.channel_id(),
+                    "project context is indeterminate; requeueing turn before ACP session creation: {}",
+                    error.0
+                );
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::ProjectContextIndeterminate(error.0),
+                    requeue_batch_if_queue(&ctx, batch),
+                );
+                return;
+            }
+        },
+        PromptSource::Heartbeat => None,
+    };
+
     //
     // Core memory is delivered inside the system prompt the harness already
-    // builds (system role for protocol >= 2, the `[System]` user-message
+    // builds (system role for protocol >= 2, the `<system>` user-message
     // section for legacy agents). To put it on the wire at `session/new` for
     // modern agents, the fetch must run *before* the session is created — so
     // we do it here and cache the rendered section in `state.core_sections`.
@@ -1501,11 +2168,15 @@ pub async fn run_prompt_task(
     //
     // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
     if ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
+        if let (PromptSource::Channel(scope), Some(owner_pk)) =
             (&source, ctx.agent_owner_pubkey.as_ref())
         {
-            let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-            if is_new_channel_session && !agent.state.core_sections.contains_key(cid) {
+            // Session state is keyed by scope: repeated activity in a thread
+            // reuses exactly that thread's session. `cid` is only for
+            // channel-level fetches/logging.
+            let cid = &scope.channel_id();
+            let is_new_channel_session = !agent.state.sessions.contains_key(scope);
+            if is_new_channel_session && !agent.state.core_sections.contains_key(scope) {
                 // Bounded — we'd rather start the session with no core hint
                 // than block session creation on a stalled relay.
                 const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -1530,10 +2201,11 @@ pub async fn run_prompt_task(
                     tracing::info!(
                         target: "engram::core",
                         channel = %cid,
+                        scope = %scope.telemetry_label(),
                         section_len = rendered.len(),
                         "injected NIP-AE core section into system prompt"
                     );
-                    agent.state.core_sections.insert(*cid, rendered);
+                    agent.state.core_sections.insert(scope.clone(), rendered);
                 }
             }
         }
@@ -1551,24 +2223,30 @@ pub async fn run_prompt_task(
     // commit it to `canvas_sections` only after session creation succeeds. This
     // prevents a stale revision A surviving a failed create and being re-used by
     // the next attempt after the canvas was cleared.
-    let mut pending_canvas: Option<(Uuid, String)> = None;
+    let mut pending_canvas: Option<(SessionScope, String)> = None;
+    let mut huddle_instructions: Option<String> = None;
     // Channel name for the session title, from the same single resolve the
     // canvas DM check uses — see `resolve_new_session_channel_context`.
     let mut title_channel: Option<String> = None;
     let mut origin_channel_type: Option<String> = None;
-    if let PromptSource::Channel(cid) = &source {
-        let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-        let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
+    if let PromptSource::Channel(scope) = &source {
+        let cid = scope.channel_id();
+        let is_new_channel_session = !agent.state.sessions.contains_key(scope);
+        let needs_canvas =
+            is_new_channel_session && !agent.state.canvas_sections.contains_key(scope);
         if is_new_channel_session {
             let (is_dm, resolved_channel, resolved_channel_type) =
-                resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
+                resolve_new_session_channel_context(resolved_channel_info.as_ref()).await;
             title_channel = resolved_channel;
             origin_channel_type = resolved_channel_type;
+            if let Some(owner) = ctx.agent_owner_pubkey.as_ref() {
+                huddle_instructions = fetch_huddle_instructions(cid, owner, &ctx.rest_client).await;
+            }
             // A confirmed DM never receives a canvas section; an undeterminable
             // channel type fails closed as a DM for the same reason.
             if needs_canvas && !is_dm {
-                if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
-                    pending_canvas = Some((*cid, section));
+                if let Some(section) = fetch_canvas_section(cid, &ctx.rest_client).await {
+                    pending_canvas = Some((scope.clone(), section));
                 }
             }
         }
@@ -1577,51 +2255,62 @@ pub async fn run_prompt_task(
     // The core section to fold into the system prompt for this turn's session.
     // Channel-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Channel(scope) => agent.state.core_sections.get(scope).cloned(),
         PromptSource::Heartbeat => None,
     };
 
     // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
     // Prefer the committed cache; fall back to pending (for new sessions being created now).
     let agent_canvas: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent
+        PromptSource::Channel(scope) => agent
             .state
             .canvas_sections
-            .get(cid)
+            .get(scope)
             .cloned()
             .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
         PromptSource::Heartbeat => None,
     };
 
     let (session_id, is_new_session) = match &source {
-        PromptSource::Channel(cid) => {
-            if let Some(sid) = agent.state.sessions.get(cid) {
+        PromptSource::Channel(scope) => {
+            let cid = &scope.channel_id();
+            if let Some(sid) = agent.state.sessions.get(scope) {
                 (sid.clone(), false)
             } else {
-                // The title is channel-qualified (`Agent · #channel`) so one
-                // agent in several channels doesn't produce identical session
-                // rows; `title_channel` comes from the single resolve above and
-                // is `None` for DM, unresolved, and unnamed channels.
+                // The title includes channel and, for thread sessions, the
+                // canonical root prefix so sibling sessions are distinguishable.
+                // DMs, unresolved, and unnamed channels omit the channel name.
                 match create_session_and_apply_model(
                     &mut agent,
                     &ctx,
                     agent_core.as_deref(),
-                    agent_canvas.as_deref(),
-                    title_channel.as_deref(),
-                    Some(*cid),
-                    origin_channel_type.as_deref(),
+                    NewSessionChannelContext {
+                        huddle_instructions: huddle_instructions.as_deref(),
+                        canvas: agent_canvas.as_deref(),
+                        name: title_channel.as_deref(),
+                        scope: Some(scope),
+                        channel_type: origin_channel_type.as_deref(),
+                    },
                 )
                 .await
                 {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
-                            "created session {sid} for channel {cid}"
+                            "created session {sid} for channel {cid} (scope {})",
+                            scope.telemetry_label()
                         );
-                        agent.state.sessions.insert(*cid, sid.clone());
+                        agent.state.sessions.insert(scope.clone(), sid.clone());
+                        agent
+                            .state
+                            .deliveries
+                            .insert(scope.clone(), ChannelDeliveryState::default());
+                        // Seed a zero usage baseline: buzz-acp spawned this session
+                        // so prior usage is zero by definition — first turn is reliable.
+                        agent.acp.notify_session_spawned(&sid);
                         // Commit canvas only after session creation succeeds (I3).
-                        if let Some((pending_cid, section)) = pending_canvas.take() {
-                            agent.state.canvas_sections.insert(pending_cid, section);
+                        if let Some((pending_scope, section)) = pending_canvas.take() {
+                            agent.state.canvas_sections.insert(pending_scope, section);
                         }
                         (sid, true)
                     }
@@ -1657,8 +2346,19 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
-                    .await
+                match create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    None,
+                    NewSessionChannelContext {
+                        huddle_instructions: None,
+                        canvas: None,
+                        name: None,
+                        scope: None,
+                        channel_type: None,
+                    },
+                )
+                .await
                 {
                     Ok(sid) => {
                         tracing::info!(
@@ -1667,6 +2367,8 @@ pub async fn run_prompt_task(
                             agent.index
                         );
                         agent.state.heartbeat_session = Some(sid.clone());
+                        // Seed a zero usage baseline: buzz-acp spawned this session.
+                        agent.acp.notify_session_spawned(&sid);
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
@@ -1713,36 +2415,50 @@ pub async fn run_prompt_task(
         }),
     );
 
+    // Standing context is fixed for the life of a session. Agents with
+    // systemPrompt support already hold it from session/new; legacy agents
+    // receive it in the session's first user message and never again.
+    //
+    // `is_new_session` comes from the session registry, which is cleared
+    // whenever a session is invalidated — so the replacement session re-delivers
+    // rather than leaving the agent unbriefed.
+    let standing = crate::queue::StandingContext {
+        base_prompt: ctx.base_prompt.as_deref(),
+        system_prompt: ctx.system_prompt.as_deref(),
+        team_instructions: ctx.team_instructions.as_deref(),
+        agent_core: agent_core.as_deref(),
+        huddle_instructions: huddle_instructions.as_deref(),
+        agent_canvas: agent_canvas.as_deref(),
+    };
+    // Delivery state is committed only after ACP confirms success. Existing
+    // sessions created before this field existed fail safe by behaving as
+    // undelivered once, rather than silently omitting standing context.
+    let mut standing_context_sent = match &source {
+        PromptSource::Channel(scope) => agent
+            .state
+            .deliveries
+            .get(scope)
+            .is_some_and(|delivery| delivery.standing_context_sent),
+        PromptSource::Heartbeat => agent.state.heartbeat_standing_context_sent,
+    };
+
     if is_new_session {
-        if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
+        if let (PromptSource::Channel(scope), Some(ref initial_msg)) =
+            (&source, &ctx.initial_message)
         {
+            let cid = &scope.channel_id();
             tracing::info!(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
             );
-            // For agents with systemPrompt support (protocol_version >= 2),
-            // base_prompt is delivered via the system role in session/new.
-            // Legacy agents receive it via [Base] in the user message instead.
-            // Canvas is also injected here for legacy agents: protocol-v2 agents
-            // already have it in systemPrompt; legacy agents need it before the
-            // first prompt, matching the "every turn" per-turn delivery semantics.
-            let init_msg = prepend_base_for_legacy(
+            let init_msg = prepend_standing_for_legacy(
                 if agent.has_system_prompt_support() {
                     2
                 } else {
                     1
                 },
-                ctx.base_prompt,
+                &standing,
                 initial_msg,
-            );
-            let init_msg = prepend_canvas_for_legacy(
-                if agent.has_system_prompt_support() {
-                    2
-                } else {
-                    1
-                },
-                agent_canvas.as_deref(),
-                &init_msg,
             );
             let init_result = agent
                 .acp
@@ -1760,6 +2476,24 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message complete for channel {cid}: {stop_reason:?}"
                     );
+                    // The legacy agent has its standing context now; the turn
+                    // prompt below must not repeat it. Every other arm returns.
+                    standing_context_sent = true;
+                    if !agent.has_system_prompt_support() {
+                        agent
+                            .state
+                            .mark_scope_delivery_success(scope.clone(), true, []);
+                    }
+                    let usage = agent.acp.take_turn_usage();
+                    publish_agent_turn_metric(
+                        &ctx,
+                        usage,
+                        Some(*cid),
+                        &session_id,
+                        &format!("{turn_id}:initial"),
+                        Some(acp_stop_to_core(&stop_reason)),
+                    )
+                    .await;
                 }
                 Err(AcpError::AgentExited) => {
                     agent.state.invalidate_all();
@@ -1784,7 +2518,17 @@ pub async fn run_prompt_task(
                         .cancel_with_cleanup(&session_id, ctx.idle_timeout)
                         .await
                     {
-                        Ok(_) => {
+                        Ok(stop_reason) => {
+                            let usage = agent.acp.take_turn_usage();
+                            publish_agent_turn_metric(
+                                &ctx,
+                                usage,
+                                Some(*cid),
+                                &session_id,
+                                &format!("{turn_id}:initial"),
+                                Some(acp_stop_to_core(&stop_reason)),
+                            )
+                            .await;
                             agent.state.invalidate(&source);
                         }
                         Err(AcpError::AgentExited) => {
@@ -1861,29 +2605,67 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    // Event IDs represented by this prompt. Commit only after ACP reports a
+    // successful turn; failed/cancelled prompts must be retryable without loss.
+    let mut pending_delivered_event_ids = HashSet::new();
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
-        let text = prepend_base_for_legacy(
-            if agent.has_system_prompt_support() {
-                2
-            } else {
-                1
-            },
-            ctx.base_prompt,
-            &text,
-        );
+        //
+        // Only the first heartbeat of a session carries `<base>`; later ticks
+        // reuse the same session, so the agent already has it.
+        let text = if standing_context_sent {
+            text
+        } else {
+            prepend_standing_for_legacy(
+                if agent.has_system_prompt_support() {
+                    2
+                } else {
+                    1
+                },
+                &crate::queue::StandingContext {
+                    base_prompt: ctx.base_prompt.as_deref(),
+                    ..Default::default()
+                },
+                &text,
+            )
+        };
         vec![text]
     } else if let Some(ref b) = batch {
-        // Build prompt from batch with context enrichment.
-        // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = ctx.channel_info.resolve(b.channel_id).await;
+        // Project authority was resolved before any ACP session boundary above;
+        // reuse that exact typed result for prompt formatting.
+        let channel_info = resolved_channel_info.clone();
 
         let conversation_context = if ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
         } else {
             None
         };
+        let rendered_batch_ids: HashSet<String> = b
+            .events
+            .iter()
+            .chain(b.cancelled_events.iter())
+            .map(|event| event.event.id.to_hex())
+            .collect();
+        let delivered_ids = agent
+            .state
+            .deliveries
+            .get(&b.scope)
+            .map(|delivery| &delivery.delivered_event_ids)
+            .cloned()
+            .unwrap_or_default();
+        let conversation_context_had_delivered_events =
+            conversation_context.as_ref().is_some_and(|context| {
+                conversation_context_event_ids(Some(context))
+                    .iter()
+                    .any(|event_id| delivered_ids.contains(event_id))
+            });
+        let conversation_context =
+            conversation_context_delta(conversation_context, &delivered_ids, &rendered_batch_ids);
+        pending_delivered_event_ids.extend(rendered_batch_ids);
+        pending_delivered_event_ids.extend(conversation_context_event_ids(
+            conversation_context.as_ref(),
+        ));
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
@@ -1907,15 +2689,18 @@ pub async fn run_prompt_task(
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
-                agent_core: agent_core.as_deref(),
+                agent_core: standing.agent_core,
+                huddle_instructions: standing.huddle_instructions,
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
+                conversation_context_had_delivered_events,
                 profile_lookup: profile_lookup.as_ref(),
                 has_system_prompt_support: agent.has_system_prompt_support(),
-                base_prompt: ctx.base_prompt,
-                system_prompt: ctx.system_prompt.as_deref(),
-                team_instructions: ctx.team_instructions.as_deref(),
-                agent_canvas: agent_canvas.as_deref(),
+                base_prompt: standing.base_prompt,
+                system_prompt: standing.system_prompt,
+                team_instructions: standing.team_instructions,
+                agent_canvas: standing.agent_canvas,
+                standing_context_sent,
             },
         )
     } else {
@@ -1955,6 +2740,28 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
+    let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
+    let has_standing_context = match &source {
+        PromptSource::Channel(_) => !standing.sections().is_empty(),
+        PromptSource::Heartbeat => ctx.base_prompt.is_some(),
+    };
+    let standing_context_included =
+        !agent.has_system_prompt_support() && !standing_context_sent && has_standing_context;
+    tracing::info!(
+        target: "pool::prompt",
+        prompt_bytes,
+        standing_context_included,
+        delivered_event_delta = pending_delivered_event_ids.len(),
+        "prompt context delivery"
+    );
+    agent.acp.observe(
+        "prompt_context_delivery",
+        serde_json::json!({
+            "promptBytes": prompt_bytes,
+            "standingContextIncluded": standing_context_included,
+            "eventDeltaCount": pending_delivered_event_ids.len(),
+        }),
+    );
 
     // Turn start, labelled exactly as `log_stop_reason` labels the end, so a
     // log reads as start/stop pairs. Purely observational: an unpaired start is
@@ -2000,9 +2807,15 @@ pub async fn run_prompt_task(
                     // `desired_model` here means the fresh session created by the
                     // requeued turn (busy) or the next turn (already-completed)
                     // applies the new model. Runtime-only — never persisted.
-                    if let ControlSignal::SwitchModel(ref model_id) = control_signal {
+                    if let ControlSignal::SwitchModel { model_id, request_id } = &control_signal {
                         agent.desired_model = Some(model_id.clone());
                         agent.model_overridden = true;
+                        agent.desired_model_request_id = request_id.clone();
+                        // Busy path: the real apply is deferred to the requeued
+                        // session. Arm the positive-terminal emit so that apply
+                        // reports success explicitly rather than the Desktop
+                        // inferring it from timeout silence.
+                        agent.desired_model_pending_ack = true;
                     }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
@@ -2093,7 +2906,7 @@ pub async fn run_prompt_task(
                         // MUST send a PromptResult or the main loop deadlocks.
                         if matches!(
                             control_signal,
-                            ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+                            ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
                         ) {
                             tracing::debug!(
                                 target: "pool::prompt",
@@ -2103,6 +2916,16 @@ pub async fn run_prompt_task(
                             tracing::debug!(
                                 target: "pool::prompt",
                                 "control signal arrived but turn already completed — treating as success"
+                            );
+                        }
+                        log_stop_reason(&source, &StopReason::EndTurn);
+                        if let PromptSource::Channel(scope) = &source {
+                            let standing_sent = !agent.has_system_prompt_support();
+                            record_scope_delivery_success(
+                                &mut agent,
+                                scope.clone(),
+                                standing_sent,
+                                &pending_delivered_event_ids,
                             );
                         }
                         apply_completed_before_control_signal(
@@ -2139,6 +2962,18 @@ pub async fn run_prompt_task(
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
 
+            if let PromptSource::Channel(scope) = &source {
+                let standing_sent = !agent.has_system_prompt_support();
+                record_scope_delivery_success(
+                    &mut agent,
+                    scope.clone(),
+                    standing_sent,
+                    &pending_delivered_event_ids,
+                );
+            } else if !agent.has_system_prompt_support() {
+                agent.state.heartbeat_standing_context_sent = true;
+            }
+
             let should_rotate = matches!(
                 stop_reason,
                 StopReason::MaxTokens | StopReason::MaxTurnRequests
@@ -2148,8 +2983,8 @@ pub async fn run_prompt_task(
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
                     match &source {
-                        PromptSource::Channel(cid) => {
-                            let count = agent.state.turn_counts.entry(*cid).or_insert(0);
+                        PromptSource::Channel(scope) => {
+                            let count = agent.state.turn_counts.entry(scope.clone()).or_insert(0);
                             *count += 1;
                             *count >= limit
                         }
@@ -2386,6 +3221,15 @@ pub(crate) async fn fetch_channel_info(
     channel_id: Uuid,
     rest: &RestClient,
 ) -> Option<PromptChannelInfo> {
+    fetch_with_retry(|| fetch_channel_info_once(channel_id, rest)).await
+}
+
+/// Fetch the current kind-39000 metadata with one bounded request.
+///
+/// Used by prompt-turn refreshes when cached metadata is already available as
+/// a graceful fallback. First-time resolution uses [`fetch_channel_info`] so
+/// unknown channels still receive the established retry behavior.
+async fn fetch_channel_info_once(channel_id: Uuid, rest: &RestClient) -> Option<PromptChannelInfo> {
     use nostr::{Alphabet, SingleLetterTag};
 
     let d_tag = SingleLetterTag::lowercase(Alphabet::D);
@@ -2395,52 +3239,166 @@ pub(crate) async fn fetch_channel_info(
         ))
         .custom_tags(d_tag, [channel_id.to_string()]);
 
-    fetch_with_retry(|| async {
-        match timeout(
-            CONTEXT_FETCH_TIMEOUT,
-            rest.query(std::slice::from_ref(&filter)),
-        )
-        .await
-        {
-            Ok(Ok(json)) => {
-                let events = json.as_array()?;
-                let ev = events.first()?;
-                let tags = ev.get("tags")?.as_array()?;
-                let mut name = None;
-                for tag in tags {
-                    if let Some(arr) = tag.as_array() {
-                        if arr.first().and_then(|v| v.as_str()) == Some("name") {
-                            name = arr.get(1).and_then(|v| v.as_str());
-                        }
+    match timeout(
+        CONTEXT_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(json)) => {
+            let events = json.as_array()?;
+            let ev = events.first()?;
+            let tags = ev.get("tags")?.as_array()?;
+            let mut name = None;
+            let mut description = None;
+            for tag in tags {
+                if let Some(arr) = tag.as_array() {
+                    match arr.first().and_then(|v| v.as_str()) {
+                        Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                        Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
+                        _ => {}
                     }
                 }
-                let channel_type = crate::relay::channel_type_from_tags(tags);
-                Some(PromptChannelInfo {
-                    name: name.unwrap_or(UNKNOWN_CHANNEL_NAME).to_string(),
-                    channel_type,
-                })
             }
-            Ok(Err(e)) => {
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    "channel info fetch failed: {e} — will retry"
-                );
-                None
-            }
-            Err(_) => {
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    "channel info fetch timed out — will retry"
-                );
-                None
-            }
+            let channel_type = crate::relay::channel_type_from_tags(tags);
+            let description = description
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            Some(PromptChannelInfo {
+                name: name.unwrap_or(UNKNOWN_CHANNEL_NAME).to_string(),
+                channel_type,
+                description,
+                project: None,
+            })
         }
-    })
+        Ok(Err(e)) => {
+            tracing::debug!(channel_id = %channel_id, "channel info fetch failed: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(channel_id = %channel_id, "channel info fetch timed out");
+            None
+        }
+    }
+}
+
+/// Resolve the listed NIP-MP project whose home channel is `channel_id`.
+pub(crate) async fn fetch_project_home_for_channel(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Result<Option<PromptProjectInfo>, ProjectLookupError> {
+    let channel = channel_id.to_string();
+    let filters = [
+        serde_json::json!({
+            "kinds": [buzz_core::kind::KIND_PROJECT],
+            "#buzz-channel": [channel],
+        }),
+        serde_json::json!({
+            "kinds": [buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT],
+            "#buzz-channel": [channel],
+        }),
+    ];
+
+    let mut events = Vec::new();
+    for filter in filters {
+        let mut page_events = fetch_with_retry(|| async {
+            match timeout(CONTEXT_FETCH_TIMEOUT, rest.query_raw_all(filter.clone())).await {
+                Ok(Ok(events)) => Some(events),
+                Ok(Err(e)) => {
+                    tracing::debug!(
+                        channel_id = %channel_id,
+                        "project home fetch failed: {e} — will retry"
+                    );
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        channel_id = %channel_id,
+                        "project home fetch timed out — will retry"
+                    );
+                    None
+                }
+            }
+        })
+        .await
+        .ok_or_else(|| ProjectLookupError("relay query failed or timed out after retry".into()))?;
+        events.append(&mut page_events);
+    }
+    let (projects, repos): (Vec<_>, Vec<_>) = events.into_iter().partition(|event| {
+        event.get("kind").and_then(serde_json::Value::as_u64)
+            == Some(buzz_core::kind::KIND_PROJECT as u64)
+    });
+    Ok(pick_authoritative_project_home(
+        &projects,
+        &repos,
+        &channel_id.to_string(),
+    ))
+}
+
+/// Fetch owner-signed huddle instructions for a new channel session.
+///
+/// The event is promoted into the system role, so accepting any channel member's
+/// event would be a privilege escalation. Only the configured agent owner's
+/// valid signature is accepted; absence or failure simply yields no section.
+async fn fetch_huddle_instructions(
+    channel_id: Uuid,
+    owner: &nostr::PublicKey,
+    rest: &RestClient,
+) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_HUDDLE_GUIDELINES as u16,
+        ))
+        .author(*owner)
+        .custom_tags(h_tag, [channel_id.to_string()])
+        .limit(1);
+    let json = match timeout(
+        CONTEXT_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
     .await
+    {
+        Ok(Ok(json)) => json,
+        Ok(Err(error)) => {
+            tracing::warn!(channel = %channel_id, "huddle instructions query failed: {error}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(channel = %channel_id, "huddle instructions query timed out");
+            return None;
+        }
+    };
+    huddle_instructions_from_query_response(json.as_array()?, channel_id, owner)
+}
+
+fn huddle_instructions_from_query_response(
+    events: &[serde_json::Value],
+    channel_id: Uuid,
+    owner: &nostr::PublicKey,
+) -> Option<String> {
+    let raw = events.first()?;
+    let event = serde_json::from_value::<nostr::Event>(raw.clone()).ok()?;
+    event.verify().ok()?;
+    let channel_id = channel_id.to_string();
+    if event.pubkey != *owner
+        || event.kind.as_u16() as u32 != buzz_core::kind::KIND_HUDDLE_GUIDELINES
+        || !event
+            .tags
+            .iter()
+            .any(|tag| tag.kind().to_string() == "h" && tag.content() == Some(channel_id.as_str()))
+    {
+        return None;
+    }
+    let content = event.content.trim();
+    (!content.is_empty()).then(|| content.to_owned())
 }
 
 /// Fetch the latest canvas event for `channel_id` and return a rendered
-/// `[Channel Canvas]` metadata section, or `None` if absent/blank/error.
+/// `<channel-canvas>` metadata section, or `None` if absent/blank/error.
 ///
 /// Failure modes (all fail open — no crash, no block):
 /// * relay returns no event → `None`
@@ -2503,7 +3461,7 @@ async fn fetch_canvas_section(channel_id: Uuid, rest: &RestClient) -> Option<Str
     canvas_section_from_query_response(events, &channel_id.to_string())
 }
 
-/// Parse a canvas query response array and render a `[Channel Canvas]` section.
+/// Parse a canvas query response array and render a `<channel-canvas>` section.
 ///
 /// Extracted as a pure function so tests can exercise the parsing/validation
 /// logic without async machinery or relay connectivity.
@@ -2620,17 +3578,82 @@ pub(crate) fn canvas_section_from_query_response(
     Some(render_canvas_section(&id, &timestamp, channel_uuid))
 }
 
-/// Render the `[Channel Canvas]` metadata section string.
+/// Render the `<channel-canvas>` metadata section string.
 ///
 /// Pure function — kept separate so unit tests can exercise rendering
 /// without async machinery or relay connectivity.
 pub(crate) fn render_canvas_section(event_id: &str, timestamp: &str, channel_uuid: &str) -> String {
-    format!(
-        "[Channel Canvas]\n\
-         Canvas revision (event ID): {event_id}\n\
-         Last modified: {timestamp}\n\
-         Fetch current content with: buzz canvas get --channel {channel_uuid}"
+    crate::prompt_framing::semantic_section(
+        "channel-canvas",
+        &format!(
+            "Canvas revision (event ID): {event_id}\n\
+             Last modified: {timestamp}\n\
+             Fetch current content with: buzz canvas get --channel {channel_uuid}"
+        ),
     )
+}
+
+fn conversation_context_event_ids(context: Option<&ConversationContext>) -> HashSet<String> {
+    match context {
+        Some(ConversationContext::Thread { messages, .. })
+        | Some(ConversationContext::Dm { messages, .. }) => messages
+            .iter()
+            .filter(|message| !message.event_id.is_empty())
+            .map(|message| message.event_id.clone())
+            .collect(),
+        None => HashSet::new(),
+    }
+}
+
+/// Remove events already delivered to this live ACP session. Triggering events
+/// are also excluded because they are rendered separately in `[Event]`.
+/// IDs are compared in Buzz's canonical 64-character lowercase hex form: relay
+/// context JSON supplies the same form emitted by `EventId::to_hex()`. A
+/// non-canonical or missing ID deliberately fails open and may be re-sent.
+fn conversation_context_delta(
+    context: Option<ConversationContext>,
+    delivered: &HashSet<String>,
+    triggering: &HashSet<String>,
+) -> Option<ConversationContext> {
+    let filter = |messages: Vec<ContextMessage>| {
+        messages
+            .into_iter()
+            .filter(|message| {
+                message.event_id.is_empty()
+                    || (!delivered.contains(&message.event_id)
+                        && !triggering.contains(&message.event_id))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    match context? {
+        ConversationContext::Thread {
+            messages,
+            total,
+            root_present,
+            truncated,
+        } => {
+            let messages = filter(messages);
+            (!messages.is_empty()).then_some(ConversationContext::Thread {
+                messages,
+                total,
+                root_present,
+                truncated,
+            })
+        }
+        ConversationContext::Dm {
+            messages,
+            total,
+            truncated,
+        } => {
+            let messages = filter(messages);
+            (!messages.is_empty()).then_some(ConversationContext::Dm {
+                messages,
+                total,
+                truncated,
+            })
+        }
+    }
 }
 
 /// Fetch conversation context (thread or DM) for a batch before prompting.
@@ -2640,8 +3663,21 @@ pub(crate) fn render_canvas_section(event_id: &str, timestamp: &str, channel_uui
 /// - The REST fetch fails or times out (graceful degradation)
 /// - `context_message_limit` is 0
 ///
-/// For batches with multiple events, thread context is fetched for the **last**
-/// reply event only (most recent = most likely to need a response).
+/// Context is scoped by the batch's resolved [`SessionScope`], never inferred
+/// from whichever event happens to be last:
+///
+/// - **Thread scope** → fetch only that canonical thread's history (all
+///   messages under the root, including intervening non-mention human
+///   messages). A brand-new thread (root == the triggering event, first turn)
+///   has no prior history, so this returns `None`, which is correct: the
+///   trigger itself is delivered as the `[Event]` block.
+/// - **Conversation scope** (DMs always; channels under the `channel` policy)
+///   → preserve legacy behavior: a threaded reply fetches its reply chain;
+///   a DM non-reply fetches recent conversation history.
+///
+/// The delivery-delta filter (`conversation_context_delta`) then removes any
+/// events this scope's live session already received, so subsequent turns
+/// deliver only intervening same-thread messages plus the trigger.
 async fn fetch_conversation_context(
     batch: &FlushBatch,
     channel_info: &Option<PromptChannelInfo>,
@@ -2653,28 +3689,54 @@ async fn fetch_conversation_context(
         .map(|ci| ci.channel_type == "dm")
         .unwrap_or(false);
 
-    // Check thread tags on the last event first — this applies to both
-    // channels and DMs. A DM reply needs thread context (not channel history)
-    // because /api/channels/{id}/messages excludes thread replies.
-    let last_event = batch.events.last()?;
-    let tags = crate::queue::parse_thread_tags(&last_event.event);
-    if let Some(root_id) = tags.root_event_id {
-        return fetch_thread_context(
-            batch.channel_id,
-            &root_id,
-            limit,
-            ctx.agent_keys.public_key(),
-            &ctx.rest_client,
-        )
-        .await;
+    match resolve_context_target(batch, is_dm) {
+        ContextTarget::Thread(root_id) => {
+            fetch_thread_context(
+                batch.channel_id,
+                &root_id,
+                limit,
+                ctx.agent_keys.public_key(),
+                &ctx.rest_client,
+            )
+            .await
+        }
+        ContextTarget::Dm => fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await,
+        ContextTarget::None => None,
     }
+}
 
-    // DM non-reply: fetch recent conversation history.
+/// Which history to fetch for a batch's context section.
+#[derive(Debug, PartialEq, Eq)]
+enum ContextTarget {
+    /// Fetch the canonical thread rooted at this event id.
+    Thread(String),
+    /// Fetch recent DM conversation history.
+    Dm,
+    /// No supplementary context (new thread's first turn, or plain channel).
+    None,
+}
+
+/// Decide which history to gather, driven by the batch's resolved
+/// [`SessionScope`] — never by inferring scope from the last event.
+///
+/// - Thread scope: the canonical root is authoritative.
+/// - Conversation scope (DMs always; channels under `channel` policy): a
+///   threaded reply fetches its reply chain; a DM non-reply fetches recent
+///   conversation history; a plain top-level channel message has none.
+fn resolve_context_target(batch: &FlushBatch, is_dm: bool) -> ContextTarget {
+    if let Some(root_id) = batch.scope.root_event_id() {
+        return ContextTarget::Thread(root_id.to_string());
+    }
+    let Some(last_event) = batch.events.last() else {
+        return ContextTarget::None;
+    };
+    if let Some(root_id) = crate::queue::parse_thread_tags(&last_event.event).root_event_id {
+        return ContextTarget::Thread(root_id);
+    }
     if is_dm {
-        return fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await;
+        return ContextTarget::Dm;
     }
-
-    None
+    ContextTarget::None
 }
 
 /// Normalize AND validate a pubkey for the batch profile API request.
@@ -3084,6 +4146,7 @@ fn parse_thread_response(json: serde_json::Value) -> Option<ConversationContext>
     Some(ConversationContext::Thread {
         messages,
         total,
+        root_present: json.get("root").and_then(json_to_context_message).is_some(),
         truncated,
     })
 }
@@ -3145,7 +4208,14 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
         })
         .unwrap_or_else(|| "unknown".to_string());
 
+    let event_id = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
     Some(ContextMessage {
+        event_id,
         pubkey: pubkey.to_string(),
         timestamp,
         content: content.to_string(),
@@ -3255,6 +4325,7 @@ fn parse_nostr_thread_response_with_meta(
         context: ConversationContext::Thread {
             messages,
             total,
+            root_present,
             truncated,
         },
         root_present,
@@ -3319,7 +4390,7 @@ fn requeue_cancelled_batch(
 ) -> Option<FlushBatch> {
     let reason = match signal {
         ControlSignal::Steer => CancelReason::Steer,
-        ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
+        ControlSignal::Interrupt | ControlSignal::SwitchModel { .. } => CancelReason::Interrupt,
         // Cancel/Rotate discard the batch — no merged re-prompt.
         ControlSignal::Cancel | ControlSignal::Rotate => return None,
     };
@@ -3388,7 +4459,11 @@ fn classify_control_cancel_failure(
 /// Shared by the turn-start and turn-stop lines so a log can be read as pairs.
 fn prompt_label(source: &PromptSource) -> String {
     match source {
-        PromptSource::Channel(cid) => format!("channel {cid}"),
+        PromptSource::Channel(scope) => format!(
+            "channel {} ({})",
+            scope.channel_id(),
+            scope.telemetry_label()
+        ),
         PromptSource::Heartbeat => "heartbeat".to_string(),
     }
 }
@@ -3413,6 +4488,33 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
             tracing::warn!(target: "pool::prompt", "turn refused for {label}");
         }
     }
+}
+
+fn delivery_receipt_line(channel_id: Uuid, event_ids: &HashSet<String>) -> String {
+    let mut event_ids: Vec<&str> = event_ids.iter().map(String::as_str).collect();
+    event_ids.sort_unstable();
+    format!(
+        "turn delivered Buzz events for channel {channel_id}: {}",
+        event_ids.join(",")
+    )
+}
+
+fn record_scope_delivery_success(
+    agent: &mut OwnedAgent,
+    scope: SessionScope,
+    standing_context_sent: bool,
+    event_ids: &HashSet<String>,
+) {
+    tracing::info!(
+        target: "pool::prompt",
+        "{}",
+        delivery_receipt_line(scope.channel_id(), event_ids)
+    );
+    agent.state.mark_scope_delivery_success(
+        scope,
+        standing_context_sent,
+        event_ids.iter().cloned(),
+    );
 }
 
 //
@@ -3682,9 +4784,8 @@ pub(crate) fn build_turn_metric_counts(
             // Field-local: present when the cumulative counter was monotonic
             // across this turn. Zero means no cache hits this turn (not absent).
             cache_read_tokens: usage.turn_cache_read_tokens,
-            // buzz-agent does not emit a cache-write count on the wire today;
-            // leave None rather than deriving it from other fields.
-            cache_write_tokens: None,
+            // Field-local: same contract as cache_read_tokens.
+            cache_write_tokens: usage.turn_cache_write_tokens,
         })
     } else {
         // Defense-in-depth: UsageTracker already sets all turn_* fields to None
@@ -3694,8 +4795,8 @@ pub(crate) fn build_turn_metric_counts(
         None
     };
     let cumulative_counts = Some(TokenCounts {
-        input_tokens: Some(usage.cumulative_input_tokens),
-        output_tokens: Some(usage.cumulative_output_tokens),
+        input_tokens: usage.cumulative_input_tokens,
+        output_tokens: usage.cumulative_output_tokens,
         // Present when every turn in the session reported a genuine provider
         // total. None when the session has never emitted one or any turn lacked
         // one. Never derived from input+output (NIP-AM MUST NOT).
@@ -3706,9 +4807,9 @@ pub(crate) fn build_turn_metric_counts(
         // Passes through directly — do not wrap in Some() as the field already
         // carries provenance (None vs Some(0) are distinct meanings).
         cache_read_tokens: usage.cumulative_cache_read_tokens,
-        // buzz-agent does not emit a cache-write count on the wire today;
-        // leave None rather than deriving it from other fields.
-        cache_write_tokens: None,
+        // Session-cumulative cache-write tokens; same provenance contract as
+        // cache_read_tokens.
+        cache_write_tokens: usage.cumulative_cache_write_tokens,
     });
     (turn_counts, cumulative_counts)
 }
@@ -3749,6 +4850,7 @@ async fn publish_agent_turn_metric(
         cumulative: cumulative_counts,
         delta_reliable: usage.delta_reliable,
         stop_reason,
+        pricing_identity: usage.pricing_identity.clone(),
     };
     let ciphertext = match buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
         &ctx.agent_keys,
@@ -3887,14 +4989,21 @@ pub(crate) async fn post_failure_notice(
             parent_event_id: parent_id,
         })
     });
-    let builder =
-        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
-                return;
-            }
-        };
+    let builder = match buzz_sdk::build_message(
+        channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+        &[],
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+            return;
+        }
+    };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
@@ -4030,6 +5139,12 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
+    /// Conversation scope for a channel — the scope these pool tests exercise
+    /// (equivalent to the pre-thread-scoping channel key).
+    fn conv(channel_id: Uuid) -> SessionScope {
+        SessionScope::Conversation { channel_id }
+    }
+
     fn test_mcp_server() -> McpServer {
         McpServer {
             name: "dev".into(),
@@ -4037,6 +5152,51 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    #[test]
+    fn delivery_receipt_line_sorts_event_ids() {
+        let channel_id = Uuid::nil();
+        let event_ids = HashSet::from(["beta".to_string(), "alpha".to_string()]);
+
+        assert_eq!(
+            delivery_receipt_line(channel_id, &event_ids),
+            format!("turn delivered Buzz events for channel {channel_id}: alpha,beta")
+        );
+    }
+
+    // MINOR (#2884): the permission-mode RPC is gated on agent_supports_mode.
+    // An advertised mode issues set_config_option; an absent one is skipped so
+    // the harness falls back to per-tool auto-approval. Pin both edges directly.
+    #[test]
+    fn agent_supports_mode_advertised_auto_is_true() {
+        let session_new = json!({
+            "modes": { "availableModes": [{ "id": "default" }, { "id": "auto" }] }
+        });
+        assert!(agent_supports_mode(
+            &session_new,
+            PermissionMode::Auto.as_wire_str()
+        ));
+    }
+
+    #[test]
+    fn agent_supports_mode_absent_auto_is_false() {
+        let session_new = json!({
+            "modes": { "availableModes": [{ "id": "default" }] }
+        });
+        assert!(!agent_supports_mode(
+            &session_new,
+            PermissionMode::Auto.as_wire_str()
+        ));
+    }
+
+    #[test]
+    fn agent_supports_mode_missing_modes_field_is_false() {
+        let session_new = json!({ "sessionId": "sess-1" });
+        assert!(!agent_supports_mode(
+            &session_new,
+            PermissionMode::Auto.as_wire_str()
+        ));
     }
 
     #[test]
@@ -4075,24 +5235,50 @@ mod tests {
     }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
-    // a legacy agent WITH a base_prompt must get [Base] prepended to the user
+    // a legacy agent WITH a base_prompt must get <base> prepended to the user
     // message. This is the exact regression that shipped in the round-2 bug.
+
+    fn base_only(base_prompt: Option<&str>) -> crate::queue::StandingContext<'_> {
+        crate::queue::StandingContext {
+            base_prompt,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_initial_message_legacy_agent_gets_base_prepended() {
-        // protocol_version 1 + Some(base_prompt): [Base] rides along in the
-        // user message, composed as `[Base]\n{bp}\n\n{initial_msg}`.
-        let composed = prepend_base_for_legacy(1, Some("you are a helpful agent"), "hello channel");
-        assert_eq!(composed, "[Base]\nyou are a helpful agent\n\nhello channel");
-        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
+        // protocol_version 1 + Some(base_prompt): <base> rides along in the
+        // user message.
+        let composed = prepend_standing_for_legacy(
+            1,
+            &base_only(Some("you are a helpful agent")),
+            "hello channel",
+        );
+        assert_eq!(
+            composed,
+            "<base>\nyou are a helpful agent\n</base>\n\nhello channel"
+        );
     }
 
     #[test]
     fn test_initial_message_modern_agent_omits_base() {
         // protocol_version 2 receives base_prompt via session/new, so the user
         // message is left untouched even when a base_prompt is present.
-        let composed = prepend_base_for_legacy(2, Some("you are a helpful agent"), "hello channel");
+        let composed = prepend_standing_for_legacy(
+            2,
+            &base_only(Some("you are a helpful agent")),
+            "hello channel",
+        );
         assert_eq!(composed, "hello channel");
+    }
+
+    #[test]
+    fn test_heartbeat_standing_block_is_base_only() {
+        // A heartbeat has no channel, so core and canvas are absent by
+        // construction — and it has never carried the persona. Pin that the
+        // shared helper does not start handing heartbeats [Agent Instructions].
+        let composed = prepend_standing_for_legacy(1, &base_only(Some("be helpful")), "tick");
+        assert_eq!(composed, "<base>\nbe helpful\n</base>\n\ntick");
     }
 
     #[test]
@@ -4149,179 +5335,160 @@ mod tests {
     #[test]
     fn test_initial_message_legacy_agent_without_base_is_unchanged() {
         // No base_prompt configured: nothing to prepend regardless of version.
-        let composed = prepend_base_for_legacy(1, None, "hello channel");
+        let composed = prepend_standing_for_legacy(1, &base_only(None), "hello channel");
         assert_eq!(composed, "hello channel");
     }
 
-    // ── prepend_canvas_for_legacy ─────────────────────────────────────────────
+    // ── prepend_standing_for_legacy ───────────────────────────────────────────
+
+    fn full_standing() -> crate::queue::StandingContext<'static> {
+        crate::queue::StandingContext {
+            base_prompt: Some("be helpful"),
+            system_prompt: Some("you are Eva"),
+            team_instructions: Some("ship small"),
+            agent_core: Some("[Agent Memory — core]\nremember this"),
+            huddle_instructions: Some("reply immediately"),
+            agent_canvas: Some("[Channel Canvas]\ncanvas content"),
+        }
+    }
 
     #[test]
-    fn test_initial_message_legacy_agent_gets_canvas_prepended() {
-        // Legacy agents (protocol_version < 2) receive the canvas section before
-        // the initial-message body so it arrives before the first prompt.
-        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00Z\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
-        let composed = prepend_canvas_for_legacy(1, Some(canvas), "do the thing");
+    fn test_initial_message_legacy_agent_gets_whole_standing_block() {
+        // The initial message is the legacy agent's first contact, so it must
+        // carry every standing section — not just <base> and the canvas, which
+        // left the agent acting on its first turn with no persona and no memory.
+        let composed = prepend_standing_for_legacy(1, &full_standing(), "do the thing");
+        let positions: Vec<usize> = [
+            "<base>",
+            "<system>",
+            "<team-instructions>",
+            "<core-memory>",
+            "<huddle-instructions>",
+            "<channel-canvas>",
+            "do the thing",
+        ]
+        .iter()
+        .map(|needle| {
+            composed
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle} in: {composed}"))
+        })
+        .collect();
         assert!(
-            composed.starts_with("[Channel Canvas]"),
-            "canvas must precede the body"
-        );
-        assert!(
-            composed.ends_with("do the thing"),
-            "body must follow the canvas"
-        );
-        assert!(
-            composed.contains("\n\ndo the thing"),
-            "canvas and body separated by blank line"
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "sections must match the per-turn order, body last; got: {composed}"
         );
     }
 
     #[test]
-    fn test_initial_message_modern_agent_omits_canvas_from_body() {
-        // Protocol-v2 agents receive canvas in systemPrompt; it must NOT be
-        // duplicated in the initial-message user turn.
-        let canvas = "[Channel Canvas]\nsome section";
-        let composed = prepend_canvas_for_legacy(2, Some(canvas), "do the thing");
+    fn test_initial_message_standing_order_matches_per_turn_order() {
+        // Both legacy paths render through StandingContext, so the initial
+        // message and a first-turn prompt agree section-for-section.
+        let standing = full_standing();
+        let composed = prepend_standing_for_legacy(1, &standing, "do the thing");
         assert_eq!(
-            composed, "do the thing",
-            "modern agent initial message must not contain canvas"
-        );
-        assert!(
-            !composed.contains("[Channel Canvas]"),
-            "canvas must be absent from modern agent initial message"
+            composed,
+            format!("{}\n\ndo the thing", standing.sections().join("\n\n"))
         );
     }
 
     #[test]
-    fn test_initial_message_legacy_agent_no_canvas_is_unchanged() {
-        // No canvas present: body passes through unmodified.
-        let composed = prepend_canvas_for_legacy(1, None, "do the thing");
+    fn test_initial_message_modern_agent_omits_standing_block() {
+        // Protocol-v2 agents hold all of this from session/new; repeating it in
+        // the initial-message user turn would double-render every section.
+        let composed = prepend_standing_for_legacy(2, &full_standing(), "do the thing");
         assert_eq!(composed, "do the thing");
     }
 
     #[test]
-    fn test_initial_message_legacy_canvas_and_base_compose_correctly() {
-        // Verify the full composition order when both base and canvas are present:
-        // [Base] → canvas section → initial-message body.
-        let canvas = "[Channel Canvas]\ncanvas content";
-        let base_composed = prepend_base_for_legacy(1, Some("be helpful"), "do the thing");
-        let full = prepend_canvas_for_legacy(1, Some(canvas), &base_composed);
-        assert!(
-            full.starts_with("[Channel Canvas]"),
-            "canvas must be first in composed message"
-        );
-        assert!(
-            full.contains("[Base]"),
-            "base must be present in composed message"
-        );
-        assert!(
-            full.ends_with("do the thing"),
-            "body must be last in composed message"
-        );
-        // Order: canvas → base → body
-        let canvas_pos = full.find("[Channel Canvas]").unwrap();
-        let base_pos = full.find("[Base]").unwrap();
-        let body_pos = full.find("do the thing").unwrap();
-        assert!(
-            canvas_pos < base_pos && base_pos < body_pos,
-            "order must be: canvas → base → body"
-        );
+    fn test_initial_message_legacy_agent_without_standing_is_unchanged() {
+        // Nothing configured: body passes through with no stray blank lines.
+        let composed =
+            prepend_standing_for_legacy(1, &crate::queue::StandingContext::default(), "do it");
+        assert_eq!(composed, "do it");
     }
 
     // Pin the session/new systemPrompt framing: each present prompt carries its
-    // own header so the desktop observer can split into labeled sub-sections.
+    // own paired tag so the desktop observer can split labeled sub-sections.
 
     #[test]
     fn test_framed_system_prompt_both_present_carries_both_headers() {
         // Also the regression guard against #2372: the session title travels
         // out of band in `_meta.sessionTitle`, so this exact-bytes assertion is
         // what pins the framing against a `[Session]` section reappearing here.
-        let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
+        let framed = framed_system_prompt("/workspace", Some("base text"), Some("persona text"))
             .expect("both present yields Some");
-        assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
+        assert_eq!(
+            framed,
+            "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>\n\n<system>\npersona text\n</system>"
+        );
     }
 
     #[test]
     fn test_framed_system_prompt_base_only_labels_base() {
-        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+        let framed =
+            framed_system_prompt("/workspace", Some("base text"), None).expect("base yields Some");
+        assert_eq!(
+            framed,
+            "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>"
+        );
     }
 
     #[test]
-    fn test_framed_system_prompt_persona_only_labels_system() {
+    fn test_framed_system_prompt_persona_only_labels_agent_instructions() {
         // A bare persona would be mislabeled "Base" downstream — it must carry
-        // its own [System] header even when no base prompt exists.
+        // its own <system> boundary even when no base prompt exists.
+        let framed = framed_system_prompt("/workspace", None, Some("persona text"))
+            .expect("persona yields Some");
+        assert_eq!(framed, "<system>\npersona text\n</system>");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_preserves_persona_bytes_verbatim() {
+        let persona = "literal </system>, <T>, &quot;, & <policy>";
         let framed =
-            framed_system_prompt("/", None, Some("persona text")).expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
+            framed_system_prompt("/workspace", None, Some(persona)).expect("persona yields Some");
+        assert_eq!(framed, format!("<system>\n{persona}\n</system>"));
     }
 
     #[test]
     fn test_framed_system_prompt_neither_is_none() {
-        assert!(framed_system_prompt("/", None, None).is_none());
+        assert!(framed_system_prompt("/workspace", None, None).is_none());
     }
 
     #[test]
-    fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_base() {
-        let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
-            .expect("base yields Some");
-        assert!(
-            framed.starts_with("[Workspace]\n"),
-            "workspace section must lead: {framed}"
+    fn test_workspace_section_preserves_windows_cwd() {
+        assert_eq!(
+            workspace_section(r"C:\Users\me\buzz"),
+            "<workspace>\nCurrent working directory: C:\\Users\\me\\buzz\n</workspace>"
         );
-        assert!(framed.contains("`/Users/me/.buzz`"));
-        assert!(
-            framed.contains("\n\n[Base]\nbase text"),
-            "base must follow the workspace section: {framed}"
-        );
-    }
-
-    #[test]
-    fn test_framed_system_prompt_persona_only_omits_workspace() {
-        // The workspace section grounds the base prompt's layout; a persona-only
-        // agent never received that layout, so no [Workspace] anchor is emitted.
-        let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
-            .expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
-    }
-
-    #[test]
-    fn test_framed_system_prompt_root_cwd_omits_workspace() {
-        // The "/" fallback must never be named — it would invite a $HOME scan.
-        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
-    }
-
-    #[test]
-    fn test_workspace_section_relative_cwd_is_none() {
-        assert!(workspace_section("relative/path").is_none());
-        assert!(workspace_section("").is_none());
     }
 
     #[test]
     fn test_with_core_appends_below_framed() {
         let framed = with_core(
-            Some("[System]\npersona".to_string()),
+            Some("[Agent Instructions]\npersona".to_string()),
             Some("[Agent Memory — core]\nbe helpful"),
         )
         .expect("both present yields Some");
         assert_eq!(
             framed,
-            "[System]\npersona\n\n[Agent Memory — core]\nbe helpful"
+            "[Agent Instructions]\npersona\n\n<core-memory>\nbe helpful\n</core-memory>"
         );
     }
 
     #[test]
     fn test_with_core_framed_only_passes_through() {
-        let framed = with_core(Some("[System]\npersona".to_string()), None)
+        let framed = with_core(Some("[Agent Instructions]\npersona".to_string()), None)
             .expect("framed-only yields Some");
-        assert_eq!(framed, "[System]\npersona");
+        assert_eq!(framed, "[Agent Instructions]\npersona");
     }
 
     #[test]
     fn test_with_core_core_only_is_just_core() {
         let framed = with_core(None, Some("[Agent Memory — core]\nbe helpful"))
             .expect("core-only yields Some");
-        assert_eq!(framed, "[Agent Memory — core]\nbe helpful");
+        assert_eq!(framed, "<core-memory>\nbe helpful\n</core-memory>");
     }
 
     #[test]
@@ -4354,11 +5521,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2); // root + 1 reply
                 assert_eq!(total, 2); // 1 reply + 1 root
                 assert!(!truncated);
+                assert!(root_present);
                 assert_eq!(messages[0].content, "root message");
                 assert_eq!(messages[1].content, "first reply");
             }
@@ -4391,11 +5560,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 11); // 10 replies + 1 root
                 assert!(truncated);
+                assert!(root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -4566,11 +5737,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 3); // root + 2 displayed replies
                 assert_eq!(total, 4); // root + displayed replies + sentinel
                 assert!(truncated);
+                assert!(root_present);
                 assert_eq!(messages[0].content, "root");
                 assert_eq!(messages[1].content, "middle reply");
                 assert_eq!(messages[2].content, "newest agent reply");
@@ -4607,11 +5780,50 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 2);
                 assert!(!truncated);
+                assert!(root_present);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_marks_missing_root_incomplete() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let json = json!([
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": "replypub1",
+                "content": "first reply",
+                "created_at": 2000
+            },
+            {
+                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "pubkey": "replypub2",
+                "content": "second reply",
+                "created_at": 3000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 12, &agent.public_key())
+            .expect("reply context should still be available");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                root_present,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 2);
+                assert_eq!(total, 2);
+                assert!(!truncated);
+                assert!(!root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -4728,6 +5940,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -4778,11 +5991,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 6);
+                assert!(!root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -4831,6 +6046,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -4883,6 +6099,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -4944,6 +6161,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(total, 4);
@@ -5017,6 +6235,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5137,8 +6356,10 @@ mod tests {
             .sign_with_keys(&keys)
             .unwrap();
         let author_hex = event.pubkey.to_hex();
+        let channel_id = Uuid::new_v4();
         let batch = FlushBatch {
-            channel_id: Uuid::new_v4(),
+            channel_id,
+            scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "@mention".into(),
@@ -5149,11 +6370,13 @@ mod tests {
         };
         let context = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 timestamp: "2026-03-25T05:51:25Z".into(),
                 content: "follow up".into(),
             }],
             total: 1,
+            root_present: true,
             truncated: false,
         };
 
@@ -5222,6 +6445,659 @@ mod tests {
         assert!(parse_kind0_profile_lookup(json!({})).is_none());
     }
 
+    fn context_message(event_id: &str, content: &str) -> ContextMessage {
+        ContextMessage {
+            event_id: event_id.to_string(),
+            pubkey: "author".into(),
+            timestamp: "2026-08-09T00:00:00Z".into(),
+            content: content.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_prompt_task_commits_standing_context_only_after_acp_success() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-standing-lifecycle-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  count=$((count + 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32000,"message":"retry me"}}}}'
+  else
+    printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$((count - 1)),\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+  fi
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn lifecycle ACP script");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent.state.heartbeat_session = Some("live-session".into());
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.base_prompt = Some("standing-once".into());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for turn in 1..=3 {
+            run_prompt_task(
+                agent,
+                None,
+                Some(format!("heartbeat-{turn}")),
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                format!("turn-{turn}"),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            match turn {
+                1 => assert!(matches!(result.outcome, PromptOutcome::Error(_))),
+                _ => assert!(matches!(
+                    result.outcome,
+                    PromptOutcome::Ok(StopReason::EndTurn)
+                )),
+            }
+            assert_eq!(
+                result.agent.state.heartbeat_standing_context_sent,
+                turn >= 2,
+                "failed first delivery must not commit; first success must commit"
+            );
+            agent = result.agent;
+        }
+        agent.acp.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured ACP requests")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        std::fs::remove_file(&capture).expect("remove ACP capture");
+        assert_eq!(requests.len(), 3);
+        let prompt_text = |index: usize| {
+            requests[index]["params"]["prompt"][0]["text"]
+                .as_str()
+                .expect("text prompt")
+        };
+        assert_eq!(
+            prompt_text(0),
+            "<base>\nstanding-once\n</base>\n\nheartbeat-1"
+        );
+        assert_eq!(
+            prompt_text(1),
+            "<base>\nstanding-once\n</base>\n\nheartbeat-2",
+            "retry after ACP failure must resend standing context"
+        );
+        assert_eq!(
+            prompt_text(2),
+            "heartbeat-3",
+            "turn after ACP success must omit standing context"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_prompt_commits_delivery_state_only_after_acp_success() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-channel-delivery-lifecycle-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  count=$((count + 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32000,"message":"retry me"}}}}'
+  else
+    printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$((count - 1)),\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+  fi
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn channel lifecycle ACP script");
+        let channel_id = Uuid::new_v4();
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(conv(channel_id), "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(conv(channel_id), ChannelDeliveryState::default());
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.base_prompt = Some("standing-once".into());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for turn in 1..=3 {
+            let event = EventBuilder::new(Kind::Custom(9), format!("channel-{turn}"))
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let event_id = event.id.to_hex();
+            let batch = FlushBatch {
+                channel_id,
+                scope: SessionScope::Conversation { channel_id },
+                events: vec![crate::queue::BatchEvent {
+                    event,
+                    prompt_tag: "test".into(),
+                    received_at: std::time::Instant::now(),
+                }],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                format!("turn-{turn}"),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            match turn {
+                1 => assert!(matches!(result.outcome, PromptOutcome::Error(_))),
+                _ => assert!(matches!(
+                    result.outcome,
+                    PromptOutcome::Ok(StopReason::EndTurn)
+                )),
+            }
+            let delivery = &result.agent.state.deliveries[&conv(channel_id)];
+            assert_eq!(
+                delivery.standing_context_sent,
+                turn >= 2,
+                "failed channel delivery must not commit; first success must commit"
+            );
+            assert_eq!(
+                delivery.delivered_event_ids.contains(&event_id),
+                turn >= 2,
+                "channel event IDs must commit only after ACP success"
+            );
+            agent = result.agent;
+        }
+        agent.acp.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured ACP requests")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        std::fs::remove_file(&capture).expect("remove ACP capture");
+        let prompt_text = |index: usize| {
+            requests[index]["params"]["prompt"][0]["text"]
+                .as_str()
+                .expect("text prompt")
+        };
+        assert!(prompt_text(0).contains("<base>\nstanding-once\n</base>"));
+        assert!(
+            prompt_text(1).contains("<base>\nstanding-once\n</base>"),
+            "retry after channel ACP failure must resend standing context"
+        );
+        assert!(
+            !prompt_text(2).contains("<base>\nstanding-once\n</base>"),
+            "turn after channel ACP success must omit standing context"
+        );
+    }
+
+    #[tokio::test]
+    async fn merged_cancel_prompt_commits_and_deduplicates_all_rendered_event_ids() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let keys = Keys::generate();
+        let carry_over = EventBuilder::new(Kind::Custom(9), "merged carry-over sentinel")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let carry_over_id = carry_over.id.to_hex();
+        let new_event = EventBuilder::new(Kind::Custom(9), "merged new-event sentinel")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let new_event_id = new_event.id.to_hex();
+        let next_event = EventBuilder::new(Kind::Custom(9), "ordinary next-turn sentinel")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let merged_batch = FlushBatch {
+            channel_id,
+            scope: SessionScope::Conversation { channel_id },
+            events: vec![crate::queue::BatchEvent {
+                event: new_event.clone(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![crate::queue::BatchEvent {
+                event: carry_over.clone(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancel_reason: Some(crate::queue::CancelReason::Steer),
+        };
+        let next_batch = FlushBatch {
+            channel_id,
+            scope: SessionScope::Conversation { channel_id },
+            events: vec![crate::queue::BatchEvent {
+                event: next_event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        // Return both merged events as DM history. They must be excluded from
+        // the merged prompt's context and, after success, from the next turn.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind context server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let response_body = serde_json::to_string(&vec![carry_over, new_event]).unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0; 16 * 1024];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(), response_body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-merged-delivery-wire-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$count,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+  count=$((count + 1))
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn wire-capture ACP");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(conv(channel_id), "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(conv(channel_id), ChannelDeliveryState::default());
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.context_message_limit = 10;
+        ctx.rest_client.base_url = base_url.clone();
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "test-dm".into(),
+                    channel_type: "dm".into(),
+                    description: None,
+                },
+            )]),
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: ctx.agent_keys.clone(),
+                auth_tag_json: None,
+            },
+        );
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for (turn_id, batch) in [("merged-turn", merged_batch), ("next-turn", next_batch)] {
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                turn_id.into(),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::Ok(StopReason::EndTurn)
+            ));
+            agent = result.agent;
+        }
+        let delivery = &agent.state.deliveries[&conv(channel_id)];
+        assert!(delivery.delivered_event_ids.contains(&carry_over_id));
+        assert!(delivery.delivered_event_ids.contains(&new_event_id));
+        agent.acp.shutdown().await;
+        server.abort();
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured prompts")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured prompt JSON"))
+            .collect();
+        std::fs::remove_file(&capture).expect("remove prompt capture");
+        assert_eq!(requests.len(), 2);
+        let wire = |index: usize| {
+            requests[index]["params"]["prompt"]
+                .as_array()
+                .expect("prompt blocks")
+                .iter()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let merged_wire = wire(0);
+        assert_eq!(merged_wire.matches("merged carry-over sentinel").count(), 1);
+        assert_eq!(merged_wire.matches("merged new-event sentinel").count(), 1);
+        let next_wire = wire(1);
+        assert!(next_wire.contains("ordinary next-turn sentinel"));
+        assert!(!next_wire.contains("merged carry-over sentinel"));
+        assert!(!next_wire.contains("merged new-event sentinel"));
+        assert!(!next_wire.contains(&carry_over_id));
+        assert!(!next_wire.contains(&new_event_id));
+    }
+
+    #[tokio::test]
+    async fn late_successful_steer_ack_excludes_event_from_next_channel_wire_prompt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let keys = Keys::generate();
+        let steered_event = EventBuilder::new(Kind::Custom(9), "steered context must not replay")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let steered_event_id = steered_event.id.to_hex();
+        let trigger = EventBuilder::new(Kind::Custom(9), "ordinary next turn")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            scope: SessionScope::Conversation { channel_id },
+            events: vec![crate::queue::BatchEvent {
+                event: trigger,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        // The local REST bridge returns the already-delivered steer as DM
+        // history. Profile/reaction requests may also arrive; the same valid
+        // event array is harmless for those best-effort paths.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind context server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let response_body = serde_json::to_string(&vec![steered_event]).unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0; 16 * 1024];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(), response_body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-late-steer-wire-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"IFS= read -r line
+printf '%s\n' "$line" > '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn wire-capture ACP");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(conv(channel_id), "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(conv(channel_id), ChannelDeliveryState::default());
+
+        // Model the adversarial ordering: the task result has already retired
+        // its TaskMeta and returned the agent before the successful ack arrives.
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        assert!(pool.record_successful_steer(
+            &conv(channel_id),
+            steered_event_id.clone(),
+            "live-session".into(),
+        ));
+        let agent = pool
+            .try_claim(Some(&conv(channel_id)))
+            .expect("claim returned agent");
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.context_message_limit = 10;
+        ctx.rest_client.base_url = base_url.clone();
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "test-dm".into(),
+                    channel_type: "dm".into(),
+                    description: None,
+                },
+            )]),
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: ctx.agent_keys.clone(),
+                auth_tag_json: None,
+            },
+        );
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(batch),
+            None,
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "next-turn".into(),
+        )
+        .await;
+        let mut result = result_rx.recv().await.expect("next prompt result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        result.agent.acp.shutdown().await;
+        server.abort();
+
+        let request: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&capture).expect("read captured prompt"))
+                .expect("captured prompt JSON");
+        std::fs::remove_file(&capture).expect("remove prompt capture");
+        let wire = request["params"]["prompt"]
+            .as_array()
+            .expect("prompt blocks")
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(wire.contains("ordinary next turn"));
+        assert!(!wire.contains("steered context must not replay"));
+        assert!(!wire.contains(&steered_event_id));
+    }
+
+    #[test]
+    fn delivery_state_commits_only_when_explicitly_marked_successful() {
+        let channel = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state
+            .deliveries
+            .insert(conv(channel), ChannelDeliveryState::default());
+
+        // Building or attempting a prompt does not mutate delivery state.
+        let delivery = state.deliveries.get(&conv(channel)).unwrap();
+        assert!(!delivery.standing_context_sent);
+        assert!(delivery.delivered_event_ids.is_empty());
+
+        state.mark_scope_delivery_success(
+            conv(channel),
+            true,
+            ["trigger".to_string(), "context".to_string()],
+        );
+        let delivery = state.deliveries.get(&conv(channel)).unwrap();
+        assert!(delivery.standing_context_sent);
+        assert_eq!(delivery.delivered_event_ids.len(), 2);
+    }
+
+    #[test]
+    fn delivery_state_is_cleared_on_rotation_and_restarts_empty() {
+        let channel = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(conv(channel), "old-session".into());
+        state.mark_scope_delivery_success(conv(channel), true, ["old-event".to_string()]);
+
+        assert!(state.invalidate_channel(&channel) > 0);
+        assert!(!state.deliveries.contains_key(&conv(channel)));
+
+        state.sessions.insert(conv(channel), "new-session".into());
+        state
+            .deliveries
+            .insert(conv(channel), ChannelDeliveryState::default());
+        let delivery = state.deliveries.get(&conv(channel)).unwrap();
+        assert!(!delivery.standing_context_sent);
+        assert!(delivery.delivered_event_ids.is_empty());
+    }
+
+    #[test]
+    fn conversation_context_delta_omits_delivered_and_triggering_events() {
+        let delivered = HashSet::from(["old".to_string()]);
+        let triggering = HashSet::from(["trigger".to_string()]);
+        let context = ConversationContext::Thread {
+            messages: vec![
+                context_message("old", "already sent"),
+                context_message("trigger", "rendered as trigger"),
+                context_message("new", "new context"),
+            ],
+            total: 3,
+            root_present: true,
+            truncated: false,
+        };
+
+        let delta = conversation_context_delta(Some(context), &delivered, &triggering)
+            .expect("new context remains");
+        match delta {
+            ConversationContext::Thread {
+                messages,
+                total,
+                root_present,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].event_id, "new");
+                assert_eq!(total, 3);
+                assert!(!truncated);
+                assert!(root_present);
+            }
+            _ => panic!("expected thread context"),
+        }
+    }
+
+    #[test]
+    fn conversation_context_delta_returns_none_when_no_new_events_remain() {
+        let delivered = HashSet::from(["old".to_string()]);
+        let context = ConversationContext::Dm {
+            messages: vec![context_message("old", "already sent")],
+            total: 1,
+            truncated: false,
+        };
+
+        assert!(conversation_context_delta(Some(context), &delivered, &HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn conversation_context_delta_preserves_unidentified_legacy_messages() {
+        let context = ConversationContext::Dm {
+            messages: vec![context_message("", "cannot safely deduplicate")],
+            total: 1,
+            truncated: false,
+        };
+
+        assert!(
+            conversation_context_delta(Some(context), &HashSet::new(), &HashSet::new()).is_some()
+        );
+    }
+
     #[test]
     fn test_json_to_context_message_missing_pubkey_uses_default() {
         let obj = json!({ "content": "hello" });
@@ -5268,15 +7144,249 @@ mod tests {
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch_a, "sess-a".into());
-        s.sessions.insert(ch_b, "sess-b".into());
-        s.turn_counts.insert(ch_a, 5);
-        s.turn_counts.insert(ch_b, 3);
-        s.core_sections.insert(ch_a, "core-a".into());
-        s.core_sections.insert(ch_b, "core-b".into());
+        s.sessions.insert(conv(ch_a), "sess-a".into());
+        s.sessions.insert(conv(ch_b), "sess-b".into());
+        s.turn_counts.insert(conv(ch_a), 5);
+        s.turn_counts.insert(conv(ch_b), 3);
+        s.core_sections.insert(conv(ch_a), "core-a".into());
+        s.core_sections.insert(conv(ch_b), "core-b".into());
+        s.deliveries.insert(
+            conv(ch_a),
+            ChannelDeliveryState {
+                standing_context_sent: true,
+                delivered_event_ids: HashSet::from(["event-a".into()]),
+            },
+        );
+        s.deliveries.insert(
+            conv(ch_b),
+            ChannelDeliveryState {
+                standing_context_sent: true,
+                delivered_event_ids: HashSet::from(["event-b".into()]),
+            },
+        );
         s.heartbeat_session = Some("sess-hb".into());
         s.heartbeat_turn_count = 7;
+        s.heartbeat_standing_context_sent = true;
         (s, ch_a, ch_b)
+    }
+
+    fn thread_scope(channel_id: Uuid, root: &str) -> SessionScope {
+        SessionScope::Thread {
+            channel_id,
+            root_event_id: root.to_string(),
+        }
+    }
+
+    #[test]
+    fn two_threads_in_one_channel_get_distinct_sessions() {
+        let ch = Uuid::new_v4();
+        let ta = thread_scope(ch, &"a".repeat(64));
+        let tb = thread_scope(ch, &"b".repeat(64));
+        let mut s = SessionState::default();
+        s.sessions.insert(ta.clone(), "sess-thread-a".into());
+        s.sessions.insert(tb.clone(), "sess-thread-b".into());
+        // Distinct roots key distinct provider sessions.
+        assert_eq!(
+            s.sessions.get(&ta).map(String::as_str),
+            Some("sess-thread-a")
+        );
+        assert_eq!(
+            s.sessions.get(&tb).map(String::as_str),
+            Some("sess-thread-b")
+        );
+        // Repeated activity under one root reuses that exact session.
+        assert_eq!(
+            s.sessions.get(&ta).map(String::as_str),
+            Some("sess-thread-a")
+        );
+        // The conversation scope is a different key again (no accidental reuse).
+        assert!(!s.sessions.contains_key(&conv(ch)));
+    }
+
+    #[test]
+    fn invalidate_scope_leaves_sibling_thread_untouched() {
+        let ch = Uuid::new_v4();
+        let ta = thread_scope(ch, &"a".repeat(64));
+        let tb = thread_scope(ch, &"b".repeat(64));
+        let mut s = SessionState::default();
+        s.sessions.insert(ta.clone(), "a".into());
+        s.sessions.insert(tb.clone(), "b".into());
+        s.turn_counts.insert(ta.clone(), 2);
+        assert!(s.invalidate_scope(&ta));
+        assert!(!s.sessions.contains_key(&ta));
+        assert!(!s.turn_counts.contains_key(&ta));
+        // Sibling thread's session survives.
+        assert_eq!(s.sessions.get(&tb).map(String::as_str), Some("b"));
+    }
+
+    fn batch_with_scope(scope: SessionScope, event: nostr::Event) -> FlushBatch {
+        FlushBatch {
+            channel_id: scope.channel_id(),
+            scope,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    fn signed_event_with_tags(tags: Vec<Vec<String>>) -> nostr::Event {
+        let keys = Keys::generate();
+        let tags: Vec<Tag> = tags.into_iter().map(|t| Tag::parse(t).unwrap()).collect();
+        EventBuilder::new(Kind::Custom(9), "hi")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn context_target_uses_thread_scope_root_not_last_event_tags() {
+        let ch = Uuid::new_v4();
+        let scope_root = "a".repeat(64);
+        // Last event carries a DIFFERENT root tag than the scope; the scope
+        // must win so context is gathered for the canonical thread.
+        let ev = signed_event_with_tags(vec![vec![
+            "e".into(),
+            "b".repeat(64),
+            String::new(),
+            "root".into(),
+        ]]);
+        let batch = batch_with_scope(thread_scope(ch, &scope_root), ev);
+        assert_eq!(
+            resolve_context_target(&batch, false),
+            ContextTarget::Thread(scope_root)
+        );
+    }
+
+    #[test]
+    fn context_target_new_top_level_thread_has_no_history() {
+        // A top-level mention opens a thread rooted at its own id; on the first
+        // turn there is no prior thread history to fetch, but the scope still
+        // resolves to that root (subsequent turns fetch it).
+        let ch = Uuid::new_v4();
+        let ev = signed_event_with_tags(vec![]);
+        let root = ev.id.to_hex();
+        let batch = batch_with_scope(thread_scope(ch, &root), ev);
+        assert_eq!(
+            resolve_context_target(&batch, false),
+            ContextTarget::Thread(root)
+        );
+    }
+
+    #[test]
+    fn context_target_conversation_channel_plain_has_none() {
+        // Channel-policy conversation scope + a plain (no-thread-tag) event =>
+        // no unrelated channel transcript is injected.
+        let ch = Uuid::new_v4();
+        let ev = signed_event_with_tags(vec![]);
+        let batch = batch_with_scope(conv(ch), ev);
+        assert_eq!(resolve_context_target(&batch, false), ContextTarget::None);
+    }
+
+    #[test]
+    fn context_target_dm_nonreply_is_dm_history() {
+        let ch = Uuid::new_v4();
+        let ev = signed_event_with_tags(vec![]);
+        let batch = batch_with_scope(conv(ch), ev);
+        assert_eq!(resolve_context_target(&batch, true), ContextTarget::Dm);
+    }
+
+    #[test]
+    fn context_target_conversation_reply_uses_reply_chain() {
+        // DM (or legacy channel-policy) reply: conversation scope but the last
+        // event has thread tags => fetch that reply chain.
+        let ch = Uuid::new_v4();
+        let root = "c".repeat(64);
+        let ev = signed_event_with_tags(vec![
+            vec!["e".into(), root.clone(), String::new(), "root".into()],
+            vec!["e".into(), "d".repeat(64), String::new(), "reply".into()],
+        ]);
+        let batch = batch_with_scope(conv(ch), ev);
+        assert_eq!(
+            resolve_context_target(&batch, true),
+            ContextTarget::Thread(root)
+        );
+    }
+
+    #[test]
+    fn invalidate_channel_clears_every_thread_scope() {
+        let ch = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.sessions
+            .insert(thread_scope(ch, &"a".repeat(64)), "a".into());
+        s.sessions
+            .insert(thread_scope(ch, &"b".repeat(64)), "b".into());
+        s.sessions.insert(conv(ch), "c".into());
+        s.sessions
+            .insert(thread_scope(other, &"d".repeat(64)), "d".into());
+        let cleared = s.invalidate_channel(&ch);
+        assert_eq!(cleared, 3, "all three ch scopes had sessions");
+        assert!(s.sessions.keys().all(|k| k.channel_id() == other));
+    }
+
+    #[test]
+    fn prompt_source_scope_exposes_thread_scope_and_none_for_heartbeat() {
+        let ch = Uuid::new_v4();
+        let scope = thread_scope(ch, &"a".repeat(64));
+        let channel = PromptSource::Channel(scope.clone());
+        // The scope-precise accessor returns the exact thread so a completing
+        // turn clears only its own typing indicator.
+        assert_eq!(channel.scope(), Some(&scope));
+        assert_eq!(channel.channel_id(), Some(ch));
+        assert_eq!(PromptSource::Heartbeat.scope(), None);
+    }
+
+    #[tokio::test]
+    async fn invalidate_scope_session_targets_one_thread_and_drops_its_owner() {
+        // The idle `!rotate` path: rotating thread A must invalidate only thread
+        // A's session and drop its scope-owner entry, leaving a sibling thread
+        // in the same channel fully intact.
+        let ch = Uuid::new_v4();
+        let ta = thread_scope(ch, &"a".repeat(64));
+        let tb = thread_scope(ch, &"b".repeat(64));
+        let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
+            .await
+            .expect("spawn dummy ACP");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "test".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent.state.sessions.insert(ta.clone(), "sess-a".into());
+        agent.state.sessions.insert(tb.clone(), "sess-b".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        pool.record_scope_owner(ta.clone(), 0);
+        pool.record_scope_owner(tb.clone(), 0);
+
+        let cleared = pool.invalidate_scope_session(&ta);
+
+        assert_eq!(cleared, 1, "exactly one worker held thread A's session");
+        assert!(!pool.has_session_for(&ta), "thread A session invalidated");
+        assert!(
+            pool.has_session_for(&tb),
+            "sibling thread B session survives"
+        );
+        assert!(
+            !pool.session_owners.contains_key(&ta),
+            "thread A owner dropped"
+        );
+        assert!(
+            pool.session_owners.contains_key(&tb),
+            "thread B owner retained"
+        );
     }
 
     #[test]
@@ -5285,17 +7395,17 @@ mod tests {
 
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Channel(SessionScope::Conversation { channel_id: ch_a }),
             &ControlSignal::Rotate,
         );
 
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&conv(ch_a)));
+        assert!(!s.turn_counts.contains_key(&conv(ch_a)));
+        assert!(!s.core_sections.contains_key(&conv(ch_a)));
         assert!(!s.has_channel_state(&ch_a));
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
     }
@@ -5306,29 +7416,31 @@ mod tests {
 
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Channel(SessionScope::Conversation { channel_id: ch_a }),
             &ControlSignal::Cancel,
         );
 
-        assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(s.sessions.get(&conv(ch_a)).unwrap(), "sess-a");
+        assert_eq!(*s.turn_counts.get(&conv(ch_a)).unwrap(), 5);
+        assert_eq!(s.core_sections.get(&conv(ch_a)).unwrap(), "core-a");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
     }
 
     #[test]
     fn test_invalidate_channel_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
-        s.invalidate(&PromptSource::Channel(ch_a));
+        s.invalidate(&PromptSource::Channel(SessionScope::Conversation {
+            channel_id: ch_a,
+        }));
 
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&conv(ch_a)));
+        assert!(!s.turn_counts.contains_key(&conv(ch_a)));
+        assert!(!s.core_sections.contains_key(&conv(ch_a)));
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -5341,12 +7453,13 @@ mod tests {
 
         assert!(s.heartbeat_session.is_none());
         assert_eq!(s.heartbeat_turn_count, 0);
+        assert!(!s.heartbeat_standing_context_sent);
         // channels untouched
         assert_eq!(s.sessions.len(), 2);
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_a)).unwrap(), 5);
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_a)).unwrap(), "core-a");
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
     }
 
     #[test]
@@ -5359,21 +7472,24 @@ mod tests {
         assert!(s.core_sections.is_empty());
         assert!(s.heartbeat_session.is_none());
         assert_eq!(s.heartbeat_turn_count, 0);
+        assert!(!s.heartbeat_standing_context_sent);
     }
 
     #[test]
     fn test_invalidate_nonexistent_channel_is_noop() {
         let (mut s, ch_a, ch_b) = make_state();
         let ghost = Uuid::new_v4();
-        s.invalidate(&PromptSource::Channel(ghost));
+        s.invalidate(&PromptSource::Channel(SessionScope::Conversation {
+            channel_id: ghost,
+        }));
 
         // Everything still intact.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_a)).unwrap(), 5);
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_a)).unwrap(), "core-a");
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
     }
 
     #[test]
@@ -5388,15 +7504,15 @@ mod tests {
     #[test]
     fn test_invalidate_channel_returns_true_when_session_existed() {
         let (mut s, ch_a, ch_b) = make_state();
-        assert!(s.invalidate_channel(&ch_a));
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(s.invalidate_channel(&ch_a) > 0);
+        assert!(!s.sessions.contains_key(&conv(ch_a)));
+        assert!(!s.turn_counts.contains_key(&conv(ch_a)));
+        assert!(!s.core_sections.contains_key(&conv(ch_a)));
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -5406,7 +7522,7 @@ mod tests {
     fn test_invalidate_channel_returns_false_when_no_session() {
         let (mut s, _ch_a, _ch_b) = make_state();
         let ghost = Uuid::new_v4();
-        assert!(!s.invalidate_channel(&ghost));
+        assert_eq!(s.invalidate_channel(&ghost), 0);
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
@@ -5421,13 +7537,13 @@ mod tests {
         for ch in &removed {
             s.invalidate_channel(ch);
         }
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&conv(ch_a)));
+        assert!(!s.turn_counts.contains_key(&conv(ch_a)));
+        assert!(!s.core_sections.contains_key(&conv(ch_a)));
         assert!(!s.has_channel_state(&ch_a));
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
     }
 
     // ── ControlSignal::SwitchModel (Phase 3a, Option ii) ─────────────────────
@@ -5440,14 +7556,17 @@ mod tests {
         // re-creates a fresh session that re-applies the new desired_model.
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
-            &ControlSignal::SwitchModel("gpt-5".into()),
+            &PromptSource::Channel(SessionScope::Conversation { channel_id: ch_a }),
+            &ControlSignal::SwitchModel {
+                model_id: "gpt-5".into(),
+                request_id: None,
+            },
         );
 
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched — the switch is channel-scoped.
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
     }
 
     // ── requeue_cancelled_batch ────────────────────────────────────────────
@@ -5465,6 +7584,7 @@ mod tests {
             .unwrap();
         FlushBatch {
             channel_id,
+            scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -5481,7 +7601,10 @@ mod tests {
             (ControlSignal::Steer, Some(CancelReason::Steer)),
             (ControlSignal::Interrupt, Some(CancelReason::Interrupt)),
             (
-                ControlSignal::SwitchModel("gpt-5".into()),
+                ControlSignal::SwitchModel {
+                    model_id: "gpt-5".into(),
+                    request_id: None,
+                },
                 Some(CancelReason::Interrupt),
             ),
             (ControlSignal::Cancel, None),
@@ -5530,6 +7653,7 @@ mod tests {
             PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "Timeout(Hard)",
             PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
             PromptOutcome::Error(_) => "Error",
+            PromptOutcome::ProjectContextIndeterminate(_) => "ProjectContextIndeterminate",
             PromptOutcome::Cancelled => "Cancelled",
             PromptOutcome::Ok(_) => "Ok",
         };
@@ -5597,7 +7721,10 @@ mod tests {
             Case {
                 name: "CancelDrainTimeout + SwitchModel preserves batch with Interrupt reason",
                 error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
-                signal: ControlSignal::SwitchModel("gpt-5".to_string()),
+                signal: ControlSignal::SwitchModel {
+                    model_id: "gpt-5".to_string(),
+                    request_id: None,
+                },
                 expected_outcome: "CancelDrainTimeout",
                 batch_preserved: true,
                 expected_reason: Some(CancelReason::Interrupt),
@@ -6015,6 +8142,9 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -6073,6 +8203,9 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -6162,12 +8295,15 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
-            cumulative_input_tokens: 100,
-            cumulative_output_tokens: 50,
+            turn_cache_write_tokens: None,
+            cumulative_input_tokens: Some(100),
+            cumulative_output_tokens: Some(50),
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            pricing_identity: None,
         };
         // owner_pubkey = None → early return, no panic.
         publish_agent_turn_metric(
@@ -6198,12 +8334,15 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: Some(0.001),
             turn_cache_read_tokens: None,
-            cumulative_input_tokens: 200,
-            cumulative_output_tokens: 80,
+            turn_cache_write_tokens: None,
+            cumulative_input_tokens: Some(200),
+            cumulative_output_tokens: Some(80),
             cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            pricing_identity: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
         publish_agent_turn_metric(
@@ -6235,12 +8374,15 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
-            cumulative_input_tokens: 150,
-            cumulative_output_tokens: 70,
+            turn_cache_write_tokens: None,
+            cumulative_input_tokens: Some(150),
+            cumulative_output_tokens: Some(70),
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            pricing_identity: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
         publish_agent_turn_metric(
@@ -6272,12 +8414,15 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
-            cumulative_input_tokens: 400,
-            cumulative_output_tokens: 100,
+            turn_cache_write_tokens: None,
+            cumulative_input_tokens: Some(400),
+            cumulative_output_tokens: Some(100),
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            pricing_identity: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
         publish_agent_turn_metric(
@@ -6306,12 +8451,15 @@ mod tests {
             turn_total_tokens: Some(130), // genuine per-turn total
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
-            cumulative_input_tokens: 500,
-            cumulative_output_tokens: 120,
+            turn_cache_write_tokens: None,
+            cumulative_input_tokens: Some(500),
+            cumulative_output_tokens: Some(120),
             cumulative_total_tokens: Some(620), // genuine cumulative total
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            pricing_identity: None,
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
@@ -6355,12 +8503,15 @@ mod tests {
             turn_total_tokens: None, // provider did not supply a total
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
-            cumulative_input_tokens: 200,
-            cumulative_output_tokens: 60,
+            turn_cache_write_tokens: None,
+            cumulative_input_tokens: Some(200),
+            cumulative_output_tokens: Some(60),
             cumulative_total_tokens: None, // session has no total
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            pricing_identity: None,
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
@@ -6471,10 +8622,11 @@ mod tests {
             Some(5_967),
             "turn.cacheReadTokens must be the per-turn delta"
         );
-        // cache_write_tokens is always None — buzz-agent doesn't emit it.
+        // cache_write_tokens: None in this test because the payloads don't
+        // include accumulatedCacheWriteTokens (Anthropic cache-read only test).
         assert!(
             turn2.cache_write_tokens.is_none(),
-            "cache_write_tokens must be None — not emitted by buzz-agent"
+            "cache_write_tokens must be None when harness omits the field"
         );
 
         let cum2 = cum2.expect("cumulative always present");
@@ -6489,7 +8641,7 @@ mod tests {
         );
     }
 
-    fn make_prompt_context_no_owner() -> PromptContext {
+    pub(super) fn make_prompt_context_no_owner() -> PromptContext {
         let agent_keys = nostr::Keys::generate();
         make_prompt_context_impl(&agent_keys, None)
     }
@@ -6545,6 +8697,59 @@ mod tests {
         }
     }
 
+    // ── huddle instructions ─────────────────────────────────────────────────
+
+    #[test]
+    fn huddle_instructions_append_as_system_section() {
+        assert_eq!(
+            with_huddle_instructions(Some("base".into()), Some("  reply now  ")).as_deref(),
+            Some("base\n\n<huddle-instructions>\nreply now\n</huddle-instructions>")
+        );
+    }
+
+    #[test]
+    fn huddle_instructions_require_owner_signature_and_channel() {
+        let owner = Keys::generate();
+        let stranger = Keys::generate();
+        let channel = Uuid::parse_str("00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae").unwrap();
+        let event = |keys: &Keys, channel_id: Uuid| {
+            let channel_id = channel_id.to_string();
+            let h_tag = Tag::parse(["h", channel_id.as_str()]).unwrap();
+            serde_json::to_value(
+                EventBuilder::new(
+                    Kind::Custom(buzz_core::kind::KIND_HUDDLE_GUIDELINES as u16),
+                    "reply immediately",
+                )
+                .tags([h_tag])
+                .sign_with_keys(keys)
+                .unwrap(),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            huddle_instructions_from_query_response(
+                &[event(&owner, channel)],
+                channel,
+                &owner.public_key(),
+            )
+            .as_deref(),
+            Some("reply immediately")
+        );
+        assert!(huddle_instructions_from_query_response(
+            &[event(&stranger, channel)],
+            channel,
+            &owner.public_key(),
+        )
+        .is_none());
+        assert!(huddle_instructions_from_query_response(
+            &[event(&owner, Uuid::new_v4())],
+            channel,
+            &owner.public_key(),
+        )
+        .is_none());
+    }
+
     // ── render_canvas_section ────────────────────────────────────────────────
 
     #[test]
@@ -6555,10 +8760,11 @@ mod tests {
         let section = render_canvas_section(id, ts, uuid);
         assert_eq!(
             section,
-            "[Channel Canvas]\n\
+            "<channel-canvas>\n\
              Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n\
              Last modified: 2024-01-15T10:30:00+00:00\n\
-             Fetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae"
+             Fetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae\n\
+             </channel-canvas>"
         );
     }
 
@@ -6567,13 +8773,19 @@ mod tests {
     #[test]
     fn test_with_canvas_appends_to_existing_prompt() {
         let result = with_canvas(Some("base content".into()), Some("[Channel Canvas]\nstuff"));
-        assert_eq!(result.unwrap(), "base content\n\n[Channel Canvas]\nstuff");
+        assert_eq!(
+            result.unwrap(),
+            "base content\n\n<channel-canvas>\nstuff\n</channel-canvas>"
+        );
     }
 
     #[test]
     fn test_with_canvas_returns_canvas_alone_when_no_prompt() {
         let result = with_canvas(None, Some("[Channel Canvas]\nstuff"));
-        assert_eq!(result.unwrap(), "[Channel Canvas]\nstuff");
+        assert_eq!(
+            result.unwrap(),
+            "<channel-canvas>\nstuff\n</channel-canvas>"
+        );
     }
 
     #[test]
@@ -6594,14 +8806,14 @@ mod tests {
     fn test_invalidate_channel_clears_canvas_section() {
         let ch = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch, "sess".into());
+        s.sessions.insert(conv(ch), "sess".into());
         s.canvas_sections
-            .insert(ch, "[Channel Canvas]\nrev abc".into());
+            .insert(conv(ch), "[Channel Canvas]\nrev abc".into());
 
         s.invalidate_channel(&ch);
 
-        assert!(!s.canvas_sections.contains_key(&ch));
-        assert!(!s.sessions.contains_key(&ch));
+        assert!(!s.canvas_sections.contains_key(&conv(ch)));
+        assert!(!s.sessions.contains_key(&conv(ch)));
     }
 
     #[test]
@@ -6609,9 +8821,9 @@ mod tests {
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.canvas_sections.insert(ch_a, "canvas-a".into());
-        s.canvas_sections.insert(ch_b, "canvas-b".into());
-        s.sessions.insert(ch_a, "sess-a".into());
+        s.canvas_sections.insert(conv(ch_a), "canvas-a".into());
+        s.canvas_sections.insert(conv(ch_b), "canvas-b".into());
+        s.sessions.insert(conv(ch_a), "sess-a".into());
 
         s.invalidate_all();
 
@@ -6624,22 +8836,22 @@ mod tests {
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch_a, "sess-a".into());
-        s.sessions.insert(ch_b, "sess-b".into());
-        s.canvas_sections.insert(ch_a, "canvas-a".into());
-        s.canvas_sections.insert(ch_b, "canvas-b".into());
+        s.sessions.insert(conv(ch_a), "sess-a".into());
+        s.sessions.insert(conv(ch_b), "sess-b".into());
+        s.canvas_sections.insert(conv(ch_a), "canvas-a".into());
+        s.canvas_sections.insert(conv(ch_b), "canvas-b".into());
 
         s.invalidate_channel(&ch_a);
 
-        assert!(!s.canvas_sections.contains_key(&ch_a));
-        assert_eq!(s.canvas_sections.get(&ch_b).unwrap(), "canvas-b");
+        assert!(!s.canvas_sections.contains_key(&conv(ch_a)));
+        assert_eq!(s.canvas_sections.get(&conv(ch_b)).unwrap(), "canvas-b");
     }
 
     #[test]
     fn test_has_channel_state_true_when_only_canvas_section_present() {
         let ch = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.canvas_sections.insert(ch, "canvas".into());
+        s.canvas_sections.insert(conv(ch), "canvas".into());
         assert!(s.has_channel_state(&ch));
     }
 
@@ -6670,7 +8882,7 @@ mod tests {
         assert!(section.contains(&id), "section must contain the event id");
         assert!(section.contains("buzz canvas get --channel"));
         assert!(section.contains(CHANNEL_UUID));
-        assert!(section.starts_with("[Channel Canvas]"));
+        assert!(section.starts_with("<channel-canvas>"));
         // Timestamp must use Z suffix, not +00:00
         assert!(section.contains('Z'), "timestamp must use Z suffix");
     }
@@ -6908,8 +9120,368 @@ mod tests {
         json!([{ "tags": event_tags }])
     }
 
+    #[tokio::test]
+    async fn expired_absence_refreshes_to_project_without_restart() {
+        use std::sync::atomic::Ordering;
+
+        let id = Uuid::new_v4();
+        let channel = id.to_string();
+        let owner = "a".repeat(64);
+        let coordinate = format!("30617:{owner}:app");
+        let responses = [
+            json!([{
+                "kind": 30621,
+                "pubkey": owner,
+                "tags": [["d", "app"], ["buzz-channel", channel], ["a", coordinate]]
+            }]),
+            json!([{
+                "kind": 30617,
+                "pubkey": "a".repeat(64),
+                "tags": [["d", "app"], ["buzz-channel", id.to_string()]]
+            }]),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                let index = server_requests.fetch_add(1, Ordering::SeqCst).min(1);
+                let body = responses[index].to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let resolver = ChannelInfoResolver::new(
+            std::collections::HashMap::new(),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        );
+        resolver.projects.write().unwrap().insert(
+            id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now() - PROJECT_INFO_CACHE_TTL,
+                value: None,
+            },
+        );
+
+        let project = resolver
+            .lookup_project(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("project refreshes");
+        assert_eq!(project.slug, "app");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_rejects_expired_absence_but_retains_expired_project() {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let id = Uuid::new_v4();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let body = "not-json";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let resolver = ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                id,
+                crate::relay::ChannelInfo {
+                    name: "ordinary-looking".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        );
+
+        resolver.projects.write().unwrap().insert(
+            id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now() - PROJECT_INFO_CACHE_TTL,
+                value: None,
+            },
+        );
+        assert!(
+            resolver.resolve(id).await.is_err(),
+            "an expired absence plus failed refresh must remain indeterminate"
+        );
+        assert!(
+            resolver
+                .projects
+                .read()
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .value
+                .is_none(),
+            "failed refresh must not renew the expired absence"
+        );
+
+        let stale_project = PromptProjectInfo {
+            name: "Last known project".into(),
+            slug: "last-known".into(),
+            owner: "a".repeat(64),
+            coordinate: format!("30621:{}:last-known", "a".repeat(64)),
+            default_repo_owner: None,
+            default_repo_id: None,
+        };
+        resolver.projects.write().unwrap().insert(
+            id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now() - PROJECT_INFO_CACHE_TTL,
+                value: Some(stale_project.clone()),
+            },
+        );
+        let resolved = resolver
+            .resolve(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("stale project is retained");
+        assert_eq!(resolved.project, Some(stale_project));
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            6,
+            "each resolve makes one metadata refresh and retries project refresh once"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn indeterminate_project_context_never_reaches_acp_prompt_boundary() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                let body = "not-json";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-indeterminate-project-wire-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn wire-capture ACP");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "boundary-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+
+        let event = EventBuilder::new(Kind::Custom(9), "do project work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id,
+            scope: conv(channel_id),
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+        ctx.initial_message = Some("inspect this project before the triggering turn".into());
+        ctx.rest_client.base_url = base_url.clone();
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "ordinary-looking".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: ctx.agent_keys.clone(),
+                auth_tag_json: None,
+            },
+        );
+        ctx.channel_info.projects.write().unwrap().insert(
+            channel_id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now() - PROJECT_INFO_CACHE_TTL,
+                value: None,
+            },
+        );
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(batch),
+            None,
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "indeterminate-project-turn".into(),
+        )
+        .await;
+
+        let mut result = result_rx.recv().await.expect("prompt result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::ProjectContextIndeterminate(_)
+        ));
+        let retry = result
+            .batch
+            .take()
+            .expect("indeterminate turn must be requeued");
+        assert_eq!(retry.events[0].event.id.to_hex(), event_id);
+        result.agent.acp.shutdown().await;
+        server.abort();
+        assert!(
+            !capture.exists(),
+            "indeterminate project context must not send any ACP prompt, especially Scope: channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_finds_authoritative_project_beyond_first_bridge_page() {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let id = Uuid::new_v4();
+        let channel = id.to_string();
+        let owner = "a".repeat(64);
+        let coordinate = format!("30617:{owner}:app");
+        let first_page: Vec<_> = (0..500)
+            .map(|index| {
+                json!({
+                    "id": format!("{index:064x}"),
+                    "created_at": 1_000 - index,
+                    "kind": 30621,
+                    "pubkey": "b".repeat(64),
+                    "tags": [["d", format!("decoy-{index}")], ["buzz-channel", channel]]
+                })
+            })
+            .collect();
+        let responses = [
+            channel_metadata_response(id, &[["name", "project-home"], ["t", "stream"]]),
+            serde_json::Value::Array(first_page),
+            json!([{
+                "id": "f".repeat(64), "created_at": 1, "kind": 30621, "pubkey": owner,
+                "tags": [["d", "app"], ["buzz-channel", channel], ["a", coordinate]]
+            }]),
+            json!([{
+                "id": "e".repeat(64), "created_at": 1, "kind": 30617, "pubkey": "a".repeat(64),
+                "tags": [["d", "app"], ["buzz-channel", id.to_string()]]
+            }]),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 65_536];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let index = server_requests.fetch_add(1, Ordering::SeqCst);
+                if index > 0 {
+                    assert!(request.contains("#buzz-channel"));
+                }
+                let body = responses[index].to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let resolver = ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                id,
+                crate::relay::ChannelInfo {
+                    name: "project-home".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        );
+
+        let info = resolver
+            .resolve(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("context resolves");
+        assert_eq!(info.project.expect("project context").slug, "app");
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        server.abort();
+    }
+
     /// A normal channel yields a non-DM (canvas allowed) and its name for the
-    /// title suffix — and the second consumer reads it from cache, not the wire.
+    /// title suffix. Prompt-visible channel metadata refreshes for each resolve;
+    /// project context remains cached independently.
     #[tokio::test]
     async fn test_new_session_channel_context_qualifies_a_normal_channel() {
         use std::sync::atomic::Ordering;
@@ -6918,20 +9490,140 @@ mod tests {
         let response = channel_metadata_response(id, &[["name", "buzz-dev"], ["t", "stream"]]);
         let (resolver, requests, server) = counting_resolver(response).await;
 
+        let info = resolver.resolve(id).await.expect("project lookup succeeds");
         let (is_dm, title_channel, channel_type) =
-            resolve_new_session_channel_context(&resolver, id).await;
+            resolve_new_session_channel_context(info.as_ref()).await;
         assert!(!is_dm, "a stream channel is not a DM");
         assert_eq!(title_channel.as_deref(), Some("buzz-dev"));
         assert_eq!(channel_type.as_deref(), Some("stream"));
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
 
-        let (_, again, _) = resolve_new_session_channel_context(&resolver, id).await;
+        let again_info = resolver
+            .resolve(id)
+            .await
+            .expect("refreshed lookup succeeds");
+        let (_, again, _) = resolve_new_session_channel_context(again_info.as_ref()).await;
         assert_eq!(again.as_deref(), Some("buzz-dev"));
         assert_eq!(
             requests.load(Ordering::SeqCst),
-            1,
-            "a resolved channel is cached — no second lookup"
+            4,
+            "channel metadata refreshes while project event classes remain cached"
         );
+        server.abort();
+    }
+
+    /// Prompt turns refresh kind-39000 metadata so an edit made while the
+    /// harness is running reaches the next agent prompt without a restart.
+    #[tokio::test]
+    async fn test_channel_resolver_refreshes_edited_description() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let id = Uuid::new_v4();
+        let responses = [
+            channel_metadata_response(
+                id,
+                &[
+                    ["name", "team-chat"],
+                    ["t", "stream"],
+                    ["about", "First version"],
+                ],
+            ),
+            json!([]),
+            json!([]),
+            channel_metadata_response(
+                id,
+                &[
+                    ["name", "team-chat"],
+                    ["t", "stream"],
+                    ["about", "First paragraph.\n\nUpdated second paragraph."],
+                ],
+            ),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                let index = server_requests.fetch_add(1, Ordering::SeqCst).min(3);
+                let body = responses[index].to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let resolver = ChannelInfoResolver::new(
+            std::collections::HashMap::new(),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        );
+
+        let first = resolver
+            .resolve(id)
+            .await
+            .expect("initial project lookup succeeds")
+            .expect("initial metadata resolves");
+        assert_eq!(first.description.as_deref(), Some("First version"));
+
+        let updated = resolver
+            .resolve(id)
+            .await
+            .expect("updated project lookup succeeds")
+            .expect("updated metadata resolves");
+        assert_eq!(
+            updated.description.as_deref(),
+            Some("First paragraph.\n\nUpdated second paragraph.")
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        server.abort();
+    }
+
+    /// A channel's `about` tag is parsed through the lazy-fetch path and
+    /// delivered as the resolved description.
+    #[tokio::test]
+    async fn test_channel_resolver_delivers_description() {
+        let id = Uuid::new_v4();
+        let response = channel_metadata_response(
+            id,
+            &[
+                ["name", "team-chat"],
+                ["t", "stream"],
+                ["about", "Engineering discussions"],
+            ],
+        );
+        let (resolver, _requests, server) = counting_resolver(response).await;
+
+        let info = resolver
+            .resolve(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("should resolve");
+        assert_eq!(info.description.as_deref(), Some("Engineering discussions"));
+        server.abort();
+    }
+
+    /// A metadata event with no `about` tag yields no description.
+    #[tokio::test]
+    async fn test_channel_resolver_absent_description_when_no_about_tag() {
+        let id = Uuid::new_v4();
+        let response = channel_metadata_response(id, &[["name", "buzz-dev"], ["t", "stream"]]);
+        let (resolver, _requests, server) = counting_resolver(response).await;
+
+        let info = resolver
+            .resolve(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("should resolve");
+        assert_eq!(info.description, None);
         server.abort();
     }
 
@@ -6943,8 +9635,9 @@ mod tests {
         let response = channel_metadata_response(id, &[["name", "DM"], ["t", "dm"]]);
         let (resolver, _requests, server) = counting_resolver(response).await;
 
+        let info = resolver.resolve(id).await.expect("project lookup succeeds");
         let (is_dm, title_channel, channel_type) =
-            resolve_new_session_channel_context(&resolver, id).await;
+            resolve_new_session_channel_context(info.as_ref()).await;
         assert!(is_dm);
         assert_eq!(channel_type.as_deref(), Some("dm"));
         assert_eq!(
@@ -6963,7 +9656,8 @@ mod tests {
         let response = channel_metadata_response(id, &[["t", "stream"]]);
         let (resolver, _requests, server) = counting_resolver(response).await;
 
-        let (is_dm, title_channel, _) = resolve_new_session_channel_context(&resolver, id).await;
+        let info = resolver.resolve(id).await.expect("project lookup succeeds");
+        let (is_dm, title_channel, _) = resolve_new_session_channel_context(info.as_ref()).await;
         assert!(!is_dm, "a nameless stream channel is still not a DM");
         assert_eq!(
             title_channel, None,
@@ -6983,8 +9677,12 @@ mod tests {
 
         let (resolver, requests, server) = counting_resolver(json!([])).await;
 
+        let info = resolver
+            .resolve(Uuid::new_v4())
+            .await
+            .expect("missing metadata is not a project lookup error");
         let (is_dm, title_channel, channel_type) =
-            resolve_new_session_channel_context(&resolver, Uuid::new_v4()).await;
+            resolve_new_session_channel_context(info.as_ref()).await;
         assert!(is_dm, "an undeterminable channel type must fail closed");
         assert_eq!(title_channel, None, "unresolved channels get a bare title");
         assert_eq!(channel_type, None);
@@ -6994,5 +9692,955 @@ mod tests {
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod startup_effort_tests {
+    use super::*;
+    use crate::acp::AcpClient;
+    use tests::make_prompt_context_no_owner;
+
+    /// Build a protocol-v2, non-goose agent whose only ACP requests will be
+    /// `session/new` (id 0) then the startup-effort `session/set_config_option`
+    /// (id 1). `startup_effort` is the held spawn-scoped value under test.
+    fn effort_agent(acp: AcpClient, startup_effort: Option<&str>) -> OwnedAgent {
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: startup_effort.map(str::to_string),
+            agent_name: "effort-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        }
+    }
+
+    /// Spawn a scripted ACP that answers `session/new` (request #1) with the
+    /// given configOptions, then replies to the effort `set_config_option`
+    /// (request #2) with `effort_reply` (a JSON-RPC `result`/`error` body, minus
+    /// the id which is filled in). Any later request gets `{"ok":true}`.
+    async fn spawn_effort_acp(session_new_config_options: &str, effort_reply: &str) -> AcpClient {
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  id=$((count - 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configOptions":{session_new_config_options}}}}}'
+  elif [ "$count" -eq 2 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',{effort_reply}}}'
+  else
+    printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',"result":{{"ok":true}}}}'
+  fi
+done"#
+        );
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn effort ACP script")
+    }
+
+    fn captured_config_options(obs: &observer::ObserverHandle) -> serde_json::Value {
+        obs.snapshot()
+            .into_iter()
+            .find(|e| e.kind == "session_config_captured")
+            .expect("session_config_captured emitted")
+            .payload["configOptions"]
+            .clone()
+    }
+
+    fn effort_current_value(options: &serde_json::Value) -> Option<String> {
+        options
+            .as_array()?
+            .iter()
+            .find(|o| o["category"] == "thought_level")
+            .and_then(|o| o["currentValue"].as_str())
+            .map(str::to_string)
+    }
+
+    const OPTS_WITH_EFFORT_DEFAULT_LOW: &str = r#"[{"configId":"effort","category":"thought_level","currentValue":"low","options":[{"value":"low"},{"value":"high"}]}]"#;
+
+    #[tokio::test]
+    async fn test_applied_effort_patches_captured_current_value_to_high() {
+        let acp = spawn_effort_acp(OPTS_WITH_EFFORT_DEFAULT_LOW, r#""result":{"ok":true}"#).await;
+        let mut agent = effort_agent(acp, Some("high"));
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        let opts = captured_config_options(&obs);
+        assert_eq!(
+            effort_current_value(&opts).as_deref(),
+            Some("high"),
+            "applied effort must overwrite the pre-set currentValue in the capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rejected_effort_retains_captured_current_value() {
+        // Adapter answers the effort set with a JSON-RPC error → AgentError →
+        // application-level rejection: non-fatal, capture keeps the default.
+        let acp = spawn_effort_acp(
+            OPTS_WITH_EFFORT_DEFAULT_LOW,
+            r#""error":{"code":-32602,"message":"unsupported effort value"}"#,
+        )
+        .await;
+        let mut agent = effort_agent(acp, Some("high"));
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("rejection is non-fatal; session creation still succeeds");
+
+        let opts = captured_config_options(&obs);
+        assert_eq!(
+            effort_current_value(&opts).as_deref(),
+            Some("low"),
+            "a rejected effort must not falsify the capture — keep the running value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_thought_level_model_leaves_capture_unpatched() {
+        // Model advertises only a `model` option — no thought_level. The held
+        // effort is silently ignored and no set_config_option is sent.
+        let opts_no_effort = r#"[{"configId":"model","category":"model","currentValue":"m-a","options":[{"value":"m-a"}]}]"#;
+        let acp = spawn_effort_acp(opts_no_effort, r#""result":{"ok":true}"#).await;
+        let mut agent = effort_agent(acp, Some("high"));
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        let opts = captured_config_options(&obs);
+        assert_eq!(
+            opts,
+            serde_json::from_str::<serde_json::Value>(opts_no_effort).unwrap(),
+            "no thought_level option → capture is the untouched session/new snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_startup_effort_leaves_capture_unpatched() {
+        // No held effort at all: the set_config_option is never sent and the
+        // default currentValue survives into the capture.
+        let acp = spawn_effort_acp(OPTS_WITH_EFFORT_DEFAULT_LOW, r#""result":{"ok":true}"#).await;
+        let mut agent = effort_agent(acp, None);
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        let opts = captured_config_options(&obs);
+        assert_eq!(
+            effort_current_value(&opts).as_deref(),
+            Some("low"),
+            "with no configured effort the capture reflects the model default"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transport_error_on_effort_propagates_for_respawn() {
+        // Adapter exits after answering session/new but before the effort set →
+        // AgentExited (transport class) → Err so the caller respawns the worker
+        // instead of reusing a possibly-poisoned stream.
+        let script = format!(
+            r#"IFS= read -r _new
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configOptions":{OPTS_WITH_EFFORT_DEFAULT_LOW}}}}}'
+IFS= read -r _effort
+exit 0"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn transport-exit ACP script");
+        let mut agent = effort_agent(acp, Some("high"));
+
+        let ctx = make_prompt_context_no_owner();
+        let err = create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect_err("transport-class effort failure must propagate as Err");
+        assert!(
+            matches!(err, AcpError::AgentExited | AcpError::Io(_)),
+            "process exit mid-effort is a transport error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_patch_config_option_current_value_matches_by_id_key() {
+        // The `id` key (claude-agent-acp) must also match, not just `configId`.
+        let mut opts = serde_json::json!([
+            { "id": "effort", "category": "thought_level", "currentValue": "low" }
+        ]);
+        patch_config_option_current_value(&mut opts, "effort", "high");
+        assert_eq!(opts[0]["currentValue"], "high");
+    }
+
+    #[test]
+    fn test_patch_config_option_current_value_noop_on_non_array() {
+        let mut opts = serde_json::Value::Null;
+        patch_config_option_current_value(&mut opts, "effort", "high");
+        assert!(opts.is_null(), "a null snapshot must stay null");
+    }
+}
+
+#[cfg(test)]
+mod model_switch_tests {
+    use super::*;
+    use crate::acp::AcpClient;
+    use tests::make_prompt_context_no_owner;
+
+    /// A protocol-v2 agent with a live `desired_model` override and no startup
+    /// effort. `model_overridden` is set so the capture's `modelOverridden`
+    /// reflects only whether the switch actually landed.
+    fn switching_agent(acp: AcpClient, desired_model: &str) -> OwnedAgent {
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: Some(desired_model.to_string()),
+            model_overridden: true,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "switch-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        }
+    }
+
+    /// Scripted ACP: `session/new` (request #1) returns `session_new_options`,
+    /// then the model-switch `set_config_option` (request #2) replies with
+    /// `switch_reply` (a JSON-RPC `result`/`error` body minus the id). Any later
+    /// request gets `{"ok":true}`.
+    async fn spawn_switch_acp(session_new_options: &str, switch_reply: &str) -> AcpClient {
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  id=$((count - 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configOptions":{session_new_options}}}}}'
+  elif [ "$count" -eq 2 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',{switch_reply}}}'
+  else
+    printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',"result":{{"ok":true}}}}'
+  fi
+done"#
+        );
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn switch ACP script")
+    }
+
+    fn capture(obs: &observer::ObserverHandle) -> serde_json::Value {
+        obs.snapshot()
+            .into_iter()
+            .find(|e| e.kind == "session_config_captured")
+            .expect("session_config_captured emitted")
+            .payload
+    }
+
+    fn control_results(obs: &observer::ObserverHandle) -> Vec<serde_json::Value> {
+        obs.snapshot()
+            .into_iter()
+            .filter(|e| e.kind == "control_result")
+            .map(|e| e.payload)
+            .collect()
+    }
+
+    // A `model`-category option offering the default model plus the target the
+    // agent wants to switch to.
+    const OPTS_MODEL_A_AND_B: &str = r#"[{"configId":"model","category":"model","currentValue":"model-a","options":[{"value":"model-a"},{"value":"model-b"}]}]"#;
+
+    #[tokio::test]
+    async fn session_new_sends_policy_specific_base_and_scope_specific_title() {
+        use crate::scope::SessionPolicy;
+
+        let channel_id = Uuid::new_v4();
+        let thread_a = SessionScope::Thread {
+            channel_id,
+            root_event_id: "abcdef01".repeat(8),
+        };
+        let thread_b = SessionScope::Thread {
+            channel_id,
+            root_event_id: "12345678".repeat(8),
+        };
+        let conversation = SessionScope::Conversation { channel_id };
+        for (policy, scope, name, channel_type, title) in [
+            (
+                SessionPolicy::Channel,
+                Some(&conversation),
+                Some("engineering"),
+                Some("stream"),
+                "Fizz · #engineering",
+            ),
+            (
+                SessionPolicy::Thread,
+                Some(&thread_a),
+                Some("engineering"),
+                Some("stream"),
+                "Fizz · #engineering · abcdef01",
+            ),
+            (
+                SessionPolicy::Thread,
+                Some(&thread_b),
+                Some("engineering"),
+                Some("stream"),
+                "Fizz · #engineering · 12345678",
+            ),
+            (
+                SessionPolicy::Thread,
+                Some(&conversation),
+                None,
+                Some("dm"),
+                "Fizz",
+            ),
+            (SessionPolicy::Thread, None, None, None, "Fizz"),
+        ] {
+            for (version, include_base) in [(1, true), (2, true), (1, false), (2, false)] {
+                let acp = spawn_switch_acp("[]", r#""result":{}"#).await;
+                let mut agent = switching_agent(acp, "unused");
+                agent.desired_model = None;
+                agent.protocol_version = version;
+                let observer = observer::ObserverHandle::in_process();
+                agent.acp.set_observer(Some(observer.clone()), 0);
+                let mut ctx = make_prompt_context_no_owner();
+                ctx.session_title = Some("Fizz".into());
+                ctx.base_prompt =
+                    include_base.then(|| policy.append_session_model("Custom base instructions."));
+                create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    None,
+                    NewSessionChannelContext {
+                        huddle_instructions: None,
+                        canvas: None,
+                        name,
+                        scope,
+                        channel_type,
+                    },
+                )
+                .await
+                .unwrap();
+                let request = observer
+                    .snapshot()
+                    .into_iter()
+                    .find(|event| {
+                        event.kind == "acp_write" && event.payload["method"] == "session/new"
+                    })
+                    .unwrap()
+                    .payload;
+                assert_eq!(request["params"]["_meta"]["sessionTitle"], title);
+                let base = ctx
+                    .base_prompt
+                    .as_deref()
+                    .map(crate::queue::base_section)
+                    .unwrap_or_default();
+                if !include_base {
+                    assert!(request["params"].get("systemPrompt").is_none());
+                } else if version == 2 {
+                    let system = request["params"]["systemPrompt"].as_str().unwrap();
+                    assert!(system.starts_with(&base));
+                    assert_eq!(system.matches("## Session Model").count(), 1);
+                } else {
+                    assert!(request["params"].get("systemPrompt").is_none());
+                    let legacy = prepend_standing_for_legacy(
+                        version,
+                        &crate::queue::StandingContext {
+                            base_prompt: ctx.base_prompt.as_deref(),
+                            ..Default::default()
+                        },
+                        "hello",
+                    );
+                    assert!(legacy.starts_with(&base));
+                    assert_eq!(legacy.matches("## Session Model").count(), 1);
+                }
+                agent.acp.shutdown().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_channel_switch_preserves_all_sibling_sessions_and_model() {
+        let channel_id = Uuid::new_v4();
+        let scopes = ["a", "b"].map(|root| SessionScope::Thread {
+            channel_id,
+            root_event_id: root.repeat(64),
+        });
+        let acp = spawn_switch_acp(OPTS_MODEL_A_AND_B, r#""result":{}"#).await;
+        let mut agent = switching_agent(acp, "model-a");
+        for scope in &scopes {
+            agent
+                .state
+                .sessions
+                .insert(scope.clone(), scope.telemetry_label());
+        }
+        let original_sessions = agent.state.sessions.clone();
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        assert_eq!(
+            pool.switch_idle_agent_model(channel_id, "model-b", Some("pick".into())),
+            IdleSwitchResult::AmbiguousTarget,
+        );
+        let agent = pool.agents[0].as_ref().unwrap();
+        assert_eq!(agent.desired_model.as_deref(), Some("model-a"));
+        assert_eq!(agent.desired_model_request_id, None);
+        assert_eq!(agent.state.sessions, original_sessions);
+
+        // One remaining session is an unambiguous channel control again. The
+        // selected scope and its owner are cleared without broad channel cleanup.
+        pool.invalidate_scope_session(&scopes[1]);
+        pool.record_scope_owner(scopes[0].clone(), 0);
+        assert_eq!(
+            pool.switch_idle_agent_model(channel_id, "model-b", Some("pick".into())),
+            IdleSwitchResult::Switched,
+        );
+        let agent = pool.agents[0].as_ref().unwrap();
+        assert_eq!(agent.desired_model.as_deref(), Some("model-b"));
+        assert!(!agent.state.sessions.contains_key(&scopes[0]));
+        assert!(!pool.session_owners.contains_key(&scopes[0]));
+    }
+
+    #[tokio::test]
+    async fn test_applied_switch_refreshes_capabilities_from_post_switch_snapshot() {
+        // The adapter accepts the switch and echoes the target model's rebuilt
+        // configOptions — including a thought_level option the default model
+        // never advertised. Capabilities and the capture must reflect the target
+        // model, not the pre-switch default.
+        let switch_reply = r#""result":{"configOptions":[{"configId":"model","category":"model","currentValue":"model-b","options":[{"value":"model-a"},{"value":"model-b"}]},{"configId":"effort","category":"thought_level","currentValue":"medium","options":[{"value":"low"},{"value":"medium"}]}]}"#;
+        let acp = spawn_switch_acp(OPTS_MODEL_A_AND_B, switch_reply).await;
+        let mut agent = switching_agent(acp, "model-b");
+        // Busy path: this switch was delivered to an in-flight turn and its apply
+        // is deferred to this requeued session. Arm the pending-ack and carry the
+        // pick's correlator so the Applied arm emits a correlated positive
+        // terminal instead of leaving the Desktop to infer success from silence.
+        agent.desired_model_pending_ack = true;
+        agent.desired_model_request_id = Some("req-busy-1".into());
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        let caps = agent
+            .model_capabilities
+            .as_ref()
+            .expect("capabilities refreshed from the post-switch snapshot");
+        assert_eq!(
+            caps.thought_level_config_id.as_deref(),
+            Some("effort"),
+            "the target model's thought_level option must be discovered post-switch"
+        );
+        let cap = capture(&obs);
+        assert_eq!(
+            cap["modelOverridden"], true,
+            "an applied switch must report modelOverridden true"
+        );
+        assert!(
+            cap["configOptions"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|o| o["category"] == "thought_level")),
+            "the cached configOptions must be the target model's post-switch set"
+        );
+        // The deferred apply must emit exactly one correlated positive terminal
+        // so the Desktop learns success from a real frame, not timeout silence.
+        let results = control_results(&obs);
+        assert_eq!(
+            results.len(),
+            1,
+            "a busy-path applied switch emits exactly one positive terminal"
+        );
+        assert_eq!(results[0]["status"], "switched");
+        assert_eq!(results[0]["modelId"], "model-b");
+        assert_eq!(
+            results[0]["requestId"], "req-busy-1",
+            "the positive terminal must carry the pick's correlator"
+        );
+        assert!(
+            !agent.desired_model_pending_ack,
+            "the pending-ack is consumed once so it cannot re-fire on a later session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rejected_switch_preserves_capabilities_and_emits_failure() {
+        // The adapter refuses the switch with a JSON-RPC error. The session is
+        // still on its default model: pre-switch capabilities survive, the
+        // capture reports modelOverridden false, and a terminal `failure`
+        // control_result tells Desktop the pick did not land.
+        let acp = spawn_switch_acp(
+            OPTS_MODEL_A_AND_B,
+            r#""error":{"code":-32602,"message":"model not accepted"}"#,
+        )
+        .await;
+        let mut agent = switching_agent(acp, "model-b");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("an application-level rejection is non-fatal");
+
+        let caps = agent
+            .model_capabilities
+            .as_ref()
+            .expect("pre-switch capabilities must be preserved on rejection");
+        assert!(
+            caps.config_options_raw
+                .iter()
+                .any(|o| o["currentValue"] == "model-a"),
+            "capabilities must still describe the default model the session runs"
+        );
+        let cap = capture(&obs);
+        assert_eq!(
+            cap["modelOverridden"], false,
+            "a rejected switch must not claim an override"
+        );
+        let results = control_results(&obs);
+        assert_eq!(results.len(), 1, "exactly one control_result on rejection");
+        assert_eq!(results[0]["status"], "failure");
+        assert_eq!(results[0]["modelId"], "model-b");
+    }
+
+    #[tokio::test]
+    async fn test_busy_path_rejection_emits_only_failure_and_consumes_pending_ack() {
+        // K1 delayed-rejection at the Rust seam: a busy-path switch is armed
+        // (pending_ack), its apply is deferred to this requeued session, and the
+        // adapter then refuses it. The rejection arm must emit exactly one
+        // `failure` (no spurious positive `switched`) and consume the pending-ack
+        // so no later session can fire a phantom success.
+        let acp = spawn_switch_acp(
+            OPTS_MODEL_A_AND_B,
+            r#""error":{"code":-32602,"message":"model not accepted"}"#,
+        )
+        .await;
+        let mut agent = switching_agent(acp, "model-b");
+        agent.desired_model_pending_ack = true;
+        agent.desired_model_request_id = Some("req-busy-reject".into());
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("an application-level rejection is non-fatal");
+
+        let results = control_results(&obs);
+        assert_eq!(
+            results.len(),
+            1,
+            "a busy-path rejection emits exactly one terminal — no phantom success"
+        );
+        assert_eq!(results[0]["status"], "failure");
+        assert_eq!(results[0]["requestId"], "req-busy-reject");
+        assert!(
+            !agent.desired_model_pending_ack,
+            "the pending-ack is consumed even on rejection so it cannot re-fire"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_applied_switch_without_options_drops_capabilities() {
+        // A successful switch whose response carries no configOptions (older
+        // adapter, or a model with no options): the pre-switch snapshot cannot
+        // be trusted for the target model, so capabilities drop to None to be
+        // re-derived on the next session — but the switch still counts as an
+        // override with no failure surfaced.
+        let acp = spawn_switch_acp(OPTS_MODEL_A_AND_B, r#""result":{"ok":true}"#).await;
+        let mut agent = switching_agent(acp, "model-b");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        assert!(
+            agent.model_capabilities.is_none(),
+            "an optionless successful switch must drop stale capabilities"
+        );
+        let cap = capture(&obs);
+        assert_eq!(
+            cap["modelOverridden"], true,
+            "the switch still applied even with no echoed options"
+        );
+        assert!(
+            control_results(&obs).is_empty(),
+            "a successful switch emits no failure control_result"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_model_emits_unsupported_without_switch_rpc() {
+        // The desired model is absent from the session/new catalog: no switch
+        // RPC is sent, the capture reports no override, and an
+        // `unsupported_model` control_result rejects the live pick.
+        let acp = spawn_switch_acp(OPTS_MODEL_A_AND_B, r#""result":{"ok":true}"#).await;
+        let mut agent = switching_agent(acp, "model-z");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("an unresolvable model is non-fatal");
+
+        let cap = capture(&obs);
+        assert_eq!(cap["modelOverridden"], false);
+        let results = control_results(&obs);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["status"], "unsupported_model");
+        assert_eq!(results[0]["modelId"], "model-z");
+    }
+
+    /// Scripted ACP whose `session/new` (request #1) returns a full result body
+    /// `session_new_result` (a JSON object minus the outer envelope), and whose
+    /// model-switch `set_config_option` (request #2) replies with `switch_reply`
+    /// (a JSON-RPC `result`/`error` body minus the id). Lets a test control the
+    /// `models` block in both the pre-switch and post-switch snapshots.
+    async fn spawn_switch_acp_full(session_new_result: &str, switch_reply: &str) -> AcpClient {
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  id=$((count - 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{session_new_result}}}'
+  elif [ "$count" -eq 2 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',{switch_reply}}}'
+  else
+    printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',"result":{{"ok":true}}}}'
+  fi
+done"#
+        );
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn switch ACP script")
+    }
+
+    /// F3: an applied switch must cache `models` from the POST-switch snapshot,
+    /// not the pre-switch `session/new` response. The pre-switch snapshot reports
+    /// the default model as current; the target response reports the target as
+    /// current. The emitted capture must carry the target's models block. The
+    /// Desktop-parsing half of this contract lives in `agent_config_tests.rs`
+    /// (`live_switch_models_from_post_switch_snapshot_parses_target_current`).
+    #[tokio::test]
+    async fn test_applied_switch_caches_target_model_not_pre_switch() {
+        // session/new: model-a is current. switch reply: model-b is current,
+        // and it echoes rebuilt configOptions so capabilities refresh cleanly.
+        let session_new = r#"{"sessionId":"sess-1","configOptions":[{"configId":"model","category":"model","currentValue":"model-a","options":[{"value":"model-a"},{"value":"model-b"}]}],"models":{"currentModelId":"model-a","availableModels":[{"modelId":"model-a"},{"modelId":"model-b"}]}}"#;
+        let switch_reply = r#""result":{"configOptions":[{"configId":"model","category":"model","currentValue":"model-b","options":[{"value":"model-a"},{"value":"model-b"}]}],"models":{"currentModelId":"model-b","availableModels":[{"modelId":"model-a"},{"modelId":"model-b"}]}}"#;
+        let acp = spawn_switch_acp_full(session_new, switch_reply).await;
+        let mut agent = switching_agent(acp, "model-b");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        let cap = capture(&obs);
+        assert_eq!(
+            cap["models"]["currentModelId"], "model-b",
+            "an applied switch must cache the target model, not the pre-switch model-a"
+        );
+    }
+
+    /// F3: an applied switch whose target response omits `models` must cache
+    /// Null — never fall back to the pre-switch `resp.raw.models`. Otherwise the
+    /// panel would report the pre-switch model as live after a successful switch.
+    #[tokio::test]
+    async fn test_applied_switch_without_models_does_not_leak_pre_switch_model() {
+        // session/new advertises model-a as current; the successful switch reply
+        // echoes configOptions (so the switch is Applied) but NO models block.
+        let session_new = r#"{"sessionId":"sess-1","configOptions":[{"configId":"model","category":"model","currentValue":"model-a","options":[{"value":"model-a"},{"value":"model-b"}]}],"models":{"currentModelId":"model-a","availableModels":[{"modelId":"model-a"},{"modelId":"model-b"}]}}"#;
+        let switch_reply = r#""result":{"configOptions":[{"configId":"model","category":"model","currentValue":"model-b","options":[{"value":"model-a"},{"value":"model-b"}]}]}"#;
+        let acp = spawn_switch_acp_full(session_new, switch_reply).await;
+        let mut agent = switching_agent(acp, "model-b");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        let cap = capture(&obs);
+        assert!(
+            cap["models"].is_null(),
+            "an optionless-models successful switch must emit Null, not the pre-switch models"
+        );
+    }
+
+    /// Like `switching_agent` but also holds a spawn-scoped startup effort, so a
+    /// single session creation both switches the model AND applies startup
+    /// effort — the interaction F5.6 pins.
+    fn switching_agent_with_effort(
+        acp: AcpClient,
+        desired_model: &str,
+        startup_effort: &str,
+    ) -> OwnedAgent {
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: Some(desired_model.to_string()),
+            model_overridden: true,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: Some(startup_effort.to_string()),
+            agent_name: "switch-effort-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        }
+    }
+
+    fn effort_option_current_value(cap: &serde_json::Value) -> Option<String> {
+        cap["configOptions"]
+            .as_array()?
+            .iter()
+            .find(|o| o["category"] == "thought_level")
+            .and_then(|o| o["currentValue"].as_str())
+            .map(str::to_string)
+    }
+
+    /// F5.6: startup effort resolves against the TARGET model's option set. The
+    /// pre-switch model-a advertises no `thought_level`; only the post-switch
+    /// model-b does. `apply_startup_effort` reads the post-switch snapshot, so
+    /// the held `high` applies against model-b's option and the cached
+    /// configOptions show it at `high`. Had it read the pre-switch snapshot the
+    /// effort would find no option and silently no-op.
+    #[tokio::test]
+    async fn test_startup_effort_resolves_against_post_switch_target_options() {
+        // session/new: model-a, model option only — NO thought_level.
+        let session_new = r#"[{"configId":"model","category":"model","currentValue":"model-a","options":[{"value":"model-a"},{"value":"model-b"}]}]"#;
+        // switch reply: model-b current AND a target-only thought_level option.
+        let switch_reply = r#""result":{"configOptions":[{"configId":"model","category":"model","currentValue":"model-b","options":[{"value":"model-a"},{"value":"model-b"}]},{"configId":"effort","category":"thought_level","currentValue":"low","options":[{"value":"low"},{"value":"high"}]}]}"#;
+        let acp = spawn_switch_acp(session_new, switch_reply).await;
+        let mut agent = switching_agent_with_effort(acp, "model-b", "high");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        let cap = capture(&obs);
+        assert_eq!(
+            effort_option_current_value(&cap).as_deref(),
+            Some("high"),
+            "startup effort must apply against the target model's thought_level option"
+        );
+    }
+
+    /// F5.6: an applied switch whose target response echoes NO options must not
+    /// apply the held startup effort against the STALE pre-switch options. The
+    /// pre-switch model-a advertised a `thought_level` option; the optionless
+    /// target response means the effort has no target option and must be
+    /// skipped — so the cached configOptions are Null, never the pre-switch
+    /// model-a options with a falsely patched `high`.
+    #[tokio::test]
+    async fn test_startup_effort_skips_stale_options_on_optionless_switch() {
+        // session/new: model-a WITH a thought_level option.
+        let session_new = r#"[{"configId":"model","category":"model","currentValue":"model-a","options":[{"value":"model-a"},{"value":"model-b"}]},{"configId":"effort","category":"thought_level","currentValue":"low","options":[{"value":"low"},{"value":"high"}]}]"#;
+        // switch reply: applied, but NO echoed options.
+        let switch_reply = r#""result":{"ok":true}"#;
+        let acp = spawn_switch_acp(session_new, switch_reply).await;
+        let mut agent = switching_agent_with_effort(acp, "model-b", "high");
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+
+        let cap = capture(&obs);
+        assert_eq!(
+            cap["modelOverridden"], true,
+            "the switch still applied even with no echoed options"
+        );
+        assert!(
+            cap["configOptions"].is_null(),
+            "an optionless switch caches the target's (empty) options, never the pre-switch model-a options with a patched effort"
+        );
     }
 }

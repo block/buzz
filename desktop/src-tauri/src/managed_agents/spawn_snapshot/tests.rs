@@ -5,6 +5,26 @@ use std::collections::BTreeMap;
 /// Canonical projection of a prospective snapshot — the exact value the drift
 /// comparison reads, so these tests assert on drift itself rather than on a
 /// proxy for it.
+fn snapshot_with_policy(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    teams: &[TeamRecord],
+    workspace_relay: &str,
+    global: &GlobalAgentConfig,
+    enforced_owner_only: bool,
+) -> serde_json::Value {
+    prospective_spawn_config_snapshot(
+        record,
+        personas,
+        teams,
+        workspace_relay,
+        global,
+        enforced_owner_only,
+        AcpSessionPolicy::Channel,
+    )
+    .canonical()
+}
+
 fn snapshot(
     record: &ManagedAgentRecord,
     personas: &[AgentDefinition],
@@ -12,11 +32,18 @@ fn snapshot(
     workspace_relay: &str,
     global: &GlobalAgentConfig,
 ) -> serde_json::Value {
-    prospective_spawn_config_snapshot(record, personas, teams, workspace_relay, global).canonical()
+    snapshot_with_policy(record, personas, teams, workspace_relay, global, false)
+}
+
+/// `snapshot` with the fixed no-persona/no-team/default-global shape the effort
+/// tests share, so their call sites read as `snap(&record)` instead of wrapping.
+fn snap(record: &ManagedAgentRecord) -> serde_json::Value {
+    snapshot(record, &[], &[], "wss://ws.example", &Default::default())
 }
 
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        description: None,
         pubkey: "p".repeat(64),
         name: "agent".into(),
         persona_id: None,
@@ -43,6 +70,7 @@ fn record() -> ManagedAgentRecord {
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -66,15 +94,18 @@ fn record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
 fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
     AgentDefinition {
+        description: None,
         id: id.into(),
         display_name: id.into(),
         avatar_url: None,
@@ -89,6 +120,7 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -222,6 +254,84 @@ fn stored_record_relay_does_not_affect_snapshot() {
         snapshot(&a, &[], &[], "wss://ws.example", &Default::default()),
         snapshot(&b, &[], &[], "wss://ws.example", &Default::default())
     );
+}
+
+#[test]
+fn owner_only_mode_and_allowlist_edits_do_not_change_effective_snapshot() {
+    let mut before = record();
+    before.respond_to = RespondTo::Allowlist;
+    before.respond_to_allowlist = vec!["a".repeat(64)];
+
+    let mut mode_edited = before.clone();
+    mode_edited.respond_to = RespondTo::Anyone;
+
+    let mut allowlist_edited = before.clone();
+    allowlist_edited.respond_to_allowlist = vec!["b".repeat(64)];
+
+    let effective_before = snapshot_with_policy(
+        &before,
+        &[],
+        &[],
+        "wss://ws.example",
+        &Default::default(),
+        true,
+    );
+    for (label, edited) in [
+        ("respond-to mode", mode_edited),
+        ("respond-to allowlist", allowlist_edited),
+    ] {
+        assert_eq!(
+            effective_before,
+            snapshot_with_policy(
+                &edited,
+                &[],
+                &[],
+                "wss://ws.example",
+                &Default::default(),
+                true,
+            ),
+            "portable {label} edit must not create restart drift when both spawns enforce owner-only",
+        );
+    }
+}
+
+#[test]
+fn oss_mode_and_allowlist_edits_change_effective_snapshot() {
+    let mut before = record();
+    before.respond_to = RespondTo::Allowlist;
+    before.respond_to_allowlist = vec!["a".repeat(64)];
+
+    let mut mode_edited = before.clone();
+    mode_edited.respond_to = RespondTo::Anyone;
+
+    let mut allowlist_edited = before.clone();
+    allowlist_edited.respond_to_allowlist = vec!["b".repeat(64)];
+
+    let effective_before = snapshot_with_policy(
+        &before,
+        &[],
+        &[],
+        "wss://ws.example",
+        &Default::default(),
+        false,
+    );
+    for (label, edited) in [
+        ("respond-to mode", mode_edited),
+        ("respond-to allowlist", allowlist_edited),
+    ] {
+        assert_ne!(
+            effective_before,
+            snapshot_with_policy(
+                &edited,
+                &[],
+                &[],
+                "wss://ws.example",
+                &Default::default(),
+                false,
+            ),
+            "OSS spawn must retain restart drift for effective {label} edits",
+        );
+    }
 }
 
 #[test]
@@ -827,3 +937,7 @@ fn openclaw_cap_crossing_parallelism_snapshots_differ() {
         "parallelism 8 (clamps to 5) and 3 (runs as 3) must produce different snapshots"
     );
 }
+
+#[cfg(test)]
+#[path = "tests_ext.rs"]
+mod ext;

@@ -1,13 +1,5 @@
 import type * as React from "react";
-import {
-  BellOff,
-  ChevronDown,
-  CircleDot,
-  FileText,
-  Hash,
-  Lock,
-  X,
-} from "lucide-react";
+import { BellOff, ChevronDown, CircleDot, X } from "lucide-react";
 
 import {
   ContextMenu,
@@ -15,9 +7,11 @@ import {
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
 
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
 import {
@@ -38,6 +32,7 @@ import {
 } from "@/shared/ui/sidebar";
 import { ChannelActivityPopover } from "@/features/sidebar/ui/ChannelActivityPopover";
 import { useAppShell } from "@/app/AppShellContext";
+import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -79,7 +74,10 @@ function UnreadCountBadge({
       data-testid={`channel-unread-${channelName}`}
     >
       {formatUnreadCount(count)}
-      <span className="sr-only"> new comment{count === 1 ? "" : "s"}</span>
+      <span className="sr-only">
+        {" "}
+        unread notification{count === 1 ? "" : "s"}
+      </span>
     </span>
   );
 }
@@ -157,6 +155,7 @@ function ChannelWorkingBadge({
 export type SidebarDmParticipant = {
   avatarUrl: string | null;
   label: string;
+  isAgent?: boolean;
   pubkey: string;
 };
 
@@ -201,6 +200,7 @@ function DmChannelIcon({
           geometry={DM_AVATAR_STATUS_GEOMETRY}
           iconClassName="h-3.5 w-3.5"
           label={primaryParticipant.label}
+          shape={primaryParticipant.isAgent ? "squircle" : "circle"}
           size={DM_AVATAR_SIZE}
           status={presenceStatus}
           statusTestId={`channel-presence-${channelName}`}
@@ -239,15 +239,7 @@ function SidebarChannelIcon({
     );
   }
 
-  if (channel.visibility === "private") {
-    return <Lock className={cn("h-4 w-4", className)} />;
-  }
-
-  if (channel.channelType === "forum") {
-    return <FileText className={cn("h-4 w-4", className)} />;
-  }
-
-  return <Hash className={cn("h-4 w-4", className)} />;
+  return <ChannelGlyph channel={channel} className={className} />;
 }
 
 export function ChannelMenuButton({
@@ -255,6 +247,7 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
+  unreadCount = 0,
   activeWorking,
   isMuted,
   dmParticipants,
@@ -290,13 +283,21 @@ export function ChannelMenuButton({
     (hasSidebarUnreadProjections
       ? unreadThreadChannelIds.has(channel.id)
       : hasUnread);
+  const showsUnreadCount =
+    !isActive && channel.channelType !== "dm" && unreadCount > 0;
+  const showsEphemeralBadge =
+    Boolean(ephemeralDisplay) &&
+    !activeWorking &&
+    !isMuted &&
+    !showsUnreadCount &&
+    !hasThreadUnread;
   const inactiveContentOpacity = cn(
     !isActive && !hasTopLevelUnread && !isMuted && "opacity-80",
     !isActive &&
       isMuted &&
       !hasTopLevelUnread &&
       !hasThreadUnread &&
-      "opacity-50 dark:opacity-45",
+      "sidebar-muted-content opacity-50 dark:opacity-45",
   );
 
   const button = (
@@ -325,16 +326,34 @@ export function ChannelMenuButton({
         presenceStatus={presenceStatus}
       />
       <span
-        className={cn("min-w-0 flex-1 truncate", inactiveContentOpacity)}
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-1",
+          inactiveContentOpacity,
+        )}
         data-sidebar-row-label
       >
-        {resolvedLabel}
+        <span className="min-w-0 truncate">{resolvedLabel}</span>
+        {channel.channelType === "dm" &&
+        (channel.participantPubkeys.length === 2 ||
+          dmParticipants?.length === 1) ? (
+          <UserNameIndicators
+            className="ml-1"
+            pubkey={dmParticipants?.[0]?.pubkey}
+            size="dm"
+          />
+        ) : null}
       </span>
-      {ephemeralDisplay ? (
+      {showsEphemeralBadge && ephemeralDisplay ? (
         <EphemeralChannelBadge
           display={ephemeralDisplay}
           testId={`channel-ephemeral-${channel.name}`}
           variant="sidebar"
+        />
+      ) : null}
+      {channel.channelType === "dm" && dmParticipants?.length === 1 ? (
+        <AgentManagementMarker
+          pubkey={dmParticipants[0].pubkey}
+          testId={`channel-agent-provenance-${channel.id}`}
         />
       ) : null}
       {activeWorking ? (
@@ -354,7 +373,13 @@ export function ChannelMenuButton({
           )}
         />
       ) : null}
-      {hasThreadUnread ? (
+      {showsUnreadCount ? (
+        <UnreadCountBadge
+          channelName={channel.name}
+          className="ml-auto"
+          count={unreadCount}
+        />
+      ) : hasThreadUnread ? (
         <UnreadDotBadge channelName={channel.name} className="ml-auto" />
       ) : null}
     </SidebarMenuButton>

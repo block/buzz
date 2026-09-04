@@ -4,6 +4,12 @@ import { installMockBridge } from "../helpers/bridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 
 const RELAY_URL = "ws://localhost:3000";
+const THEME_STORAGE_KEY = "buzz-theme";
+const OWNER_PUBKEY = "deadbeef".repeat(8);
+
+function snapshotKey(relayUrl: string) {
+  return `buzz-channels.v1:${relayUrl}:${OWNER_PUBKEY.toLowerCase()}`;
+}
 
 const COMMUNITY_A = {
   id: "ws-a",
@@ -17,6 +23,25 @@ const COMMUNITY_B = {
   relayUrl: "ws://localhost:3001",
   addedAt: "2026-01-02T00:00:00.000Z",
 };
+
+async function expectContentSurfaceHorizontalGutters(
+  page: import("@playwright/test").Page,
+  expectedLeftGutter = 1,
+) {
+  const [mainInsetBox, contentBox] = await Promise.all([
+    page.locator("[data-buzz-glass-inset]").boundingBox(),
+    page.locator("[data-buzz-content-surface]").first().boundingBox(),
+  ]);
+  expect(mainInsetBox).not.toBeNull();
+  expect(contentBox).not.toBeNull();
+  const leftGutter = (contentBox?.x ?? 0) - (mainInsetBox?.x ?? 0);
+  const rightGutter =
+    (mainInsetBox?.x ?? 0) +
+    (mainInsetBox?.width ?? 0) -
+    ((contentBox?.x ?? 0) + (contentBox?.width ?? 0));
+  expect(Math.abs(leftGutter - expectedLeftGutter)).toBeLessThan(0.5);
+  expect(Math.abs(rightGutter - 8)).toBeLessThan(0.5);
+}
 
 async function seedCommunities(
   page: import("@playwright/test").Page,
@@ -59,7 +84,7 @@ test.describe("community rail", () => {
       "overflow",
       "visible",
     );
-    await expect(rail).toHaveCSS("z-index", "0");
+    await expect(rail).toHaveCSS("z-index", "20");
 
     const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
     const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
@@ -132,6 +157,7 @@ test.describe("community rail", () => {
 
     // The add-community affordance lives at the bottom of the rail.
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
+    await expectContentSurfaceHorizontalGutters(page);
   });
 
   test("restores pointer events after dismissing community settings", async ({
@@ -270,10 +296,87 @@ test.describe("community rail", () => {
     expect(communityBox?.y).toBeLessThan(feedbackBox?.y ?? 0);
     expect(feedbackBox?.y).toBeLessThan(settingsBox?.y ?? 0);
 
-    await page.getByTestId("community-switcher").click();
-
     const menu = page.getByRole("menu", { name: "Community actions" });
+    await communityTrigger.evaluate((trigger) => {
+      trigger.addEventListener(
+        "mouseenter",
+        () => {
+          trigger.dataset.hoverStartedAt = String(performance.now());
+        },
+        { once: true },
+      );
+      trigger.addEventListener("mouseleave", () => {
+        trigger.dataset.leftAt = String(performance.now());
+      });
+      const observer = new MutationObserver((records) => {
+        if (
+          trigger.getAttribute("aria-expanded") === "true" &&
+          !trigger.dataset.expandedAt
+        ) {
+          trigger.dataset.expandedAt = String(performance.now());
+        }
+        if (
+          records.some(
+            (record) =>
+              record.attributeName === "aria-expanded" &&
+              record.oldValue === "true",
+          )
+        ) {
+          trigger.dataset.closedAfterOpening = "true";
+        }
+      });
+      observer.observe(trigger, {
+        attributeFilter: ["aria-expanded"],
+        attributeOldValue: true,
+        attributes: true,
+      });
+    });
+    await communityTrigger.hover();
+    await expect(menu).toBeVisible({ timeout: 700 });
+    const openDelayMs = await communityTrigger.evaluate((trigger) => {
+      const hoverStartedAt = Number(trigger.dataset.hoverStartedAt);
+      const expandedAt = Number(trigger.dataset.expandedAt);
+      if (!Number.isFinite(hoverStartedAt) || !Number.isFinite(expandedAt)) {
+        throw new Error("Community actions open timing was not recorded");
+      }
+      return expandedAt - hoverStartedAt;
+    });
+    expect(openDelayMs).toBeGreaterThanOrEqual(40);
+    expect(openDelayMs).toBeLessThan(300);
+
+    const openTriggerBox = await communityTrigger.boundingBox();
+    const menuBox = await menu.boundingBox();
+    expect(openTriggerBox).not.toBeNull();
+    expect(menuBox).not.toBeNull();
+    if (!openTriggerBox || !menuBox) {
+      throw new Error("Community actions geometry unavailable");
+    }
+    const triggerExitX = openTriggerBox.x + openTriggerBox.width - 1;
+    const triggerExitY = Math.min(
+      openTriggerBox.y + openTriggerBox.height - 4,
+      menuBox.y + menuBox.height - 4,
+    );
+    await page.mouse.move(triggerExitX, triggerExitY);
+    await page.mouse.move(menuBox.x + 8, menuBox.y - 8);
+    await page.waitForTimeout(80);
+    await page.mouse.move(menuBox.x + 8, menuBox.y + 8);
+    const bridgeDurationMs = await communityTrigger.evaluate((trigger) => {
+      const leftAt = Number(trigger.dataset.leftAt);
+      if (!Number.isFinite(leftAt)) {
+        throw new Error(
+          "Community actions trigger exit timing was not recorded",
+        );
+      }
+      return performance.now() - leftAt;
+    });
+    expect(bridgeDurationMs).toBeGreaterThanOrEqual(60);
+    expect(bridgeDurationMs).toBeLessThan(140);
+    await page.waitForTimeout(180);
     await expect(menu).toBeVisible();
+    await expect(communityTrigger).not.toHaveAttribute(
+      "data-closed-after-opening",
+      "true",
+    );
     await expect(
       menu.getByRole("menuitem", { name: "Copy community URL" }),
     ).toBeVisible();
@@ -373,6 +476,194 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("community switch cancels a send after its link preview settles", async ({
+    page,
+  }) => {
+    const agentPubkey =
+      "ee00000000000000000000000000000000000000000000000000000000000001";
+    await installMockBridge(
+      page,
+      {
+        addChannelMembersDelayMs: 10_000,
+        managedAgents: [
+          {
+            pubkey: agentPubkey,
+            name: "SlowBot",
+            status: "running",
+          },
+        ],
+        linkPreviewMetadata: {
+          title: "Ready preview",
+          siteName: "GitHub",
+          description: "Must not cross community boundaries.",
+          imageDataUrl: null,
+          imageDomain: null,
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    const previewUrl =
+      "https://github.com/block/buzz/pull/5697?community=reset";
+    await input.fill("@SlowBot");
+    await expect(page.getByTestId("mention-autocomplete")).toBeVisible();
+    await input.press("Enter");
+    await page.keyboard.type(` ${previewUrl}`);
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "add_channel_members",
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+    await page.waitForTimeout(250);
+
+    const publications = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ),
+    );
+    expect(publications).toHaveLength(0);
+    await expect(page.getByTestId("message-input")).toHaveText("");
+  });
+
+  test("community switch stops preview media before it reaches the new community", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        deferLinkPreviewMetadata: true,
+        linkPreviewMetadata: {
+          title: "Old community preview",
+          siteName: "GitHub",
+          description: "Must not upload after reset.",
+          imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          imageDomain: "github.com",
+          faviconDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("https://github.com/block/buzz/pull/5697?media=reset");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "fetch_link_preview_metadata",
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__?.() ?? 0,
+      ),
+    ).toBeGreaterThan(0);
+    await page.waitForTimeout(250);
+
+    const uploadCalls = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "upload_media_bytes",
+      ),
+    );
+    expect(uploadCalls).toHaveLength(0);
+  });
+
+  test("community switch cancellation wins before native upload registration", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        deferLinkPreviewUploadRegistration: true,
+        linkPreviewMetadata: {
+          title: "Old community preview",
+          siteName: "GitHub",
+          description: "Cancellation must survive native registration.",
+          imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          imageDomain: "github.com",
+          faviconDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("https://github.com/block/buzz/pull/5697?native=reset");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "upload_media_bytes",
+            ).length,
+        ),
+      )
+      .toBe(2);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "cancel_media_upload",
+            ).length,
+        ),
+      )
+      .toBe(2);
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_UPLOADS__?.() ?? 0,
+      ),
+    ).toBe(2);
+    await page.waitForTimeout(250);
+
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ ?? 0,
+      ),
+    ).toBe(0);
+  });
+
   test("restores the last Home or channel destination per community", async ({
     page,
   }) => {
@@ -412,33 +703,36 @@ test.describe("community rail", () => {
     await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
     await page.goto("/");
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
-    const rememberedChannelId = await page.evaluate((communityId) => {
-      const source = window.localStorage.getItem(
-        "buzz-channels.v1:ws://localhost:3000",
-      );
-      if (!source) throw new Error("missing source channel snapshot");
-      const snapshot = JSON.parse(source) as {
-        channels: Array<{ id: string; name: string }>;
-      };
-      const generalChannel = snapshot.channels.find(
-        (channel) => channel.name === "general",
-      );
-      if (!generalChannel) throw new Error("missing general channel snapshot");
-      window.localStorage.setItem(
-        "buzz-channels.v1:ws://localhost:3001",
-        source,
-      );
-      window.localStorage.setItem(
-        "buzz-community-destinations",
-        JSON.stringify({
-          [communityId]: {
-            kind: "channel",
-            channelId: generalChannel.id,
-          },
-        }),
-      );
-      return generalChannel.id;
-    }, COMMUNITY_B.id);
+    const rememberedChannelId = await page.evaluate(
+      ({ communityId, sourceSnapshotKey, targetSnapshotKey }) => {
+        const source = window.localStorage.getItem(sourceSnapshotKey);
+        if (!source) throw new Error("missing source channel snapshot");
+        const snapshot = JSON.parse(source) as {
+          channels: Array<{ id: string; name: string }>;
+        };
+        const generalChannel = snapshot.channels.find(
+          (channel) => channel.name === "general",
+        );
+        if (!generalChannel)
+          throw new Error("missing general channel snapshot");
+        window.localStorage.setItem(targetSnapshotKey, source);
+        window.localStorage.setItem(
+          "buzz-community-destinations",
+          JSON.stringify({
+            [communityId]: {
+              kind: "channel",
+              channelId: generalChannel.id,
+            },
+          }),
+        );
+        return generalChannel.id;
+      },
+      {
+        communityId: COMMUNITY_B.id,
+        sourceSnapshotKey: snapshotKey(COMMUNITY_A.relayUrl),
+        targetSnapshotKey: snapshotKey(COMMUNITY_B.relayUrl),
+      },
+    );
 
     await page.evaluate(() => {
       const testWindow = window as typeof window & {
@@ -478,28 +772,29 @@ test.describe("community rail", () => {
     }, COMMUNITY_B.id);
 
     await page.goto("/");
+    const sourceSnapshotKey = snapshotKey(COMMUNITY_A.relayUrl);
+    const targetSnapshotKey = snapshotKey(COMMUNITY_B.relayUrl);
     await expect
       .poll(() =>
-        page.evaluate(() =>
-          window.localStorage.getItem("buzz-channels.v1:ws://localhost:3000"),
+        page.evaluate(
+          (key) => window.localStorage.getItem(key),
+          sourceSnapshotKey,
         ),
       )
       .not.toBeNull();
-    await page.evaluate(() => {
-      const source = window.localStorage.getItem(
-        "buzz-channels.v1:ws://localhost:3000",
-      );
-      if (!source) throw new Error("missing source channel snapshot");
-      const snapshot = JSON.parse(source);
-      snapshot.channels = snapshot.channels.map(
-        (channel: Record<string, unknown>, index: number) =>
-          index === 0 ? { ...channel, id: "missing-channel" } : channel,
-      );
-      window.localStorage.setItem(
-        "buzz-channels.v1:ws://localhost:3001",
-        JSON.stringify(snapshot),
-      );
-    });
+    await page.evaluate(
+      ({ sourceKey, targetKey }) => {
+        const source = window.localStorage.getItem(sourceKey);
+        if (!source) throw new Error("missing source channel snapshot");
+        const snapshot = JSON.parse(source);
+        snapshot.channels = snapshot.channels.map(
+          (channel: Record<string, unknown>, index: number) =>
+            index === 0 ? { ...channel, id: "missing-channel" } : channel,
+        );
+        window.localStorage.setItem(targetKey, JSON.stringify(snapshot));
+      },
+      { sourceKey: sourceSnapshotKey, targetKey: targetSnapshotKey },
+    );
     await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
 
     await expect(page).not.toHaveURL(/#\/channels\//);
@@ -531,10 +826,12 @@ test.describe("community rail", () => {
     }, COMMUNITY_B.id);
     await page.goto("/");
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    const sourceSnapshotKey = snapshotKey(COMMUNITY_A.relayUrl);
     await expect
       .poll(() =>
-        page.evaluate(() =>
-          window.localStorage.getItem("buzz-channels.v1:ws://localhost:3000"),
+        page.evaluate(
+          (key) => window.localStorage.getItem(key),
+          sourceSnapshotKey,
         ),
       )
       .not.toBeNull();
@@ -563,20 +860,21 @@ test.describe("community rail", () => {
         };
       }),
     ).toEqual({ released: 0, pending: 0 });
-    await page.evaluate(() => {
-      const source = window.localStorage.getItem(
-        "buzz-channels.v1:ws://localhost:3000",
-      );
-      if (!source) throw new Error("missing source channel snapshot");
-      const snapshot = JSON.parse(source);
-      snapshot.channels = snapshot.channels.filter(
-        (channel: { id: string }) => channel.id !== "general",
-      );
-      window.localStorage.setItem(
-        "buzz-channels.v1:ws://localhost:3001",
-        JSON.stringify(snapshot),
-      );
-    });
+    await page.evaluate(
+      ({ sourceKey, targetKey }) => {
+        const source = window.localStorage.getItem(sourceKey);
+        if (!source) throw new Error("missing source channel snapshot");
+        const snapshot = JSON.parse(source);
+        snapshot.channels = snapshot.channels.filter(
+          (channel: { id: string }) => channel.id !== "general",
+        );
+        window.localStorage.setItem(targetKey, JSON.stringify(snapshot));
+      },
+      {
+        sourceKey: sourceSnapshotKey,
+        targetKey: snapshotKey(COMMUNITY_B.relayUrl),
+      },
+    );
     await page.evaluate(() => {
       const config = (
         window as Window & {
@@ -822,6 +1120,16 @@ test.describe("community rail", () => {
 
     // The app settles into the new community once apply completes.
     await expect(buttonB).toHaveAttribute("aria-current", "true");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            window.__BUZZ_E2E_COMMANDS__?.filter(
+              (command) => command === "clear_pending_navigation_deep_links",
+            ).length ?? 0,
+        ),
+      )
+      .toBe(1);
   });
 
   test("leaving the final community returns to setup without resetting identity", async ({
@@ -892,7 +1200,67 @@ test.describe("community rail", () => {
       .toEqual(identityBefore);
   });
 
+  test("shows a recoverable error when leaving the final community cannot clear navigation", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      { clearPendingNavigationDeepLinksError: "queue unavailable" },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
+
+    const error = page.getByTestId("community-apply-error");
+    await expect(error).toBeVisible();
+    await expect(error).toContainText(
+      "Could not safely leave community: queue unavailable",
+    );
+    await expect(page.getByText("Join or create a community")).toHaveCount(0);
+    await expect(page.getByTestId("community-switch-gate")).toHaveCount(0);
+    await expect(page.getByTestId("community-apply-error-retry")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Change community" }),
+    ).toBeVisible();
+  });
+
+  test("keeps the gutter when the mobile sidebar closes without a rail", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 740, height: 516 });
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+    await expect(
+      page.locator('[data-sidebar="sidebar"][data-mobile="true"]'),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    await expect(
+      page.locator('[data-sidebar="sidebar"][data-mobile="true"]'),
+    ).toBeHidden();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "width",
+      "8px",
+    );
+    await expectContentSurfaceHorizontalGutters(page, 9);
+  });
+
   test("hides the rail with a single community", async ({ page }) => {
+    await page.addInitScript((themeStorageKey) => {
+      window.localStorage.setItem(themeStorageKey, "buzz-dark");
+    }, THEME_STORAGE_KEY);
     await installMockBridge(page, undefined, { skipCommunitySeed: true });
     await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
     await page.goto("/");
@@ -901,6 +1269,25 @@ test.describe("community rail", () => {
     // adds nothing).
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
     await expect(page.getByTestId("community-rail")).toHaveCount(0);
+
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+    await expect(
+      page.locator('[data-side="left"][data-state="collapsed"]'),
+    ).toBeVisible();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "width",
+      "8px",
+    );
+    const sidebarBackground = await page
+      .locator("[data-buzz-glass-inset]")
+      .evaluate((element) => getComputedStyle(element).backgroundColor);
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "background-color",
+      sidebarBackground,
+    );
+    await expectContentSurfaceHorizontalGutters(page, 9);
   });
 
   test("keeps the rail visible when the sidebar is collapsed", async ({
@@ -933,6 +1320,10 @@ test.describe("community rail", () => {
       page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
     ).toBeVisible();
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCount(
+      0,
+    );
+    await expectContentSurfaceHorizontalGutters(page);
   });
 
   test("clears the macOS traffic lights", async ({ page }) => {

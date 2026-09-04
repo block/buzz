@@ -10,6 +10,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const MEMORY_LIST_PREVIEW_LIMIT = 3;
+type MemorySectionVariant = "cards" | "grouped";
 
 const MEMORY_TRUNCATED_TOOLTIP =
   "This list may be incomplete — the relay returned the maximum number of memories.";
@@ -41,15 +42,17 @@ const MEMORY_DANGLING_REF_TOOLTIP =
  */
 export function MemorySection({
   agentPubkey,
+  variant = "cards",
   viewerIsOwner,
 }: {
   agentPubkey: string;
+  variant?: MemorySectionVariant;
   viewerIsOwner: boolean;
 }): React.ReactElement | null {
   // Hide entirely for non-owners.
   if (!viewerIsOwner) return null;
 
-  return <MemorySectionForOwner agentPubkey={agentPubkey} />;
+  return <MemorySectionForOwner agentPubkey={agentPubkey} variant={variant} />;
 }
 
 export function MemoryRefreshButton({
@@ -92,7 +95,13 @@ export function MemoryRefreshButton({
   );
 }
 
-function MemorySectionForOwner({ agentPubkey }: { agentPubkey: string }) {
+function MemorySectionForOwner({
+  agentPubkey,
+  variant,
+}: {
+  agentPubkey: string;
+  variant: MemorySectionVariant;
+}) {
   const { query, graph } = useAgentMemoryGraph(agentPubkey);
 
   // Order matters here. We want:
@@ -107,13 +116,14 @@ function MemorySectionForOwner({ agentPubkey }: { agentPubkey: string }) {
 
   return (
     <section data-testid="agent-memory-section">
-      {showInitialSkeleton ? <MemorySkeleton /> : null}
+      {showInitialSkeleton ? <MemorySkeleton variant={variant} /> : null}
 
       {showInitialError ? (
         <MemoryErrorState
           error={query.error}
           onRetry={() => query.refetch()}
           retrying={query.isFetching}
+          variant={variant}
         />
       ) : null}
 
@@ -123,10 +133,17 @@ function MemorySectionForOwner({ agentPubkey }: { agentPubkey: string }) {
               still have prior data on screen. Distinct from the initial
               error state above. */}
           {query.isError && !query.isFetching ? (
-            <MemoryStaleErrorBanner onRetry={() => query.refetch()} />
+            <MemoryStaleErrorBanner
+              onRetry={() => query.refetch()}
+              variant={variant}
+            />
           ) : null}
 
-          <MemoryGraphView graph={graph} truncated={query.data.truncated} />
+          <MemoryGraphView
+            graph={graph}
+            truncated={query.data.truncated}
+            variant={variant}
+          />
         </>
       ) : null}
     </section>
@@ -135,11 +152,11 @@ function MemorySectionForOwner({ agentPubkey }: { agentPubkey: string }) {
 
 // ── Subviews ────────────────────────────────────────────────────────────────
 
-function MemorySkeleton() {
+function MemorySkeleton({ variant }: { variant: MemorySectionVariant }) {
   return (
     <div
       aria-label="Loading memory"
-      className="space-y-2"
+      className={cn("space-y-2", variant === "grouped" && "p-4")}
       data-testid="agent-memory-skeleton"
       role="status"
     >
@@ -154,16 +171,21 @@ function MemoryErrorState({
   error,
   onRetry,
   retrying,
+  variant,
 }: {
   error: unknown;
   onRetry: () => void;
   retrying: boolean;
+  variant: MemorySectionVariant;
 }) {
   const message =
     error instanceof Error ? error.message : String(error ?? "unknown error");
   return (
     <div
-      className="flex flex-col gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs"
+      className={cn(
+        "flex flex-col gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs",
+        variant === "grouped" && "m-3",
+      )}
       data-testid="agent-memory-error"
       role="alert"
     >
@@ -189,10 +211,19 @@ function MemoryErrorState({
   );
 }
 
-function MemoryStaleErrorBanner({ onRetry }: { onRetry: () => void }) {
+function MemoryStaleErrorBanner({
+  onRetry,
+  variant,
+}: {
+  onRetry: () => void;
+  variant: MemorySectionVariant;
+}) {
   return (
     <div
-      className="mb-2 flex items-center gap-2 rounded-md border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
+      className={cn(
+        "mb-2 flex items-center gap-2 rounded-md border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs",
+        variant === "grouped" && "mx-3 mt-3",
+      )}
       data-testid="agent-memory-stale-error"
     >
       <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
@@ -211,9 +242,11 @@ function MemoryStaleErrorBanner({ onRetry }: { onRetry: () => void }) {
 function MemoryGraphView({
   graph,
   truncated,
+  variant,
 }: {
   graph: NonNullable<ReturnType<typeof useAgentMemoryGraph>["graph"]>;
   truncated: boolean;
+  variant: MemorySectionVariant;
 }) {
   const { rootedTree, orphans, dangling } = graph;
   const [showAllEntries, setShowAllEntries] = React.useState(false);
@@ -250,10 +283,13 @@ function MemoryGraphView({
     : entries.slice(0, MEMORY_LIST_PREVIEW_LIMIT);
 
   return (
-    <div className="space-y-3">
+    <div className={variant === "grouped" ? undefined : "space-y-3"}>
       {!core && memories.length > 0 ? (
         <p
-          className="text-xs italic text-muted-foreground"
+          className={cn(
+            "text-xs italic text-muted-foreground",
+            variant === "grouped" && "px-4 py-3",
+          )}
           data-testid="agent-memory-no-core"
         >
           No <code className="font-mono text-2xs">core</code> memory yet — agent
@@ -261,12 +297,18 @@ function MemoryGraphView({
         </p>
       ) : null}
 
-      <div className="space-y-2" data-testid="agent-memory-list">
+      <div
+        className={cn(
+          variant === "grouped" ? "divide-y divide-border/55" : "space-y-2",
+        )}
+        data-testid="agent-memory-list"
+      >
         {visibleEntries.map((entry) => (
           <MemoryEntryAccordion
             danglingSlugs={danglingSlugs}
             entry={entry}
             key={entry.eventId}
+            variant={variant}
           />
         ))}
       </div>
@@ -276,14 +318,22 @@ function MemoryGraphView({
           count={entries.length}
           onClick={() => setShowAllEntries(true)}
           truncated={truncated}
+          variant={variant}
         />
       ) : null}
 
-      {truncated && !hasMoreEntries ? <MemoryTruncatedHint /> : null}
+      {truncated && !hasMoreEntries ? (
+        <MemoryTruncatedHint variant={variant} />
+      ) : null}
 
       {hasMoreEntries && showAllEntries ? (
         <button
-          className="flex w-full justify-center rounded-2xl bg-muted/40 px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
+          className={cn(
+            "flex w-full justify-center px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50",
+            variant === "grouped"
+              ? "border-t border-border/55"
+              : "rounded-2xl bg-muted/40",
+          )}
           data-testid="agent-memory-show-less"
           onClick={() => setShowAllEntries(false)}
           type="button"
@@ -299,14 +349,21 @@ function MemoryShowMoreButton({
   count,
   onClick,
   truncated,
+  variant,
 }: {
   count: number;
   onClick: () => void;
   truncated: boolean;
+  variant: MemorySectionVariant;
 }) {
   const button = (
     <button
-      className="flex w-full items-center justify-center gap-2 rounded-2xl bg-muted/40 px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
+      className={cn(
+        "flex w-full items-center justify-center gap-2 px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50",
+        variant === "grouped"
+          ? "border-t border-border/55"
+          : "rounded-2xl bg-muted/40",
+      )}
       data-testid={
         truncated ? "agent-memory-truncated" : "agent-memory-show-more"
       }
@@ -329,12 +386,15 @@ function MemoryShowMoreButton({
   );
 }
 
-function MemoryTruncatedHint() {
+function MemoryTruncatedHint({ variant }: { variant: MemorySectionVariant }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <div
-          className="flex justify-center rounded-2xl border border-warning/30 bg-warning/5 px-4 py-2"
+          className={cn(
+            "flex justify-center border-warning/30 bg-warning/5 px-4 py-2",
+            variant === "grouped" ? "border-t" : "rounded-2xl border",
+          )}
           data-testid="agent-memory-truncated"
         >
           <AlertTriangle className="h-4 w-4 text-warning" />
@@ -466,9 +526,11 @@ function elementExceedsLines(element: HTMLElement, lines: number): boolean {
 function MemoryEntryAccordion({
   danglingSlugs,
   entry,
+  variant,
 }: {
   danglingSlugs: ReadonlySet<string>;
   entry: EngramEntry;
+  variant: MemorySectionVariant;
 }) {
   const [open, setOpen] = React.useState(false);
   const [showCaret, setShowCaret] = React.useState(false);
@@ -545,7 +607,10 @@ function MemoryEntryAccordion({
 
   return (
     <article
-      className="overflow-hidden rounded-2xl bg-muted/40"
+      className={cn(
+        "overflow-hidden",
+        variant === "cards" && "rounded-2xl bg-muted/40",
+      )}
       ref={articleRef}
     >
       {canExpand ? (

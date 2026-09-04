@@ -2,7 +2,13 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tauri::{ipc::Channel, plugin::TauriPlugin, Manager, Runtime};
+use tauri::{
+    ipc::{Channel, InvokeResponseBody},
+    plugin::TauriPlugin,
+    Manager, Runtime,
+};
+
+use crate::native_websocket_batch::{is_auth_challenge, FrameBatch, BATCH_MAX_SERIALIZED_BYTES};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::{
     connect_async,
@@ -124,7 +130,7 @@ impl WebSocketManager {
 async fn open_connection(
     manager: &WebSocketManager,
     url: &str,
-    on_message: Channel<serde_json::Value>,
+    on_message: Channel<InvokeResponseBody>,
 ) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
     let (socket, _) = tokio::select! {
@@ -176,7 +182,7 @@ async fn open_connection(
 async fn connect(
     manager: tauri::State<'_, WebSocketManager>,
     url: String,
-    on_message: Channel<serde_json::Value>,
+    on_message: Channel<InvokeResponseBody>,
     _config: Option<serde_json::Value>,
 ) -> Result<Id, String> {
     open_connection(manager.inner(), &url, on_message).await
@@ -261,11 +267,12 @@ async fn run_connection<S>(
     mut socket: tokio_tungstenite::WebSocketStream<S>,
     mut receiver: mpsc::Receiver<SendRequest>,
     cancel: CancellationToken,
-    on_message: Channel<serde_json::Value>,
+    on_message: Channel<InvokeResponseBody>,
     manager: WebSocketManager,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let mut batch = FrameBatch::default();
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -278,6 +285,7 @@ async fn run_connection<S>(
                 ).await;
                 break;
             }
+            _ = batch.due() => batch.flush(&on_message),
             request = receiver.recv() => {
                 let Some(request) = request else { break };
                 let result = tokio::time::timeout(WRITE_TIMEOUT, socket.send(request.message))
@@ -295,13 +303,35 @@ async fn run_connection<S>(
                     None => OutboundMessage::Close(None),
                 };
                 let terminal = matches!(message, OutboundMessage::Close(_) | OutboundMessage::Error(_));
-                if let Ok(value) = serde_json::to_value(message) {
-                    let _ = on_message.send(value);
+                // Classify the relay payload before it is wrapped, while its
+                // structure is still readable.
+                let urgent = match &message {
+                    OutboundMessage::Text(payload) => is_auth_challenge(payload),
+                    _ => false,
+                };
+                let Ok(frame) = serde_json::to_string(&message) else { continue };
+
+                // Flush before appending when the frame would carry the batch
+                // over the direct-eval ceiling, so the oversized frame starts a
+                // batch of its own rather than pushing its predecessors onto the
+                // fetch path. A frame that exceeds the bound alone is delivered
+                // alone, exactly as it is today.
+                if batch.projected_len(&frame) > BATCH_MAX_SERIALIZED_BYTES {
+                    batch.flush(&on_message);
+                }
+                batch.push(frame);
+                // Ordering is FIFO in all cases: buffered frames are flushed
+                // together with the frame that forced the flush, never after it.
+                if terminal || urgent {
+                    batch.flush(&on_message);
                 }
                 if terminal { break; }
             }
         }
     }
+    // A terminal frame already flushed; this covers cancellation and send
+    // failure, which must not strand frames the relay already delivered.
+    batch.flush(&on_message);
     manager.remove(id).await;
 }
 
@@ -338,15 +368,239 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_websocket_batch::BATCH_WINDOW;
     use futures_util::FutureExt;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use tauri::ipc::InvokeResponseBody;
     use tokio::io::duplex;
     use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
 
-    fn silent_channel() -> Channel<serde_json::Value> {
+    fn silent_channel() -> Channel<InvokeResponseBody> {
         Channel::new(|_: InvokeResponseBody| Ok(()))
+    }
+
+    /// Records each delivery as its raw JSON payload, so tests assert on what
+    /// the renderer actually receives rather than on internal batch state.
+    fn recording_channel() -> (
+        Channel<InvokeResponseBody>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        // A std mutex: `Channel::send` is synchronous and runs on whatever
+        // thread flushed, including inside the async runtime.
+        let deliveries = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = deliveries.clone();
+        let channel = Channel::new(move |body: InvokeResponseBody| {
+            let payload = match body {
+                InvokeResponseBody::Json(json) => json,
+                InvokeResponseBody::Raw(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            };
+            sink.lock().unwrap().push(payload);
+            Ok(())
+        });
+        (channel, deliveries)
+    }
+
+    /// Drives the real `run_connection` loop over a live in-memory socket, so
+    /// flush policy is exercised as the loop applies it. Asserting against
+    /// `FrameBatch` alone cannot see the loop's decisions and lets a broken
+    /// policy pass.
+    struct LoopHarness {
+        server: WebSocketStream<tokio::io::DuplexStream>,
+        deliveries: Arc<std::sync::Mutex<Vec<String>>>,
+        cancel: CancellationToken,
+        _sender: mpsc::Sender<SendRequest>,
+    }
+
+    impl LoopHarness {
+        async fn start() -> Self {
+            let manager = WebSocketManager::default();
+            let (client_io, server_io) = duplex(256 * 1024);
+            let (client, server) = tokio::join!(
+                WebSocketStream::from_raw_socket(client_io, Role::Client, None),
+                WebSocketStream::from_raw_socket(server_io, Role::Server, None),
+            );
+            let (channel, deliveries) = recording_channel();
+            // The sender is held by the harness: dropping it would end the
+            // loop before the test could drive it.
+            let (sender, receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
+            let cancel = CancellationToken::new();
+            // `tokio::spawn`, not `tauri::async_runtime::spawn`: the latter
+            // runs the task on Tauri's own runtime, where this test's paused
+            // clock does not apply and `advance` would silently do nothing.
+            tokio::spawn(run_connection(
+                1,
+                client,
+                receiver,
+                cancel.clone(),
+                channel,
+                manager,
+            ));
+            Self {
+                server,
+                deliveries,
+                cancel,
+                _sender: sender,
+            }
+        }
+
+        async fn relay_says(&mut self, payload: &str) {
+            self.server
+                .send(Message::Text(payload.into()))
+                .await
+                .unwrap();
+        }
+
+        /// Lets the connection task run without letting the batch timer
+        /// elapse, so what arrives here arrived because policy forced it out.
+        async fn settle(&self) {
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        fn deliveries(&self) -> Vec<String> {
+            self.deliveries.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_challenge_does_not_wait_for_the_batch_timer() {
+        let mut harness = LoopHarness::start().await;
+
+        // Control: an ordinary frame stays buffered, proving the window is
+        // genuinely holding frames back rather than the clock running out.
+        harness.relay_says(r#"["EOSE","sub"]"#).await;
+        harness.settle().await;
+        assert!(
+            harness.deliveries().is_empty(),
+            "EOSE must ride the batch window"
+        );
+
+        harness.relay_says(r#"["AUTH","challenge"]"#).await;
+        harness.settle().await;
+
+        let deliveries = harness.deliveries();
+        assert_eq!(deliveries.len(), 1, "AUTH must not wait for the timer");
+        let frames: Vec<serde_json::Value> = serde_json::from_str(&deliveries[0]).unwrap();
+        assert_eq!(frames.len(), 2, "the buffered EOSE rides out with AUTH");
+        assert_eq!(frames[0]["data"], r#"["EOSE","sub"]"#, "FIFO preserved");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batch_window_eventually_delivers_unforced_frames() {
+        let mut harness = LoopHarness::start().await;
+        harness.relay_says(r#"["EOSE","sub"]"#).await;
+        harness.settle().await;
+        assert!(harness.deliveries().is_empty());
+
+        // Same frame, once the window elapses: the control above is waiting on
+        // the timer, not stuck.
+        tokio::time::advance(BATCH_WINDOW * 2).await;
+        harness.settle().await;
+        assert_eq!(harness.deliveries().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_delivers_frames_the_relay_already_sent() {
+        let mut harness = LoopHarness::start().await;
+        harness.relay_says(r#"["EVENT","sub",{}]"#).await;
+        harness.settle().await;
+        assert!(harness.deliveries().is_empty(), "frame is buffered");
+
+        // Teardown must not strand a frame that never reached the renderer.
+        harness.cancel.cancel();
+        harness.settle().await;
+
+        let seen = harness.deliveries().join("");
+        assert!(
+            seen.contains("EVENT"),
+            "buffered frame lost on cancel: {seen}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversize_frame_does_not_drag_buffered_frames_over_the_threshold() {
+        let mut harness = LoopHarness::start().await;
+        harness.relay_says(r#"["EOSE","sub"]"#).await;
+        harness.settle().await;
+
+        let big = format!(
+            r#"["EVENT","sub","{}"]"#,
+            "x".repeat(BATCH_MAX_SERIALIZED_BYTES)
+        );
+        harness.relay_says(&big).await;
+        harness.settle().await;
+        // The small frame is forced out by the straddle; the oversize frame
+        // itself still rides the window.
+        assert_eq!(
+            harness.deliveries().len(),
+            1,
+            "straddle flushes immediately"
+        );
+        tokio::time::advance(BATCH_WINDOW * 2).await;
+        harness.settle().await;
+
+        // The small frame must ship on its own rather than riding a delivery
+        // that crosses tauri's direct-eval threshold.
+        let deliveries = harness.deliveries();
+        assert_eq!(
+            deliveries.len(),
+            2,
+            "straddling frames must not share a batch"
+        );
+        assert!(
+            deliveries[0].len() < 8192,
+            "first delivery {} crossed the direct-eval threshold",
+            deliveries[0].len()
+        );
+        let first: Vec<serde_json::Value> = serde_json::from_str(&deliveries[0]).unwrap();
+        assert_eq!(first[0]["data"], r#"["EOSE","sub"]"#);
+    }
+
+    #[tokio::test]
+    async fn eof_delivers_buffered_frames_before_the_close() {
+        let manager = WebSocketManager::default();
+        let (client_io, server_io) = duplex(4096);
+        let (client, mut server) = tokio::join!(
+            WebSocketStream::from_raw_socket(client_io, Role::Client, None),
+            WebSocketStream::from_raw_socket(server_io, Role::Server, None),
+        );
+        let (channel, deliveries) = recording_channel();
+        let (sender, receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
+        let handle = Arc::new(ConnectionHandle {
+            sender,
+            cancel: CancellationToken::new(),
+            task: Mutex::new(None),
+        });
+        manager.connections.lock().await.insert(1, handle.clone());
+        let task = tauri::async_runtime::spawn(run_connection(
+            1,
+            client,
+            receiver,
+            handle.cancel.clone(),
+            channel,
+            manager.clone(),
+        ));
+        *handle.task.lock().await = Some(task);
+
+        server.send(Message::Text("buffered".into())).await.unwrap();
+        drop(server);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while manager.connections.lock().await.contains_key(&1) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("EOF should clean up its native connection ID");
+
+        // A frame the relay already delivered must reach the renderer even
+        // though the socket closed inside the batch window.
+        let seen = deliveries.lock().unwrap().join("");
+        assert!(
+            seen.contains("buffered"),
+            "buffered frame was dropped: {seen}"
+        );
     }
 
     #[tokio::test]

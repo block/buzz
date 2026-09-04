@@ -2,7 +2,17 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test, type Page } from "@playwright/test";
 import { nsecEncode } from "nostr-tools/nip19";
 
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  installMockBridge,
+  openChannelBrowser,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
+import { expectEmojiMartStylesInstalled } from "../helpers/css";
+import {
+  invokeMockCommand,
+  publishWelcomeTeamPresence,
+  waitForWelcomeTeam,
+} from "../helpers/welcomeTeam";
 import { installFakeCamera } from "../helpers/fakeCamera";
 import {
   E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
@@ -207,6 +217,7 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     .locator("div")
     .boundingBox();
   const guidanceLayer = page.getByTestId("welcome-composer-guidance-layer");
+  const guidanceLayerBox = await guidanceLayer.boundingBox();
   const guidanceBackdrop = page.getByTestId(
     "welcome-composer-guidance-backdrop",
   );
@@ -217,6 +228,7 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     !personaMentionBox ||
     !composerBox ||
     !dockBackdropBox ||
+    !guidanceLayerBox ||
     !guidanceBackdropBox
   ) {
     throw new Error("Could not measure welcome composer banner layout");
@@ -226,23 +238,20 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     await composer.getByTestId("welcome-composer-guide-banner").count(),
   ).toBe(0);
   expect(bannerBox.y).toBeLessThan(composerBox.y);
-  expect(bannerBox.y + bannerBox.height).toBeGreaterThan(composerBox.y);
-  expect(Math.abs(dockBackdropBox.y - composerBox.y)).toBeLessThanOrEqual(1);
+  // Banner is in normal flow above the composer, no overlap.
+  expect(bannerBox.y + bannerBox.height).toBeLessThanOrEqual(composerBox.y);
+  // The dock backdrop is absolute inset-y-0 inside composer-dock, which now
+  // contains the guidance layer + composer in flow, so its top aligns with the
+  // guidance layer top (not the composer top).
+  expect(Math.abs(dockBackdropBox.y - guidanceLayerBox.y)).toBeLessThanOrEqual(
+    1,
+  );
   expect(guidanceBackdropBox.y).toBeLessThanOrEqual(bannerBox.y);
-  expect(
-    Math.abs(
-      guidanceBackdropBox.y + guidanceBackdropBox.height - composerBox.y,
-    ),
-  ).toBeLessThanOrEqual(1);
-  const [guidanceZIndex, backdropZIndex] = await Promise.all([
-    guidanceLayer.evaluate((element) =>
-      Number(window.getComputedStyle(element).zIndex),
-    ),
-    page
-      .getByTestId("composer-dock-backdrop")
-      .evaluate((element) => Number(window.getComputedStyle(element).zIndex)),
-  ]);
-  expect(guidanceZIndex).toBeLessThan(backdropZIndex);
+  // The guidance backdrop extends bottom-3 (12px) short of the banner's bottom,
+  // visually connecting up to the composer.
+  expect(guidanceBackdropBox.y + guidanceBackdropBox.height).toBeLessThan(
+    composerBox.y,
+  );
   expect(
     await page
       .getByTestId("channel-composer-overlay")
@@ -426,6 +435,9 @@ async function expectWelcomeView(page: Page) {
     "Create an agent",
   );
   await expect(page.getByTestId("message-composer")).toBeVisible();
+  // Measure the empty-channel intro before presence releases the live kickoff.
+  // Its message arrival can remount the timeline while bounding boxes are read.
+  await publishWelcomeTeamPresence(page);
   await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(
     "Mention",
@@ -500,49 +512,19 @@ async function getMockChannels(page: Page) {
       throw new Error("Mock invoke bridge is unavailable.");
     }
 
-    return (await invoke("get_channels")) as Array<{
-      id: string;
-      name: string;
-      channel_type: string;
-      visibility: "open" | "private";
-      member_count: number;
-      is_member: boolean;
-      ttl_seconds: number | null;
-    }>;
+    const payload = (await invoke("get_channels")) as {
+      channels: Array<{
+        id: string;
+        name: string;
+        channel_type: string;
+        visibility: "open" | "private";
+        member_count: number;
+        is_member: boolean;
+        ttl_seconds: number | null;
+      }> | null;
+    };
+    return payload.channels ?? [];
   });
-}
-
-async function invokeMockCommand<T>(
-  page: Page,
-  command: string,
-  payload?: Record<string, unknown>,
-) {
-  return page.evaluate(
-    async ({ command, payload }) => {
-      const bridgeWindow = window as Window & {
-        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
-          command: string,
-          payload?: Record<string, unknown>,
-        ) => Promise<unknown>;
-        __TAURI_INTERNALS__?: {
-          invoke?: (
-            command: string,
-            payload?: Record<string, unknown>,
-          ) => Promise<unknown>;
-        };
-      };
-      const invoke =
-        bridgeWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ ??
-        bridgeWindow.__TAURI_INTERNALS__?.invoke;
-
-      if (!invoke) {
-        throw new Error("Mock invoke bridge is unavailable.");
-      }
-
-      return (await invoke(command, payload)) as T;
-    },
-    { command, payload },
-  );
 }
 
 async function seedCurrentAvatar(page: Page, avatarUrl: string) {
@@ -801,6 +783,31 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+});
+
+test("key import locks host navigation and ignores rapid duplicate submits", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { identityImportDelayMs: 500 },
+    {
+      skipCommunitySeed: true,
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
+  const submit = page.getByTestId("nostr-import-submit");
+  await submit.dblclick({ delay: 0 });
+
+  await expect(submit).toBeDisabled();
+  await expect(page.getByTestId("onboarding-back")).toBeDisabled();
+  await expect.poll(() => commandCount(page, "import_identity")).toBe(1);
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
 test("imported-key users can skip out of harness setup", async ({ page }) => {
@@ -1595,6 +1602,26 @@ test("first-community shows the scenario cards for localhost", async ({
     }),
   ).toBeVisible();
 
+  await page.getByTestId("community-choice-join").click();
+  await expect(
+    page
+      .getByTestId("welcome-setup")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "forward");
+  await expect(
+    page
+      .getByTestId("welcome-setup")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-effect", "line-slide");
+  const joinBack = page.getByTestId("welcome-join-back");
+  await expect(joinBack).toBeVisible();
+  await joinBack.click();
+  await expect(
+    page
+      .getByTestId("welcome-setup")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "backward");
+
   await page.getByTestId("welcome-setup-back").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
   await expect(
@@ -1714,8 +1741,22 @@ test("community onboarding reuses an existing relay profile", async ({
     page.getByRole("heading", { name: "Meet your starter team" }),
   ).toBeVisible();
   await expect(
+    page
+      .getByTestId("community-onboarding-flow")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "forward");
+  await expect(
     page.getByRole("heading", { name: "Build your profile" }),
   ).toHaveCount(0);
+  await page.getByTestId("community-team-intro-back").click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByTestId("community-onboarding-flow")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "backward");
 });
 
 test("first-community direct join cancel returns to request access", async ({
@@ -1846,7 +1887,7 @@ test("canceling a join to an existing inactive community preserves it", async ({
     .toEqual(["active-community", "existing-community"]);
 });
 
-test("connected first-community profile step offers equal-width Next and Back controls", async ({
+test("connected first-community profile keeps Back bottom-left and balances the avatar editor", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -2014,7 +2055,7 @@ test("connected first-community profile step offers equal-width Next and Back co
   if (!dialogBox || !urlBox) {
     throw new Error("Could not measure avatar dialog layout");
   }
-  expect(dialogLayout.clientWidth).toBeLessThanOrEqual(560);
+  expect(dialogLayout.clientWidth).toBeLessThanOrEqual(920);
   const imageDialogHeight = dialogLayout.clientHeight;
   const dialogTransition = await avatarDialog.evaluate(
     (element) => window.getComputedStyle(element).transitionProperty,
@@ -2029,6 +2070,20 @@ test("connected first-community profile step offers equal-width Next and Back co
   expect(urlBox.y + urlBox.height).toBeLessThanOrEqual(
     dialogBox.y + dialogBox.height,
   );
+  const [livePreviewBox, editorBox] = await Promise.all([
+    page.getByTestId("community-avatar-live-preview").boundingBox(),
+    page.getByTestId("community-avatar-editor").boundingBox(),
+  ]);
+  if (!livePreviewBox || !editorBox) {
+    throw new Error("Could not measure avatar preview/editor spacing");
+  }
+  expect(
+    Math.abs(
+      livePreviewBox.x -
+        dialogBox.x -
+        (editorBox.x - (livePreviewBox.x + livePreviewBox.width)),
+    ),
+  ).toBeLessThanOrEqual(4);
   const saveButton = page.getByTestId("community-avatar-done");
   await page.getByTestId("community-avatar-input").setInputFiles({
     buffer: Buffer.from(
@@ -2038,14 +2093,14 @@ test("connected first-community profile step offers equal-width Next and Back co
     mimeType: "image/png",
     name: "community-avatar.png",
   });
-  const previewImage = page.getByTestId(
-    "community-avatar-upload-preview-image",
+  await expect(page.getByTestId("community-avatar-upload-preview")).toHaveCount(
+    0,
   );
-  await expect(previewImage).toHaveAttribute("src", /^blob:/);
   await expect(saveButton).toBeDisabled();
   await expect(saveButton).toHaveText("Save");
-  const localPreviewUrl = await previewImage.getAttribute("src");
-  await expect(previewImage).toHaveAttribute("src", localPreviewUrl ?? "");
+  await expect(
+    page.getByTestId("community-avatar-live-preview-image"),
+  ).toHaveAttribute("src", /^blob:/);
   await saveButton.click();
   await expect(avatarDialog).toHaveCount(0);
   const avatarCircleImage = page.getByTestId("community-avatar-circle-image");
@@ -2063,10 +2118,9 @@ test("connected first-community profile step offers equal-width Next and Back co
 
   await avatarButton.click();
   await expect(avatarDialog).toBeVisible();
-  await expect(previewImage).toHaveAttribute(
-    "src",
-    new RegExp(`^${uploadedAvatarUrl}`),
-  );
+  await expect(
+    page.getByTestId("community-avatar-live-preview-image"),
+  ).toHaveAttribute("src", new RegExp(`^${uploadedAvatarUrl}`));
   const modeContentShell = page.getByTestId(
     "community-avatar-mode-content-shell",
   );
@@ -2102,6 +2156,16 @@ test("connected first-community profile step offers equal-width Next and Back co
   });
   const defaultDialogHeight = imageDialogHeight;
   await page.getByRole("tab", { name: "Emoji" }).click();
+  const emojiPicker = page.locator("em-emoji-picker");
+  await expect(emojiPicker.locator("input[type='search']")).toBeVisible();
+  await expectEmojiMartStylesInstalled(emojiPicker);
+  await expect
+    .poll(() =>
+      emojiPicker.evaluate((element) =>
+        Boolean(element.shadowRoot?.querySelector(".skin-tone-button")),
+      ),
+    )
+    .toBe(true);
   await expect
     .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
     .toBe(defaultDialogHeight);
@@ -2110,21 +2174,65 @@ test("connected first-community profile step offers equal-width Next and Back co
   expect(emojiEditorLayout.saveBox.y).toBe(imageEditorLayout.saveBox.y);
   await page.getByRole("tab", { name: "Animated" }).click();
   await expect(saveButton).toHaveCount(0);
+  const iphoneCameraButton = page.getByTestId(
+    "community-avatar-animated-camera-iphone",
+  );
+  const computerCameraButton = page.getByTestId(
+    "community-avatar-animated-camera-computer",
+  );
+  await expect(iphoneCameraButton).toBeVisible();
+  await expect(computerCameraButton).toBeVisible();
+  await expect(iphoneCameraButton).toHaveAttribute("aria-pressed", "false");
+  await expect(computerCameraButton).toHaveAttribute("aria-pressed", "false");
+  await iphoneCameraButton.click();
   await expect(
     page.getByTestId("community-avatar-animated-error"),
   ).toContainText("Could not access the camera");
-  const retryCameraButton = page.getByTestId("community-avatar-animated-retry");
-  await expect(retryCameraButton).toHaveText("Try camera again");
-  await retryCameraButton.click();
+  await expect(iphoneCameraButton).toHaveAttribute("aria-pressed", "true");
+  await computerCameraButton.click();
+  await expect(computerCameraButton).toHaveAttribute("aria-pressed", "true");
   const captureButton = page.getByTestId("community-avatar-animated-record");
   await expect(captureButton).toHaveText("Capture 3 sec video");
+  const captureButtonStyles = await captureButton.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      backgroundColor: styles.backgroundColor,
+      borderRadius: Number.parseFloat(styles.borderRadius),
+      color: styles.color,
+      height: styles.height,
+    };
+  });
+  expect(captureButtonStyles).toMatchObject({
+    backgroundColor: "rgb(23, 23, 23)",
+    color: "rgb(240, 240, 205)",
+    height: "38px",
+  });
+  expect(captureButtonStyles.borderRadius).toBeGreaterThan(1_000);
   await captureButton.click();
   await expect(
     page.getByTestId("community-avatar-animated-sections"),
   ).toBeVisible({ timeout: 60_000 });
   await expect(saveButton).toBeVisible();
+  await saveButton.click();
+  await expect(avatarDialog).toHaveCount(0, { timeout: 30_000 });
+  await expect(
+    page.getByTestId("community-avatar-circle-image"),
+  ).toHaveAttribute("src", /^blob:/);
+  await avatarButton.click();
+  await expect(avatarDialog).toBeVisible();
   await page.getByRole("tab", { name: "Emoji" }).click();
   await selectFirstEmojiFromPicker(page);
+  const liveEmoji = page.getByTestId("community-avatar-live-preview-emoji");
+  await expect(liveEmoji).toHaveClass(/buzz-avatar-squish/);
+  await expect(
+    page.getByTestId("community-avatar-live-preview-panel"),
+  ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.getByTestId("community-avatar-live-preview")).not.toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await expect(liveEmoji).toHaveCSS("animation-name", "none");
   await expect
     .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
     .toBeGreaterThan(defaultDialogHeight);
@@ -2160,6 +2268,21 @@ test("connected first-community profile step offers equal-width Next and Back co
     .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
     .toBe(selectedEmojiDialogHeight);
   await page.getByRole("tab", { name: "Image" }).click();
+  await page.getByTestId("community-avatar-input").setInputFiles({
+    buffer: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+    mimeType: "image/png",
+    name: "emoji-replacement.png",
+  });
+  await expect(
+    page.getByTestId("community-avatar-live-preview-image"),
+  ).toHaveAttribute("src", /^blob:/);
+  await expect
+    .poll(() =>
+      page
+        .getByTestId("community-avatar-live-preview-image")
+        .getAttribute("src"),
+    )
+    .not.toMatch(/^blob:/);
   await expect
     .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
     .toBe(imageDialogHeight);
@@ -2184,8 +2307,12 @@ test("connected first-community profile step offers equal-width Next and Back co
   if (!nextBox || !backBox) {
     throw new Error("Could not measure community profile navigation controls");
   }
-  expect(Math.abs(nextBox.width - backBox.width)).toBeLessThanOrEqual(1);
-  expect(nextBox.width).toBeLessThanOrEqual(160);
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("Could not measure onboarding viewport");
+  expect(backBox.x).toBeLessThanOrEqual(32);
+  expect(
+    Math.abs(nextBox.x + nextBox.width / 2 - viewport.width / 2),
+  ).toBeLessThanOrEqual(1);
 
   await backButton.click();
   await expect(
@@ -3063,13 +3190,29 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
   await completeProfileOnboarding(page);
 
   await expectPrivateWelcomeLanding(page);
+  // Runtime start alone cannot satisfy the kickoff's relay-presence wait.
+  const team = await waitForWelcomeTeam(page);
+  const presence = await invokeMockCommand<Record<string, string>>(
+    page,
+    "get_presence",
+    { pubkeys: team.map((agent) => agent.pubkey) },
+  );
+  expect(team.map((agent) => presence[agent.pubkey])).toEqual([
+    "offline",
+    "offline",
+    "offline",
+  ]);
+  await expect(page.getByTestId("message-timeline")).not.toContainText(
+    "Hi Morty QA, I'm Fizz. Welcome to Buzz.",
+  );
+  await publishWelcomeTeamPresence(page);
   // Greeted by the name typed above — the @mention pill also files the opener
   // into the new user's Inbox mentions feed.
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi @Morty QA, I'm Fizz. Welcome to Buzz.",
+    "Hi Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Honey and Bumble, introduce yourselves",
+    "Honey and Pollen, introduce yourselves",
   );
 });
 
@@ -3089,8 +3232,9 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
 
   await expectPrivateWelcomeLanding(page);
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+  await publishWelcomeTeamPresence(page);
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi @Morty QA, I'm Fizz. Welcome to Buzz.",
+    "Hi Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await page.waitForTimeout(1_500);
   expect(await commandCount(page, "create_managed_agent")).toBe(3);
@@ -3168,6 +3312,63 @@ test("finishing onboarding creates starter channels and focuses welcome-everyone
   await expectStarterChannels(page);
   await expectWelcomeGuideIntro(page);
   await expectWelcomeComposerBannerCompletesAfterPersonaMention(page);
+});
+
+test("welcome-everywhere banner: X dismiss removes the guidance surface", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await completeProfileOnboarding(page);
+  await publishWelcomeTeamPresence(page);
+
+  const banner = page.getByTestId("welcome-composer-guide-banner");
+  const guidanceLayer = page.getByTestId("welcome-composer-guidance-layer");
+  const dismissButton = page.getByTestId("welcome-composer-dismiss-button");
+
+  // Banner and guidance layer are visible in the prompt state.
+  await expect(banner).toBeVisible();
+  await expect(guidanceLayer).toBeVisible();
+  await expect(dismissButton).toBeVisible();
+
+  await dismissButton.click();
+
+  // After dismiss the entire guidance surface must be gone.
+  await expect(banner).toHaveCount(0, { timeout: 2_000 });
+  await expect(guidanceLayer).toHaveCount(0);
+});
+
+test("welcome-everywhere banner: dismiss persists after channel re-entry", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await completeProfileOnboarding(page);
+  await publishWelcomeTeamPresence(page);
+
+  const banner = page.getByTestId("welcome-composer-guide-banner");
+
+  await expect(banner).toBeVisible();
+  await page.getByTestId("welcome-composer-dismiss-button").click();
+  await expect(banner).toHaveCount(0, { timeout: 2_000 });
+
+  // Leave the Welcome channel.
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toContainText("general");
+  await expect(banner).toHaveCount(0);
+
+  // Return — banner must stay hidden.
+  await page.getByTestId("channel-welcome-everyone").click();
+  await expect(page.getByTestId("chat-title")).toContainText(
+    "welcome-everyone",
+  );
+  await expect(banner).toHaveCount(0);
 });
 
 test("initial profile read failures still hold incomplete users in onboarding", async ({
@@ -3423,6 +3624,192 @@ test("membership denial can import a different invited key", async ({
     .toBe(TEST_IDENTITIES.alice.pubkey);
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
+});
+
+// Guards the signer-aware community boundary: replacing identity A with
+// identity B on the SAME relay (in-app key import) must rebuild the community
+// query client and re-bucket the draft store, so B never renders A's cached
+// data, never enumerates A's drafts, and never persists drafts into A's
+// bucket. Mutation-proof: removing the signer (pubkey/epoch) from
+// `communityKey` in App.tsx retains A's query client and draft bucket and
+// fails every leg below.
+test("same-relay identity replacement rebuilds the community boundary (A→B→A cache and draft isolation)", async ({
+  page,
+}) => {
+  // Two full boots (denied-A → imported-B, then relaunch-as-A) plus draft
+  // flush polling exceed the default budget.
+  test.slow();
+  const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+  const DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v2";
+  // Mirrors the bridge's DEFAULT_RELAY_WS_URL and useDrafts'
+  // canonicalizeRelayScope (scheme://host, no trailing slash).
+  const relayScope = (process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3000")
+    .replace(/^http/, "ws")
+    .replace(/\/+$/, "");
+  const tylerDraftStoreKey = `${DRAFT_STORE_KEY_PREFIX}:${relayScope}:${TEST_IDENTITIES.tyler.pubkey}`;
+  const aliceDraftStoreKey = `${DRAFT_STORE_KEY_PREFIX}:${relayScope}:${TEST_IDENTITIES.alice.pubkey}`;
+
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      relayRequiresMembership: true,
+      relayRole: null,
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  // Seed a draft in tyler's identity-scoped bucket after boot, as if typed in
+  // an earlier session. Written directly to localStorage (not through the
+  // live store) so it exercises the persisted bucket, not the memory cache.
+  await page.evaluate(
+    ([draftStoreKey, channelId]) => {
+      const now = new Date().toISOString();
+      window.localStorage.setItem(
+        draftStoreKey,
+        JSON.stringify({
+          [channelId]: {
+            content: "tyler private draft",
+            selectionStart: 0,
+            selectionEnd: 0,
+            channelId,
+            createdAt: now,
+            updatedAt: now,
+            pendingImeta: [],
+            spoileredAttachmentUrls: [],
+            status: "active",
+          },
+        }),
+      );
+    },
+    [tylerDraftStoreKey, GENERAL_CHANNEL_ID] as const,
+  );
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("membership-denied")).toBeVisible();
+
+  // Seed identity-unkeyed data into tyler's live community query client and
+  // capture the client instance so its replacement is provable.
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E_QUERY_CLIENT__?: {
+        setQueryData: (key: unknown[], data: unknown) => void;
+      };
+      __BUZZ_E2E_PREVIOUS_QUERY_CLIENT__?: unknown;
+    };
+    const client = testWindow.__BUZZ_E2E_QUERY_CLIENT__;
+    if (!client) {
+      throw new Error("community query client seam is not installed");
+    }
+    // A key no production query uses: real keys (projects/channels) would be
+    // refetched by B's session and mask whether the CACHE was dropped.
+    client.setQueryData(
+      ["e2e-identity-boundary-probe"],
+      [{ id: "tyler-cached-project" }],
+    );
+    testWindow.__BUZZ_E2E_PREVIOUS_QUERY_CLIENT__ = client;
+  });
+
+  // Import alice (B) through the in-app denied-membership key swap.
+  await page.getByTestId("membership-denied-change-key").click();
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("membership-denied-nsec-input").fill(importedNsec);
+  await expect(
+    page.getByTestId("membership-denied-npub-preview"),
+  ).toBeVisible();
+  await page.getByTestId("membership-denied-import-key").click();
+
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expectHomeView(page);
+
+  // Leg 1 — the community boundary was rebuilt for B: a fresh query client
+  // replaced tyler's, and the seeded cache entry did not survive into
+  // alice's session.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const testWindow = window as Window & {
+          __BUZZ_E2E_QUERY_CLIENT__?: {
+            getQueryData: (key: unknown[]) => unknown;
+          };
+          __BUZZ_E2E_PREVIOUS_QUERY_CLIENT__?: unknown;
+        };
+        const client = testWindow.__BUZZ_E2E_QUERY_CLIENT__;
+        if (!client) return "client-missing";
+        if (client === testWindow.__BUZZ_E2E_PREVIOUS_QUERY_CLIENT__) {
+          return "client-retained";
+        }
+        return client.getQueryData(["e2e-identity-boundary-probe"]) ===
+          undefined
+          ? "rebuilt"
+          : "cache-retained";
+      }),
+    )
+    .toBe("rebuilt");
+
+  // Leg 2 — alice opens the channel tyler's seeded draft targets: the
+  // composer must not restore another identity's draft.
+  await page.getByTestId("channel-general").click();
+  const composerInput = page.getByTestId("message-input");
+  await expect(composerInput).toBeVisible();
+  await expect(composerInput).not.toContainText("tyler private draft");
+
+  // A draft typed by alice persists in alice's bucket, never tyler's. Draft
+  // persistence flushes on composer teardown, so switch channels after typing.
+  await composerInput.fill("alice draft after import");
+  await page.getByTestId("channel-random").click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ([aliceKey, tylerKey]) => {
+          const aliceStore = window.localStorage.getItem(aliceKey) ?? "";
+          const tylerStore = window.localStorage.getItem(tylerKey) ?? "";
+          return {
+            aliceHasDraft: aliceStore.includes("alice draft after import"),
+            tylerBucketLeaked: tylerStore.includes("alice draft after import"),
+            tylerDraftIntact: tylerStore.includes("tyler private draft"),
+          };
+        },
+        [aliceDraftStoreKey, tylerDraftStoreKey] as const,
+      ),
+    )
+    .toEqual({
+      aliceHasDraft: true,
+      tylerBucketLeaked: false,
+      tylerDraftIntact: true,
+    });
+
+  // Leg 3 — alice's own draft restores from alice's bucket, and her first
+  // send succeeds. The mock's send handler asserts the frontend-captured
+  // signer against the active identity, so a send that still carried tyler's
+  // cached identity would be rejected and never render.
+  await page.getByTestId("channel-general").click();
+  await expect(composerInput).toContainText("alice draft after import");
+  await composerInput.fill("hello from alice");
+  await composerInput.press("Enter");
+  await expect(page.getByText("hello from alice").first()).toBeVisible();
+  await expect(composerInput).not.toContainText("hello from alice");
+
+  // Leg 4 — A restoration: relaunch as tyler (fully onboarded this time,
+  // open relay) on the same relay. Tyler's bucket must restore tyler's
+  // draft untouched by alice's session, and alice's draft must stay in
+  // alice's bucket. Tyler is not a member of the mock starter channels, so
+  // reach general through the channel browser.
+  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
+  await installMockBridge(page);
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+  await page
+    .getByTestId("browse-channel-general")
+    .getByRole("button", { name: "Join" })
+    .click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(composerInput).toContainText("tyler private draft");
+  await expect(composerInput).not.toContainText("alice draft after import");
 });
 
 test("onboarding relay reconnect — click shows Connected then auto-dismisses", async ({

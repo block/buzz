@@ -6,16 +6,20 @@ use tokio::task::JoinSet;
 use tracing::Instrument as _;
 
 use crate::builtin;
-use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
+use crate::config::{
+    pricing_authority, Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES,
+};
 use crate::handoff::{ContextRecovery, HandoffOutcome};
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
+use crate::permission::PermissionDecision;
 
 use crate::types::{
-    AgentError, ContentBlock, HistoryItem, ProviderStop, SessionUsageBaseline, StopReason,
-    ToolCall, ToolResult, ToolResultContent, TurnTotalState,
+    AgentError, CacheTotalState, ContentBlock, HistoryItem, PricingIdentity, ProviderStop,
+    SessionUsageBaseline, StopReason, ToolCall, ToolResult, ToolResultContent, TurnIOState,
+    TurnTotalState,
 };
 use crate::wire::{self, WireSender};
 
@@ -28,12 +32,7 @@ const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support
 /// its output-token limit. This is a user message rather than a synthetic tool
 /// result because truncation can happen without a tool call (and an unpaired
 /// tool result is invalid on every provider wire format).
-const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response exceeded the model's output token limit and was truncated. Any incomplete tool call was not run. Continue the task, breaking the work or tool call into smaller steps and keeping the response concise.";
-
-/// A provider can repeatedly spend its entire output allowance without making
-/// progress, while `max_rounds` is unbounded by default. Keep the in-turn rescue
-/// finite so a persistently truncating model eventually surfaces `max_tokens`.
-const MAX_TOKENS_RECOVERIES_PER_RUN: u32 = 2;
+const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response reached the model's output token limit and was truncated. Any incomplete tool calls were discarded and were not run. Stop prolonged internal reasoning now. Use the available tools immediately: write a script or artifact to a file and run it in small, verifiable steps instead of emitting the entire solution inline. Continue the task concisely from the preserved text.";
 
 /// Remove image blocks that the provider has explicitly rejected while keeping
 /// their surrounding tool result (and therefore the tool-call/result pairing)
@@ -68,6 +67,12 @@ fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
 /// speech. The shared `stop_max_rejections` budget can cut this lower — see
 /// [`Config::require_reply`](crate::config::Config::require_reply).
 const MAX_REPLY_NAGS: u32 = 2;
+
+/// Output-token upper bound (inclusive) for the silent-death signature: the
+/// observed failure emits 2–12 tokens.  Turns with `output_tokens <= 12`
+/// and no prior tool call are flagged.  Legitimate one-sentence replies land
+/// well above this value even in the most terse case.
+const SILENT_TURN_TOKEN_THRESHOLD: u64 = 12;
 
 /// Server label on the synthetic reply-guard objection.
 ///
@@ -144,6 +149,14 @@ pub struct RunCtx<'a> {
     pub system_prompt: &'a str,
     pub llm: &'a Llm,
     pub mcp: &'a Arc<McpRegistry>,
+    /// Process-wide permission broker (owned by `App`). Every LLM-issued MCP
+    /// tool call asks the client to authorize it through this broker before
+    /// executing. Shared across all sessions so the global admission cap bounds
+    /// simultaneously-outstanding asks process-wide.
+    pub permissions: &'a Arc<crate::permission::PermissionBroker>,
+    /// ACP protocol version negotiated at `initialize`, fixed for the
+    /// connection. Selects the `session/request_permission` wire shape.
+    pub protocol_version: u32,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
     pub skills: &'a [SkillEntry],
     pub wire: &'a WireSender,
@@ -175,16 +188,38 @@ pub struct RunCtx<'a> {
     /// preserved in lockstep with `last_request_input_tokens`.
     pub last_request_history_bytes: &'a mut Option<usize>,
     /// Accumulated input tokens across all LLM rounds in this turn, for
-    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
-    pub turn_input_tokens: &'a mut Option<u64>,
+    /// NIP-AM metric publishing. Reset to `Unseen` at turn start in `run()`.
+    pub turn_input_tokens: &'a mut TurnIOState,
     /// Accumulated output tokens across all LLM rounds in this turn, for
-    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
-    pub turn_output_tokens: &'a mut Option<u64>,
+    /// NIP-AM metric publishing. Reset to `Unseen` at turn start in `run()`.
+    pub turn_output_tokens: &'a mut TurnIOState,
     /// The cache-served subset of `turn_input_tokens`, accumulated across all
-    /// LLM rounds in this turn. Reset to `None` at turn start in `run()`.
+    /// LLM rounds in this turn. Reset to `Unseen` at turn start in `run()`.
     /// Consumers price this slice at the provider's cached rate; without it
     /// every round of a growing conversation is billed at full price.
-    pub turn_cached_input_tokens: &'a mut Option<u64>,
+    ///
+    /// `CacheTotalState` enforces the D1 rule: any usage-bearing round that
+    /// omits this category poisons the accumulator permanently for the turn.
+    pub turn_cached_input_tokens: &'a mut CacheTotalState,
+    /// The cache-written subset of `turn_input_tokens`, accumulated across all
+    /// LLM rounds in this turn. Reset to `Unseen` at turn start in `run()`.
+    /// Consumers need this to price cache-creation at the provider's write rate
+    /// (distinct from both the standard input rate and the cached-read rate).
+    ///
+    /// Same D1 tri-state contract as `turn_cached_input_tokens`.
+    pub turn_cache_write_tokens: &'a mut CacheTotalState,
+    /// Per-turn billing identity accumulator.
+    ///
+    /// - `None`: no usage-bearing response observed yet this turn (initial state).
+    /// - `Some(Some(pi))`: all usage-bearing responses so far carry the same
+    ///   proven identity `pi`. If a subsequent response carries a different or
+    ///   unproven identity, this transitions to `Some(None)` (poisoned).
+    /// - `Some(None)`: poisoned — mixed identities, unproven response, mesh
+    ///   retry across models, or no identity derived. Never heals within the turn.
+    ///
+    /// Reset to `None` at turn start in `run()`. The wire payload emits the
+    /// proven identity when `Some(Some(pi))`, omits it otherwise.
+    pub turn_pricing_identity: &'a mut Option<Option<PricingIdentity>>,
     /// Tri-state total-token accumulator for this turn.
     ///
     /// - `Unseen`: no usage-bearing response observed yet this turn (initial state).
@@ -202,6 +237,41 @@ pub struct RunCtx<'a> {
     pub usage_baseline: SessionUsageBaseline,
 }
 
+/// Fold one round's proven identity into the per-turn identity accumulator.
+///
+/// Accumulator tri-state (NIP-AM §pricingIdentity):
+/// - `None`: no usage-bearing round observed yet this turn.
+/// - `Some(Some(pi))`: every usage-bearing round so far carries the same
+///   proven identity `pi`.
+/// - `Some(None)`: poisoned — mixed identities or unproven round seen.
+///   Never heals within the turn.
+///
+/// `round`: `Some(pi)` when this round's `(base_url, request_model)` resolve
+/// to a proven identity; `None` when the endpoint is unallowlisted or the
+/// model is unknown.
+#[inline]
+fn fold_pricing_identity(
+    acc: Option<Option<PricingIdentity>>,
+    round: Option<PricingIdentity>,
+) -> Option<Option<PricingIdentity>> {
+    match acc {
+        // First usage-bearing round: record whatever was derived.
+        None => Some(round),
+        // Already consistent: keep only if this round matches exactly.
+        Some(Some(ref existing)) => {
+            if Some(existing) == round.as_ref() {
+                Some(round)
+            } else {
+                // Mismatch (different model, different authority,
+                // or this round had no proven identity) → poison.
+                Some(None)
+            }
+        }
+        // Already poisoned: stays poisoned forever this turn.
+        poisoned @ Some(None) => poisoned,
+    }
+}
+
 impl RunCtx<'_> {
     /// Send a session-cumulative `usage_update` reflecting everything observed
     /// up to and including the most recent LLM response.
@@ -213,15 +283,30 @@ impl RunCtx<'_> {
     /// everything but its final in-flight request.
     async fn emit_usage_update(&self) {
         let base = self.usage_baseline;
+        // Combine session baseline CacheTotalState with the per-turn delta:
+        // merge_session produces Exact when both sides are Exact, Unknown when
+        // either is Unknown, and leaves Unseen when both sides are Unseen.
+        let cached_total = base
+            .cached_input_tokens
+            .merge_session(*self.turn_cached_input_tokens);
+        let write_total = base
+            .cache_write_tokens
+            .merge_session(*self.turn_cache_write_tokens);
         let payload = wire::usage_update_payload(
             base.input_tokens
-                .saturating_add(self.turn_input_tokens.unwrap_or(0)),
+                .merge_session(*self.turn_input_tokens)
+                .exact_value(),
             base.output_tokens
-                .saturating_add(self.turn_output_tokens.unwrap_or(0)),
-            base.cached_input_tokens
-                .saturating_add(self.turn_cached_input_tokens.unwrap_or(0)),
+                .merge_session(*self.turn_output_tokens)
+                .exact_value(),
+            cached_total.exact_value(),
+            write_total.exact_value(),
             base.total_state.merge_session(*self.turn_total_state),
             self.effective_model,
+            // Extract the proven identity if this turn is consistent so far.
+            self.turn_pricing_identity
+                .as_ref()
+                .and_then(|inner| inner.as_ref()),
         );
         wire::send(
             self.wire,
@@ -243,9 +328,11 @@ impl RunCtx<'_> {
         self.history.push(HistoryItem::User(user_text));
 
         // Reset per-turn token accumulators for this prompt.
-        *self.turn_input_tokens = None;
-        *self.turn_output_tokens = None;
-        *self.turn_cached_input_tokens = None;
+        *self.turn_input_tokens = TurnIOState::Unseen;
+        *self.turn_output_tokens = TurnIOState::Unseen;
+        *self.turn_cached_input_tokens = CacheTotalState::Unseen;
+        *self.turn_cache_write_tokens = CacheTotalState::Unseen;
+        *self.turn_pricing_identity = None;
         *self.turn_total_state = TurnTotalState::Unseen;
         // Per-turn handoff-attempt counter. Scoped here (not persisted in the
         // session) so `BUZZ_AGENT_MAX_HANDOFFS` bounds compactions per
@@ -267,6 +354,11 @@ impl RunCtx<'_> {
         //
         // Named for what it proves: a *recognized attempt* to publish, not a
         // successful publish. See `is_buzz_reply_call`.
+        // Tracks whether a publish-shaped tool call was seen this turn, updated
+        // unconditionally (not gated on `require_reply`) so the silent-turn
+        // diagnostic has a turn-level view regardless of config.  A turn that
+        // ran read-only tools and then died at 3 tokens IS a silent death;
+        // only a genuine publish should suppress the WARN.
         let mut buzz_reply_call_seen = false;
         let mut reply_nags = 0u32;
         // Per-`run()` reactive context-recovery budget. Per-turn, not
@@ -423,7 +515,17 @@ impl RunCtx<'_> {
             // a response omits usage (`None`) rather than clobbering — a
             // one-off missing field shouldn't blind the gate or zero the
             // growth baseline.
-            if let Some(tokens) = response.input_tokens {
+            if response.input_tokens_overflowed {
+                // The Anthropic-style inclusive sum (input_tokens +
+                // cache_read_input_tokens + cache_creation_input_tokens)
+                // overflowed u64::MAX during parsing. Permanently poison the
+                // turn accumulator so wire emission omits this value and ACP
+                // marks the delta unreliable. Do NOT update
+                // last_request_input_tokens — freeze the context-gate
+                // baseline at its prior reading rather than poisoning it with
+                // a clamped value, exactly as the absent-usage path does.
+                *self.turn_input_tokens = TurnIOState::Poisoned;
+            } else if let Some(tokens) = response.input_tokens {
                 *self.last_request_input_tokens = Some(tokens);
                 *self.last_request_history_bytes = Some(
                     self.history
@@ -432,29 +534,30 @@ impl RunCtx<'_> {
                         .sum(),
                 );
                 // Accumulate per-turn input tokens for NIP-AM metric publishing.
-                *self.turn_input_tokens =
-                    Some(self.turn_input_tokens.unwrap_or(0).saturating_add(tokens));
+                // fold_round uses checked_add; overflow permanently poisons the
+                // turn accumulator (and, via merge_session, the session cumulative).
+                *self.turn_input_tokens = self.turn_input_tokens.fold_round(tokens);
             }
             // Accumulate per-turn output tokens for NIP-AM metric publishing.
             if let Some(out) = response.output_tokens {
-                *self.turn_output_tokens =
-                    Some(self.turn_output_tokens.unwrap_or(0).saturating_add(out));
+                *self.turn_output_tokens = self.turn_output_tokens.fold_round(out);
             }
-            // Accumulate the cache-served subset of this turn's input. Tracked
-            // separately from `turn_input_tokens` rather than subtracted from
-            // it: the input total must stay inclusive for the handoff gate,
-            // which cares how much context was sent, not what it cost.
-            if let Some(cached) = response.cached_input_tokens {
-                *self.turn_cached_input_tokens = Some(
-                    self.turn_cached_input_tokens
-                        .unwrap_or(0)
-                        .saturating_add(cached),
-                );
-            }
-            // Fold the provider-reported total into the turn tri-state, but only
-            // when this response was usage-bearing (had input or output tokens).
-            // A response with no usage at all is not evidence of a missing total
-            // and must not poison the accumulator.
+            // Fold the provider-reported total, cache subsets, and billing
+            // identity — only when this response was usage-bearing (had input
+            // or output tokens).  A response with no usage at all is not
+            // evidence of a missing cache field or total and must not poison
+            // either accumulator.
+            //
+            // `input_tokens_overflowed` counts as usage-bearing: the provider
+            // reported an input total (which overflowed) so cache fields and
+            // the total are meaningful and must be folded.
+            //
+            // D1: absent cache field on a usage-bearing round permanently
+            // poisons the turn accumulator.  Some(0) stays Exact(0) (explicit
+            // zero is distinct from absent).  Cache-read and cache-write are
+            // tracked separately from `turn_input_tokens` rather than
+            // subtracted from it: the input total must stay inclusive for the
+            // handoff gate, which cares how much context was sent, not cost.
             //
             // Shape assumption: documented OpenAI-compatible responses that carry
             // `total_tokens` always co-report at least one of `prompt_tokens` /
@@ -462,8 +565,45 @@ impl RunCtx<'_> {
             // with neither category is therefore not a supported shape and would
             // be silently ignored here. If that shape is ever encountered, extend
             // this gate rather than representing absent categories as zero.
-            if response.input_tokens.is_some() || response.output_tokens.is_some() {
+            if response.input_tokens.is_some()
+                || response.input_tokens_overflowed
+                || response.output_tokens.is_some()
+            {
                 *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
+                // Cache-read: the cache-served subset of input tokens.
+                *self.turn_cached_input_tokens = self
+                    .turn_cached_input_tokens
+                    .fold(response.cached_input_tokens);
+                // Cache-write: the cache-creation subset of input tokens.
+                *self.turn_cache_write_tokens = self
+                    .turn_cache_write_tokens
+                    .fold(response.cache_write_tokens);
+
+                // Derive billing identity for this round and fold it into the
+                // per-turn accumulator.  Rules (NIP-AM §pricingIdentity):
+                //
+                // 1. Attempt to derive identity from (base_url, request_model).
+                //    - base_url must canonically match an official allowlisted host.
+                //    - request_model must be Some (mesh-auto with unknown model
+                //      cannot prove identity).
+                // 2. Fold the round identity into the turn accumulator:
+                //    - Unseen (None): record this round's identity (or poison if None).
+                //    - Consistent: if it matches, keep; otherwise poison.
+                //    - Poisoned: stays poisoned forever this turn.
+                {
+                    let round_identity: Option<PricingIdentity> =
+                        response.request_model.as_deref().and_then(|model| {
+                            pricing_authority(&self.cfg.base_url).map(|auth| PricingIdentity {
+                                authority: auth.to_string(),
+                                model: model.to_string(),
+                                cache_class: None, // no cache-class derivation yet
+                            })
+                        });
+
+                    *self.turn_pricing_identity =
+                        fold_pricing_identity(self.turn_pricing_identity.take(), round_identity);
+                }
+
                 // Report what the turn has burned SO FAR, before running the
                 // next round. A turn is many provider round-trips over many
                 // minutes, and until this point the only report was the one
@@ -542,9 +682,10 @@ impl RunCtx<'_> {
                     tool_calls: Vec::new(),
                     reasoning_details: response.reasoning_details,
                 });
-                if max_tokens_recoveries >= MAX_TOKENS_RECOVERIES_PER_RUN {
+                if max_tokens_recoveries >= self.cfg.max_token_recoveries {
                     tracing::warn!(
                         recoveries = max_tokens_recoveries,
+                        max_recoveries = self.cfg.max_token_recoveries,
                         "provider repeatedly hit output token limit; recovery budget exhausted"
                     );
                     return Ok(StopReason::MaxTokens);
@@ -552,8 +693,7 @@ impl RunCtx<'_> {
                 max_tokens_recoveries = max_tokens_recoveries.saturating_add(1);
                 tracing::warn!(
                     recovery = max_tokens_recoveries,
-                    max_recoveries = MAX_TOKENS_RECOVERIES_PER_RUN,
-                    discarded_tool_calls = response.tool_calls.len(),
+                    max_recoveries = self.cfg.max_token_recoveries,
                     "provider hit output token limit; asking model to continue in smaller steps"
                 );
                 self.history
@@ -567,12 +707,33 @@ impl RunCtx<'_> {
                         "provider: stop=tool_use but zero tool_calls".into(),
                     ));
                 }
+                // Capture before response.text is moved into history.
+                let text_is_empty = response.text.trim().is_empty();
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),
                     reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
+                // Diagnostic: warn when no publish was seen across the whole
+                // turn, the final response has no visible text, and the
+                // token count looks silent.  Two independent gates:
+                //   1. `!buzz_reply_call_seen` — no publish attempt in any
+                //      round (read-only tool calls do NOT suppress: a turn
+                //      that ran tools but never published then died at 3
+                //      tokens is still a silent death).
+                //   2. `text_is_empty` — model emitted no visible text
+                //      (a terse reply like "OK" is not silent).
+                //   3. token count or usage-absent check.
+                // Fires before the `_Stop` hook so the warning appears in
+                // the log even if the hook rejects the stop and the loop
+                // continues.  Does not alter control flow.
+                warn_if_silent_turn(
+                    buzz_reply_call_seen,
+                    text_is_empty,
+                    response.output_tokens,
+                    response.stop,
+                );
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
                 if stop == StopReason::EndTurn {
                     if stop_rejections >= self.cfg.stop_max_rejections {
@@ -617,7 +778,10 @@ impl RunCtx<'_> {
             }
             // Deliberately after truncation: a publish-shaped call that was
             // discarded never runs, so it must not suppress the reminder.
-            if self.cfg.require_reply && !buzz_reply_call_seen {
+            // Updated unconditionally (not gated on `require_reply`) so the
+            // silent-turn diagnostic has a publish-aware turn-level signal
+            // regardless of config.
+            if !buzz_reply_call_seen {
                 buzz_reply_call_seen = calls.iter().any(|c| is_buzz_reply_call(c, self.mcp));
             }
             self.history.push(HistoryItem::Assistant {
@@ -762,8 +926,10 @@ impl RunCtx<'_> {
                 total: MAX_TOOL_RESULT_BYTES,
                 text: self.cfg.max_tool_result_text_bytes,
             };
-            let cancel = self.cancel.clone();
+            let mut cancel = self.cancel.clone();
             let sem = Arc::clone(&sem);
+            let permissions = Arc::clone(self.permissions);
+            let protocol_version = self.protocol_version;
             set.spawn(async move {
                 // Acquire a permit; if the semaphore is closed (cancel),
                 // emit a terminal wire update and skip the call.
@@ -774,6 +940,37 @@ impl RunCtx<'_> {
                         return (i, InvokeOutcome::Failed("cancelled".into()));
                     }
                 };
+                // Argument-shape validation BEFORE the ask: a malformed
+                // non-object argument can never execute, so reject it locally
+                // without prompting the user to approve a doomed call.
+                if let Err(e) = crate::mcp::validate_arg_shape(&call.name, &call.arguments) {
+                    let msg = e.to_string();
+                    emit_failed(&wire, &session_id, &call, &msg).await;
+                    return (i, InvokeOutcome::Failed(msg));
+                }
+                // Ask the client to authorize this call. The broker owns the
+                // full correlation lifecycle and races cancellation internally;
+                // every non-authorizing outcome fails closed.
+                match permissions
+                    .request_permission(&wire, protocol_version, &session_id, &call, &mut cancel)
+                    .await
+                {
+                    PermissionDecision::Allowed => {}
+                    PermissionDecision::Denied(msg) => {
+                        emit_failed(&wire, &session_id, &call, msg).await;
+                        return (i, InvokeOutcome::Failed(msg.into()));
+                    }
+                    PermissionDecision::Cancelled => {
+                        emit_failed(&wire, &session_id, &call, "cancelled").await;
+                        return (i, InvokeOutcome::Failed("cancelled".into()));
+                    }
+                }
+                // Cancellation recheck: a cancel may have landed while we
+                // waited for approval. Do not start the call in that case.
+                if *cancel.borrow() {
+                    emit_failed(&wire, &session_id, &call, "cancelled").await;
+                    return (i, InvokeOutcome::Failed("cancelled".into()));
+                }
                 emit_in_progress(&wire, &session_id, &call).await;
                 let outcome = invoke_tool_inner(&mcp, &call, timeout, budget, cancel).await;
                 match &outcome {
@@ -1124,10 +1321,69 @@ fn map_stop(p: ProviderStop) -> StopReason {
     }
 }
 
+/// Returns `true` when a reported output-token count is at or below the
+/// silent-death threshold.  The observed failure signature is 2–12 tokens.
+///
+/// Takes a bare `u64` — the caller handles `None` usage separately (a
+/// provider that omits token counts is a distinct diagnostic case, not
+/// automatically "near-zero").
+///
+/// Extracted as a pure function so it can be tested without standing up an
+/// async agent loop.
+fn is_silent_turn(output_tokens: u64) -> bool {
+    output_tokens <= SILENT_TURN_TOKEN_THRESHOLD
+}
+
+/// Emits the silent-turn diagnostic WARN when the turn produced no publish,
+/// no visible text, and either near-zero or absent output tokens.
+///
+/// `buzz_reply_call_seen` is the publish-aware gate (from
+/// `is_buzz_reply_call`), updated unconditionally regardless of
+/// `require_reply`.  Read-only tool calls do NOT suppress the WARN — a turn
+/// that ran tools but never published and then died at 3 tokens is a silent
+/// death.
+///
+/// Two distinct WARN shapes:
+/// - Near-zero token count (`output_tokens <= 12`): canonical silent-death.
+/// - Unknown usage (`None`) with no publish and no text: separately
+///   diagnostic; does not assert near-zero since the count is unknown.
+///
+/// Extracted as a free function so the WARN seam can be exercised by a
+/// scoped tracing subscriber without standing up the full async run loop.
+fn warn_if_silent_turn(
+    buzz_reply_call_seen: bool,
+    text_is_empty: bool,
+    output_tokens: Option<u64>,
+    stop: ProviderStop,
+) {
+    if buzz_reply_call_seen || !text_is_empty {
+        return;
+    }
+    match output_tokens {
+        Some(t) if is_silent_turn(t) => {
+            tracing::warn!(
+                stop = ?stop,
+                output_tokens = t,
+                "agent: turn ended with no publish attempt and near-zero output tokens — possible silent model/gateway early-stop"
+            );
+        }
+        None => {
+            tracing::warn!(
+                stop = ?stop,
+                "agent: turn ended with no publish attempt and no usage reported — cannot confirm output size"
+            );
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
 
     /// `truncate_history` cannot serve as the context-window fallback: it is
     /// measured in BYTES (`max_history_bytes`, default 16 MiB, a request-body
@@ -1377,5 +1633,242 @@ mod tests {
             original_len,
             "under budget must not evict anything"
         );
+    }
+
+    // ── fold_pricing_identity: turn discipline ────────────────────────────────
+
+    fn pi(authority: &str, model: &str) -> PricingIdentity {
+        PricingIdentity {
+            authority: authority.to_string(),
+            model: model.to_string(),
+            cache_class: None,
+        }
+    }
+
+    /// Case 1: two usage-bearing rounds with different proven identities in one
+    /// turn must poison the accumulator.  The wire payload omits `pricingIdentity`
+    /// when `Some(None)`.
+    #[test]
+    fn fold_pricing_identity_mismatch_poisons() {
+        let round_a = Some(pi("api.anthropic.com", "claude-opus-4-5"));
+        let round_b = Some(pi("api.openai.com", "gpt-4o"));
+
+        // Start: unseen.
+        let acc = None;
+        // After round A: consistent — Some(Some(claude-opus-4-5)).
+        let acc = fold_pricing_identity(acc, round_a);
+        assert!(
+            matches!(acc, Some(Some(_))),
+            "after one round must be consistent"
+        );
+        // After round B (different authority + model): poisoned.
+        let acc = fold_pricing_identity(acc, round_b);
+        assert_eq!(
+            acc,
+            Some(None),
+            "different proven identities in one turn must poison"
+        );
+    }
+
+    /// Case 2: proven identity followed by a usage-bearing round with no proven
+    /// identity (request_model absent or non-allowlisted endpoint) must poison.
+    /// An unpaired cumulative snapshot also produces round=None (no model known)
+    /// and hits this same path — case 4 collapses into case 2.
+    #[test]
+    fn fold_pricing_identity_unproven_round_poisons() {
+        let round_a = Some(pi("api.anthropic.com", "claude-3-7-sonnet"));
+        let round_unproven: Option<PricingIdentity> = None; // absent request_model or custom endpoint
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, round_a);
+        assert!(
+            matches!(acc, Some(Some(_))),
+            "after one proven round must be consistent"
+        );
+        let acc = fold_pricing_identity(acc, round_unproven);
+        assert_eq!(
+            acc,
+            Some(None),
+            "an unproven round after a proven round must poison (no-model / custom-endpoint path)"
+        );
+    }
+
+    /// Case 3: a poisoned accumulator must not heal, even if a later round
+    /// carries an identity matching the original.
+    #[test]
+    fn fold_pricing_identity_poisoned_never_heals() {
+        let round_a = Some(pi("api.openai.com", "gpt-4o"));
+        let round_unproven: Option<PricingIdentity> = None;
+        let round_a_again = Some(pi("api.openai.com", "gpt-4o")); // identical to round_a
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, round_a);
+        let acc = fold_pricing_identity(acc, round_unproven); // poisons
+        assert_eq!(acc, Some(None), "must be poisoned before heal attempt");
+        let acc = fold_pricing_identity(acc, round_a_again); // must not heal
+        assert_eq!(
+            acc,
+            Some(None),
+            "poisoned accumulator must stay poisoned even when the next round matches the original identity"
+        );
+    }
+
+    /// Baseline: a turn where every round carries the same proven identity
+    /// stays consistent and emits the identity on the wire.
+    #[test]
+    fn fold_pricing_identity_consistent_rounds_stay_proven() {
+        let identity = pi("api.openrouter.ai", "meta-llama/llama-4-scout");
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        assert_eq!(
+            acc,
+            Some(Some(identity)),
+            "three identical rounds must remain consistently proven"
+        );
+    }
+
+    // ── is_silent_turn (pure predicate) ─────────────────────────────────────
+
+    /// Counts WARN events emitted by `warn_if_silent_turn` calls inside `f`.
+    ///
+    /// Identifies silent-turn WARNs by target (`buzz_agent::agent`) + WARN
+    /// level + presence of the `stop` field, which is unique to these two
+    /// WARNs in this module.  Using the target avoids parsing message strings,
+    /// which are routed through `record_debug` as `Display`-formatted values
+    /// and are not reliably interceptable via `record_str` across tracing
+    /// versions.
+    fn count_silent_turn_warnings(f: impl FnOnce()) -> usize {
+        struct Capture {
+            count: Arc<AtomicUsize>,
+        }
+        struct Visitor {
+            saw_stop: bool,
+        }
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                if field.name() == "stop" {
+                    self.saw_stop = true;
+                }
+            }
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() != tracing::Level::WARN {
+                    return;
+                }
+                if event.metadata().target() != "buzz_agent::agent" {
+                    return;
+                }
+                let mut v = Visitor { saw_stop: false };
+                event.record(&mut v);
+                if v.saw_stop {
+                    self.count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let sub = tracing_subscriber::registry().with(Capture {
+            count: count.clone(),
+        });
+        tracing::subscriber::with_default(sub, f);
+        count.load(Ordering::SeqCst)
+    }
+
+    /// Predicate: values within the observed failure range (2–12) fire.
+    /// Pair (0, 12) catches an always-false mutation and an off-by-one at 12.
+    #[test]
+    fn is_silent_turn_fires_at_and_below_threshold() {
+        assert!(
+            is_silent_turn(0),
+            "zero output tokens must be a silent turn"
+        );
+        assert!(
+            is_silent_turn(SILENT_TURN_TOKEN_THRESHOLD),
+            "exactly at threshold (12) must be a silent turn — 12 is in the observed range"
+        );
+    }
+
+    /// One above the threshold must NOT fire, catching `<` vs `<=` and
+    /// always-true mutations.
+    #[test]
+    fn is_silent_turn_silent_above_threshold() {
+        assert!(
+            !is_silent_turn(SILENT_TURN_TOKEN_THRESHOLD + 1),
+            "one above threshold (13) must not be a silent turn"
+        );
+    }
+
+    // ── warn_if_silent_turn (WARN seam) ───────────────────────────────────
+
+    /// The canonical silent-death signature — no publish, no text, ≤12 tokens
+    /// — must emit exactly one WARN.  Deleting the WARN call, weakening the
+    /// token check, or hardcoding `buzz_reply_call_seen = true` are all caught.
+    #[test]
+    fn warn_if_silent_turn_fires_for_canonical_signature() {
+        let n = count_silent_turn_warnings(|| {
+            warn_if_silent_turn(
+                false,   // no publish seen
+                true,    // no text
+                Some(4), // 4 tokens — in the 2–12 range
+                ProviderStop::EndTurn,
+            );
+        });
+        assert_eq!(n, 1, "canonical silent-death must emit exactly one WARN");
+    }
+
+    /// A turn that ends with non-empty assistant text is NOT a silent death
+    /// even if token count is low — a terse reply like "OK" is legitimate.
+    /// Deleting the `text_is_empty` gate would cause this to fail.
+    #[test]
+    fn warn_if_silent_turn_silent_for_nonempty_text() {
+        let n = count_silent_turn_warnings(|| {
+            warn_if_silent_turn(
+                false,   // no publish
+                false,   // text IS present
+                Some(3), // low tokens — would fire without the text gate
+                ProviderStop::EndTurn,
+            );
+        });
+        assert_eq!(n, 0, "a turn with non-empty assistant text must not WARN");
+    }
+
+    /// A turn that published (buzz_reply_call_seen = true) then ended with a
+    /// short final completion must not trigger the WARN.  This is the normal
+    /// publish-then-wrap pattern.  Deleting the `buzz_reply_call_seen` gate
+    /// would cause this to fail.
+    #[test]
+    fn warn_if_silent_turn_silent_after_publish() {
+        let n = count_silent_turn_warnings(|| {
+            warn_if_silent_turn(
+                true,    // publish seen
+                true,    // no text in final round
+                Some(0), // zero tokens — would fire without the publish gate
+                ProviderStop::EndTurn,
+            );
+        });
+        assert_eq!(n, 0, "a turn where a publish ran must not WARN");
+    }
+
+    /// Unknown usage (None) with no publish and no text emits the distinct
+    /// "no usage reported" WARN.  Mutating the None arm to fall through to
+    /// `_ => {}` would cause this.
+    #[test]
+    fn warn_if_silent_turn_fires_distinct_warn_for_none_usage() {
+        let n = count_silent_turn_warnings(|| {
+            warn_if_silent_turn(
+                false, // no publish
+                true,  // no text
+                None,  // provider omitted usage
+                ProviderStop::EndTurn,
+            );
+        });
+        assert_eq!(n, 1, "unknown-usage silent turn must emit exactly one WARN");
     }
 }

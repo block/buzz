@@ -8,23 +8,45 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{app_state::AppState, relay::classify_request_error};
 
-static MEDIA_UPLOAD_CANCELLATIONS: LazyLock<Mutex<HashMap<String, CancellationToken>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+#[derive(Default)]
+struct MediaUploadCancellations {
+    tokens: HashMap<String, CancellationToken>,
+}
+
+impl MediaUploadCancellations {
+    fn begin(&mut self, progress_id: &str) -> CancellationToken {
+        if let Some(cancel) = self.tokens.get(progress_id).cloned() {
+            return cancel;
+        }
+        let cancel = CancellationToken::new();
+        self.tokens.insert(progress_id.to_string(), cancel.clone());
+        cancel
+    }
+
+    fn cancel(&mut self, progress_id: &str) {
+        let cancel = self.tokens.entry(progress_id.to_string()).or_default();
+        cancel.cancel();
+    }
+
+    fn finish(&mut self, progress_id: &str) {
+        self.tokens.remove(progress_id);
+    }
+}
+
+static MEDIA_UPLOAD_CANCELLATIONS: LazyLock<Mutex<MediaUploadCancellations>> =
+    LazyLock::new(|| Mutex::new(MediaUploadCancellations::default()));
 
 pub(super) fn begin_media_upload(progress_id: Option<&str>) -> Option<CancellationToken> {
     let progress_id = progress_id?;
-    let cancel = CancellationToken::new();
-    if let Ok(mut uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
-        uploads.insert(progress_id.to_string(), cancel.clone());
-    }
-    Some(cancel)
+    MEDIA_UPLOAD_CANCELLATIONS
+        .lock()
+        .ok()
+        .map(|mut uploads| uploads.begin(progress_id))
 }
 
 pub(super) fn cancel_media_upload(progress_id: &str) {
-    if let Ok(uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
-        if let Some(cancel) = uploads.get(progress_id) {
-            cancel.cancel();
-        }
+    if let Ok(mut uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
+        uploads.cancel(progress_id);
     }
 }
 
@@ -33,7 +55,7 @@ pub(super) fn finish_media_upload(progress_id: Option<&str>) {
         return;
     };
     if let Ok(mut uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
-        uploads.remove(progress_id);
+        uploads.finish(progress_id);
     }
 }
 
@@ -123,4 +145,86 @@ pub(super) fn emit_media_upload_phase(
         "media-upload-phase",
         serde_json::json!({ "id": id, "phase": phase }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_before_begin_is_retained() {
+        let progress_id = format!("cancel-before-begin-{}", uuid::Uuid::new_v4());
+
+        cancel_media_upload(&progress_id);
+        let cancellation = begin_media_upload(Some(&progress_id)).expect("cancellation token");
+
+        assert!(cancellation.is_cancelled());
+        finish_media_upload(Some(&progress_id));
+    }
+
+    #[test]
+    fn cancellation_after_begin_reaches_registered_token() {
+        let progress_id = format!("cancel-after-begin-{}", uuid::Uuid::new_v4());
+        let cancellation = begin_media_upload(Some(&progress_id)).expect("cancellation token");
+
+        cancel_media_upload(&progress_id);
+
+        assert!(cancellation.is_cancelled());
+        finish_media_upload(Some(&progress_id));
+    }
+
+    #[test]
+    fn late_cancellation_after_native_finish_is_removed_on_release() {
+        let mut uploads = MediaUploadCancellations::default();
+        let id = "late-cancel";
+
+        uploads.begin(id);
+        uploads.finish(id);
+        uploads.cancel(id);
+        assert!(uploads.tokens.contains_key(id));
+
+        uploads.finish(id);
+        assert!(!uploads.tokens.contains_key(id));
+    }
+
+    #[test]
+    fn repeated_concurrent_cycles_leave_no_registry_entries() {
+        let mut uploads = MediaUploadCancellations::default();
+        let ids = (0..256)
+            .map(|index| format!("cycle-{index}"))
+            .collect::<Vec<_>>();
+
+        for id in &ids {
+            uploads.begin(id);
+        }
+        for id in &ids {
+            uploads.cancel(id);
+        }
+        for id in &ids {
+            uploads.finish(id);
+        }
+
+        assert!(uploads.tokens.is_empty());
+    }
+
+    #[test]
+    fn dispatched_cancellations_are_not_evicted_before_begin() {
+        let mut uploads = MediaUploadCancellations::default();
+        let ids = (0..129)
+            .map(|index| format!("dispatched-{index}"))
+            .collect::<Vec<_>>();
+
+        for id in &ids {
+            uploads.cancel(id);
+        }
+
+        let oldest = uploads.begin(&ids[0]);
+        assert!(oldest.is_cancelled());
+        assert_eq!(uploads.tokens.len(), ids.len());
+
+        for id in &ids {
+            uploads.finish(id);
+        }
+        assert!(uploads.tokens.is_empty());
+    }
 }

@@ -3,7 +3,7 @@
 //!
 //! Scope per Tyler's spec:
 //! - Fire one synchronous query for the core head when a *new* session is born.
-//! - If a body is found, emit `[Agent Memory — core]\n<profile>`.
+//! - If a body is found, emit `<core-memory>…</core-memory>`.
 //! - If no body is found, emit an onboarding nudge so the agent learns how
 //!   to set its own core.
 //! - On any *error* (transport, parse), log and emit nothing. We must not
@@ -16,9 +16,6 @@ use buzz_core::kind::KIND_AGENT_ENGRAM;
 use nostr::{Event, Keys, PublicKey};
 
 use crate::relay::RestClient;
-
-/// Section header rendered into the prompt.
-const SECTION_LABEL: &str = "Agent Memory — core";
 
 /// Onboarding nudge for new agents with no core yet.
 ///
@@ -42,8 +39,14 @@ pub async fn build_core_section(
     owner: &PublicKey,
 ) -> Option<String> {
     match fetch_core_body(rest, agent_keys, owner).await {
-        Ok(Some(profile)) => Some(format!("[{SECTION_LABEL}]\n{profile}")),
-        Ok(None) => Some(format!("[{SECTION_LABEL}]\n{ONBOARDING_NUDGE}")),
+        Ok(Some(profile)) => Some(crate::prompt_framing::semantic_section(
+            "core-memory",
+            &profile,
+        )),
+        Ok(None) => Some(crate::prompt_framing::semantic_section(
+            "core-memory",
+            ONBOARDING_NUDGE,
+        )),
         Err(reason) => {
             tracing::warn!(
                 target: "engram::core",

@@ -1,19 +1,55 @@
 const CONVERSATION_STORAGE_PREFIX = "buzz.projects.agentConversation";
 
+/** Builds the identity boundary for Projects conversation pointers and drafts. */
+export function projectsConversationScope(
+  surface: string,
+  relayUrl: string | null,
+  signerPubkey: string | null,
+  resource: string,
+): string | null {
+  if (!relayUrl || !signerPubkey || !resource) return null;
+  return `${surface}:${relayUrl}:${signerPubkey.toLowerCase()}:${resource}`;
+}
+
+/**
+ * The exact opening prompt of an inline Projects conversation, identified by
+ * the signed event the relay accepted. `createdAt` alone (epoch seconds)
+ * cannot isolate the conversation — every unrelated event sharing the
+ * opener's second would pass a timestamp cutoff — so the event id
+ * participates in the same `(created_at, event_id)` ordering the message
+ * timeline uses.
+ */
+export type ProjectsConversationOpener = {
+  createdAt: number;
+  eventId: string;
+};
+
 /**
  * Minimal workspace-scoped pointer to the last inline Projects conversation.
- * `visibleAfter` (epoch seconds) anchors the thread to the first Projects
- * prompt — messages the reused DM channel held before that instant must
- * never render on the Projects page.
+ * `opener` anchors the thread to the first Projects prompt — messages the
+ * reused DM channel held before that event must never render on the
+ * Projects page.
  */
 export type StoredProjectsAgentConversation = {
   agentPubkey: string;
   channelId: string;
-  visibleAfter: number;
+  opener: ProjectsConversationOpener;
 };
 
 function scopedKey(prefix: string, workspaceId: string) {
   return `${prefix}.${encodeURIComponent(workspaceId)}`;
+}
+
+function isValidOpener(value: unknown): value is ProjectsConversationOpener {
+  if (!value || typeof value !== "object") return false;
+  const opener = value as Partial<ProjectsConversationOpener>;
+  return (
+    typeof opener.eventId === "string" &&
+    opener.eventId.length > 0 &&
+    typeof opener.createdAt === "number" &&
+    Number.isFinite(opener.createdAt) &&
+    opener.createdAt > 0
+  );
 }
 
 /** Reads the last inline Projects conversation without persisting its content. */
@@ -32,18 +68,20 @@ export function readStoredProjectsAgentConversation(
       value.agentPubkey.length === 0 ||
       typeof value.channelId !== "string" ||
       value.channelId.length === 0 ||
-      typeof value.visibleAfter !== "number" ||
-      !Number.isFinite(value.visibleAfter) ||
-      // A zero/negative cutoff would restore the DM's full history
-      // (pointers written before the cutoff was prompt-anchored).
-      value.visibleAfter <= 0
+      // Legacy pointers carried only a timestamp cutoff. They cannot uphold
+      // the isolation invariant (same-second history would leak), so they
+      // are not restorable.
+      !isValidOpener(value.opener)
     ) {
       return null;
     }
     return {
       agentPubkey: value.agentPubkey,
       channelId: value.channelId,
-      visibleAfter: value.visibleAfter,
+      opener: {
+        createdAt: value.opener.createdAt,
+        eventId: value.opener.eventId,
+      },
     };
   } catch {
     return null;

@@ -26,6 +26,7 @@ class SystemEvent {
   final String? targetPubkey;
   final String? topic;
   final String? purpose;
+  final String? ephemeralChannelId;
 
   const SystemEvent({
     required this.type,
@@ -33,6 +34,7 @@ class SystemEvent {
     this.targetPubkey,
     this.topic,
     this.purpose,
+    this.ephemeralChannelId,
   });
 
   /// Parse a system event from the JSON content of a kind-40099 event.
@@ -80,7 +82,21 @@ class SystemEvent {
     };
     if (type == null) return null;
 
-    return SystemEvent(type: type, actorPubkey: event.pubkey);
+    String? ephemeralChannelId;
+    try {
+      final content = jsonDecode(event.content);
+      if (content is Map) {
+        ephemeralChannelId = _readString(content, 'ephemeral_channel_id');
+      }
+    } catch (_) {
+      // The row still renders, but joining requires the validated room ID.
+    }
+
+    return SystemEvent(
+      type: type,
+      actorPubkey: event.pubkey,
+      ephemeralChannelId: ephemeralChannelId,
+    );
   }
 
   /// Human-readable description. [resolveLabel] maps a pubkey to a display

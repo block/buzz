@@ -179,42 +179,6 @@ fn role_switch_checkpoint_starts_exactly_once_after_restart() {
 }
 
 #[test]
-fn readiness_failure_is_catalog_sync_when_model_never_visible() {
-    assert_eq!(
-        classify_mesh_readiness_failure(false),
-        MeshReadinessFailure::CatalogNeverSynced
-    );
-}
-
-#[test]
-fn readiness_failure_is_routing_when_model_was_visible() {
-    assert_eq!(
-        classify_mesh_readiness_failure(true),
-        MeshReadinessFailure::RoutingNeverCompleted
-    );
-}
-
-#[test]
-fn readiness_messages_are_distinct_and_actionable() {
-    let catalog = mesh_readiness_failure_message(
-        MeshReadinessFailure::CatalogNeverSynced,
-        "auto",
-        "HTTP 429",
-    );
-    let routing = mesh_readiness_failure_message(
-        MeshReadinessFailure::RoutingNeverCompleted,
-        "auto",
-        "HTTP 503",
-    );
-    // Distinct diagnoses, each names the model and carries the raw detail.
-    assert_ne!(catalog, routing);
-    assert!(catalog.contains("network path"));
-    assert!(catalog.contains("HTTP 429"));
-    assert!(routing.contains("did not complete"));
-    assert!(routing.contains("HTTP 503"));
-}
-
-#[test]
 fn mesh_status_cursor_uses_relay_composite_tiebreak() {
     let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "status")
         .custom_created_at(nostr::Timestamp::from(1_234))

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  boundChannelSortStore,
   DEFAULT_STORE,
   readChannelSortStore,
   sortModeForGroup,
@@ -174,9 +175,11 @@ export function useChannelSortPreference(
         };
         // Prune sort modes left behind by deleted custom sections on write so
         // the stored map can't grow unboundedly with stale `section:` keys.
-        const next = liveSectionIds
-          ? stripOrphanedSectionModes(withUpdate, liveSectionIds)
-          : withUpdate;
+        const next = boundChannelSortStore(
+          liveSectionIds
+            ? stripOrphanedSectionModes(withUpdate, liveSectionIds)
+            : withUpdate,
+        );
         if (!writeChannelSortStore(pubkey, next, relayUrl)) return prev;
         managerRef.current?.publishSortPrefs(next);
         return next;

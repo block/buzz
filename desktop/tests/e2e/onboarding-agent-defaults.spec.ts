@@ -96,6 +96,21 @@ test("setup shows all bundled harnesses as detected", async ({ page }) => {
   await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toBeVisible();
   await expect(page.getByRole("checkbox")).toHaveCount(0);
+  const setupSkip = page.getByTestId("onboarding-setup-skip");
+  await expect(setupSkip).toBeVisible();
+  await expect(setupSkip).not.toHaveClass(/animate-in|fade-in/);
+  const harnessNote = page.getByText(/More harnesses \(Cursor, Grok, Amp…\)/);
+  await expect(harnessNote).toBeVisible();
+  const [lastHarnessBox, harnessNoteBox] = await Promise.all([
+    page.getByTestId("onboarding-runtime-buzz-agent").boundingBox(),
+    harnessNote.boundingBox(),
+  ]);
+  if (!lastHarnessBox || !harnessNoteBox) {
+    throw new Error("Could not measure harness note placement");
+  }
+  expect(harnessNoteBox.y).toBeGreaterThan(
+    lastHarnessBox.y + lastHarnessBox.height,
+  );
 });
 
 test("setup distinguishes a missing CLI from an installed desktop app", async ({
@@ -610,7 +625,7 @@ test("defaults stages auto-selection and edits without writing when skipped", as
     page.getByText(
       "Configure default models in Settings → Agents after setup.",
     ),
-  ).toBeVisible();
+  ).toHaveCount(0);
 
   await page.getByTestId("onboarding-config-skip").click();
 
@@ -645,6 +660,11 @@ test("Back preserves incomplete defaults draft without writing", async ({
   await page.goto("/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
+  await expect(
+    page
+      .getByTestId("onboarding-page-config")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "forward");
 
   const harness = page.getByTestId("global-agent-default-harness");
   await harness.click();
@@ -657,10 +677,20 @@ test("Back preserves incomplete defaults draft without writing", async ({
 
   await page.getByTestId("onboarding-back").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(
+    page
+      .getByTestId("onboarding-page-2")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "backward");
   expect(await readSavedRuntime(page)).toBeNull();
   expect(await readGlobalConfigSetterCallCount(page)).toBe(0);
 
   await page.getByTestId("onboarding-setup-next").click();
+  await expect(
+    page
+      .getByTestId("onboarding-page-config")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "forward");
   await expect(harness).toHaveText("Buzz");
   await expect(page.getByTestId("global-agent-provider")).toHaveText(
     "Anthropic",
@@ -1005,6 +1035,14 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
   await expect(tooltip).toBeVisible({ timeout: 2_000 });
   await expect(tooltip).toContainText("npm ERR! code EACCES");
   await expect(tooltip).toContainText("Hint: Run as Administrator");
+
+  // Moving from the trigger into the portalled tooltip must keep it open so
+  // pointer users can operate the scrollable error detail.
+  const tooltipBox = await tooltip.boundingBox();
+  if (!tooltipBox) throw new Error("Expected runtime error tooltip bounds");
+  await page.mouse.move(tooltipBox.x + 8, tooltipBox.y + 8);
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveCSS("pointer-events", "auto");
 
   // Locate the scroll container using page-level locator since Radix portals
   // can place content outside the tooltip role element's subtree in the DOM.

@@ -1,6 +1,6 @@
 //! Unit tests for `managed_agents/storage.rs`.
 //!
-//! Kept in a sibling file so `storage.rs` stays closer to the 1000-line gate;
+//! Kept in a sibling file so `storage.rs` stays closer to the 1500-line gate;
 //! `#[path]`-included from there.
 
 use std::cell::RefCell;

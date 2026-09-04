@@ -1,4 +1,12 @@
-import { Bell, Clock, Ellipsis, ExternalLink, MailOpen } from "lucide-react";
+import {
+  AlertCircle,
+  Bell,
+  Clock,
+  Ellipsis,
+  ExternalLink,
+  LoaderCircle,
+  MailOpen,
+} from "lucide-react";
 import * as React from "react";
 
 import {
@@ -8,6 +16,8 @@ import {
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
 import { buildInboxListRows } from "@/features/home/lib/inboxListRows";
+import { hasRenderedVideoAttachment } from "@/features/messages/lib/videoReviewContext";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { InboxFilterMenu } from "@/features/home/ui/InboxFilterMenu";
 import {
   DraftsPanel,
@@ -30,7 +40,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
-import { Markdown } from "@/shared/ui/markdown";
+import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
 import {
   MENTION_CHIP_BASE_CLASSES,
   MESSAGE_MARKDOWN_CLASS,
@@ -82,13 +92,14 @@ function InboxLabel({
     <div
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
-        "mt-0 flex min-w-0 items-center gap-1.5 text-2xs leading-3 group-hover/inbox-item:pr-[6.75rem] group-focus-within/inbox-item:pr-[6.75rem]",
+        "mt-0 flex min-h-[var(--inline-chip-min-height)] min-w-0 items-center gap-1.5 text-2xs leading-3 group-hover/inbox-item:pr-[6.75rem] group-focus-within/inbox-item:pr-[6.75rem]",
         isActionRequired && !isDone
           ? "font-medium text-amber-600/80 dark:text-amber-300/80"
           : isDone
             ? "font-normal text-muted-foreground/70"
             : "font-medium text-muted-foreground/80",
       )}
+      data-inbox-type-label=""
     >
       <span className="shrink-0">{label.text}</span>
       {label.channelLabel ? (
@@ -118,6 +129,34 @@ function formatReminderStatus(notBefore: number | undefined) {
     return `Reminder in ${Math.floor(secondsUntil / 3_600)}h`;
   }
   return `Reminder in ${Math.floor(secondsUntil / 86_400)}d`;
+}
+
+function getInboxVideoReviewCommentRootId(item: InboxItem) {
+  const feedItems = [item.item, ...item.groupItems];
+  const feedItemById = new Map(
+    feedItems.map((feedItem) => [feedItem.id, feedItem]),
+  );
+  const videoMessageIds = new Set(
+    feedItems
+      .filter((feedItem) =>
+        hasRenderedVideoAttachment({
+          body: feedItem.content,
+          tags: feedItem.tags,
+        }),
+      )
+      .map((feedItem) => feedItem.id),
+  );
+  const visited = new Set<string>();
+  let ancestorId = getThreadReference(item.item.tags).parentId;
+
+  while (ancestorId && !visited.has(ancestorId)) {
+    if (videoMessageIds.has(ancestorId)) return ancestorId;
+    visited.add(ancestorId);
+    const ancestor = feedItemById.get(ancestorId);
+    ancestorId = ancestor ? getThreadReference(ancestor.tags).parentId : null;
+  }
+
+  return undefined;
 }
 
 function PersonalItemRow({
@@ -184,6 +223,8 @@ type InboxListPaneProps = {
   onMarkRead: (itemId: string) => void;
   onMarkUnread: (itemId: string) => void;
   onOpenDirect: (item: InboxItem) => void;
+  isReopenPending?: (channelId: string | null | undefined) => boolean;
+  isReopenErrored?: (channelId: string | null | undefined) => boolean;
   onRemindLater: (item: InboxItem) => void;
   onSelect: (itemId: string) => void;
   onSelectDraft: (draftKey: string) => void;
@@ -212,6 +253,8 @@ export function InboxListPane({
   onMarkRead,
   onMarkUnread,
   onOpenDirect,
+  isReopenPending,
+  isReopenErrored,
   onRemindLater,
   onSelect,
   onSelectDraft,
@@ -272,7 +315,16 @@ export function InboxListPane({
         (eventId) => activeReminderEventIds?.has(eventId) ?? false,
       );
     const hasChannelTarget = Boolean(item.item.channelId);
+    const isReopening = isReopenPending?.(item.item.channelId) ?? false;
+    const hasReopenError = isReopenErrored?.(item.item.channelId) ?? false;
+    const canOpen = hasChannelTarget && !isReopening;
+    const openLabel = !hasChannelTarget
+      ? "No channel link"
+      : isReopening
+        ? "Reopening…"
+        : "Open in channel";
     const typeLabel = getInboxTypeLabel(item);
+    const videoReviewCommentRootId = getInboxVideoReviewCommentRootId(item);
     const isSenderAgent =
       agentPubkeys?.has(normalizePubkey(item.item.pubkey)) === true;
     const profileRole = isSenderAgent ? "bot" : undefined;
@@ -334,13 +386,17 @@ export function InboxListPane({
                 triggerElement="span"
               >
                 <span
-                  className="inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  className={cn(
+                    "inline-flex shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                    isSenderAgent ? "rounded-[30%]" : "rounded-full",
+                  )}
                   data-testid={`home-inbox-avatar-${item.id}`}
                 >
                   <UserAvatar
                     avatarUrl={item.avatarUrl}
                     className="h-9 w-9"
                     displayName={item.senderLabel}
+                    shape={isSenderAgent ? "squircle" : "circle"}
                     size="md"
                   />
                 </span>
@@ -399,19 +455,61 @@ export function InboxListPane({
                 </div>
               ) : null}
 
+              {isReopening || hasReopenError ? (
+                <div
+                  aria-live="polite"
+                  className={cn(
+                    "mt-1 flex items-center gap-1 text-2xs font-medium",
+                    hasReopenError
+                      ? "text-destructive"
+                      : "text-muted-foreground",
+                  )}
+                  data-testid={`home-inbox-reopen-status-${item.id}`}
+                  role="status"
+                >
+                  {isReopening ? (
+                    <>
+                      <LoaderCircle className="h-3 w-3 shrink-0 animate-spin" />
+                      Reopening…
+                    </>
+                  ) : (
+                    <>
+                      <AlertCircle className="h-3 w-3 shrink-0" />
+                      Couldn’t reopen
+                      {canOpen ? (
+                        <button
+                          className="ml-0.5 rounded font-semibold underline underline-offset-2 hover:no-underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                          data-testid={`home-inbox-reopen-retry-${item.id}`}
+                          onClick={(event) => {
+                            // The row wrapper selects on click; stop it so
+                            // Retry only re-issues the reopen for this row.
+                            event.stopPropagation();
+                            onOpenDirect(item);
+                          }}
+                          type="button"
+                        >
+                          Retry
+                        </button>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              ) : null}
+
               <div
                 className={cn(
-                  "mt-1.5 text-sm leading-5 [&_a]:font-medium [&_a]:text-current",
+                  "mt-1.5 text-message [&_a]:font-medium [&_a]:text-current",
                   isDone
                     ? "font-normal text-muted-foreground"
                     : "font-semibold text-foreground",
                 )}
               >
-                <Markdown
-                  className="inbox-preview-markdown text-inherit leading-5"
+                <VideoReviewCommentMarkdown
+                  className="inbox-preview-markdown text-inherit"
                   content={item.preview}
                   interactive={false}
                   mentionNames={item.mentionNames}
+                  videoReviewCommentRootId={videoReviewCommentRootId}
                 />
               </div>
             </div>
@@ -435,8 +533,8 @@ export function InboxListPane({
             </InboxRowActionButton>
           )}
           <InboxRowActionButton
-            disabled={!hasChannelTarget}
-            label={hasChannelTarget ? "Open in channel" : "No channel link"}
+            disabled={!canOpen}
+            label={openLabel}
             onClick={() => onOpenDirect(item)}
           >
             <ExternalLink className="!h-4 !w-4" />
@@ -476,15 +574,15 @@ export function InboxListPane({
           )}
           <ContextMenuSeparator />
           <ContextMenuItem
-            disabled={!hasChannelTarget}
+            disabled={!canOpen}
             onClick={() => {
-              if (hasChannelTarget) {
+              if (canOpen) {
                 onOpenDirect(item);
               }
             }}
           >
             <ExternalLink className="h-4 w-4" />
-            {hasChannelTarget ? "Open in channel" : "No channel link"}
+            {openLabel}
           </ContextMenuItem>
           <ContextMenuItem
             disabled={!hasChannelTarget}

@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/config-bridge";
@@ -97,11 +98,20 @@ async function activatePersonas(page: import("@playwright/test").Page) {
 
 /**
  * Open the #agents channel and click an agent's avatar in the message list
- * to open the profile side panel, then navigate to the Runtime tab.
+ * to open the profile side panel, then navigate to the requested tab.
  */
 async function openAgentProfileFromChannel(
   page: import("@playwright/test").Page,
   agentName: string,
+  {
+    anchorText = "Model",
+    scrollToBottom = true,
+    tab = "Info",
+  }: {
+    anchorText?: string;
+    scrollToBottom?: boolean;
+    tab?: "Info" | "Runtime";
+  } = {},
 ) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await waitForInvokeBridge(page);
@@ -121,27 +131,26 @@ async function openAgentProfileFromChannel(
   const panel = page.getByTestId("user-profile-panel");
   await expect(panel).toBeVisible({ timeout: 10_000 });
 
-  // Click the Runtime tab to reveal the Configuration section.
-  await panel.getByRole("tab", { name: "Runtime" }).click();
+  await panel.getByRole("tab", { name: tab }).click();
 
-  // Wait for the first normalized config field ("Model") to appear.
-  const configAnchor = panel.getByText("Model").first();
+  const configAnchor = panel.getByText(anchorText, { exact: true }).first();
   await expect(configAnchor).toBeVisible({ timeout: 10_000 });
-
   // Scroll the panel's internal scroll container to the bottom so the
   // config section content is fully visible.
   await configAnchor.scrollIntoViewIfNeeded();
-  await panel.evaluate((el) => {
-    // The scrollable container is the profileBody div with overflow-y-auto.
-    // Find it by checking which child actually scrolls.
-    const scrollable =
-      el.querySelector("[data-radix-scroll-area-viewport]") ??
-      Array.from(el.querySelectorAll("*")).find(
-        (child) => child.scrollHeight > child.clientHeight + 10,
-      ) ??
-      el;
-    scrollable.scrollTop = scrollable.scrollHeight;
-  });
+  if (scrollToBottom) {
+    await panel.evaluate((el) => {
+      // The scrollable container is the profileBody div with overflow-y-auto.
+      // Find it by checking which child actually scrolls.
+      const scrollable =
+        el.querySelector("[data-radix-scroll-area-viewport]") ??
+        Array.from(el.querySelectorAll("*")).find(
+          (child) => child.scrollHeight > child.clientHeight + 10,
+        ) ??
+        el;
+      scrollable.scrollTop = scrollable.scrollHeight;
+    });
+  }
   await panel.page().waitForTimeout(200);
 
   return panel;
@@ -149,9 +158,7 @@ async function openAgentProfileFromChannel(
 
 // Settle any in-flight animations before capture.
 async function settleAnimations(panel: import("@playwright/test").Locator) {
-  await panel.evaluate((el) =>
-    Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)),
-  );
+  await waitForAnimations(panel.page());
 }
 
 test.describe("config bridge screenshots", () => {
@@ -175,10 +182,17 @@ test.describe("config bridge screenshots", () => {
   test("01 — folded config panel", async ({ page }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
 
-    const panel = await openAgentProfileFromChannel(page, "Goose Agent");
+    const panel = await openAgentProfileFromChannel(page, "Goose Agent", {
+      scrollToBottom: false,
+      tab: "Runtime",
+    });
 
-    // The folded config panel: provenance sentences inline under each value.
-    await expect(panel.getByText("Set in Buzz").first()).toBeVisible();
+    // The shared config panel shows only the effective value.
+    await expect(panel.getByText("gpt-4o", { exact: true })).toBeVisible();
+    await expect(panel.getByText("gpt-4o-mini", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(panel.getByText("Set in Buzz")).toHaveCount(0);
     await settleAnimations(panel);
 
     await panel.screenshot({ path: `${SHOTS}/01-folded-config-panel.png` });
@@ -190,14 +204,17 @@ test.describe("config bridge screenshots", () => {
     const panel = await openAgentProfileFromChannel(
       page,
       "Runtime Override Agent",
+      { tab: "Runtime" },
     );
 
-    // A runtimeOverride model shows the live model, the persona baseline as a
-    // NON-struck secondary value, and the "Live override" sentence.
+    // A runtime override shows only the effective live model.
+    await expect(
+      panel.getByText("claude-opus-4-20250514", { exact: true }),
+    ).toBeVisible();
+    await expect(panel.getByText("gpt-4o", { exact: true })).toHaveCount(0);
     await expect(
       panel.getByText("Live override (this session only)"),
-    ).toBeVisible();
-    await expect(panel.getByText("gpt-4o", { exact: true })).toBeVisible();
+    ).toHaveCount(0);
     await settleAnimations(panel);
 
     await panel.screenshot({
@@ -205,36 +222,43 @@ test.describe("config bridge screenshots", () => {
     });
   });
 
-  test("03 — provenance sentences", async ({ page }) => {
+  test("03 — effective values without provenance", async ({ page }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
 
-    const panel = await openAgentProfileFromChannel(page, "Multi-Origin Agent");
+    const panel = await openAgentProfileFromChannel(
+      page,
+      "Multi-Origin Agent",
+      {
+        tab: "Runtime",
+      },
+    );
 
-    // Multiple distinct provenance origins visible at once.
-    await expect(panel.getByText("Set in Buzz").first()).toBeVisible();
-    await expect(panel.getByText("Inherited from template")).toBeVisible();
-    await expect(
-      panel.getByText("From environment variable (GOOSE_MODE)"),
-    ).toBeVisible();
-    await expect(
-      panel.getByText("From config file (~/.config/goose/config.yaml)").first(),
-    ).toBeVisible();
+    // Values from different sources use the same simple two-line hierarchy.
+    await expect(panel.getByText("gpt-4o", { exact: true })).toBeVisible();
+    await expect(panel.getByText("openai", { exact: true })).toBeVisible();
+    await expect(panel.getByText("auto", { exact: true })).toBeVisible();
+    await expect(panel.getByText(/From config file/)).toHaveCount(0);
+    await expect(panel.getByText(/Inherited from/)).toHaveCount(0);
+    await expect(panel.getByText(/From environment variable/)).toHaveCount(0);
     await settleAnimations(panel);
 
     await panel.screenshot({
-      path: `${SHOTS}/03-provenance-sentences.png`,
+      path: `${SHOTS}/03-effective-values.png`,
     });
   });
 
   test("04 — pre-spawn state", async ({ page }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
 
-    const panel = await openAgentProfileFromChannel(page, "Pre-Spawn Agent");
+    const panel = await openAgentProfileFromChannel(page, "Pre-Spawn Agent", {
+      tab: "Runtime",
+    });
 
-    // ACP-only fields show "Available after agent starts" before spawn.
-    await expect(
-      panel.getByText("Available after agent starts").first(),
-    ).toBeVisible();
+    // Unknown pre-start values stay empty rather than adding an explanatory row.
+    await expect(panel.getByText("Available after agent starts")).toHaveCount(
+      0,
+    );
+    await expect(panel.getByText("—", { exact: true })).toHaveCount(2);
     await settleAnimations(panel);
 
     await panel.screenshot({ path: `${SHOTS}/04-pre-spawn-state.png` });
@@ -243,7 +267,10 @@ test.describe("config bridge screenshots", () => {
   test("05 — advanced flat list", async ({ page }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
 
-    const panel = await openAgentProfileFromChannel(page, "Goose Agent");
+    const panel = await openAgentProfileFromChannel(page, "Goose Agent", {
+      anchorText: "MCP servers",
+      tab: "Runtime",
+    });
 
     // Advanced runtime fields render directly in the profile panel's flat list,
     // grouped under their own "Advanced" header.
@@ -251,7 +278,7 @@ test.describe("config bridge screenshots", () => {
     await expect(panel.getByText("Advanced", { exact: true })).toHaveCount(1);
     // MCP servers render once each under their group label.
     await expect(panel.getByText("developer", { exact: true })).toHaveCount(1);
-    await expect(panel.getByText("MCP Servers", { exact: true })).toHaveCount(
+    await expect(panel.getByText("MCP servers", { exact: true })).toHaveCount(
       1,
     );
     await settleAnimations(panel);
@@ -271,12 +298,15 @@ test.describe("config bridge screenshots", () => {
       ],
     });
 
-    const panel = await openAgentProfileFromChannel(page, "Buzz Agent");
+    const panel = await openAgentProfileFromChannel(page, "Buzz Agent", {
+      anchorText: "MCP servers",
+      tab: "Runtime",
+    });
 
     await expect(
-      panel.getByText("No custom servers configured", { exact: true }),
+      panel.getByText("No custom servers configured.", { exact: true }),
     ).toBeVisible();
-    await expect(panel.getByText("MCP Servers", { exact: true })).toHaveCount(
+    await expect(panel.getByText("MCP servers", { exact: true })).toHaveCount(
       1,
     );
   });
@@ -313,7 +343,7 @@ test.describe("config bridge screenshots", () => {
     const panel = page.getByTestId("user-profile-panel");
     await expect(panel).toBeVisible({ timeout: 10_000 });
 
-    // The Configuration section lives inside the Runtime tab — click it first.
+    // Editable configuration lives inside the Runtime tab.
     await panel.getByRole("tab", { name: "Runtime" }).click();
 
     // Wait for the config section to render and scroll it into view so
@@ -334,10 +364,7 @@ test.describe("config bridge screenshots", () => {
     });
     await panel.page().waitForTimeout(200);
 
-    // Settle any in-flight animations before capture.
-    await panel.evaluate((el) =>
-      Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)),
-    );
+    await settleAnimations(panel);
 
     await panel.screenshot({
       path: `${SHOTS}/06-profile-side-panel-config.png`,

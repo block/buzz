@@ -64,6 +64,7 @@ class HomePage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tabIndex = useState(0);
+    final visitedTabs = useRef(<int>{0});
     final tabContentTransitionDirection = useRef(1.0);
     final tabContentTransitionController = useAnimationController(
       duration: _tabContentTransitionDuration,
@@ -96,8 +97,14 @@ class HomePage extends HookConsumerWidget {
           }
         },
       ),
-      ActivityPage(tabReselection: activityReselection),
-      SearchPage(tabReselection: searchReselection),
+      if (visitedTabs.value.contains(1))
+        ActivityPage(tabReselection: activityReselection)
+      else
+        const SizedBox.shrink(),
+      if (visitedTabs.value.contains(2))
+        SearchPage(tabReselection: searchReselection)
+      else
+        const SizedBox.shrink(),
     ];
 
     final settingsTransitionGradient = tabIndex.value == 0
@@ -119,6 +126,10 @@ class HomePage extends HookConsumerWidget {
           ),
         ),
         ValueListenableBuilder<double>(
+          key: const ValueKey('home-settings-transition-progress'),
+          // Keep one stable listenable for Home. Swapping in the route's
+          // animation can briefly rebuild with its completed value before the
+          // new controller starts, which makes the background scale twice.
           valueListenable: settingsTransitionProgress,
           child: Scaffold(
             backgroundColor: Colors.transparent,
@@ -195,6 +206,7 @@ class HomePage extends HookConsumerWidget {
                     ? 1
                     : -1;
                 unawaited(HapticFeedback.selectionClick());
+                visitedTabs.value.add(i);
                 tabIndex.value = i;
                 if (reducedMotion) {
                   tabContentTransitionController.value = 1;
@@ -211,7 +223,10 @@ class HomePage extends HookConsumerWidget {
                 : Curves.easeOutCubic.transform(progress);
             return Opacity(
               key: const ValueKey('home-settings-transition-opacity'),
-              opacity: 1 - curvedProgress,
+              // Settings supplies the crossfade. Keeping Home opaque beneath
+              // it prevents the bare backdrop showing through two partially
+              // transparent layers.
+              opacity: 1,
               child: Transform.scale(
                 key: const ValueKey('home-settings-transition-scale'),
                 scale: lerpDouble(1, _settingsBackgroundScale, curvedProgress),

@@ -87,6 +87,24 @@ export function activateRateLimit(retryInSeconds: number | null): void {
   }, durationMs);
 }
 
+/**
+ * Arms the gate if `message` is a relay back-pressure signal, and reports
+ * whether it was.
+ *
+ * The relay marks back-pressure with a `rate-limited:` prefix on whichever
+ * frame carries the rejection — `NOTICE` for connection-scoped limits, `OK`
+ * for one addressed to a single event, `CLOSED` for a subscription. Every
+ * inbound path needs the same test, so it lives here with the gate rather than
+ * being re-derived per call site.
+ */
+export function activateRateLimitIfSignalled(message: string): boolean {
+  if (!message.startsWith("rate-limited:")) {
+    return false;
+  }
+  activateRateLimit(parseRateLimitHint(message));
+  return true;
+}
+
 /** Returns `true` when the relay has signalled back-pressure and the gate is active. */
 export function isRateLimited(): boolean {
   return expiresAt !== null && Date.now() < expiresAt;

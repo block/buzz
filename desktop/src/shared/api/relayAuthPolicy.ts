@@ -26,6 +26,28 @@ export type AuthOkDecision = "authenticated" | "retry" | "terminal";
 
 export const MAX_CONSECUTIVE_AUTH_REJECTIONS = 3;
 
+export type RelayAuthRequest = {
+  pendingEventId: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: number;
+};
+
+export function armRelayAuthentication(
+  timeoutMs: number,
+  setRequest: (request: RelayAuthRequest) => void,
+  onTimeout: (error: Error) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      const error = new Error("Relay authentication timed out.");
+      onTimeout(error);
+      reject(error);
+    }, timeoutMs);
+    setRequest({ pendingEventId: "", resolve, reject, timeout });
+  });
+}
+
 /** Tracks consecutive AUTH rejections across reconnect attempts. */
 export class AuthOkTracker {
   private consecutiveRejections = 0;

@@ -63,7 +63,19 @@ List<double> _sectionOffsets(List<_EmojiSection> sections) {
 }
 
 /// Which section owns [offset] — the one whose header is pinned right now.
-int _activeSectionIndex(List<double> offsets, double offset) {
+/// At the clamped bottom, the final visible section owns the viewport even when
+/// it is too short for its header to reach the top.
+int _activeSectionIndex(
+  List<double> offsets,
+  double offset, {
+  required double maxScrollExtent,
+}) {
+  if (offsets.isEmpty) return 0;
+  if (maxScrollExtent > 0 &&
+      offset >= maxScrollExtent - precisionErrorTolerance) {
+    return offsets.length - 1;
+  }
+
   var active = 0;
   for (var i = 0; i < offsets.length; i++) {
     // Half a header of slack so the highlight flips as a header reaches the
@@ -92,7 +104,7 @@ class _EmojiTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      key: ValueKey('$keyPrefix-${entry.tileId}'),
+      key: ValueKey('$keyPrefix-${entry.id}'),
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Semantics(
@@ -196,11 +208,13 @@ class _EmojiSearchResults extends StatelessWidget {
   final List<EmojiEntry> entries;
   final List<CustomEmoji> customEmoji;
   final void Function(String emoji) onSelect;
+  final ScrollController controller;
 
   const _EmojiSearchResults({
     required this.entries,
     required this.customEmoji,
     required this.onSelect,
+    required this.controller,
   });
 
   @override
@@ -214,6 +228,7 @@ class _EmojiSearchResults extends StatelessWidget {
 
     return CustomScrollView(
       key: const ValueKey('emoji-picker-search-results'),
+      controller: controller,
       slivers: [
         if (customEmoji.isNotEmpty) ...[
           const _SectionHeader(label: 'Custom'),
@@ -279,7 +294,7 @@ class _SectionHeaderDelegate extends SliverPersistentHeaderDelegate {
     bool overlapsContent,
   ) {
     return Container(
-      color: context.colors.surfaceContainerHighest,
+      color: context.colors.surface,
       alignment: Alignment.centerLeft,
       padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
       child: Text(label, style: _sectionLabelStyle(context)),

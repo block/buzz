@@ -419,6 +419,7 @@ function AllowlistPicker({
                       <UserAvatar
                         avatarUrl={result.avatarUrl}
                         displayName={formatSearchUserName(result)}
+                        shape={result.isAgent ? "squircle" : "circle"}
                         size="xs"
                       />
                       <div className="min-w-0">

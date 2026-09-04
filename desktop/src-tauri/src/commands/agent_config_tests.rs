@@ -1,5 +1,5 @@
 //! Unit tests for `commands/agent_config.rs` (split to keep `agent_config.rs`
-//! under the 1000-line file-size ratchet).
+//! under the 1500-line file-size ratchet).
 //!
 //! Included via `#[path = "agent_config_tests.rs"] mod tests;` at the bottom of
 //! `agent_config.rs`, so `use super::*` gives access to all items in that module.
@@ -29,7 +29,7 @@ fn with_no_goose_config<T>(body: impl FnOnce() -> T) -> T {
 }
 
 fn goose_runtime() -> &'static KnownAcpRuntime {
-    &KnownAcpRuntime {
+    static RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
         id: "goose",
         label: "Goose",
         commands: &["goose"],
@@ -55,17 +55,21 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
         config_file_format: Some("yaml"),
         supports_acp_native_config: true,
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        effort_normalization: Some(&crate::managed_agents::GOOSE_EFFORT_NORMALIZATION),
+        effort_accepted_values: None,
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         max_rounds_env_var: None,
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
-    }
+    };
+    &RUNTIME
 }
 
 fn agent_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: Some("persona-1".to_string()),
@@ -89,6 +93,7 @@ fn agent_record() -> ManagedAgentRecord {
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -112,10 +117,12 @@ fn agent_record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
         agent_command_override: None,
         persona_source_version: None,
         provider: None,
@@ -124,6 +131,7 @@ fn agent_record() -> ManagedAgentRecord {
 
 fn persona_with_model(model: &str) -> AgentDefinition {
     AgentDefinition {
+        description: None,
         id: "persona-1".to_string(),
         display_name: "Persona".to_string(),
         avatar_url: None,
@@ -138,6 +146,7 @@ fn persona_with_model(model: &str) -> AgentDefinition {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -181,6 +190,7 @@ fn linked_stale_record_model_never_outranks_persona_model() {
         Some(goose_runtime()),
         None,
         &Default::default(),
+        None,
     );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
@@ -205,7 +215,14 @@ fn linked_blank_definition_model_falls_through_to_global_default() {
         ..Default::default()
     };
 
-    let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None, &global);
+    let surface = resolve_config_surface(
+        record,
+        &personas,
+        Some(goose_runtime()),
+        None,
+        &global,
+        None,
+    );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
     assert_eq!(model.value.as_deref(), Some("global-model"));
@@ -228,6 +245,7 @@ fn definition_less_explicit_record_model_keeps_buzz_explicit_origin() {
         Some(goose_runtime()),
         None,
         &Default::default(),
+        None,
     );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
@@ -255,6 +273,7 @@ fn pending_pick_keeps_explicit_x_and_does_not_surface_live_y() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -283,6 +302,7 @@ fn genuine_explicit_live_switch_renders_y_over_x_buzz_explicit_secondary() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -318,6 +338,7 @@ fn genuine_explicit_live_switch_to_same_model_yields_clean_field() {
             Some(goose_runtime()),
             Some(&cache),
             &Default::default(),
+            None,
         )
     });
     let model = surface.normalized.model.expect("model resolved");
@@ -346,6 +367,7 @@ fn persona_linked_live_switch_keeps_persona_default_secondary() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -381,6 +403,7 @@ fn global_default_live_switch_renders_global_model_as_secondary_global_default()
         Some(goose_runtime()),
         Some(&cache),
         &global,
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -610,6 +633,58 @@ fn baked_env_mixed_keys_correct_masking() {
     assert!(token.masked);
 }
 
+/// F1 picker direct-write invariant: a stale record-native `GOOSE_THINKING_EFFORT`
+/// (launch-projection tier 1, ABOVE the canonical column) must not survive a
+/// picker write. Setting effort `high` through the picker path both writes the
+/// column and sweeps the stale alias, so the reader and the launch projection
+/// both resolve `high` — not the stale `low`. Deleting the sweep in
+/// `apply_picker_effort_level` re-breaks this: the projection would emit `low`.
+#[test]
+fn picker_write_sweeps_stale_record_native_effort_alias() {
+    let mut record = agent_record();
+    record
+        .env_vars
+        .insert("GOOSE_THINKING_EFFORT".to_string(), "low".to_string());
+
+    super::apply_picker_effort_level(&mut record, Some("high".to_string()));
+
+    // The stale record-native alias is gone; only the column carries the value.
+    assert!(
+        !record.env_vars.contains_key("GOOSE_THINKING_EFFORT"),
+        "stale record-native effort alias must be swept by the picker write"
+    );
+    assert_eq!(record.effort_level.as_deref(), Some("high"));
+
+    // Reader: the panel resolves the just-set value, not the stale alias.
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(
+            record.clone(),
+            &[],
+            Some(goose_runtime()),
+            None,
+            &Default::default(),
+            None,
+        )
+    });
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("picker-set effort must resolve");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+
+    // Launch projection: the spawned child receives the picker value.
+    let launch = crate::managed_agents::config_bridge::effort::effort_launch_projection(
+        &record,
+        Some(goose_runtime()),
+        &[],
+        None,
+        &std::collections::BTreeMap::new(),
+        None,
+        &std::collections::BTreeMap::new(),
+    );
+    assert_eq!(launch.value.as_deref(), Some("high"));
+}
+
 #[test]
 fn baked_env_thinking_effort_is_unmasked() {
     // BUZZ_AGENT_THINKING_EFFORT is a non-secret enum — must not be masked.
@@ -664,4 +739,33 @@ fn baked_env_allowlist_is_case_insensitive() {
     assert!(!super::is_safe_to_reveal("PRIVATE_KEY"));
     // Unknown key → masked by default.
     assert!(!super::is_safe_to_reveal("SOME_UNKNOWN_KEY"));
+}
+
+/// F3 (Desktop-parsing half): the `models` block emitted by an applied live
+/// switch — taken from the post-switch snapshot in `pool.rs` — must parse to the
+/// target model as current. Pairs with the pool test
+/// `test_applied_switch_caches_target_model_not_pre_switch`, which proves the
+/// emitted block already carries `currentModelId=model-b`.
+#[test]
+fn live_switch_models_from_post_switch_snapshot_parses_target_current() {
+    let models = serde_json::json!({
+        "currentModelId": "model-b",
+        "availableModels": [{"modelId": "model-a"}, {"modelId": "model-b"}],
+    });
+    let (available, current) = parse_models(Some(&models));
+    assert_eq!(current.as_deref(), Some("model-b"));
+    assert_eq!(available.len(), 2);
+}
+
+/// F3 (Desktop-parsing half): a Null `models` block — emitted when a successful
+/// switch's target response omits `models` — must parse to no current model, so
+/// the pre-switch model is never revived in the cache.
+#[test]
+fn live_switch_null_models_parses_to_no_current_model() {
+    let (available, current) = parse_models(Some(&serde_json::Value::Null));
+    assert!(
+        current.is_none(),
+        "Null models must not surface any current model"
+    );
+    assert!(available.is_empty());
 }

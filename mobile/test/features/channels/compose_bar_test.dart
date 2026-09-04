@@ -18,6 +18,9 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/photo_library.dart';
+import 'package:buzz/features/channels/voice_note_play_pause_icon.dart';
+import 'package:buzz/features/channels/voice_note_recording.dart';
+import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -173,17 +176,35 @@ Widget _buildComposeBar({
   Future<List<ChannelMember>>? membersFuture,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
+  List<ChannelMember> cachedMembers = const <ChannelMember>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
+  bool? disableAnimations,
   TextScaler? textScaler,
+  EdgeInsets? viewPadding,
   List<CustomEmoji> customEmoji = const <CustomEmoji>[],
   RelayConfigNotifier Function()? relayConfig,
   PhotoLibrary photoLibrary = const _EmptyPhotoLibrary(),
+  VoidCallback? onFocusRequested,
+  FocusNode? focusNode,
+  ValueChanged<VoidCallback>? onFocusRestorerChanged,
+  AppLifecycleNotifier Function()? appLifecycle,
+  String composeBarKey = 'compose-bar',
+  VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
+  VoiceNotePlayerController Function()? voiceNotePlayerFactory,
 }) {
   return ProviderScope(
     overrides: [
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
+      if (voiceNoteRecorderFactory != null)
+        voiceNoteRecorderFactoryProvider.overrideWithValue(
+          voiceNoteRecorderFactory,
+        ),
+      if (voiceNotePlayerFactory != null)
+        voiceNotePlayerFactoryProvider.overrideWithValue(
+          voiceNotePlayerFactory,
+        ),
       photoLibraryProvider.overrideWithValue(photoLibrary),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
       channelMembersProvider(
@@ -197,15 +218,25 @@ Widget _buildComposeBar({
       relayConfigProvider.overrideWith(
         relayConfig ?? _FakeRelayConfigNotifier.new,
       ),
+      if (appLifecycle != null) appLifecycleProvider.overrideWith(appLifecycle),
       savedPrefsProvider.overrideWithValue(_testPrefs),
-      channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
+      channelsProvider.overrideWith(
+        () => _FakeChannelsNotifier(channels, cachedMembers: cachedMembers),
+      ),
     ],
     child: MaterialApp(
+      navigatorObservers: [voiceNoteRouteObserver],
       theme: AppTheme.light(),
-      builder: supportsShowingSystemContextMenu == null && textScaler == null
+      builder:
+          supportsShowingSystemContextMenu == null &&
+              disableAnimations == null &&
+              textScaler == null
           ? null
           : (context, child) => MediaQuery(
               data: MediaQuery.of(context).copyWith(
+                disableAnimations:
+                    disableAnimations ??
+                    MediaQuery.disableAnimationsOf(context),
                 supportsShowingSystemContextMenu:
                     supportsShowingSystemContextMenu ??
                     MediaQuery.of(context).supportsShowingSystemContextMenu,
@@ -217,7 +248,25 @@ Widget _buildComposeBar({
         body: SafeArea(
           child: Align(
             alignment: Alignment.bottomCenter,
-            child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+            child: Builder(
+              builder: (context) {
+                final composeBar = ComposeBar(
+                  key: ValueKey(composeBarKey),
+                  channelId: 'channel-1',
+                  focusNode: focusNode,
+                  onFocusRestorerChanged: onFocusRestorerChanged,
+                  onFocusRequested: onFocusRequested,
+                  onSend: onSend,
+                );
+                if (viewPadding == null) return composeBar;
+                return MediaQuery(
+                  data: MediaQuery.of(
+                    context,
+                  ).copyWith(viewPadding: viewPadding),
+                  child: composeBar,
+                );
+              },
+            ),
           ),
         ),
       ),
@@ -281,6 +330,13 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   );
 }
 
+class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
+
+  void setLifecycle(AppLifecycleState value) => state = value;
+}
+
 class _EmptyPhotoLibrary implements PhotoLibrary {
   const _EmptyPhotoLibrary();
 
@@ -326,6 +382,155 @@ class _FakeVideoUploadService extends MediaUploadService {
   }
 }
 
+class _FakeVoiceNoteUploadService extends MediaUploadService {
+  _FakeVoiceNoteUploadService()
+    : super(
+        baseUrl: 'https://relay.example',
+        nsec: null,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+
+  VoiceNoteRecording? uploadedRecording;
+  Completer<BlobDescriptor>? pendingVoiceNoteUpload;
+  XFile? file;
+
+  @override
+  Future<XFile?> pickAttachmentFile() async => file;
+
+  @override
+  Future<BlobDescriptor> uploadVoiceNote(
+    XFile voiceNote, {
+    required Duration duration,
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    uploadedRecording = VoiceNoteRecording(
+      file: voiceNote,
+      duration: duration,
+      waveform: const [],
+    );
+    final pending = pendingVoiceNoteUpload;
+    if (pending != null) return pending.future;
+    onProgress?.call(1);
+    return BlobDescriptor(
+      url: 'https://relay.example/media/voice-note.mp4',
+      sha256:
+          '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      size: 4,
+      type: 'video/mp4',
+      uploaded: 1,
+      duration: duration.inMilliseconds / 1000,
+      filename: voiceNote.name.replaceFirst('.m4a', '.mp4'),
+    );
+  }
+}
+
+class _FakeVoiceNoteRecorder implements VoiceNoteRecorder {
+  _FakeVoiceNoteRecorder({this.path = '/tmp/voice-note-test.m4a'});
+
+  final String path;
+  final StreamController<double> _levels = StreamController.broadcast(
+    sync: true,
+  );
+  bool started = false;
+  bool cancelled = false;
+  bool disposed = false;
+
+  @override
+  Stream<double> get levels => _levels.stream;
+
+  void emit(double level) => _levels.add(level);
+
+  @override
+  Future<void> start() async {
+    started = true;
+    _levels.add(0.72);
+  }
+
+  @override
+  Future<VoiceNoteRecording> stop() async => VoiceNoteRecording(
+    file: XFile(path, mimeType: 'audio/mp4'),
+    duration: const Duration(seconds: 3),
+    waveform: const [0.2, 0.7, 0.4, 0.9],
+  );
+
+  @override
+  Future<void> cancel() async {
+    cancelled = true;
+  }
+
+  @override
+  Future<void> dispose() async {
+    disposed = true;
+    await _levels.close();
+  }
+}
+
+class _DelayedVoiceNoteRecorder extends _FakeVoiceNoteRecorder {
+  final Completer<void> startup = Completer<void>();
+  bool stopCalled = false;
+
+  @override
+  Future<void> start() async {
+    await startup.future;
+    if (!cancelled) await super.start();
+  }
+
+  @override
+  Future<VoiceNoteRecording> stop() async {
+    stopCalled = true;
+    return super.stop();
+  }
+}
+
+class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
+  VoiceNotePlaybackState _state = const VoiceNotePlaybackState(
+    duration: Duration(seconds: 3),
+  );
+
+  @override
+  VoiceNotePlaybackState get state => _state;
+  double speed = 1;
+
+  @override
+  Future<void> loadLocal(
+    String path, {
+    required Duration fallbackDuration,
+  }) async {
+    _state = VoiceNotePlaybackState(duration: fallbackDuration);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required Map<String, String> Function() headers,
+    required Duration fallbackDuration,
+  }) => loadLocal(url, fallbackDuration: fallbackDuration);
+
+  @override
+  Future<void> pause() async {
+    _state = _state.copyWith(isPlaying: false);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    _state = _state.copyWith(position: position);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> setSpeed(double value) async => speed = value;
+
+  @override
+  Future<void> toggle() async {
+    _state = _state.copyWith(isPlaying: !_state.isPlaying);
+    notifyListeners();
+  }
+}
+
 class _FakePhotoLibrary implements PhotoLibrary {
   final List<RecentPhoto> photos;
 
@@ -357,6 +562,10 @@ class _RecordingRelaySocket extends RelaySocket {
   final List<Map<String, dynamic>> events;
   final void Function(List<dynamic> message) handleMessage;
 
+  /// Invoked after an event is handed to the socket but before its relay
+  /// acknowledgement is delivered. Tests may defer that acknowledgement.
+  final Future<void> Function(Map<String, dynamic> event)? beforeAcknowledged;
+
   /// Invoked after an event has been recorded and acknowledged, before the
   /// caller's `await` resumes. Lets a test interleave state changes (such as
   /// a community switch) between two relay round trips.
@@ -365,6 +574,7 @@ class _RecordingRelaySocket extends RelaySocket {
   _RecordingRelaySocket(
     this.events,
     this.handleMessage, {
+    this.beforeAcknowledged,
     this.onEventAcknowledged,
   }) : super(
          wsUrl: 'ws://localhost',
@@ -382,8 +592,18 @@ class _RecordingRelaySocket extends RelaySocket {
     if (payload case ['EVENT', final Map<String, dynamic> event]) {
       events.add(event);
       final id = event['id'] as String;
-      super.debugHandleOkForTest(['OK', id, true, '']);
-      onEventAcknowledged?.call(event);
+      final pending = beforeAcknowledged?.call(event);
+      if (pending == null) {
+        super.debugHandleOkForTest(['OK', id, true, '']);
+        onEventAcknowledged?.call(event);
+      } else {
+        unawaited(
+          pending.then((_) {
+            super.debugHandleOkForTest(['OK', id, true, '']);
+            onEventAcknowledged?.call(event);
+          }),
+        );
+      }
     }
   }
 
@@ -396,15 +616,27 @@ class _RecordingRelaySocket extends RelaySocket {
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
   final List<Channel> _channels;
+  final List<ChannelMember> _cachedMembers;
 
-  _FakeChannelsNotifier(this._channels);
+  _FakeChannelsNotifier(
+    this._channels, {
+    List<ChannelMember> cachedMembers = const [],
+  }) : _cachedMembers = cachedMembers;
+
+  @override
+  List<ChannelMember> cachedMembersForChannel(String channelId) =>
+      channelId == 'channel-1' ? _cachedMembers : const [];
 
   @override
   Future<List<Channel>> build() async => _channels;
 
   @override
-  Future<void> refresh() async {
+  Future<void> refresh({bool fetchDirectory = false}) async {
     state = AsyncData(_channels);
+  }
+
+  void notifyWithCopy() {
+    state = AsyncData([..._channels]);
   }
 }
 
@@ -479,6 +711,13 @@ void main() {
       final compactWidth = tester
           .getSize(find.byKey(const ValueKey('composer-width-transition')))
           .width;
+      final compactPosition = tester.widget<Transform>(
+        find.byKey(const ValueKey('composer-position-transition')),
+      );
+      expect(
+        compactPosition.transform.getTranslation().y,
+        Grid.twelve + Grid.quarter,
+      );
 
       await _expandComposer(tester);
 
@@ -493,6 +732,10 @@ void main() {
                   .decoration
               as BoxDecoration;
       expect(compactWidth, closeTo(expandedWidth * 0.85, 0.5));
+      final expandedPosition = tester.widget<Transform>(
+        find.byKey(const ValueKey('composer-position-transition')),
+      );
+      expect(expandedPosition.transform.getTranslation().y, 0);
       expect(
         expandedDecoration.borderRadius,
         BorderRadius.circular(Radii.dialog),
@@ -502,6 +745,288 @@ void main() {
       expect(find.byIcon(LucideIcons.hash), findsOneWidget);
       expect(find.byIcon(LucideIcons.smilePlus), findsOneWidget);
       expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
+    });
+
+    testWidgets('notifies focus intent before attaching the focused field', (
+      tester,
+    ) async {
+      var focusRequested = false;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRequested: () => focusRequested = true,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      expect(focusRequested, isTrue);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('uses a parent-owned focus node when provided', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(focusNode.hasFocus, isTrue);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode,
+        same(focusNode),
+      );
+    });
+
+    testWidgets('restores the collapsed editor before requesting focus', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      VoidCallback? restoreFocus;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onFocusRestorerChanged: (callback) => restoreFocus = callback,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+      focusNode.unfocus();
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+
+      restoreFocus!();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('keeps hook order when the parent focus node changes', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('invalidates a registered focus restorer on unmount', (
+      tester,
+    ) async {
+      final callbacks = <VoidCallback>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      final registeredRestorer = callbacks.single;
+
+      await tester.pumpWidget(const SizedBox.shrink());
+
+      registeredRestorer();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('does not let an old restorer mutate a replacement composer', (
+      tester,
+    ) async {
+      final callbacks = <VoidCallback>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          composeBarKey: 'first-compose-bar',
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      final oldRestorer = callbacks.single;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          composeBarKey: 'second-compose-bar',
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      expect(callbacks, hasLength(2));
+
+      oldRestorer();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsNothing);
+
+      callbacks.last();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('starts Android composer motion with the first IME metrics', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        final widthFinder = find.byKey(
+          const ValueKey('composer-width-transition'),
+        );
+        final compactWidth = tester.getSize(widthFinder).width;
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 80));
+
+        expect(tester.getSize(widthFinder).width, closeTo(compactWidth, 0.1));
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        addTearDown(tester.view.reset);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 40));
+
+        expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('expands Android composer when the IME is already visible', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(() {
+        tester.view.reset();
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      });
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        final widthFinder = find.byKey(
+          const ValueKey('composer-width-transition'),
+        );
+        final compactWidth = tester.getSize(widthFinder).width;
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pumpAndSettle();
+
+        expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('returns to the compact capsule when the keyboard drops', (
@@ -553,6 +1078,234 @@ void main() {
       );
     });
 
+    testWidgets('return inserts a newline and sending stays on the button', (
+      tester,
+    ) async {
+      var sendCount = 0;
+      String? sentContent;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sendCount += 1;
+                sentContent = content;
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      expect(textField.keyboardType, TextInputType.multiline);
+      expect(textField.textInputAction, TextInputAction.newline);
+      expect(textField.onSubmitted, isNull);
+
+      await tester.enterText(find.byType(TextField), 'First line\nSecond line');
+      await tester.pumpAndSettle();
+
+      expect(sendCount, 0);
+      expect(textField.controller!.text, 'First line\nSecond line');
+
+      final sendButton = find
+          .ancestor(
+            of: find.byIcon(LucideIcons.arrowUp),
+            matching: find.byType(IconButton),
+          )
+          .hitTestable();
+      await tester.tap(sendButton);
+      await tester.pumpAndSettle();
+
+      expect(sendCount, 1);
+      expect(sentContent, 'First line\nSecond line');
+    });
+
+    testWidgets('clears text before the optimistic send completes', (
+      tester,
+    ) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      delivery.complete();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('a failed send restores an untouched cleared draft', (
+      tester,
+    ) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'retry me');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      delivery.completeError(Exception('relay rejected'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'retry me',
+      );
+    });
+
+    testWidgets('a failed send does not overwrite a new draft', (tester) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'first draft');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      await tester.enterText(find.byType(TextField), 'new draft');
+      delivery.completeError(StateError('relay rejected'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'new draft',
+      );
+    });
+
+    testWidgets('smoothly resizes the text field when a new line is added', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'First line');
+      await tester.pumpAndSettle();
+
+      final heightMotion = find.byKey(
+        const ValueKey('composer-text-height-motion'),
+      );
+      final animation = tester.widget<AnimatedSize>(heightMotion);
+      expect(animation.duration, const Duration(milliseconds: 140));
+      expect(animation.curve, Curves.easeOutCubic);
+      final oneLineHeight = tester.getSize(heightMotion).height;
+
+      await tester.enterText(
+        find.byType(TextField),
+        'First line\nSecond line\nThird line',
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 70));
+      final midResizeHeight = tester.getSize(heightMotion).height;
+      await tester.pumpAndSettle();
+      final threeLineHeight = tester.getSize(heightMotion).height;
+
+      expect(midResizeHeight, greaterThan(oneLineHeight));
+      expect(midResizeHeight, lessThan(threeLineHeight));
+    });
+
+    testWidgets('skips composer height motion when animations are disabled', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          disableAnimations: true,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      expect(find.byType(AnimatedSize), findsNothing);
+      expect(
+        find.byKey(const ValueKey('composer-text-height-motion')),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('attachment control responds while the composer is expanding', (
       tester,
     ) async {
@@ -572,6 +1325,9 @@ void main() {
         );
 
         await tester.tap(find.text('Message\u2026'));
+        await tester.pump();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        addTearDown(tester.view.reset);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 80));
         await tester.tap(find.byTooltip('Add attachment').hitTestable());
@@ -702,6 +1458,98 @@ void main() {
       expect(textField.focusNode!.hasFocus, isTrue);
     });
 
+    testWidgets('iOS selection handles resize a draft with the system menu', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            supportsShowingSystemContextMenu: true,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'abc def ghi');
+        await tester.pump();
+
+        final editableState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final renderEditable = editableState.renderEditable;
+        Offset textPosition(int offset) {
+          final point = renderEditable
+              .getEndpointsForSelection(TextSelection.collapsed(offset: offset))
+              .single;
+          return renderEditable.localToGlobal(point.point) - const Offset(0, 2);
+        }
+
+        final wordPosition = textPosition(5);
+        await tester.tapAt(wordPosition, pointer: 7);
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.tapAt(wordPosition, pointer: 7);
+        await tester.pumpAndSettle();
+
+        final controller = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        expect(
+          tester
+              .widget<TextField>(find.byType(TextField))
+              .magnifierConfiguration,
+          same(TextMagnifierConfiguration.disabled),
+        );
+        expect(
+          controller.selection,
+          const TextSelection(baseOffset: 4, extentOffset: 7),
+        );
+
+        final contextMenuBuilder = tester
+            .widget<TextField>(find.byType(TextField))
+            .contextMenuBuilder;
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+        (container.read(channelsProvider.notifier) as _FakeChannelsNotifier)
+            .notifyWithCopy();
+        await tester.pump();
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).contextMenuBuilder,
+          same(contextMenuBuilder),
+        );
+        expect(tester.takeException(), isNull);
+
+        final endpoint = renderEditable
+            .getEndpointsForSelection(controller.selection)
+            .last;
+        final gesture = await tester.startGesture(
+          renderEditable.localToGlobal(endpoint.point),
+          pointer: 7,
+        );
+        await tester.pump();
+        await gesture.moveTo(textPosition(11));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(controller.selection.baseOffset, 4);
+        expect(controller.selection.extentOffset, 11);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        tester.view.reset();
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('composer controls use selection haptics', (tester) async {
       final hapticCalls = <MethodCall>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -786,6 +1634,141 @@ void main() {
         tester.widget<Text>(find.text('general')).style?.fontFamily,
         'Inter',
       );
+    });
+
+    testWidgets('shows cached member mentions before the refresh completes', (
+      tester,
+    ) async {
+      final pendingMembers = Completer<List<ChannelMember>>();
+      addTearDown(() {
+        if (!pendingMembers.isCompleted) pendingMembers.complete(const []);
+      });
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          membersFuture: pendingMembers.future,
+          cachedMembers: [
+            ChannelMember(
+              pubkey: 'a' * 64,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+              displayName: 'Alice',
+            ),
+          ],
+          channels: [_makeCurrentChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.atSign));
+      await tester.pump();
+
+      expect(pendingMembers.isCompleted, isFalse);
+      expect(
+        find.byKey(const ValueKey('mention-suggestions-popover')),
+        findsOneWidget,
+      );
+      expect(find.text('Alice'), findsOneWidget);
+    });
+
+    testWidgets('dismisses mention suggestions in the selection frame', (
+      tester,
+    ) async {
+      final signer = nostr.Keys.generate();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [_testAgent('f' * 64)],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('mention-suggestions-popover')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('mention-suggestions-popover')),
+        findsNothing,
+      );
+      expect(find.byType(AnimatedSize), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('composer-text-height-motion')),
+        findsOneWidget,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      expect(controller.text, '@Helper Bot ');
+      expect(controller.selection, const TextSelection.collapsed(offset: 12));
+
+      // Rendering the selected agent chip notifies the editor again. That
+      // display-only update must not restart the completed mention query.
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.byKey(const ValueKey('mention-suggestions-popover')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('reuses rich text layout for selection-only movement', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'abc def ghi');
+      await tester.pump();
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final controller = textField.controller!;
+      final editableContext = tester.element(find.byType(EditableText));
+      final before = controller.buildTextSpan(
+        context: editableContext,
+        style: textField.style,
+        withComposing: true,
+      );
+
+      controller.selection = const TextSelection(
+        baseOffset: 4,
+        extentOffset: 7,
+      );
+      final after = controller.buildTextSpan(
+        context: editableContext,
+        style: textField.style,
+        withComposing: true,
+      );
+
+      expect(after, same(before));
     });
 
     testWidgets('native All Photos picker failures show an error', (
@@ -888,6 +1871,84 @@ void main() {
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
     });
+
+    testWidgets(
+      'native Voice note waits for the keyboard while the popover dismisses',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        final recorder = _FakeVoiceNoteRecorder();
+        _setMockNativeAttachmentPopoverHandler((call) async {
+          return switch (call.method) {
+            'isSupported' || 'present' => true,
+            'dismiss' => null,
+            _ => null,
+          };
+        });
+
+        try {
+          await tester.pumpWidget(
+            _buildComposeBar(
+              uploadService: _testUploadService(nostr.Keys.generate().nsec),
+              voiceNoteRecorderFactory: () => recorder,
+              onSend:
+                  (
+                    content,
+                    mentionPubkeys, {
+                    mediaTags = const <List<String>>[],
+                  }) async {},
+            ),
+          );
+
+          await _expandComposer(tester);
+          await tester.tap(find.byTooltip('Add attachment').hitTestable());
+          await tester.pumpAndSettle();
+          await _sendNativeAttachmentPopoverCall(tester, 'recordVoiceNote');
+          await tester.pump();
+
+          expect(
+            find.byKey(const ValueKey('voice-note-recorder')),
+            findsNothing,
+          );
+          expect(recorder.started, isFalse);
+          final initialPosition = tester.widget<Transform>(
+            find.byKey(const ValueKey('composer-position-transition')),
+          );
+          expect(initialPosition.transform.getTranslation().y, 0);
+
+          await tester.pump(const Duration(milliseconds: 100));
+
+          final closingKeyboardPosition = tester.widget<Transform>(
+            find.byKey(const ValueKey('composer-position-transition')),
+          );
+          expect(
+            closingKeyboardPosition.transform.getTranslation().y,
+            greaterThan(0),
+          );
+          expect(
+            closingKeyboardPosition.transform.getTranslation().y,
+            lessThan(Grid.twelve + Grid.quarter),
+          );
+          expect(recorder.started, isFalse);
+
+          tester.view.viewInsets = FakeViewPadding.zero;
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(const ValueKey('voice-note-recorder')),
+            findsOneWidget,
+          );
+          expect(recorder.started, isTrue);
+        } finally {
+          await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+          await tester.pumpWidget(const SizedBox.shrink());
+          tester.view.reset();
+          _setMockNativeAttachmentPopoverHandler(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
 
     testWidgets('leaving a focused composer dismisses the native keyboard', (
       tester,
@@ -1614,7 +2675,13 @@ void main() {
       final menu = find.byKey(const ValueKey('attachment-menu'));
       final surface = find.byKey(const ValueKey('attachment-surface-popover'));
       final rows = [
-        for (final label in ['camera', 'photos', 'video', 'files'])
+        for (final label in [
+          'camera',
+          'photos',
+          'video',
+          'voice note',
+          'files',
+        ])
           find.byKey(ValueKey('attachment-menu-item-$label')),
       ];
       final menuRect = tester.getRect(menu);
@@ -1628,23 +2695,41 @@ void main() {
         material.shadowColor,
         appPopoverShadowColor(tester.element(surface)),
       );
-      expect(menuRect.size, const Size(216, 264));
+      expect(menuRect.size, const Size(216, 324));
       for (final row in rows) {
         expect(tester.getSize(row).height, 52);
         expect(tester.getRect(row).left - menuRect.left, Grid.xs);
         expect(menuRect.right - tester.getRect(row).right, Grid.xs);
       }
-      for (final label in ['Camera', 'Photos', 'Video', 'Files']) {
+      for (final label in [
+        'Camera',
+        'Photos',
+        'Video',
+        'Voice note',
+        'Files',
+      ]) {
         final text = tester.widget<Text>(find.text(label));
         expect(text.style?.fontSize, 20);
         expect(text.style?.fontFamily, 'Inter');
       }
       final icons = [
-        for (final label in ['camera', 'photos', 'video', 'files'])
+        for (final label in [
+          'camera',
+          'photos',
+          'video',
+          'voice note',
+          'files',
+        ])
           find.byKey(ValueKey('attachment-menu-icon-$label')),
       ];
       final labels = [
-        for (final label in ['camera', 'photos', 'video', 'files'])
+        for (final label in [
+          'camera',
+          'photos',
+          'video',
+          'voice note',
+          'files',
+        ])
           find.byKey(ValueKey('attachment-menu-label-$label')),
       ];
       for (final icon in icons) {
@@ -1739,7 +2824,13 @@ void main() {
 
         final menu = find.byKey(const ValueKey('attachment-menu'));
         final rows = [
-          for (final label in ['camera', 'photos', 'video', 'files'])
+          for (final label in [
+            'camera',
+            'photos',
+            'video',
+            'voice note',
+            'files',
+          ])
             find.byKey(ValueKey('attachment-menu-item-$label')),
         ];
         final scrollView = tester.widget<ListView>(
@@ -2268,6 +3359,108 @@ void main() {
       );
     });
 
+    testWidgets('renders all five permalink types as composer chips', (
+      tester,
+    ) async {
+      final owner = 'ab' * 32;
+      final id = 'cd' * 32;
+      const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+      final urls = [
+        'buzz://message?channel=$channelId&id=$id',
+        'buzz://channel/$channelId',
+        'buzz://repo?owner=$owner&d=buzz',
+        'buzz://pr?id=$id&owner=$owner&d=buzz',
+        'buzz://issue?id=$id&owner=$owner&d=buzz',
+      ];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: [
+            Channel(
+              id: channelId,
+              name: 'engineering',
+              channelType: 'stream',
+              visibility: 'open',
+              description: '',
+              createdBy: 'creator',
+              createdAt: DateTime(2026),
+              memberCount: 1,
+              isMember: true,
+            ),
+          ],
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), urls.join(' '));
+      await tester.pump();
+
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'composer-buzz-link-chip:',
+              ),
+        ),
+        findsNWidgets(5),
+      );
+      expect(
+        find.byKey(
+          const ValueKey('composer-buzz-link-chip:engineering · cdcdcdcd'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:engineering')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:buzz')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:buzz · cdcdcdcd')),
+        findsNWidgets(2),
+      );
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        urls.join(' '),
+      );
+    });
+
+    testWidgets('preserves underscore d-tags and Markdown delimiters', (
+      tester,
+    ) async {
+      final owner = 'ab' * 32;
+      final url = 'buzz://repo?owner=$owner&d=my_repo';
+      final source = '**$url**';
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), source);
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:my_repo')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:my')),
+        findsNothing,
+      );
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        source,
+      );
+    });
+
     testWidgets('uses the primary color for formatting actions', (
       tester,
     ) async {
@@ -2438,8 +3631,17 @@ void main() {
                 )
                 as SystemContextMenu;
         final pasteImage = menu.items.first as IOSSystemContextMenuItemCustom;
+        final rebuiltMenu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as SystemContextMenu;
+        final rebuiltPasteImage =
+            rebuiltMenu.items.first as IOSSystemContextMenuItemCustom;
 
         expect(pasteImage.title, 'Paste Image');
+        expect(rebuiltPasteImage.onPressed, same(pasteImage.onPressed));
         expect(menu.items.skip(1), orderedEquals(defaultItems));
         pasteImage.onPressed();
         await tester.pumpAndSettle();
@@ -2968,6 +4170,78 @@ void main() {
       ]);
     });
 
+    testWidgets('preserves edits made while a mentioned agent is being added', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final publishedEvents = <Map<String, dynamic>>[];
+      final addMemberAcknowledgement = Completer<void>();
+      String? sentContent;
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Helper Bot',
+              respondTo: 'anyone',
+              channelIds: const ['shared-channel'],
+            ),
+          ],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      session.debugAttachSocketForTest(
+        _RecordingRelaySocket(
+          publishedEvents,
+          session.debugHandleSocketMessageForTest,
+          beforeAcknowledged: (event) async {
+            if (event['kind'] == 9000) await addMemberAcknowledgement.future;
+          },
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pump();
+
+      expect(
+        publishedEvents.where((event) => event['kind'] == 9000),
+        hasLength(1),
+      );
+
+      await tester.enterText(find.byType(TextField), 'newer draft');
+      addMemberAcknowledgement.complete();
+      await tester.pumpAndSettle();
+
+      expect(sentContent, 'hello @Helper Bot');
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'newer draft',
+      );
+    });
+
     testWidgets(
       'renders chips only for selected agents outside code and composition',
       (tester) async {
@@ -3139,7 +4413,7 @@ void main() {
     });
 
     testWidgets(
-      'skips the agent add in a private channel when not owner/admin',
+      'adds the agent in a private channel when the sender is a plain member',
       (tester) async {
         final agentPubkey = 'a' * 64;
         final signer = nostr.Keys.generate();
@@ -3152,8 +4426,8 @@ void main() {
           _buildComposeBar(
             uploadService: _testUploadService(signer.nsec),
             currentPubkey: signer.public,
-            // Plain member of a private channel: the relay rejects any add, so
-            // the composer must not attempt one — and must still send.
+            // Plain member of a private channel: ordinary member and bot
+            // additions are permitted; elevated-role grants still are not.
             members: [
               ChannelMember(
                 pubkey: signer.public,
@@ -3201,15 +4475,14 @@ void main() {
         expect(didSend, isTrue);
         expect(
           publishedEvents.where((event) => event['kind'] == 9000),
-          isEmpty,
+          hasLength(1),
         );
-        // The un-added agent is demoted from p-tag to a reference mention.
-        expect(sentMentionPubkeys, isEmpty);
+        expect(sentMentionPubkeys, contains(agentPubkey));
         expect(
           sentMediaTags,
-          contains(orderedEquals(['mention', agentPubkey])),
+          isNot(contains(orderedEquals(['mention', agentPubkey]))),
         );
-        expect(find.text(privateChannelAddDeniedMessage), findsOneWidget);
+        expect(find.text(privateChannelAddDeniedMessage), findsNothing);
       },
     );
 
@@ -3298,6 +4571,701 @@ void main() {
 
       expect(uploadService.uploadedVideo, same(pickedVideo));
       expect(sentContent, '\n![video](https://relay.example/media/test.mp4)');
+    });
+
+    testWidgets('records, previews, uploads, and sends a voice note', (
+      tester,
+    ) async {
+      final recorder = _FakeVoiceNoteRecorder();
+      final uploadService = _FakeVoiceNoteUploadService();
+      String? sentContent;
+      List<List<String>> sentMediaTags = const [];
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          viewPadding: const EdgeInsets.only(bottom: 34),
+          voiceNoteRecorderFactory: () => recorder,
+          voiceNotePlayerFactory: _FakeVoiceNotePlayer.new,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+                sentMediaTags = mediaTags;
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'Keep this draft');
+      await _openAttachmentMenu(tester);
+      expect(find.text('Voice note'), findsOneWidget);
+      await tester.tap(find.text('Voice note'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final transitioningDecoration =
+          tester
+                  .widget<Container>(
+                    find.byKey(const ValueKey('composer-surface')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      final transitioningRadius =
+          (transitioningDecoration.borderRadius! as BorderRadius).topLeft.x;
+      expect(transitioningRadius, greaterThan(Radii.dialog));
+      expect(transitioningRadius, lessThan(Radii.full));
+      await tester.pumpAndSettle();
+
+      expect(recorder.started, isTrue);
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('voice-note-recorder-close')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('voice-note-recorder-stop')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('voice-note-waveform')), findsOneWidget);
+      expect(find.byType(TextField), findsNothing);
+      expect(find.byIcon(LucideIcons.arrowUp), findsNothing);
+      expect(find.byTooltip('Add attachment'), findsNothing);
+
+      final recordingWidth = tester
+          .getSize(find.byKey(const ValueKey('composer-width-transition')))
+          .width;
+      expect(recordingWidth, closeTo(744, 0.5));
+      final recordingOuterGutter = tester.widget<Padding>(
+        find.byKey(const ValueKey('composer-recording-outer-gutter')),
+      );
+      expect(
+        recordingOuterGutter.padding,
+        const EdgeInsets.symmetric(horizontal: 16),
+      );
+      final recordingPosition = tester.widget<Transform>(
+        find.byKey(const ValueKey('composer-position-transition')),
+      );
+      expect(
+        recordingPosition.transform.getTranslation().y,
+        Grid.twelve + Grid.quarter,
+      );
+      final composerDecoration =
+          tester
+                  .widget<Container>(
+                    find.byKey(const ValueKey('composer-surface')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      final recordingComposer = tester.widget<Container>(
+        find.byKey(const ValueKey('composer-surface')),
+      );
+      expect(
+        tester.widget(find.byKey(const ValueKey('voice-note-recorder'))),
+        isA<Row>(),
+      );
+      expect(
+        composerDecoration.borderRadius,
+        BorderRadius.circular(Radii.full),
+      );
+      expect(recordingComposer.padding, const EdgeInsets.all(Grid.twelve));
+
+      final initialWaveform = tester.widget<VoiceNoteWaveform>(
+        find.byType(VoiceNoteWaveform),
+      );
+      expect(initialWaveform.progress, 1);
+      expect(initialWaveform.samples.first, 0);
+      expect(initialWaveform.samples.last, 0.72);
+
+      for (var index = 0; index < 130; index += 1) {
+        recorder.emit(index == 129 ? 0.99 : 0.1);
+      }
+      await tester.pump(const Duration(milliseconds: 100));
+      final waveform = tester.widget<VoiceNoteWaveform>(
+        find.byType(VoiceNoteWaveform),
+      );
+      expect(waveform.samples.last, 0.99);
+      final updatedRecordingPosition = tester.widget<Transform>(
+        find.byKey(const ValueKey('composer-position-transition')),
+      );
+      expect(
+        updatedRecordingPosition.transform.getTranslation().y,
+        recordingPosition.transform.getTranslation().y,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('voice-note-recorder-stop')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('composer-voice-note-remove')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('voice-note-playback-rate')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('voice-note-play-pause-icon-play')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
+      await tester.pump();
+      expect(
+        tester
+            .widget<VoiceNotePlayPauseIcon>(find.byType(VoiceNotePlayPauseIcon))
+            .isPlaying,
+        isTrue,
+      );
+      await tester.pump(const Duration(milliseconds: 160));
+      expect(
+        find.byKey(const ValueKey('voice-note-play-pause-icon-pause')),
+        findsOneWidget,
+      );
+      final composerVoiceNote = tester.widget<Container>(
+        find.byKey(
+          const ValueKey('voice-note-attachment:/tmp/voice-note-test.m4a'),
+        ),
+      );
+      final voiceNoteDecoration =
+          composerVoiceNote.decoration! as BoxDecoration;
+      expect(
+        voiceNoteDecoration.borderRadius,
+        BorderRadius.circular(Radii.dialog + Grid.quarter - Grid.twelve),
+      );
+      final previewComposer = tester.widget<Container>(
+        find.byKey(const ValueKey('composer-surface')),
+      );
+      expect(previewComposer.padding, const EdgeInsets.all(Grid.twelve));
+      final previewComposerDecoration =
+          previewComposer.decoration! as BoxDecoration;
+      final previewOuterRadius =
+          (previewComposerDecoration.borderRadius! as BorderRadius).topLeft.x;
+      final previewInnerRadius =
+          (voiceNoteDecoration.borderRadius! as BorderRadius).topLeft.x;
+      expect(previewOuterRadius - previewInnerRadius, Grid.twelve);
+      final waveformRect = tester.getRect(find.byType(VoiceNoteWaveform));
+      final playRect = tester.getRect(
+        find.byKey(const ValueKey('voice-note-play-pause')),
+      );
+      final removeRect = tester.getRect(
+        find.byKey(const ValueKey('composer-voice-note-remove')),
+      );
+      expect(waveformRect.left - playRect.right, Grid.xxs);
+      expect(removeRect.left - waveformRect.right, Grid.xxs);
+      expect(
+        tester
+            .widget<FractionallySizedBox>(
+              find.byKey(const ValueKey('composer-width-transition')),
+            )
+            .widthFactor,
+        1,
+      );
+      expect(
+        tester
+            .getSize(
+              find.byKey(
+                const ValueKey(
+                  'voice-note-attachment:/tmp/voice-note-test.m4a',
+                ),
+              ),
+            )
+            .width,
+        greaterThan(320),
+      );
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('composer-width-transition')))
+            .width,
+        recordingWidth,
+      );
+      final sendButton = find
+          .ancestor(
+            of: find.byIcon(LucideIcons.arrowUp),
+            matching: find.byType(IconButton),
+          )
+          .hitTestable();
+      await tester.tap(sendButton);
+      await tester.pumpAndSettle();
+
+      expect(
+        uploadService.uploadedRecording?.duration,
+        const Duration(seconds: 3),
+      );
+      expect(
+        sentContent,
+        'Keep this draft\n'
+        '[voice-note-test.mp4](https://relay.example/media/voice-note.mp4)',
+      );
+      expect(
+        sentMediaTags.single,
+        containsAll([
+          'm video/mp4',
+          'duration 3.0',
+          'filename voice-note-test.mp4',
+        ]),
+      );
+    });
+
+    testWidgets('community switch cancels pending voice-note startup', (
+      tester,
+    ) async {
+      final signer = nostr.Keys.generate();
+      final recorder = _DelayedVoiceNoteRecorder();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+          ),
+          voiceNoteRecorderFactory: () => recorder,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsOneWidget);
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://other.example', nsec: signer.nsec);
+      expect(
+        container.read(relayConfigProvider).baseUrl,
+        'https://other.example',
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsNothing);
+      expect(recorder.cancelled, isTrue);
+      recorder.startup.complete();
+      await tester.pumpAndSettle();
+      expect(recorder.started, isFalse);
+      expect(recorder.disposed, isTrue);
+    });
+
+    testWidgets('disables Stop while voice-note startup is pending', (
+      tester,
+    ) async {
+      final recorder = _DelayedVoiceNoteRecorder();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _FakeVoiceNoteUploadService(),
+          voiceNoteRecorderFactory: () => recorder,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+
+      final stop = tester.widget<IconButton>(
+        find.descendant(
+          of: find.byKey(const ValueKey('voice-note-recorder-stop')),
+          matching: find.byType(IconButton),
+        ),
+      );
+      expect(stop.onPressed, isNull);
+      await tester.tap(find.byKey(const ValueKey('voice-note-recorder-stop')));
+      expect(recorder.stopCalled, isFalse);
+
+      recorder.startup.complete();
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<IconButton>(
+              find.descendant(
+                of: find.byKey(const ValueKey('voice-note-recorder-stop')),
+                matching: find.byType(IconButton),
+              ),
+            )
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets(
+      'permission startup survives transient inactive and resumed states',
+      (tester) async {
+        final recorder = _DelayedVoiceNoteRecorder();
+        final lifecycle = _FakeAppLifecycleNotifier();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _FakeVoiceNoteUploadService(),
+            voiceNoteRecorderFactory: () => recorder,
+            appLifecycle: () => lifecycle,
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+          ),
+        );
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Voice note'));
+        await tester.pumpAndSettle();
+
+        lifecycle.setLifecycle(AppLifecycleState.inactive);
+        lifecycle.setLifecycle(AppLifecycleState.resumed);
+        recorder.startup.complete();
+        await tester.pumpAndSettle();
+
+        expect(recorder.started, isTrue);
+        expect(recorder.cancelled, isFalse);
+        expect(
+          find.byKey(const ValueKey('voice-note-recorder')),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('hidden remains a transient lifecycle state', (tester) async {
+      final recorder = _FakeVoiceNoteRecorder();
+      final lifecycle = _FakeAppLifecycleNotifier();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _FakeVoiceNoteUploadService(),
+          voiceNoteRecorderFactory: () => recorder,
+          appLifecycle: () => lifecycle,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+
+      lifecycle.setLifecycle(AppLifecycleState.hidden);
+      await tester.pump();
+
+      expect(recorder.cancelled, isFalse);
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsOneWidget);
+    });
+
+    testWidgets(
+      'paused cancels startup without waiting for its permission result',
+      (tester) async {
+        final recorder = _DelayedVoiceNoteRecorder();
+        final lifecycle = _FakeAppLifecycleNotifier();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _FakeVoiceNoteUploadService(),
+            voiceNoteRecorderFactory: () => recorder,
+            appLifecycle: () => lifecycle,
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+          ),
+        );
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Voice note'));
+        await tester.pumpAndSettle();
+
+        lifecycle.setLifecycle(AppLifecycleState.paused);
+
+        expect(recorder.cancelled, isTrue);
+        recorder.startup.complete();
+        await tester.pumpAndSettle();
+        expect(recorder.started, isFalse);
+        expect(recorder.disposed, isTrue);
+      },
+    );
+
+    for (final lifecycleState in [
+      AppLifecycleState.paused,
+      AppLifecycleState.detached,
+    ]) {
+      testWidgets(
+        '${lifecycleState.name} starts cancellation without a rendered frame',
+        (tester) async {
+          final recorder = _FakeVoiceNoteRecorder();
+          final lifecycle = _FakeAppLifecycleNotifier();
+          await tester.pumpWidget(
+            _buildComposeBar(
+              uploadService: _FakeVoiceNoteUploadService(),
+              voiceNoteRecorderFactory: () => recorder,
+              appLifecycle: () => lifecycle,
+              onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+            ),
+          );
+          await _openAttachmentMenu(tester);
+          await tester.tap(find.text('Voice note'));
+          await tester.pumpAndSettle();
+
+          lifecycle.setLifecycle(lifecycleState);
+
+          expect(recorder.cancelled, isTrue);
+          await tester.pumpAndSettle();
+          expect(recorder.disposed, isTrue);
+          expect(
+            find.byKey(const ValueKey('voice-note-recorder')),
+            findsNothing,
+          );
+        },
+      );
+    }
+
+    testWidgets('voice note rejects an existing attachment like desktop', (
+      tester,
+    ) async {
+      final recorder = _FakeVoiceNoteRecorder();
+      final uploadService = _FakeVoiceNoteUploadService()
+        ..file = XFile('/tmp/extra.txt');
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          voiceNoteRecorderFactory: () => recorder,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Files'));
+      await tester.pumpAndSettle();
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('A voice note must be the only attachment.'),
+        findsOneWidget,
+      );
+      expect(find.text('extra.txt'), findsOneWidget);
+      expect(recorder.started, isFalse);
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsNothing);
+    });
+
+    testWidgets('voice note stays the only attachment like desktop', (
+      tester,
+    ) async {
+      final recorder = _FakeVoiceNoteRecorder();
+      final uploadService = _FakeVoiceNoteUploadService()
+        ..file = XFile('/tmp/extra.txt');
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          voiceNoteRecorderFactory: () => recorder,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('voice-note-recorder-stop')));
+      await tester.pumpAndSettle();
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Files'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('A voice note must be the only attachment.'),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(
+          const ValueKey('voice-note-attachment:/tmp/voice-note-test.m4a'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('extra.txt'), findsNothing);
+    });
+
+    testWidgets(
+      'starting a voice note prevents a failed upload from restoring its draft',
+      (tester) async {
+        final uploadService = _FakeVoiceNoteUploadService()
+          ..pendingVoiceNoteUpload = Completer<BlobDescriptor>();
+        final recorders = [
+          _FakeVoiceNoteRecorder(path: '/tmp/first-voice-note.m4a'),
+          _FakeVoiceNoteRecorder(path: '/tmp/second-voice-note.m4a'),
+        ];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            voiceNoteRecorderFactory: () => recorders.removeAt(0),
+            voiceNotePlayerFactory: _FakeVoiceNotePlayer.new,
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+          ),
+        );
+
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Voice note'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('voice-note-recorder-stop')),
+        );
+        await tester.pumpAndSettle();
+        final sendButton = find
+            .ancestor(
+              of: find.byIcon(LucideIcons.arrowUp),
+              matching: find.byType(IconButton),
+            )
+            .hitTestable();
+        await tester.tap(sendButton);
+        await tester.pump();
+        expect(
+          uploadService.uploadedRecording?.file.path,
+          '/tmp/first-voice-note.m4a',
+        );
+
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Voice note'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('voice-note-recorder')),
+          findsOneWidget,
+        );
+
+        uploadService.pendingVoiceNoteUpload!.completeError(
+          Exception('upload failed'),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-recorder')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(
+            const ValueKey('voice-note-attachment:/tmp/first-voice-note.m4a'),
+          ),
+          findsNothing,
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('voice-note-recorder-stop')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(
+            const ValueKey('voice-note-attachment:/tmp/second-voice-note.m4a'),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('covering the route cancels its active voice-note recorder', (
+      tester,
+    ) async {
+      final recorder = _FakeVoiceNoteRecorder();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _FakeVoiceNoteUploadService(),
+          voiceNoteRecorderFactory: () => recorder,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+
+      final context = tester.element(
+        find.byKey(const ValueKey('voice-note-recorder')),
+      );
+      unawaited(
+        Navigator.of(
+          context,
+        ).push(MaterialPageRoute<void>(builder: (_) => const Scaffold())),
+      );
+      await tester.pumpAndSettle();
+
+      expect(recorder.cancelled, isTrue);
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsNothing);
+    });
+
+    testWidgets('discarding an inline voice note restores the composer', (
+      tester,
+    ) async {
+      final recorder = _FakeVoiceNoteRecorder();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _FakeVoiceNoteUploadService(),
+          voiceNoteRecorderFactory: () => recorder,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('voice-note-recorder-close')));
+      await tester.pump();
+
+      final contentMorph = find.byKey(const ValueKey('composer-content-morph'));
+      expect(
+        find.descendant(
+          of: contentMorph,
+          matching: find.byKey(const ValueKey('composer-voice-note-content')),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: contentMorph,
+          matching: find.byKey(const ValueKey('composer-standard-content')),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: contentMorph,
+          matching: find.byType(SizeTransition),
+        ),
+        findsWidgets,
+      );
+      expect(
+        find.descendant(
+          of: contentMorph,
+          matching: find.byType(SlideTransition),
+        ),
+        findsNothing,
+      );
+      expect(
+        tester.widget<AnimatedSwitcher>(contentMorph).duration,
+        const Duration(milliseconds: 140),
+      );
+      await tester.pumpAndSettle();
+
+      expect(recorder.cancelled, isTrue);
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsNothing);
+      expect(find.byTooltip('Add attachment').hitTestable(), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('composer-voice-note-remove')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('removing a voice note restores keyboard focus', (
+      tester,
+    ) async {
+      final recorder = _FakeVoiceNoteRecorder();
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _FakeVoiceNoteUploadService(),
+          voiceNoteRecorderFactory: () => recorder,
+          focusNode: focusNode,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('voice-note-recorder-stop')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('composer-voice-note-remove')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
     });
   });
 
@@ -3432,6 +5400,29 @@ void main() {
       // [start=6, cursor=10) → "hello " + "@Alice " + " world"
       expect(controller.text, 'hello @Alice  world');
       expect(controller.selection.baseOffset, 13); // after "@Alice "
+    });
+
+    test('updates text and selection in one editor notification', () {
+      final controller = TextEditingController(text: '@ali');
+      controller.selection = const TextSelection.collapsed(offset: 4);
+      var notifications = 0;
+      controller.addListener(() => notifications += 1);
+
+      spliceAndMoveCursor(
+        controller,
+        FocusNode(),
+        start: 0,
+        replacement: '@Alice ',
+      );
+
+      expect(notifications, 1);
+      expect(
+        controller.value,
+        const TextEditingValue(
+          text: '@Alice ',
+          selection: TextSelection.collapsed(offset: 7),
+        ),
+      );
     });
 
     test('replaces #channel query with channel name', () {

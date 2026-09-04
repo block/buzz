@@ -3,11 +3,16 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
+/**
+ * Cmd +/- scales the real root font-size, so every rem in the app — text,
+ * spacing, widths, radii — zooms together. The Font size preference is a
+ * separate, text-only dial layered on top (see `styles/globals/typography.css`).
+ */
+const BASE_FONT_SIZE_PX = 16;
 const DEFAULT_ZOOM_FACTOR = 1;
 const MIN_ZOOM_FACTOR = 0.75;
 const MAX_ZOOM_FACTOR = 1.5;
 const ZOOM_STEP = 0.1;
-const BASE_FONT_SIZE_PX = 16;
 const TEXT_SCALE_STORAGE_KEY = "buzz:text-scale";
 
 type ZoomAction = "increase" | "decrease" | "reset";
@@ -75,14 +80,20 @@ function readStoredZoomFactor() {
   return Math.min(Math.max(parsed, MIN_ZOOM_FACTOR), MAX_ZOOM_FACTOR);
 }
 
+function applyRootZoom(zoomFactor: number) {
+  document.documentElement.style.fontSize =
+    zoomFactor === DEFAULT_ZOOM_FACTOR
+      ? ""
+      : `${BASE_FONT_SIZE_PX * zoomFactor}px`;
+}
+
 function applyTextScale(zoomFactor: number) {
+  applyRootZoom(zoomFactor);
   if (zoomFactor === DEFAULT_ZOOM_FACTOR) {
-    document.documentElement.style.fontSize = "";
     window.localStorage.removeItem(TEXT_SCALE_STORAGE_KEY);
     return;
   }
 
-  document.documentElement.style.fontSize = `${BASE_FONT_SIZE_PX * zoomFactor}px`;
   window.localStorage.setItem(TEXT_SCALE_STORAGE_KEY, String(zoomFactor));
 }
 
@@ -96,7 +107,8 @@ export function useWebviewZoomShortcuts() {
     zoomFactorRef.current = storedZoomFactor;
     applyTextScale(storedZoomFactor);
 
-    // Keep the webview coordinate system stable; only text should scale.
+    // Pin the native webview zoom so the rem root is the only zoom dial and
+    // window/coordinate math stays stable.
     void webview.setZoom(DEFAULT_ZOOM_FACTOR).catch((error) => {
       console.error("Failed to reset webview zoom", error);
     });
@@ -120,9 +132,21 @@ export function useWebviewZoomShortcuts() {
       applyTextScale(nextZoomFactor);
     }
 
+    function handleStorage(event: StorageEvent) {
+      if (event.key !== TEXT_SCALE_STORAGE_KEY && event.key !== null) {
+        return;
+      }
+
+      const storedZoomFactor = readStoredZoomFactor();
+      zoomFactorRef.current = storedZoomFactor;
+      applyRootZoom(storedZoomFactor);
+    }
+
     window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("storage", handleStorage);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("storage", handleStorage);
     };
   }, []);
 }

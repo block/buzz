@@ -6,6 +6,25 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
+## Product Contract
+
+Before planning or reviewing a non-trivial change:
+
+1. Read [VISION.md](VISION.md).
+2. Read the `VISION_*.md` documents relevant to the affected product surface.
+3. Read the applicable guidance in [TESTING.md](TESTING.md) and any
+   package-local `TESTING.md`.
+4. Check that the proposed design advances, or at least does not contradict,
+   that product intent. Call out any intentional tension explicitly.
+
+Implementation describes the product today; the vision documents describe the
+product it is becoming. A locally correct change can still be wrong if it works
+against that direction. Scale validation to the change's risk and exercise the
+real workflow for user-visible or integration behavior when practical; green CI
+and runtime evidence answer different questions.
+
+---
+
 ## Ecosystem
 
 Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
@@ -90,8 +109,9 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 
 ## Quality Gates
 
-Run `just ci` before every PR — it runs `fmt` + `clippy` + desktop lint +
-unit tests + builds. Clippy passing does not mean fmt passes; run both.
+Run `just ci` before every PR — it runs repository-wide formatting, lint,
+and static checks; Rust, Tauri, desktop, and mobile tests; and desktop and web
+builds. Clippy passing does not mean fmt passes; run both.
 
 Run `just test` for integration tests if you touched `buzz-relay`,
 `buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
@@ -100,14 +120,27 @@ Run `just test` for integration tests if you touched `buzz-relay`,
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
 fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
 Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
-commit. **Pre-push hooks** run clippy (workspace + Tauri), desktop TypeScript
-typechecking (`tsc --noEmit`), and fast unit tests in parallel (Rust, desktop
-JS, Tauri Rust, mobile Flutter) — no overlap with pre-commit. Builds are
-CI-only. Run `just fix-all` to auto-fix all formatting in one shot. Run
-`just ci` for the full local gate. Run `just hooks` to
-re-install hooks after env changes. Before agents run Git or hooks, activate the
-repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
-commands to compensate for an unconfigured shell `PATH`.
+commit. **Pre-push hooks** run the repository-wide differential file-size gate,
+clippy (workspace + Tauri), desktop TypeScript typechecking (`tsc --noEmit`),
+and fast unit tests in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter)
+— no overlap with pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix
+all formatting in one shot. Run `just ci` for the full local gate. Run `just
+hooks` to re-install hooks after env changes. Each globbed pre-push lane is
+scoped to the branch's merge-base diff against `origin/main` (`git diff
+origin/main...HEAD`), matching CI's paths-filter — so a lane only fires when this
+branch actually changed a file it covers, never because `origin/main` moved.
+These lanes validate the checked-out HEAD; pushing a non-HEAD ref (explicit
+refspec, `--all`) gets a non-fatal `push-head-scope` warning and relies on CI for
+its path-scoped checks.
+Before agents run Git or hooks, activate the repo's Hermit environment
+(`. ./bin/activate-hermit`) so `./bin` leads `PATH` and the pinned toolchain
+(flutter, dart, lefthook) wins over any Homebrew version; do not
+rewrite hook commands to compensate for an unconfigured shell `PATH`. The
+pre-push hook self-pins regardless: `bin/.lefthookrc` (sourced by the generated
+`.git/hooks/*`) prepends the Hermit `bin/` to `PATH` and pins `LEFTHOOK_BIN`, so
+lane subprocesses resolve the pinned flutter/dart/lefthook even when an
+unactivated shell has Homebrew first. Activating Hermit remains recommended for
+non-hook commands.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
@@ -115,6 +148,91 @@ Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
 - New public API must have doc comments
+
+---
+
+## Review-Proven Rules
+
+These rules distill the recurring findings from the last 25 PRs' review
+threads — 53% of substantive review findings were repeats of the clusters
+below, and reviewed PRs averaged ~5 review rounds. A second, independent
+mining pass over 71 agent-review rooms (303 findings, Aug 18–29) confirmed
+the same clusters and measured how often authors actually fix each class
+once flagged: test-seam binding and unbounded-resource findings were fixed
+**100%** of the time, swallowed-error findings **90%**, stale-state races
+**70%** — these are not style opinions, they are defects authors agree
+with on sight. Apply the rules **before writing code**; each cites the
+PRs where reviewers litigated it.
+
+1. **Every caught failure must leave a durable retry record or propagate.**
+   Never catch-log-and-return-success (opt-out revocation permanently
+   abandoned, PR #6269), never convert a terminal failure into an
+   authoritative success/empty result (cold-history `error` → `success`
+   with `[]`, PR #7013), and never delete the durable journal an operation
+   depends on before its retry has actually succeeded (PR #6269). If a
+   partial failure can orphan committed state (installations, endpoints),
+   schedule its cleanup/renewal durably (PRs #6269, #6996, #7013).
+
+2. **Fence async results by generation; clear derived metadata on every
+   removal path.** A completing in-flight probe or fetch must verify it is
+   still the newest before writing its result (stale login-shell probe
+   recached a false-negative PATH, PR #6904). Provenance/ownership metadata
+   attached to synthetic state must be updated or cleared on *all* paths
+   that remove or refresh that state — typed deletion, toolbar removal,
+   profile/name refresh; enumerate the paths and test each (PR #6956 burned
+   4 rounds on this one class). Backfill and live subscriptions must
+   overlap — a gap between a finite history REQ and the live subscription
+   silently drops events (PR #3995); a retired chunk must not keep a stale
+   scope fence (PR #6996). (PRs #3995, #6904, #6956, #6996)
+
+3. **Regression tests must bind the production seam and be falsifiable.**
+   See "Review-Proven Test Standards" in [TESTING.md](TESTING.md) for the
+   full rule — in short: a guard whose removal doesn't fail any test
+   protects nothing; bind regression tests to the production code path,
+   not test-only helpers. (PRs #6807, #6980, #6996, #7013)
+
+4. **Bound every resource, loop, and process tree.** Cap captured
+   output (unbounded discovery temp files exhausted disk and overran the
+   deadline, PR #6904). Containment failures are errors, not warnings — a
+   tolerated Job Object creation failure or a `setsid` escape leaks whole
+   process trees (PR #6904). Retry/re-subscribe loops need backoff and a
+   terminal state: a persistent failure must not self-amplify into an
+   unbounded refresh loop (PR #6996), and check zero-delay edge cases
+   (`remainingMs()==0` selected the wrong fallback window, PR #6996).
+   (PRs #6904, #6996)
+
+5. **One user action = one atomic persist.** Implementing a single user
+   commit as N independent durable writes leaves torn state on partial
+   failure (theme "Set" as three independent notifier persists, PR #6944;
+   relay-commit vs. local-save recovery gap, PR #6269). Persist one
+   snapshot, or order the writes so every prefix is consistent and the
+   remainder is durably retried per rule 1. (PRs #6269, #6944)
+
+6. **A guard that hides the only recovery affordance is a functional
+   failure.** Before adding a visibility predicate or state fence, ask:
+   if the state it assumes goes wrong, does the user still have a way
+   back? A fence that permanently suppresses "jump to latest" after a
+   bounded correction fails strands the user silently — two reviewers
+   flagged this independently (PR #6807).
+
+7. **Audit assistive semantics on every new visual component.** The
+   agent-review lanes flagged accessibility defects on 44 findings across
+   the Aug 18–29 window — the second-largest cluster — and authors fixed
+   the concrete ones (duplicate VoiceOver stops on native controls,
+   actionable labels owned by two widgets at once, PR #6680; missing or
+   decorative-leaking semantics on new UI, PRs #6611, #6702, #6885, #6905,
+   #6908). New UI ships with: one owner per actionable label, no duplicate
+   screen-reader stops, and explicit semantics for every interactive
+   element. (PRs #6611, #6680, #6702, #6885, #6905, #6908, #6980)
+
+8. **Every input modality is a first-class seam.** Keyboard, pointer, and
+   hotkey paths must not silently diverge: `Shift+Space` treated as plain
+   `Space` because the guard omitted `shiftKey` (PR #6862), keyboard
+   ownership not released on blur, modifier keys dropped on the non-mouse
+   path (PRs #5958, #6793, #6860, #6908, #7006). When adding an input
+   handler, enumerate the modalities that can reach it and test the
+   non-primary ones — that's where the defects were. (PRs #5958, #5972,
+   #6793, #6860, #6862, #6908, #7006)
 
 ---
 
@@ -182,17 +300,20 @@ or invoke with the full path.
 ### Deep Links
 
 `buzz://message?channel=<uuid>&id=<hex>` links reference a specific message
-thread. To read the linked thread:
+thread. Pass the link directly to the CLI:
 
 ```bash
-buzz messages thread --channel <uuid> --event <hex> --format compact
+buzz --format compact messages thread --link '<buzz://message?...>'
 ```
 
-Extract `channel` and `id` from the URL query parameters. The optional
-`thread` parameter (root event ID) can be ignored — `messages thread` resolves
-the full thread from the event ID alone.
+The selected message ID is authoritative: `messages thread` verifies its
+channel and derives its containing root. An optional `thread` parameter is
+accepted only when it matches that derived root. The explicit
+`--channel <uuid> --event <hex>` form remains available.
 
-All reads return sig-stripped JSON arrays; all writes return
+All event reads return normalized JSON arrays. Normal output preserves the seven
+canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
+`created_at`, `tags`, `sig`); all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 
@@ -216,7 +337,9 @@ E2E tests live in `crates/buzz-test-client/tests/`:
 - `e2e_media_extended.rs` — extended media scenarios
 - `e2e_nostr_interop.rs` — Nostr interop (NIP-50 search, NIP-10 threads, NIP-17 gift wraps)
 
-Desktop E2E: `cd desktop && pnpm exec playwright test`
+Desktop E2E: `cd desktop && pnpm test:e2e:smoke` for mock-bridge smoke
+coverage, or `pnpm test:e2e:integration` for relay-backed coverage. These
+scripts build the required E2E bridge before running Playwright.
 
 See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 
@@ -427,11 +550,11 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 
 1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `buzz-core/src/kind.rs`.
 2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403). Always include explicit kind filters.
-3. **`messages search` must include `--kinds`** — an open-ended search (no kinds) hits the relay p-gate and returns 403. Pass at least `--kinds 9,45001,45003` to scope the query.
+3. **`messages search` chooses its own supported kinds** — do not add a `--kinds` option; the current command does not accept one. This differs from raw relay filters, which still need explicit kinds.
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
-6. **Desktop Tauri fmt fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
-7. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
+6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
+7. **`pgschema` omits seed DML and some storage parameters** — Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
 
 ---
 
@@ -455,11 +578,18 @@ are frozen.**
 So for any readable text, reach for rem-based Tailwind tokens, never arbitrary
 px:
 
-- ✅ Stock rem tokens (`text-base`, `text-sm`, `text-xs`, …). **Chat body/author
-  text === `text-base` (16px) — chat is the app's base type size**, and the
-  surrounding timeline elements (timestamps, system rows, code, reactions) are
-  deliberate steps on that same stock ramp.
-- ✅ The `text-2xs` (0.6875rem / 11px) and `text-3xs` (0.5rem / 8px) meta-text
+- ✅ Stock rem tokens (`text-base`, `text-sm`, `text-xs`, …) for general
+  interface text. All of these derive from the virtual typography rem and
+  therefore follow the user's font-size preference and Cmd +/- zoom.
+- ✅ Conversation text uses the named `text-message` token. Its
+  **Smaller / Default / Larger contract is 13 / 14 / 15px** before keyboard
+  zoom. Author names use the same conversation-size step; timestamps, system
+  rows, code, and reactions are deliberate neighboring steps on the shared
+  virtual-rem ramp. Keep those relationships tokenized rather than restoring a
+  fixed 16px chat baseline or hardcoding preference-specific values in
+  components.
+- ✅ The `text-2xs` (0.6875rem / 11px at a 16px virtual rem) and `text-3xs`
+  (0.5rem / 8px at a 16px virtual rem) meta-text
   tokens (in `desktop/tailwind.config.js` under `theme.extend.fontSize`) for the
   sub-`text-xs` ramp — timestamps, count badges, tracking labels, tiny glyphs.
   These replaced the dozens of arbitrary `text-[…rem]` literals that had drifted
@@ -492,27 +622,12 @@ class instances, cached promises) survive across remounts. Every community-scope
 singleton needs a reset function wired into `resetCommunityState()` in
 `desktop/src/features/communities/useCommunityInit.ts`.
 
-Current singletons that are reset on relay boundary changes (same-relay
-reconnects preserve pending avatar verification work):
-- `relayClient.disconnect()` — WebSocket teardown + promise rejection
-- `resetRateLimitGate()` — clears any active rate-limit window from the old relay
-- `clearAllDrafts()` — message draft cache
-- `resetAgentObserverStore()` — agent observer relay store
-- `resetActiveAgentTurnsStore()` — active agent turn timers
-- `resetAgentWorkingSignal()` — agent working indicator signal
-- `resetAvatarProfileSync()` — pending verified-avatar profile writes
-- `resetAvatarPresentations()` — avatar probes, previews, and Retry toasts
-- `resetSidebarRelayConnectionCardState()` — sidebar relay card dismiss state
-- `resetMediaCaches()` — proxy port and relay origin caches
-- `resetVideoPlayerState()` — video player singleton
-- `resetRenderScopedReactionHydration()` — reaction hydration cache
-- `clearSearchHitEventCache()` — search result event cache
-- `clearMarkdownNodeCache()` — markdown parse-node cache
-- `resetLinkPreviewTitleCache()` — link preview title cache (Buzz entity titles come from relay events)
-
-**If you add a new module-level cache, Map, or class instance that holds
-community-scoped data, you must add its reset to `resetCommunityState()`.**
-Failure to do so causes data from the old community to leak into the new one.
+`resetCommunityState()` is the canonical inventory of community-scoped
+singletons. **If you add a new module-level cache, Map, or class instance that
+holds community-scoped data, add its reset there in the same change.** Failure
+to do so causes data from the old community to leak into the new one. Avoid
+duplicating its complete reset list here; the implementation is the source of
+truth.
 
 Key files:
 - `desktop/src/app/App.tsx` — community key, init gate, remount boundary
@@ -537,19 +652,35 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 
 - **NEVER use `StatefulWidget`** — favor Riverpod for state and always use
   `HookConsumerWidget` or `ConsumerWidget` with `flutter_hooks` for local state.
-- **NEVER run `flutter run`, `flutter build`, `flutter clean`, or
-  `flutter upgrade`** — only `flutter test`, `flutter analyze`, and
-  `dart format` are safe for agents to run.
+- Agents may build and run the Flutter app when it materially helps implement,
+  debug, or validate mobile changes. Prefer the smallest relevant command and
+  reuse an already-running simulator/emulator and the app's configured staging
+  or production community when that is sufficient. Do not start or rebuild
+  local relay services unless the task specifically requires relay-side or
+  isolated integration behavior.
+- For iOS runtime validation, prefer `just mobile-dev`; it applies the
+  worktree-specific debug identity and runs `flutter run`. Direct `flutter run`
+  or IDE workflows are also allowed. Use `just mobile-build-android` only when
+  an APK build is relevant to the task.
+- Do not rebuild, reinstall, or relaunch merely for ceremony. Preserve Flutter's
+  incremental build cache and use hot reload/restart where appropriate. Use
+  `flutter clean` only when stale build artifacts are a credible cause. Run
+  `flutter upgrade` only when the task explicitly requires a toolchain change.
+- For user-visible or integration changes, exercise the affected workflow in a
+  real app when practical and report the device/simulator, connected community,
+  and workflow actually tested.
 - **Do NOT use `print()`** — use `debugPrint()` or structured logging.
 - Prefer `context.colors` and `context.textTheme` (via theme extensions)
   over raw `Theme.of(context)` calls.
 - **Keep widgets small and composable.** One public widget per file; push
   private sub-widgets (`_Foo`) into sibling `part` files under a
-  `<page>/` folder rather than growing the page file. Hard ceiling:
-  **1000 lines/file**, enforced by `mobile/scripts/check-file-sizes.mjs` via
-  `just mobile-check` (runs in `just check` + pre-push, mirroring desktop/web).
-  If the guard trips, **split the file — never bump the limit or add an
-  override to slip under it.**
+  `<page>/` folder rather than growing the page file. Mobile's hard ceiling is
+  **1200 lines/file**, enforced with the other surface-specific limits by the
+  repository-level `just file-size-check` gate (`just check`, CI, and every
+  pre-push). If an individual file trips the guard, **split the file — never
+  bump a surface limit or add an override merely to admit that file.**
+  Deliberate repository-wide policy revisions must update the enforced rules,
+  tests, and guidance together.
 - Feature modules must not import from other feature modules — only from
   `shared/`.
 - Use `Grid` tokens for spacing, `Radii` for border radius.
@@ -565,11 +696,15 @@ flutter test
 
 Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).
 
-To run the app locally (starts Docker, relay, iOS simulator automatically):
+To run the app locally with a worktree-specific debug identity and a
+started or reused iOS Simulator:
 
 ```bash
 just mobile-dev
 ```
+
+This runs `flutter run` against the app's configured community; it does not
+start Docker or local relay services.
 
 When run from a git worktree, `just mobile-dev` (and `just
 mobile-build-android`) give the debug build a per-worktree app identifier
@@ -598,3 +733,10 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+### Mention editor contract
+
+Autocomplete inserts a literal full label and a separator, including multi-word
+names. Only autocomplete settlement may move the caret past that separator;
+internal label spaces and deliberate ArrowLeft/click movement must be respected.
+See `docs/mention-editor.md` and `desktop/tests/e2e/mention-spacing.spec.ts`.

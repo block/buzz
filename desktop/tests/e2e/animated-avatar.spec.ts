@@ -326,5 +326,8 @@ test.describe("animated avatar", () => {
     await expect(page.getByTestId("profile-avatar-preview")).toBeVisible({
       timeout: 10_000,
     });
+    await expect(
+      page.getByTestId("profile-avatar-preview-image"),
+    ).toHaveAttribute("src", /^blob:/);
   });
 });

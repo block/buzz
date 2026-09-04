@@ -10,7 +10,7 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
 import androidx.annotation.RequiresApi
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
@@ -77,11 +77,17 @@ internal object AndroidImageProcessor {
     }
 }
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
     private var mediaUploadChannel: MethodChannel? = null
+    private var huddleMediaPlugin: HuddleMediaPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        huddleMediaPlugin = HuddleMediaPlugin(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger,
+        )
 
         mediaUploadChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -101,6 +107,9 @@ class MainActivity : FlutterActivity() {
                     GENERATE_VIDEO_POSTER_METHOD -> {
                         handleGenerateVideoPoster(call.arguments, result)
                     }
+                    PACKAGE_VOICE_NOTE_FOR_UPLOAD_METHOD -> {
+                        handlePackageVoiceNoteForUpload(call.arguments, result)
+                    }
                     REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD -> {
                         result.success(Build.VERSION.SDK_INT <= Build.VERSION_CODES.P)
                     }
@@ -108,6 +117,21 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        huddleMediaPlugin?.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
+    override fun onDestroy() {
+        huddleMediaPlugin?.dispose()
+        huddleMediaPlugin = null
+        super.onDestroy()
     }
 
     private fun handleSanitizeImageForUpload(
@@ -328,6 +352,33 @@ class MainActivity : FlutterActivity() {
         }.start()
     }
 
+    private fun handlePackageVoiceNoteForUpload(
+        arguments: Any?,
+        result: MethodChannel.Result,
+    ) {
+        val sourcePath = arguments as? String ?: run {
+            invalidArguments(result, "Expected source file path as String.")
+            return
+        }
+
+        Thread {
+            try {
+                result.success(
+                    AndroidVoiceNotePackager.packageForUpload(
+                        sourcePath = sourcePath,
+                        cacheDirectory = cacheDir,
+                    ),
+                )
+            } catch (error: Exception) {
+                result.error(
+                    "transcode_failed",
+                    "Unable to assemble voice note for upload.",
+                    error.message,
+                )
+            }
+        }.start()
+    }
+
     private fun invalidArguments(
         result: MethodChannel.Result,
         message: String,
@@ -341,6 +392,7 @@ class MainActivity : FlutterActivity() {
         private const val TRANSCODE_IMAGE_TO_JPEG_METHOD = "transcodeImageToJpeg"
         private const val TRANSCODE_VIDEO_TO_MP4_METHOD = "transcodeVideoToMp4"
         private const val GENERATE_VIDEO_POSTER_METHOD = "generateVideoPoster"
+        private const val PACKAGE_VOICE_NOTE_FOR_UPLOAD_METHOD = "packageVoiceNoteForUpload"
         private const val REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD =
             "requiresLegacyMediaStoragePermission"
     }

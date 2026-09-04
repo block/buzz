@@ -114,7 +114,7 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
     },
   );
 
-  // Open the inbox item and react via the hover action bar's quick reaction.
+  // Open the inbox item and react through Add reaction and the picker.
   const item = page.getByTestId(`home-inbox-item-${replyEvent.id}`);
   await item.click();
   const detail = page.getByTestId("home-inbox-detail");
@@ -152,9 +152,11 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
   }
   expect(actionBarBox.y).toBeGreaterThanOrEqual(selectedMessageBox.y);
 
-  await selectedMessage
-    .getByRole("button", { name: "React with :+1:" })
-    .click();
+  await actionBar.getByRole("button", { name: "Open reactions" }).click();
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker).toBeVisible();
+  await picker.locator("input[type='search']").fill("thumbs up");
+  await picker.getByRole("button", { name: "👍" }).first().click();
 
   // The pill must appear AND persist: the post-toggle refetch replaces the
   // optimistic state with fetched reaction events. Give the refetch time to

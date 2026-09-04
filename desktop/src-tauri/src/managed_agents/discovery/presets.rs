@@ -67,6 +67,7 @@ pub(super) fn preset_catalog_entry(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        effort_canonical_values: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
         max_rounds_env_var: None,
@@ -90,6 +91,15 @@ pub(super) fn preset_catalog_entry(
 }
 
 pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
+    PresetHarness {
+        id: "pi",
+        label: "Pi",
+        command: "pi-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/svkozak/pi-acp",
+        install_hint: "Buzz talks to Pi through the pi-acp adapter. Install Pi with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`, then install the adapter with `npm install -g pi-acp`.",
+        underlying_cli: Some("pi"),
+    },
     PresetHarness {
         id: "devin",
         label: "Devin",
@@ -336,7 +346,7 @@ mod tests {
         let _path_guard = crate::managed_agents::lock_path_mutex();
         let _registry_guard = registry_test_lock();
 
-        let entry = super::super::discover_acp_runtimes_from(None)
+        let entry = super::super::discover_acp_runtimes_from(None, true)
             .into_iter()
             .find(|entry| entry.id == "devin")
             .expect("Devin preset should appear in the runtime catalog");
@@ -345,6 +355,48 @@ mod tests {
         assert_eq!(entry.default_args, vec!["acp"]);
         assert_eq!(entry.install_instructions_url, "https://docs.devin.ai/cli");
         assert_eq!(entry.source, HarnessSource::Preset);
+    }
+
+    #[test]
+    fn pi_preset_uses_zero_arg_adapter_and_reports_missing_component() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "pi")
+            .expect("Pi preset should be present");
+
+        assert_eq!(preset.label, "Pi");
+        assert_eq!(preset.command, "pi-acp");
+        assert!(preset.args.is_empty());
+        assert_eq!(preset.underlying_cli, Some("pi"));
+
+        let available = preset_catalog_entry(preset, |command| match command {
+            "pi-acp" => Some(PathBuf::from("/usr/local/bin/pi-acp")),
+            "pi" => Some(PathBuf::from("/usr/local/bin/pi")),
+            _ => None,
+        });
+        assert_eq!(available.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(available.command.as_deref(), Some("pi-acp"));
+        assert!(available.default_args.is_empty());
+        assert_eq!(
+            available.underlying_cli_path.as_deref(),
+            Some("/usr/local/bin/pi")
+        );
+
+        let adapter_missing = preset_catalog_entry(preset, |command| {
+            (command == "pi").then(|| PathBuf::from("/usr/local/bin/pi"))
+        });
+        assert_eq!(
+            adapter_missing.availability,
+            AcpAvailabilityStatus::AdapterMissing
+        );
+        assert!(adapter_missing.command.is_none());
+        assert!(adapter_missing.default_args.is_empty());
+
+        let not_installed = preset_catalog_entry(preset, |_| None);
+        assert_eq!(
+            not_installed.availability,
+            AcpAvailabilityStatus::NotInstalled
+        );
     }
 
     #[test]

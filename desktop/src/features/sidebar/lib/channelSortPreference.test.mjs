@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  boundChannelSortStore,
   DEFAULT_SORT_MODE,
   DEFAULT_STORE,
+  MAX_CHANNEL_SORT_GROUPS,
   parseChannelSortPayload,
   sectionSortGroupKey,
   sortChannelsForSidebar,
@@ -166,6 +168,25 @@ test("stripOrphanedSectionModes: does not mutate the input store", () => {
   };
   stripOrphanedSectionModes(store, []);
   assert.deepEqual(store.groups, { [sectionSortGroupKey("gone")]: "recent" });
+});
+
+test("boundChannelSortStore caps custom sections while preserving fixed groups", () => {
+  const groups = {
+    channels: "recent",
+    ...Object.fromEntries(
+      Array.from({ length: MAX_CHANNEL_SORT_GROUPS }, (_, index) => [
+        sectionSortGroupKey(String(index)),
+        "alpha",
+      ]),
+    ),
+  };
+
+  const bounded = boundChannelSortStore({ version: 1, groups });
+
+  assert.equal(Object.keys(bounded.groups).length, MAX_CHANNEL_SORT_GROUPS);
+  assert.equal(bounded.groups.channels, "recent");
+  assert.equal(bounded.groups[sectionSortGroupKey("0")], undefined);
+  assert.equal(bounded.groups[sectionSortGroupKey("99")], "alpha");
 });
 
 // ── sortChannelsForSidebar ───────────────────────────────────────────────────

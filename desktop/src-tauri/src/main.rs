@@ -2,6 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    if buzz_lib::print_agent_access_owner_only_probe_if_requested() {
+        return;
+    }
+
     // Before anything else: WebKitGTK reads its rendering environment once at
     // process start, and this is the only point where the process is still
     // single threaded and no GTK object exists yet, which is what makes

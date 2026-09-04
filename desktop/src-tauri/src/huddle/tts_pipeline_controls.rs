@@ -1,14 +1,32 @@
 use super::*;
 
 impl TtsPipeline {
+    pub(crate) fn has_audio_publisher(&self, speaker_pubkey: &str) -> bool {
+        self.broadcasters.contains(speaker_pubkey)
+    }
+
+    pub(crate) fn register_audio_publisher(
+        &self,
+        speaker_pubkey: &str,
+        publisher: TtsAudioPublisher,
+    ) {
+        self.broadcasters.register(
+            speaker_pubkey,
+            publisher,
+            current_speaker_generation(&self.speaker_generations, speaker_pubkey),
+        );
+    }
+
     /// Queue `text` for TTS synthesis and playback.
     ///
     /// Non-blocking. Returns `Err` if the queue is full (bounded at
     /// `TEXT_QUEUE_DEPTH`) — caller may log and discard.
     pub fn speak(&self, text: String) -> Result<(), String> {
+        let floor_epoch = self.human_floor.epoch();
         self.text_tx
             .try_send(QueuedText {
                 generation: self.voice_generation.load(Ordering::Acquire),
+                floor_epoch,
                 route_id: 0,
                 speaker_pubkey: None,
                 speaker_generation: 0,
@@ -28,6 +46,7 @@ impl TtsPipeline {
         TtsTextSender {
             text_tx: self.text_tx.clone(),
             generation: self.voice_generation.load(Ordering::Acquire),
+            human_floor: self.human_floor.clone(),
             speaker_generations: Arc::clone(&self.speaker_generations),
         }
     }
@@ -41,6 +60,7 @@ impl TtsPipeline {
             &self.speaker_cancel,
             speaker_pubkey,
         );
+        self.broadcasters.remove_speaker(speaker_pubkey);
     }
 
     /// Cancel exactly the speaker utterance currently owning playback.
@@ -49,13 +69,20 @@ impl TtsPipeline {
     /// stale Stop click cannot cancel a later utterance that starts after the
     /// observed one drains.
     pub(crate) fn cancel_active_speaker(&self, expected_speaker_pubkey: &str) -> bool {
-        request_active_speaker_cancel(
+        let cancelled = request_active_speaker_cancel(
             &self.speaker_generations,
             &self.active_speaker,
             &self.speaker_cancel,
             &self.playback_probe,
             expected_speaker_pubkey,
-        )
+        );
+        if cancelled {
+            self.broadcasters.cancel_speaker(
+                expected_speaker_pubkey,
+                current_speaker_generation(&self.speaker_generations, expected_speaker_pubkey),
+            );
+        }
+        cancelled
     }
 
     /// Select a bundled Pocket voice for subsequent speech.
@@ -72,6 +99,7 @@ impl TtsPipeline {
             voice,
         );
         if acknowledged.is_some() {
+            self.broadcasters.cancel_all();
             eprintln!("buzz-desktop: tts stage=cancellation reason=voice_switch route_id=0");
         }
         acknowledged
@@ -89,6 +117,7 @@ impl TtsPipeline {
     /// Signal the worker thread to stop.
     pub fn shutdown(&self) {
         eprintln!("buzz-desktop: tts stage=cancellation reason=shutdown route_id=0");
+        self.broadcasters.shutdown();
         self.shutdown.store(true, Ordering::Release);
     }
 

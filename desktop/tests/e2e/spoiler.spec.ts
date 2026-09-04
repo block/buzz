@@ -99,7 +99,9 @@ test("image attachments can be marked and sent as hidden spoilers", async ({
   await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
-  await expect(composer.getByAltText("Attachment cccc")).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Attachment cccc", exact: true }),
+  ).toBeVisible();
 
   // Media spoilers are toggled per-attachment from the lightbox.
   await composer.getByTestId("composer-media-attachment").hover();
@@ -155,7 +157,9 @@ test("text spoiler stays usable while attachment upload is pending", async ({
   );
 
   await expect(
-    page.getByTestId("message-composer").getByAltText("Attachment cccc"),
+    page
+      .getByTestId("message-composer")
+      .getByRole("button", { name: "Attachment cccc", exact: true }),
   ).toBeVisible();
 });
 

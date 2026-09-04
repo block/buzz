@@ -43,7 +43,6 @@ import {
   saveReviewPlaybackPosition,
   setVideoReviewOpen,
 } from "./videoPlayerState";
-
 type VideoReviewReaction = {
   emoji: string;
   emojiUrl?: string;
@@ -55,11 +54,11 @@ type VideoReviewReaction = {
     avatarUrl: string | null;
   }>;
 };
-
 export type VideoReviewComment = {
   id: string;
   author: string;
   avatarUrl?: string | null;
+  isAgent?: boolean;
   body: string;
   createdAt: number;
   time: string;
@@ -67,7 +66,6 @@ export type VideoReviewComment = {
   parentId?: string | null;
   reactions?: VideoReviewReaction[];
 };
-
 export type VideoReviewContext = {
   channelId?: string | null;
   channelName?: string;
@@ -91,7 +89,6 @@ export type VideoReviewContext = {
   rootEventId?: string;
   title?: string;
 };
-
 type VideoPlayerProps = {
   src: string;
   poster?: string;
@@ -108,14 +105,12 @@ type VideoPlayerProps = {
   /** imeta `filename`, used as the save-dialog name. */
   filename?: string;
 };
-
 type TimecodedComment = {
   comment: VideoReviewComment;
   seconds: number | null;
   timecode: string | null;
   text: string;
 };
-
 const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
 const DEFAULT_PLAYBACK_SPEED = 1;
 const INLINE_SPEED_CONTROL_MIN_WIDTH = 220;
@@ -1697,7 +1692,7 @@ function VideoReviewDialog({
               ref={videoAreaRef}
             >
               <div
-                className="relative isolate flex max-h-full min-w-0 max-w-full items-center justify-center"
+                className="video-review-media-surface relative isolate flex max-h-full min-w-0 max-w-full items-center justify-center"
                 style={fittedVideoStyle}
               >
                 <VideoGlow videoRef={videoRef} />
@@ -1764,7 +1759,7 @@ function VideoReviewDialog({
                     visible={!hasVisibleFrame}
                   />
                 </div>
-                <div className="absolute inset-x-2 bottom-2 z-20 sm:inset-x-4 sm:bottom-3">
+                <div className="video-review-controls absolute inset-x-2 bottom-2 z-20 sm:inset-x-4 sm:bottom-3">
                   <div className="relative isolate flex items-center gap-2 rounded-xl px-2 py-1.5">
                     <GlassSurface />
                     <button
@@ -1813,6 +1808,9 @@ function VideoReviewDialog({
                                   avatarUrl={item.comment.avatarUrl ?? null}
                                   className="h-4 w-4 shadow-none"
                                   displayName={item.comment.author}
+                                  shape={
+                                    item.comment.isAgent ? "squircle" : "circle"
+                                  }
                                   size="xs"
                                 />
                               </button>
@@ -2143,6 +2141,7 @@ function VideoReviewCommentBody({
           avatarUrl={item.comment.avatarUrl ?? null}
           className="h-6 w-6 shadow-none"
           displayName={item.comment.author}
+          shape={item.comment.isAgent ? "squircle" : "circle"}
           size="xs"
         />
         <p className="truncate text-sm font-semibold text-foreground">

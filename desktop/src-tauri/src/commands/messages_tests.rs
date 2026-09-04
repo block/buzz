@@ -1,6 +1,13 @@
 use super::*;
 
 #[test]
+fn search_messages_limit_allows_discussion_discovery_page() {
+    assert_eq!(search_messages_limit(None), 20);
+    assert_eq!(search_messages_limit(Some(500)), 500);
+    assert_eq!(search_messages_limit(Some(1_000)), 500);
+}
+
+#[test]
 fn marker_author_scope_validates_scope_and_required_pubkey() {
     assert_eq!(
         marker_author_for_scope(None, Some("agent")),
@@ -164,6 +171,7 @@ fn thread_replies_filter_carries_non_p_gated_kinds_to_clear_the_gate() {
     assert_eq!(filter["#e"], serde_json::json!(["root-hex"]));
     assert_eq!(filter["depth_limit"], serde_json::json!(64));
     assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
+    assert_eq!(filter["include_aux"], serde_json::json!(true));
 }
 
 #[test]
@@ -216,4 +224,55 @@ fn legacy_managed_agent_auth_tag_skips_self_attestation() {
         .expect("self-attestation should be skipped");
 
     assert_eq!(tag, None);
+}
+
+#[test]
+fn provided_thread_ref_validates_and_preserves_root_and_parent() {
+    let root = "11".repeat(32);
+    let parent = "22".repeat(32);
+    let thread_ref = thread_ref::provided_thread_ref(&root, &parent)
+        .expect("valid 64-hex event ids should be accepted");
+    assert_eq!(thread_ref.root_event_id.to_hex(), root);
+    assert_eq!(thread_ref.parent_event_id.to_hex(), parent);
+    assert!(thread_ref::provided_thread_ref("not-hex", &parent).is_err());
+}
+
+/// `FeedItem.category` is a wire contract with the desktop frontend
+/// (`desktop/src/shared/api/types.ts`). The frontend routes notification
+/// sounds, titles, mute-bypass, and inbox labels off these exact strings, so
+/// the serialized form must stay singular `mention` — not the plural section
+/// name `mentions` used by `FeedSections` and the `--types` filter.
+#[test]
+fn feed_item_category_serializes_to_frontend_contract() {
+    let cases = [
+        (FeedItemCategory::Mention, "mention"),
+        (FeedItemCategory::NeedsAction, "needs_action"),
+        (FeedItemCategory::Activity, "activity"),
+        (FeedItemCategory::AgentActivity, "agent_activity"),
+    ];
+    for (category, expected) in cases {
+        let value = serde_json::to_value(category).expect("category should serialize");
+        assert_eq!(value, serde_json::Value::String(expected.to_string()));
+    }
+}
+
+#[test]
+fn feed_item_from_event_carries_singular_mention_category() {
+    let pubkey = Keys::generate().public_key().to_hex();
+    let event = build_managed_agent_channel_message(
+        uuid::Uuid::new_v4(),
+        "hey @you",
+        None,
+        std::slice::from_ref(&pubkey),
+        &[],
+    )
+    .expect("message should build")
+    .sign_with_keys(&Keys::generate())
+    .expect("message should sign");
+
+    let item = feed_item_from_event(&event, FeedItemCategory::Mention);
+    let json = serde_json::to_value(&item).expect("feed item should serialize");
+
+    assert_eq!(json["category"], "mention");
+    assert_eq!(json["id"], event.id.to_hex());
 }

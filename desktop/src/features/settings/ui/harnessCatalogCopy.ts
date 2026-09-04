@@ -27,6 +27,8 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   cursor: "Cursor's coding agent, connected to Buzz through its ACP server.",
   // Source: https://github.com/can1357/oh-my-pi
   omp: "A terminal coding agent with integrated development tools.",
+  // Sources: https://pi.dev/docs/latest, https://github.com/svkozak/pi-acp
+  pi: "A minimal terminal coding harness, connected through the pi-acp adapter.",
   // Source: https://build.x.ai (docs unavailable during research; kept
   // deliberately conservative).
   grok: "xAI's coding agent, connected to Buzz through its ACP entrypoint.",

@@ -30,6 +30,15 @@ val worktreeProps =
     Properties().apply {
         if (worktreePropsFile.isFile) worktreePropsFile.inputStream().use { load(it) }
     }
+// Optional gitignored developer overrides are loaded after the generated
+// worktree values. They are consumed only by the debug build type below, so a
+// long-lived device test build can keep a stable, descriptive local identity
+// without changing release/profile or being overwritten by the worktree script.
+val appOverridesFile = rootProject.file("AppOverrides.properties")
+val appOverrides =
+    Properties().apply {
+        if (appOverridesFile.isFile) appOverridesFile.inputStream().use { load(it) }
+    }
 val worktreeLabel = worktreeProps.getProperty("label")?.takeIf { it.isNotBlank() }
 if (worktreeLabel != null && !worktreeLabel.matches(Regex("""[A-Za-z0-9._-]+"""))) {
     throw GradleException(
@@ -37,12 +46,31 @@ if (worktreeLabel != null && !worktreeLabel.matches(Regex("""[A-Za-z0-9._-]+""")
             "resources), got: " + worktreeLabel,
     )
 }
+val worktreeAppName = worktreeProps.getProperty("appName")?.takeIf { it.isNotBlank() }
+if (worktreeAppName != null && !worktreeAppName.matches(Regex("""[A-Za-z0-9._() \-]+"""))) {
+    throw GradleException(
+        "worktree.properties appName must contain only letters, numbers, spaces, ., _, -, or " +
+            "parentheses, got: " + worktreeAppName,
+    )
+}
 val worktreeIdSuffix =
     worktreeProps.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
-if (worktreeIdSuffix != null && !worktreeIdSuffix.matches(Regex("""\.[a-z][a-z0-9_]*"""))) {
+val debugIdSuffix =
+    appOverrides.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
+        ?: worktreeIdSuffix
+if (debugIdSuffix != null && !debugIdSuffix.matches(Regex("""\.[a-z][a-z0-9_]*"""))) {
     throw GradleException(
-        "worktree.properties applicationIdSuffix must match \\.[a-z][a-z0-9_]*, got: " +
-            worktreeIdSuffix,
+        "debug applicationIdSuffix must match \\.[a-z][a-z0-9_]*, got: " +
+            debugIdSuffix,
+    )
+}
+val debugAppName = appOverrides.getProperty("appName")?.takeIf { it.isNotBlank() }
+if (
+    debugAppName != null &&
+        !debugAppName.matches(Regex("""[A-Za-z0-9][A-Za-z0-9 ._()\-]{0,39}"""))
+) {
+    throw GradleException(
+        "debug appName must be 1-40 resource-safe characters, got: " + debugAppName,
     )
 }
 
@@ -109,11 +137,15 @@ android {
         debug {
             // Only debug builds take the worktree identity; release/profile
             // keep the production applicationId and label.
-            if (worktreeIdSuffix != null) {
-                applicationIdSuffix = worktreeIdSuffix
+            if (debugIdSuffix != null) {
+                applicationIdSuffix = debugIdSuffix
             }
-            if (worktreeLabel != null) {
-                resValue("string", "app_name", "Buzz ($worktreeLabel)")
+            val resolvedAppName =
+                debugAppName
+                    ?: worktreeAppName
+                    ?: worktreeLabel?.let { "Buzz ($it)" }
+            if (resolvedAppName != null) {
+                resValue("string", "app_name", resolvedAppName)
             }
         }
         release {
@@ -125,6 +157,8 @@ android {
 }
 
 dependencies {
+    implementation("androidx.appcompat:appcompat:1.6.1")
+
     testImplementation(kotlin("test"))
 
     androidTestImplementation(kotlin("test"))

@@ -178,7 +178,7 @@ export function useNewMessageRecipients({
           displayName: agent.name,
           avatarUrl: null,
           nip05Handle: null,
-          ownerPubkey: null,
+          ownerPubkey: agent.ownerPubkey,
           isAgent: true,
         },
         { includeSelected: deferredSearchQuery.length > 0 },

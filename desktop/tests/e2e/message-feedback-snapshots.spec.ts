@@ -101,6 +101,10 @@ test("profile hover uses the channel hover surface", async ({ page }) => {
   const profile = page.getByTestId("sidebar-profile-card");
   const channel = page.getByTestId("channel-random");
   await channel.hover();
+  // Wait for the CSS transition to settle before capturing the hover color so
+  // a mid-transition sample does not produce a value the profile card (which
+  // uses the same token) can never match.
+  await waitForAnimations(page);
   const channelHoverColor = await channel.evaluate(
     (element) => getComputedStyle(element).backgroundColor,
   );

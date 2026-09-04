@@ -5,7 +5,7 @@ const Object _sentinel = Object();
 /// Shown when a private-channel add is refused, so a missing Invite action
 /// reads as a rule rather than a bug.
 const privateChannelAddDeniedMessage =
-    'Only channel owners and admins can add people to a private channel.';
+    'Only channel members can add people to a private channel.';
 
 @immutable
 class Channel {
@@ -82,15 +82,17 @@ class Channel {
   bool get isForum => channelType == 'forum';
   bool get isDm => channelType == 'dm';
   bool get isPrivate => visibility == 'private';
+  bool get canJoin => visibility == 'open' && !isArchived && !isMember && !isDm;
 
   /// Whether [selfRole] may add *another* identity here, mirroring the relay's
   /// kind:9000 authority (`validate_admin_event` + `add_member`): DMs never,
-  /// open channels always, private channels owners/admins only. An unknown
-  /// visibility fails closed — the relay is the authority.
+  /// open channels always, private channels for any active member. Elevated
+  /// grants remain reserved for owners/admins. Unknown visibility fails closed.
   bool canAddMembers(String? selfRole) {
     if (isDm) return false;
     if (visibility == 'open') return true;
-    return selfRole == 'owner' || selfRole == 'admin';
+    if (visibility == 'private') return selfRole != null;
+    return false;
   }
 
   bool get isArchived => archivedAt != null;
@@ -140,16 +142,18 @@ class Channel {
   );
 
   Channel copyWith({
+    String? name,
+    String? description,
     Object? lastMessageAt = _sentinel,
     Object? archivedAt = _sentinel,
     int? memberCount,
     bool? isMember,
   }) => Channel(
     id: id,
-    name: name,
+    name: name ?? this.name,
     channelType: channelType,
     visibility: visibility,
-    description: description,
+    description: description ?? this.description,
     topic: topic,
     purpose: purpose,
     createdBy: createdBy,

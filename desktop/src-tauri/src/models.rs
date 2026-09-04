@@ -178,6 +178,22 @@ pub struct ChannelMembersResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Per-item classification of a home feed entry.
+///
+/// This is the wire contract for `FeedItem.category` in the desktop frontend
+/// (`desktop/src/shared/api/types.ts`). It is distinct from the plural
+/// *section* vocabulary (`mentions`, `needs_action`, …) used by
+/// [`FeedSections`] and the `--types` filter: a mention item lives in the
+/// `mentions` section but carries the singular `mention` category.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedItemCategory {
+    Mention,
+    NeedsAction,
+    Activity,
+    AgentActivity,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct FeedItemInfo {
     pub id: String,
@@ -190,7 +206,7 @@ pub struct FeedItemInfo {
     #[serde(default)]
     pub channel_type: Option<String>,
     pub tags: Vec<Vec<String>>,
-    pub category: String,
+    pub category: FeedItemCategory,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -356,6 +372,21 @@ where
 
 fn default_true() -> bool {
     true
+}
+
+/// Response payload for `get_channels`. When the caller supplies a hash that
+/// matches the computed stable hash, `channels` is `None` so the multi-MB
+/// channel list is not serialized across IPC. `last_messages` is always
+/// included — it is cheap and changes frequently (every new message).
+#[derive(Serialize)]
+pub struct GetChannelsPayload {
+    pub hash: String,
+    /// `None` on a not-modified response (hash matched); `Some` with the full
+    /// sorted list otherwise.
+    pub channels: Option<Vec<ChannelInfo>>,
+    /// Map of channel id → ISO-8601 timestamp of its most recent message.
+    /// Empty for channels with no messages.
+    pub last_messages: std::collections::HashMap<String, String>,
 }
 
 // ── Social / Contact list ───────────────────────────────────────────────────

@@ -13,11 +13,14 @@ use crate::{
     events,
     managed_agents::{find_managed_agent_mut, load_managed_agents, ManagedAgentRecord},
     models::{
-        FeedItemInfo, FeedMeta, FeedResponse, FeedSections, SearchResponse,
+        FeedItemCategory, FeedItemInfo, FeedMeta, FeedResponse, FeedSections, SearchResponse,
         SendChannelMessageResponse, ThreadRepliesResponse,
     },
     nostr_convert,
-    relay::{query_relay, submit_event, submit_event_with_keys},
+    relay::{
+        assert_expected_relay_scope, assert_expected_signer, query_relay, submit_event,
+        submit_event_at_created_at, submit_event_with_keys_created_at,
+    },
 };
 
 // ── Reads (pure-nostr) ──────────────────────────────────────────────────────
@@ -135,14 +138,14 @@ pub async fn get_feed(
     let mentions: Vec<FeedItemInfo> = mention_events
         .iter()
         .map(|ev| {
-            let mut item = feed_item_from_event(ev, "mentions");
+            let mut item = feed_item_from_event(ev, FeedItemCategory::Mention);
             apply_link_preview_suppression(&mut item.tags, &item.id, &suppressed_mentions);
             item
         })
         .collect();
     let needs_action: Vec<FeedItemInfo> = approval_events
         .iter()
-        .map(|ev| feed_item_from_event(ev, "needs_action"))
+        .map(|ev| feed_item_from_event(ev, FeedItemCategory::NeedsAction))
         .collect();
 
     let total = (mentions.len() + needs_action.len()) as u64;
@@ -215,7 +218,7 @@ pub async fn search_messages(
     until: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<SearchResponse, String> {
-    let cap = limit.unwrap_or(20).min(100);
+    let cap = search_messages_limit(limit);
     let filter = build_search_messages_filter(
         &q,
         cap,
@@ -229,22 +232,15 @@ pub async fn search_messages(
     Ok(nostr_convert::search_response_from_events(&events))
 }
 
-/// Fetch the full reply subtree under a thread root, server-side.
-///
-/// Unlike the channel timeline (which the desktop assembles from its local
-/// cache by grouping on `e`-root tags), this walks `thread_metadata` on the
-/// relay via `get_thread_replies`, so a thread renders complete even when its
-/// replies fell outside the channel cold-load window. Results are chronological
-/// (oldest first) and are the *replies* under the root (depth >= 1); the root
-/// event itself is NOT returned (the relay query keys on `root_event_id`, and a
-/// root row has no `root_event_id`). Callers already hold the root — it is the
-/// open thread head — so this closes the descendant gap without re-fetching it.
+fn search_messages_limit(limit: Option<u32>) -> u32 {
+    limit.unwrap_or(20).min(500)
+}
+
+/// Fetch the reply subtree and its auxiliary events under a thread root.
 ///
 /// Paging is forward keyset on `(created_at, event_id)`: pass the `next_cursor`
 /// from a previous page back as `cursor` to fetch the next batch. The event-id
-/// tiebreak is required because replies routinely share a `created_at` second;
-/// a timestamp-only cursor would skip every tied reply past the page limit.
-/// `next_cursor` is `Some` only when a full page was returned.
+/// tiebreak prevents same-second replies from being skipped.
 #[tauri::command]
 pub async fn get_thread_replies(
     root_event_id: String,
@@ -268,8 +264,12 @@ pub async fn get_thread_replies(
     // A full page implies there may be more; hand back the last event's
     // composite key as the next cursor (the DB returns replies strictly after
     // it, tiebroken by event_id so same-second replies are not skipped).
-    let next_cursor = if events.len() as u32 >= cap {
-        events.last().map(|ev| crate::models::ThreadCursor {
+    let reply_events: Vec<_> = events
+        .iter()
+        .filter(|event| TIMELINE_KINDS.contains(&(event.kind.as_u16() as u32)))
+        .collect();
+    let next_cursor = if reply_events.len() as u32 >= cap {
+        reply_events.last().map(|ev| crate::models::ThreadCursor {
             created_at: ev.created_at.as_secs() as i64,
             event_id: ev.id.to_hex(),
         })
@@ -288,21 +288,9 @@ pub async fn get_thread_replies(
     })
 }
 
-/// Build the relay `/query` filter for the server-side thread-subtree read.
-///
-/// The relay routes a filter to `get_thread_replies` purely off a single `#e`
-/// (root) tag plus `depth_limit` — kind is NOT part of that routing or the
-/// underlying DB query (it keys on `root_event_id`). Yet `kinds` is still
-/// required here: the bridge runs the p-gate (`p_gated_filters_authorized`) on
-/// every filter *before* routing, and a kindless filter "could match" a p-gated
-/// kind, so the gate demands a `#p` tag we don't send -> HTTP 403
-/// `restricted: p-gated kinds require #p tag`, before the thread query ever
-/// runs. Carrying non-p-gated [`TIMELINE_KINDS`] makes the filter provably
-/// un-p-gated so it clears the gate. `build_channel_messages_before_filter` is
-/// the sibling that already does this, which is why the dense-second channel
-/// pager was never gated and this reader was. Extracted so a unit test can pin
-/// that `kinds` is present (the e2e mock does not model p-gating, so only a
-/// unit test guards this contract).
+/// Build the relay `/query` filter for a thread-subtree read.
+/// `kinds` is required to prove the filter cannot match p-gated events; without
+/// it, relay authorization rejects this otherwise kindless query.
 fn build_thread_replies_filter(
     root_event_id: &str,
     channel_id: Option<&str>,
@@ -317,6 +305,7 @@ fn build_thread_replies_filter(
     // defaults it to a deep-but-bounded value so nested replies aren't dropped.
     filter.insert("depth_limit".to_string(), serde_json::json!(depth_limit));
     filter.insert("limit".to_string(), serde_json::json!(cap));
+    filter.insert("include_aux".to_string(), serde_json::json!(true));
     if let Some(cid) = channel_id {
         filter.insert("#h".to_string(), serde_json::json!([cid]));
     }
@@ -407,74 +396,13 @@ pub async fn get_channel_messages_before(
     })
 }
 
-#[tauri::command]
-pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<String, String> {
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "ids": [event_id],
-            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
-            "limit": 1
-        })],
-    )
-    .await?;
-
-    let ev = events
-        .first()
-        .ok_or_else(|| "event not found".to_string())?;
-    serde_json::to_string(ev).map_err(|e| format!("serialize event: {e}"))
-}
+mod event_batch;
+pub use event_batch::{get_event, get_events};
 
 // ── Writes ──────────────────────────────────────────────────────────────────
 
-/// Fetch a parent event and extract the thread root from its NIP-10 e-tags.
-async fn resolve_thread_ref(
-    parent_event_id: &str,
-    state: &AppState,
-) -> Result<events::ThreadRef, String> {
-    let parent_eid =
-        EventId::from_hex(parent_event_id).map_err(|e| format!("invalid parent event ID: {e}"))?;
-
-    let evs = query_relay(
-        state,
-        &[serde_json::json!({
-            "ids": [parent_event_id],
-            "kinds": [9, 40002, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
-            "limit": 1
-        })],
-    )
-    .await?;
-
-    let parent = evs
-        .first()
-        .ok_or_else(|| "parent event not found".to_string())?;
-
-    // Walk tags looking for NIP-10 root/reply markers.
-    let (mut root, mut reply) = (None, None);
-    for tag in parent.tags.iter() {
-        let s = tag.as_slice();
-        if s.len() >= 4 && s[0] == "e" {
-            match s[3].as_str() {
-                "root" => root = Some(s[1].clone()),
-                "reply" => reply = Some(s[1].clone()),
-                _ => {}
-            }
-        }
-    }
-    let root_hex = root.or(reply);
-
-    let root_eid = match root_hex {
-        Some(hex) if hex != parent_event_id => {
-            EventId::from_hex(&hex).map_err(|e| format!("invalid root event ID: {e}"))?
-        }
-        _ => parent_eid,
-    };
-
-    Ok(events::ThreadRef {
-        root_event_id: root_eid,
-        parent_event_id: parent_eid,
-    })
-}
+mod thread_ref;
+use thread_ref::{resolve_thread_ref, thread_ref};
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -482,12 +410,16 @@ pub async fn send_channel_message(
     channel_id: String,
     content: String,
     parent_event_id: Option<String>,
+    root_event_id: Option<String>,
     media_tags: Option<Vec<Vec<String>>>,
     emoji_tags: Option<Vec<Vec<String>>>,
     mention_tags: Option<Vec<Vec<String>>>,
     link_preview_tags: Option<Vec<Vec<String>>>,
+    sent_from_thread_tag: Option<Vec<String>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -498,8 +430,30 @@ pub async fn send_channel_message(
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
     let link_previews = link_preview_tags.unwrap_or_default();
+    // Resolve the relay AND the signing identity once and use them for every
+    // read and the submission. Callers that captured a tenant scope before an
+    // await (Projects agent sends) pass `expected_relay_url` and
+    // `expected_signer_pubkey`; a mismatch on either means the active
+    // community changed mid-flight and the send must fail closed rather than
+    // publish the captured tenant's content to the new tenant's relay — or
+    // sign it under the new tenant's identity. The relay check alone cannot
+    // catch the latter: relay and keys mutate under separate locks during a
+    // workspace switch, so the keys are snapshotted here, asserted, and that
+    // exact snapshot signs the event and its NIP-98 auth below.
     let relay_base = crate::relay::relay_api_base_url_with_override(&state);
+    assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
+    let signing_keys = state.signing_keys()?;
+    assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &signing_keys.public_key().to_hex(),
+    )?;
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
+    if sent_from_thread_tag.is_some() && kind_num != buzz_core_pkg::kind::KIND_STREAM_MESSAGE {
+        return Err("sent-from-thread provenance requires a stream message".into());
+    }
+    if root_event_id.is_some() && parent_event_id.is_none() {
+        return Err("root_event_id requires parent_event_id".into());
+    }
 
     let mut resolved_root: Option<String> = None;
 
@@ -515,7 +469,14 @@ pub async fn send_channel_message(
             let parent_id = parent_event_id
                 .as_deref()
                 .ok_or("forum comment requires parent_event_id")?;
-            let thread_ref = resolve_thread_ref(parent_id, &state).await?;
+            let thread_ref = thread_ref(
+                parent_id,
+                root_event_id.as_deref(),
+                &state,
+                &relay_base,
+                Some(&signing_keys),
+            )
+            .await?;
             resolved_root = Some(thread_ref.root_event_id.to_hex());
             events::build_forum_comment(
                 channel_uuid,
@@ -529,7 +490,14 @@ pub async fn send_channel_message(
         _ => {
             let thread_ref = match parent_event_id.as_deref() {
                 Some(pid) => {
-                    let tr = resolve_thread_ref(pid, &state).await?;
+                    let tr = thread_ref(
+                        pid,
+                        root_event_id.as_deref(),
+                        &state,
+                        &relay_base,
+                        Some(&signing_keys),
+                    )
+                    .await?;
                     resolved_root = Some(tr.root_event_id.to_hex());
                     Some(tr)
                 }
@@ -544,12 +512,19 @@ pub async fn send_channel_message(
                 &emoji,
                 &mention_refs_only,
                 &link_previews,
+                sent_from_thread_tag.as_deref(),
                 &relay_base,
             )?
         }
     };
 
-    let result = submit_event(builder, &state).await?;
+    // `created_at` is the signed event's own second, not a post-publication
+    // clock read — persisted as an event cursor by the Projects opener.
+    // Submit through the base resolved (and scope-checked) above and the
+    // identity snapshotted (and signer-checked) above — a re-resolve or key
+    // re-read here would reopen the mid-command switch window.
+    let (result, created_at) =
+        submit_event_at_created_at(builder, &state, &relay_base, &signing_keys).await?;
 
     let depth = match (&parent_event_id, &resolved_root) {
         (None, _) => 0,
@@ -563,7 +538,7 @@ pub async fn send_channel_message(
         root_event_id: resolved_root,
         parent_event_id,
         depth,
-        created_at: chrono::Utc::now().timestamp(),
+        created_at,
     })
 }
 
@@ -712,6 +687,7 @@ fn build_managed_agent_channel_message(
         &[],
         &[],
         &[],
+        None,
         &crate::relay::relay_api_base_url(),
         client_tags,
     )
@@ -765,7 +741,18 @@ pub async fn send_managed_agent_channel_message(
     let submission_auth_tag =
         managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
     let thread_ref = match parent_event_id.as_deref() {
-        Some(parent_id) => Some(resolve_thread_ref(parent_id, &state).await?),
+        Some(parent_id) => Some(
+            // Same active-relay resolution as before — this path has no
+            // caller-captured tenant scope (yet), so resolve the override
+            // here and read through it with the active identity.
+            resolve_thread_ref(
+                parent_id,
+                &state,
+                &crate::relay::relay_api_base_url_with_override(&state),
+                None,
+            )
+            .await?,
+        ),
         None => None,
     };
 
@@ -810,15 +797,18 @@ pub async fn send_managed_agent_channel_message(
         &mentions,
         &client_tags,
     )?;
-    let result =
-        submit_event_with_keys(builder, &state, &keys, submission_auth_tag.as_deref()).await?;
+    // Same contract as `send_channel_message`: `created_at` is the signed
+    // event's, not a post-publication clock read.
+    let (result, created_at) =
+        submit_event_with_keys_created_at(builder, &state, &keys, submission_auth_tag.as_deref())
+            .await?;
 
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,
         parent_event_id: parent_event_id.clone(),
         root_event_id: thread_ref.map(|reference| reference.root_event_id.to_hex()),
         depth: if parent_event_id.is_some() { 1 } else { 0 },
-        created_at: chrono::Utc::now().timestamp(),
+        created_at,
     })
 }
 
@@ -890,6 +880,10 @@ pub struct EditMessageInput {
     // tag, so a typo-fix edit never re-wakes existing mentions.
     #[serde(default)]
     mention_pubkeys: Vec<String>,
+    // Full stable mention identity set selected in the edited composer. `None`
+    // means a partial edit that must preserve the existing snapshot; `Some`,
+    // including an empty set, authoritatively replaces it.
+    mention_tags: Option<Vec<Vec<String>>>,
     #[serde(default)]
     suppress_link_previews: bool,
 }
@@ -914,9 +908,12 @@ pub async fn edit_message(
         channel_uuid,
         target_eid,
         trimmed,
-        &input.media_tags,
-        &input.emoji_tags,
-        &mention_refs,
+        events::MessageEditTags {
+            media: &input.media_tags,
+            custom_emoji: &input.emoji_tags,
+            mentions: &mention_refs,
+            mention_refs: input.mention_tags.as_deref(),
+        },
         input.suppress_link_previews,
     )?;
     submit_event(builder, &state).await?;
@@ -954,7 +951,7 @@ fn tags_to_vec(ev: &nostr::Event) -> Vec<Vec<String>> {
     ev.tags.iter().map(|t| t.as_slice().to_vec()).collect()
 }
 
-fn feed_item_from_event(ev: &nostr::Event, category: &str) -> FeedItemInfo {
+fn feed_item_from_event(ev: &nostr::Event, category: FeedItemCategory) -> FeedItemInfo {
     let channel_id = channel_id_from_tags(ev);
     FeedItemInfo {
         id: ev.id.to_hex(),
@@ -966,7 +963,7 @@ fn feed_item_from_event(ev: &nostr::Event, category: &str) -> FeedItemInfo {
         channel_name: String::new(),
         channel_type: None,
         tags: tags_to_vec(ev),
-        category: category.to_string(),
+        category,
     }
 }
 #[cfg(test)]

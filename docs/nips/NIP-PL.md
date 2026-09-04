@@ -264,15 +264,22 @@ This section registers the public last-hop profile served at `https://push.buzz.
 
 ### Registered values and lease mapping
 
-The registered `app_profile` values are `buzz-ios-production` (Apple production APNs environment) and `buzz-ios-sandbox` (Apple sandbox APNs environment). A gateway deployment MUST enable only profiles for which its App Attest application identifier, APNs topic, credentials, and APNs environment are configured consistently. The APNs token registered with the gateway is called the **installation endpoint** and never leaves gateway custody after enrollment.
+The registered `app_profile` value is `buzz-ios-dogfood`. It identifies the
+closed Buzz dogfood application identity, not an APNs transport environment.
+The canonical gateway owns its exact App Attest application identifier, APNs
+topic, certificate-backed connection pool, and APNs environment. Enrollment
+succeeds only when App Attest cryptographically verifies the configured
+application identifier. The gateway MUST NOT accept an APNs topic from a client. The APNs token
+registered with the gateway is called the **installation endpoint** and never
+leaves gateway custody after enrollment.
 
 The opaque string returned as `endpoint_grant` by `POST /v1/delegations` is the **delivery capability**. For this profile, the active lease plaintext's `endpoint` member MUST contain that `endpoint_grant`, not the raw APNs token. `transport` MUST be `apns`, and `app_profile` MUST equal the profile sealed into the grant. Base-protocol endpoint uniqueness, rotation, hashing, and coalescing operate on this opaque lease `endpoint` within an origin. A capability is scoped to one installation, relay signing pubkey, endpoint epoch, generation, and expiry; grants independently issued to different relays are intentionally distinct. The gateway separately enforces global installation-endpoint uniqueness using `(app_profile, SHA-256(token))`. A public-profile relay MUST treat `endpoint` as opaque and MUST NOT parse or transform it.
 
 ### Common HTTP and value rules
 
-All routes below accept only `POST`. Clients MUST send `Content-Type: application/json`; bodies are UTF-8 JSON and MUST be at most 8192 bytes. Every request object is closed: unknown members, duplicate members at any depth, missing or incorrectly typed members, trailing non-whitespace data, or a `v` other than integer `1` are `400 {"error":"invalid_request"}`. Integers are signed JSON integers in the ranges stated below. Unix times are integer seconds. UUIDs use the canonical lowercase hyphenated representation. Relay pubkeys are exactly 64 lowercase hexadecimal characters. APNs endpoints are non-empty, even-length lowercase hexadecimal strings encoding at most 512 bytes. Challenges are exactly 32 bytes encoded as unpadded URL-safe base64. `key_id`, `attestation`, and `assertion` use padded or unpadded standard base64 as accepted by Apple's App Attest API; decoded key ids are exactly 32 bytes, attestations are 1..16384 bytes, and assertions are 1..1024 bytes. An `endpoint_grant`, including its key-id prefix, MUST be at most 4096 bytes.
+All routes below accept only `POST`. Clients MUST send `Content-Type: application/json`; bodies are UTF-8 JSON and MUST be at most 8192 bytes, except `POST /v1/installations`, whose body MUST be at most 23896 bytes. That installation-only ceiling is derived from the maximum permitted base64-encoded 16384-byte App Attest object, the maximum 512-byte APNs endpoint encoded as hex, and 1024 bytes for the remaining closed envelope. A body over its applicable limit is rejected with HTTP `413` before JSON parsing. Every request object is closed: unknown members, duplicate members at any depth, missing or incorrectly typed members, trailing non-whitespace data, or a `v` other than integer `1` are `400 {"error":"invalid_request"}`. Integers are signed JSON integers in the ranges stated below. Unix times are integer seconds. UUIDs use the canonical lowercase hyphenated representation. Relay pubkeys are exactly 64 lowercase hexadecimal characters. APNs endpoints are non-empty, even-length lowercase hexadecimal strings encoding at most 512 bytes. Challenges are exactly 32 bytes encoded as unpadded URL-safe base64. `key_id`, `attestation`, and `assertion` use padded or unpadded standard base64 as accepted by Apple's App Attest API; decoded key ids are exactly 32 bytes, attestations are 1..16384 bytes, and assertions are 1..1024 bytes. An `endpoint_grant`, including its key-id prefix, MUST be at most 4096 bytes.
 
-Successful and error responses are UTF-8 `application/json`. Closed error bodies are `{"error":"invalid_request"}`, `{"error":"invalid_attestation"}`, `{"error":"not_authorized"}`, `{"error":"invalid_auth"}`, `{"error":"invalid_grant"}`, `{"error":"temporarily_unavailable"}`, `{"error":"configuration_fault"}`, or `{"error":"not_ready"}`. Authority/custody/quota rejection MUST NOT reveal whether an installation, delegation, or endpoint exists. In particular, delivery grant/authority/replay/quota failures collapse to `404 invalid_grant`; storage failures use `503 temporarily_unavailable`.
+Handler responses are UTF-8 `application/json`. Closed error bodies are `{"error":"invalid_request"}`, `{"error":"invalid_attestation"}`, `{"error":"not_authorized"}`, `{"error":"invalid_auth"}`, `{"error":"invalid_grant"}`, `{"error":"rate_limited"}`, `{"error":"temporarily_unavailable"}`, `{"error":"configuration_fault"}`, or `{"error":"not_ready"}`. Authority, custody, and quota rejection MUST NOT reveal whether an installation, delegation, or endpoint exists. Delivery grant, authority, and replay failures collapse to `404 invalid_grant`; endpoint quota exhaustion uses `429 rate_limited`; storage failures use `503 temporarily_unavailable`.
 
 ### Exact App Attest transcript construction
 
@@ -296,7 +303,7 @@ Success `200`:
 {"challenge_id":"<uuid>","challenge":"<base64url-no-pad-32-bytes>","expires_at":<unix-seconds>}
 ```
 
-The challenge is single-use. Invalid input is `400 invalid_request`; storage/randomness failure is `503 temporarily_unavailable`.
+The challenge is single-use. Invalid input is `400 invalid_request`; deployment-global challenge issuance limits return `429 rate_limited`; storage/randomness failure is `503 temporarily_unavailable`.
 
 ### Installation enrollment
 
@@ -305,7 +312,7 @@ The challenge is single-use. Invalid input is `400 invalid_request`; storage/ran
 Request members, in any request order:
 
 ```json
-{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","key_id":"<standard-base64>","attestation":"<standard-base64 CBOR>","app_profile":"buzz-ios-production","endpoint":"<lowercase APNs-token hex>","endpoint_epoch":1,"expires_at":<unix-seconds>}
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","key_id":"<standard-base64>","attestation":"<standard-base64 CBOR>","app_profile":"buzz-ios-dogfood","endpoint":"<lowercase APNs-token hex>","endpoint_epoch":1,"expires_at":<unix-seconds>}
 ```
 
 `expires_at` MUST satisfy `now < expires_at <= now + configured_max_installation_lifetime`; the selected profile MUST be enabled. The exact transcript is domain `buzz.push.enroll.v1` followed by this ordered object:
@@ -320,7 +327,9 @@ The gateway verifies Apple's attestation chain, configured application identifie
 {"installation_handle":"<uuid>","endpoint_epoch":1,"expires_at":<unix-seconds>}
 ```
 
-Invalid attestation is `401 invalid_attestation`; a consumed/expired challenge or duplicate key/token is `404 not_authorized`.
+The client MUST durably journal the exact attested enrollment request before its first send and retain it until delegation state is durable. If that exact request is replayed after the installation commit, the gateway MUST return the same success response after re-verifying the attestation, even though the challenge was already consumed. Idempotency requires exact equality of attested key, profile, endpoint fingerprint, epoch, and expiration, and the recovered public key MUST equal the committed key; any mismatch remains indistinguishable from other authority rejection. This recovery rule grants no authority beyond replaying the already authenticated request.
+
+Invalid attestation is `401 invalid_attestation`; a consumed/expired challenge or a key/token owned by a live installation is `404 not_authorized`. A fresh verified enrollment may replace expired or revoked ownership so an app that missed its renewal window can recover.
 
 ### Relay delegation and capability issuance
 
@@ -330,7 +339,7 @@ Invalid attestation is `401 invalid_attestation`; a consumed/expired challenge o
 {"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<positive-integer>,"generation":<positive-integer>,"relay_pubkey":"<64-lowercase-hex>","not_before":<unix-seconds>,"expires_at":<unix-seconds>,"assertion":"<standard-base64 CBOR>"}
 ```
 
-`not_before <= now + 300`, `not_before < expires_at`, and `expires_at <= min(now + configured_max_grant_lifetime, installation.expires_at)`. The endpoint epoch MUST equal the current installation epoch. For each `(installation_handle, relay_pubkey)`, generation MUST strictly increase. Transcript domain `buzz.push.delegate.v1`; ordered object:
+`not_before <= now + 300`, `not_before < expires_at`, and `expires_at <= now + configured_max_grant_lifetime`. The endpoint epoch MUST equal the current installation epoch. For each `(installation_handle, relay_pubkey)`, generation MUST strictly increase. A successful delegation atomically extends the authenticated installation lifetime through at least the delegation's `expires_at`, allowing renewal without duplicate token enrollment. Transcript domain `buzz.push.delegate.v1`; ordered object:
 
 ```json
 {"v":1,"audience":"https://push.buzz.xyz/v1/delegations","challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<integer>,"generation":<integer>,"relay_pubkey":"<hex>","not_before":<integer>,"expires_at":<integer>}
@@ -404,7 +413,8 @@ Responses:
 - `503 {"error":"configuration_fault"}` — provider configuration fault; request reservation released after processing.
 - `400 {"error":"invalid_request"}` — malformed request or permanent APNs request fault; a provider-reached permanent fault is terminal.
 - `401 {"error":"invalid_auth"}` — absent or invalid NIP-98 authorization.
-- `404 {"error":"invalid_grant"}` — capability, signer, authority, replay, expiry, or quota rejection.
+- `404 {"error":"invalid_grant"}` — capability, signer, authority, replay, or expiry rejection.
+- `429 {"error":"rate_limited"}` — endpoint delivery quota exhausted.
 - `503 {"error":"temporarily_unavailable"}` — durable authority/custody/disposition failure.
 
 The gateway performs one APNs request, except that an APNs expired-provider-token response permits one credential refresh and one retry. The application body is always the exact constant registered in the APNs transport profile above; no request or grant field enters it.
@@ -439,4 +449,4 @@ Zombie leases (e.g. `#h` after leaving a channel) are neutralized by match-time 
 - NIP-11 `supported_extensions`: contains `"nip-pl"` pre-numbering; descriptor object `push` as specified in Executor Discovery
 - Classes: `silent`, `default`, `time_sensitive`, `urgent`
 - `h_grammar` values: `"uuid-v4-lowercase"` (initial entry; origins may register additional grammars with this NIP)
-- Public APNs gateway profile: base URL `https://push.buzz.xyz`; app profiles `buzz-ios-production`, `buzz-ios-sandbox`; wire version `1`
+- Public APNs gateway profile: base URL `https://push.buzz.xyz`; app profile `buzz-ios-dogfood`; wire version `1`

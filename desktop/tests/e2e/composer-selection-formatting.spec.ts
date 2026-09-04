@@ -38,6 +38,41 @@ async function selectText(input: Locator, selectedText: string) {
   }, selectedText);
 }
 
+async function doubleClickText(
+  page: Page,
+  input: Locator,
+  selectedText: string,
+) {
+  const point = await input.evaluate((element, text) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const value = node.textContent ?? "";
+      const index = value.indexOf(text);
+      if (index < 0) continue;
+
+      const range = document.createRange();
+      range.setStart(node, index);
+      range.setEnd(node, index + text.length);
+      const rect = range.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    }
+
+    throw new Error(`Could not locate "${text}" for double-click selection`);
+  }, selectedText);
+
+  await page.mouse.dblclick(point.x, point.y);
+  await expect
+    .poll(() => page.evaluate(() => window.getSelection()?.toString()))
+    .toBe(selectedText);
+
+  return point;
+}
+
 async function selectTextRange(
   input: Locator,
   firstText: string,
@@ -619,6 +654,59 @@ test("block formatting preserves a backward native selection", async ({
       }),
     )
     .toBe(true);
+});
+
+test("right-clicking selected composer text hides the selection formatter", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  await input.fill("before selected after");
+  const rightClickPoint = await doubleClickText(page, input, "selected");
+
+  const tray = page.getByTestId("selection-formatting-tray");
+  await expect(tray).toBeVisible();
+
+  await input.evaluate((element) => {
+    (
+      window as Window & {
+        __BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__?: boolean;
+      }
+    ).__BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__ = false;
+    element.addEventListener(
+      "contextmenu",
+      (event) => {
+        (
+          window as Window & {
+            __BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__?: boolean;
+          }
+        ).__BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__ = event.defaultPrevented;
+      },
+      { once: true },
+    );
+  });
+
+  await page.mouse.click(rightClickPoint.x, rightClickPoint.y, {
+    button: "right",
+  });
+
+  await expect(tray).toBeHidden();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__?: boolean;
+            }
+          ).__BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__,
+      ),
+    )
+    .toBe(false);
+
+  await doubleClickText(page, input, "selected");
+  await expect(tray).toBeVisible();
 });
 
 test("Buzz theme uses the primary color for the selection formatter", async ({

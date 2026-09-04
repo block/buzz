@@ -2,7 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { useChannelReferences } from "@/features/channels/openChannelDirectory";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -77,13 +77,27 @@ export function useOpenAgentActivity() {
   const { goChannel } = useAppNavigation();
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data;
-  const channelsQuery = useChannelsQuery();
-  const channels = channelsQuery.data;
+  // Agent metadata and the working-signal snapshot are both finite id sources.
+  // Resolve them by id, never by scanning the all-open directory, so an agent
+  // can link to a readable open channel the viewer has not browsed this session.
+  const activityChannelIds = React.useMemo(
+    () => [
+      ...(relayAgents ?? []).flatMap((agent) => agent.channelIds),
+      ...(relayAgents ?? []).flatMap((agent) =>
+        getAgentWorkingState(agent.pubkey).channels.map(
+          (working) => working.channelId,
+        ),
+      ),
+    ],
+    [relayAgents],
+  );
+  const { channelsById, isReady: areChannelsReady } =
+    useChannelReferences(activityChannelIds);
 
   const findOpenableChannel = React.useCallback(
     (channelId: string): boolean =>
-      isChannelOpenable(channels?.find((entry) => entry.id === channelId)),
-    [channels],
+      isChannelOpenable(channelsById.get(channelId)),
+    [channelsById],
   );
 
   const resolveChannelId = React.useCallback(
@@ -93,7 +107,7 @@ export function useOpenAgentActivity() {
         (agent) => normalizePubkey(agent.pubkey) === key,
       );
       const openableChannelIds = new Set(
-        (channels ?? [])
+        [...channelsById.values()]
           .filter((channel) => isChannelOpenable(channel))
           .map((channel) => channel.id),
       );
@@ -103,7 +117,7 @@ export function useOpenAgentActivity() {
         // Deliberately an unsubscribed snapshot: this callback runs on click
         // (and in canOpenAgentActivity), not in render, so we don't need to
         // recompute when working state changes — its deps are only
-        // [channels, relayAgents]. Worst case the preferred working-channel
+        // [channelsById, relayAgents]. Worst case the preferred working-channel
         // target lags a just-changed signal; the member-channel fallback in
         // resolveOpenableActivityChannelId keeps the destination valid.
         workingChannelIds: getAgentWorkingState(pubkey).channels.map(
@@ -111,7 +125,7 @@ export function useOpenAgentActivity() {
         ),
       });
     },
-    [channels, relayAgents],
+    [channelsById, relayAgents],
   );
 
   const canOpenAgentActivity = React.useCallback(
@@ -127,12 +141,12 @@ export function useOpenAgentActivity() {
       // optimistic until channels resolve so "View activity log" doesn't
       // flicker in on cold start; openAgentActivity still guards the actual
       // navigation.
-      if (channels === undefined) {
+      if (!areChannelsReady) {
         return true;
       }
       return resolveChannelId(pubkey) !== null;
     },
-    [channels, onOpenAgentSession, resolveChannelId],
+    [areChannelsReady, onOpenAgentSession, resolveChannelId],
   );
 
   const openAgentActivity = React.useCallback(
@@ -143,14 +157,17 @@ export function useOpenAgentActivity() {
       // an inaccessible room (in place or via navigation) would expose that
       // room's activity content, so we warn and stop instead.
       if (options?.channelId) {
-        if (!findOpenableChannel(options.channelId)) {
-          toast.warning(INACCESSIBLE_ACTIVITY_MESSAGE);
-          return false;
-        }
         if (!onOpenAgentSession) {
+          if (!findOpenableChannel(options.channelId)) {
+            toast.warning(INACCESSIBLE_ACTIVITY_MESSAGE);
+            return false;
+          }
           void goChannel(options.channelId, { agentSession: pubkey });
           return true;
         }
+        // A channel-scoped AgentSessionProvider belongs to the channel view
+        // already authorized by its route. Do not reject its own current
+        // channel while the member/reference query is still settling.
         onOpenAgentSession(pubkey, options.channelId);
         return true;
       }

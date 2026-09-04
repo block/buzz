@@ -29,40 +29,20 @@ use super::{pipeline::start_auto_enabled_transcription, HuddlePhase};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Voice-mode guidelines posted as kind:48106 (huddle guidelines) to the
-/// ephemeral channel at huddle start. Agents see them via EOSE replay.
-/// Instructs agents on voice-mode etiquette: TTS constraints, brevity,
-/// self-selection, and sentence-at-a-time delivery.
+/// Voice-mode instructions posted as kind:48106 to the ephemeral channel at
+/// huddle start. Agents load this event into the channel session system prompt.
 ///
-/// Why sentence-at-a-time: the desktop speaks each agent message as it
-/// arrives (queued, in order), so an agent that sends its first sentence
-/// immediately — then the rest as separate messages — cuts time-to-first-
-/// audio from "full reply generated" to "first sentence generated". This is
-/// the prompt-level equivalent of token streaming, with no harness changes.
-///
-/// Build voice-mode guidelines with the parent channel ID so agents know
-/// where "the main channel" is.
+/// Keep this deliberately short: the invariant that matters is that a directly
+/// addressed user receives an immediate spoken response before any other work.
 pub fn voice_mode_guidelines(parent_channel_id: &str) -> String {
     format!(
         "\
-You are in a live voice huddle attached to channel {parent_channel_id}.
-Your text is read aloud via TTS, message by message, in the order sent.
-
-Latency matters most: reply IMMEDIATELY — do not compose your full reply
-before sending anything. The moment your first sentence is formed, send it
-as its own `buzz messages send` tool call: it is what breaks the silence.
-Then send each following sentence the same way — one sentence per separate
-`buzz messages send` call. Never hold a finished sentence back to bundle it
-with the next one.
-
-- If not addressed or relevant: do nothing. Do not respond.
-- Keep the whole reply short — a few sentences at most. Start with the answer, no preamble.
-- No markdown, code blocks, lists, or structured data — say it naturally.
-- To share code or detailed data: say \"I'll post that in the main channel\" and do so.
-- When you need a tool, say one short sentence first (e.g. \"Let me check.\"), then run it, then summarize the key finding verbally.
-- If a new human message arrives mid-reply, you were interrupted: drop your unsent sentences and respond to the new message instead.
-- In multi-agent huddles, identify yourself only when needed.
-- Use your Buzz tools proactively when asked."
+You are in a live voice huddle. Its attached main channel is {parent_channel_id}; that is not the live huddle channel.
+The channel UUID in the current `[Context]` block is the live huddle channel. Only messages sent with `buzz messages send` to that current Context channel are spoken aloud, in the order sent; everything else you produce is silent.
+When a user addresses you, your FIRST tool call must send a brief spoken reply to the current Context channel, before any file read, search, or other tool call. The usual rule against bare acknowledgments does not apply here; the pickup is the feedback that you heard them.
+Then work, sending each useful sentence as its own message the moment it is ready—a few sentences per answer, not a monologue.
+Speak plainly without markdown; post code or long detail to the attached main channel instead.
+If you are not addressed, stay silent."
     )
 }
 
@@ -317,7 +297,20 @@ fn contains_member(members: &[(String, Option<String>)], pubkey: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::contains_member;
+    use super::{contains_member, voice_mode_guidelines};
+
+    #[test]
+    fn voice_mode_guidelines_pin_spoken_reply_as_first_tool_call() {
+        let guidelines = voice_mode_guidelines("parent-channel");
+        assert_eq!(guidelines.lines().count(), 6);
+        assert!(guidelines.contains("Its attached main channel is parent-channel"));
+        assert!(guidelines.contains("that is not the live huddle channel"));
+        assert!(guidelines.contains("current `[Context]` block is the live huddle channel"));
+        assert!(guidelines.contains("buzz messages send` to that current Context channel"));
+        assert!(guidelines.contains("your FIRST tool call must send a brief spoken reply"));
+        assert!(guidelines.contains("before any file read, search, or other tool call"));
+        assert!(guidelines.contains("rule against bare acknowledgments does not apply here"));
+    }
 
     #[test]
     fn existing_parent_membership_is_preserved_regardless_of_role() {

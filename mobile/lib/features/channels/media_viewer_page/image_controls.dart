@@ -259,6 +259,34 @@ class _MediaViewerCircleButton extends StatelessWidget {
   }
 }
 
+class _MediaViewerCloseButton extends StatelessWidget {
+  const _MediaViewerCloseButton({
+    super.key,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (Theme.of(context).platform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        icon: IosGlassNavigationIcon.close,
+        semanticLabel: tooltip,
+        onPressed: onPressed,
+        foregroundColor: Colors.white,
+      );
+    }
+    return _MediaViewerCircleButton(
+      icon: LucideIcons.x,
+      tooltip: tooltip,
+      onPressed: onPressed,
+    );
+  }
+}
+
 Size _imageViewerSize(Size viewport, double? aspectRatio) {
   if (aspectRatio == null || aspectRatio <= 0) {
     return viewport;

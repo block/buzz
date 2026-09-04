@@ -47,6 +47,7 @@ fn disabled_is_the_only_intentional_runtime_no_op() {
 
 #[test]
 fn assistant_text_truncation_is_unicode_safe_before_voice_routing() {
+    assert_eq!(MAX_TTS_TEXT_LEN, 8_096);
     let input = "🦀".repeat(MAX_TTS_TEXT_LEN + 1);
     let output = normalize_agent_tts_text(input);
     assert_eq!(

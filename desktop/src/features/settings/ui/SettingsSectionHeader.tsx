@@ -19,7 +19,11 @@ export function SettingsSectionHeader({
     <PageHeader
       action={action}
       className="mb-12"
-      description={description}
+      description={
+        <span data-settings-subcopy className="text-muted-foreground/70">
+          {description}
+        </span>
+      }
       title={title}
     />
   );

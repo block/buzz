@@ -4,9 +4,8 @@
  *
  * - DMs: nobody — membership is fixed at creation.
  * - Open channels: anyone, member or not.
- * - Private channels: owners/admins only. A plain member extending access to
- *   channel history is exactly what the relay now rejects, so the affordance
- *   must not be offered.
+ * - Private channels: any active member. The relay separately reserves elevated
+ *   role grants and active-role changes for owners/admins.
  *
  * Unknown visibility fails closed — the relay is the authority and a hidden
  * button is cheaper than an opaque rejection.
@@ -28,9 +27,13 @@ export function canAddChannelMembers({
     return true;
   }
 
-  return selfRole === "owner" || selfRole === "admin";
+  if (visibility === "private") {
+    return selfRole != null;
+  }
+
+  return false;
 }
 
 /** Explains a denied add so the user isn't left guessing at a missing button. */
 export const PRIVATE_CHANNEL_ADD_DENIED_MESSAGE =
-  "Only channel owners and admins can add people to a private channel.";
+  "Only channel members can add people to a private channel.";

@@ -51,7 +51,7 @@ pub async fn set_huddle_transcription_enabled(
             (ephemeral_channel_id, None)
         } else {
             hs.invalidate_transcription_pipeline();
-            (ephemeral_channel_id, hs.stt_pipeline.take())
+            (ephemeral_channel_id, hs.take_stt_pipeline())
         }
     };
 

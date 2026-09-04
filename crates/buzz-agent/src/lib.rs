@@ -8,10 +8,14 @@ mod handoff;
 mod hints;
 mod llm;
 mod mcp;
+pub mod model_capabilities;
+mod permission;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
+pub use catalog::{
+    discover_databricks_models, discover_databricks_models_with_cache_dir, ModelEntry,
+};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -31,6 +35,7 @@ pub const WINDOWS_SHELL_RESOLUTION_ENV: &[&str] = &[
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -53,6 +58,17 @@ struct App {
     cfg: Config,
     llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
+    /// ACP protocol version negotiated at `initialize`, stored for the whole
+    /// connection lifetime. The `session/request_permission` wire shape derives
+    /// from this value — never from a later mutable session field — so a strict
+    /// client always receives exactly the shape it negotiated. Defaults to
+    /// [`PROTOCOL_VERSION`] before `initialize`; no prompt (and thus no
+    /// permission ask) can run before then.
+    negotiated_version: AtomicU32,
+    /// Owns the entire `session/request_permission` correlation lifecycle:
+    /// process-wide admission, id allocation, response delivery, and abort-safe
+    /// cleanup. See [`permission::PermissionBroker`].
+    permissions: Arc<permission::PermissionBroker>,
     /// Cached model catalog for Databricks providers. Populated lazily on the
     /// first successful `session/new` discovery call. Failed discovery is never
     /// cached: static-token authentication errors reject session creation, while
@@ -97,14 +113,26 @@ struct Session {
     /// Session-cumulative input tokens across all turns. Sent in the
     /// `_goose/unstable/session/update` usage notification so buzz-acp's
     /// `UsageTracker` can compute per-turn deltas symmetrically with goose.
-    accumulated_input_tokens: u64,
+    /// `TurnIOState`: `Unseen` before any turn reports; `Exact(n)` while running;
+    /// `Poisoned` if any turn's sum overflowed — permanently poisons the session.
+    accumulated_input_tokens: crate::types::TurnIOState,
     /// Session-cumulative output tokens across all turns.
-    accumulated_output_tokens: u64,
+    /// Same `Unseen`/`Exact(n)`/`Poisoned` contract as `accumulated_input_tokens`.
+    accumulated_output_tokens: crate::types::TurnIOState,
     /// Session-cumulative cache-served input tokens across all turns — a subset
-    /// of `accumulated_input_tokens`, not an addition to it. Emitted alongside
-    /// it so a consumer can price the cached slice at the provider's discounted
-    /// rate instead of assuming every input token cost full price.
-    accumulated_cached_input_tokens: u64,
+    /// of `accumulated_input_tokens`, not an addition to it. Tri-state:
+    ///
+    /// - `Unseen`: no turn has ever reported this category.
+    /// - `Exact(n)`: every usage-bearing response in every turn reported this
+    ///   category; `n` is the cumulative sum.
+    /// - `Unknown`: at least one usage-bearing response ever omitted the
+    ///   category — permanently poisoned for this session.
+    accumulated_cached_input_tokens: crate::types::CacheTotalState,
+    /// Session-cumulative cache-written input tokens across all turns — also a
+    /// subset of `accumulated_input_tokens`, not an addition to it.
+    /// Same `Unseen`/`Exact`/`Unknown` tri-state contract as
+    /// `accumulated_cached_input_tokens`.
+    accumulated_cache_write_tokens: crate::types::CacheTotalState,
     /// Session-cumulative total-token state across all turns.
     ///
     /// Mirrors the per-turn `TurnTotalState` tri-state: starts `Unseen`,
@@ -135,10 +163,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Authenticate to Databricks and store credentials under an optional explicit
+/// cache root. `None` preserves buzz-agent's production cache location.
+pub async fn authenticate_databricks_with_cache_dir(
+    host: &str,
+    cache_dir: Option<&std::path::Path>,
+) -> Result<(), AgentError> {
+    auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(
+        host,
+        cache_dir.map(std::path::Path::to_path_buf),
+    ))?
+    .interactive_login()
+    .await
+}
+
 pub async fn authenticate_databricks(host: &str) -> Result<(), AgentError> {
-    auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(host))?
-        .interactive_login()
-        .await
+    authenticate_databricks_with_cache_dir(host, None).await
 }
 
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a
@@ -168,28 +208,53 @@ async fn async_main() {
     let cfg = Config::from_env().unwrap_or_else(|e| die(e));
     let llm = Arc::new(Llm::new(&cfg).unwrap_or_else(|e| die(e.to_string())));
     let max_line = cfg.max_line_bytes;
+    let permissions = Arc::new(permission::PermissionBroker::new(
+        cfg.max_pending_permissions,
+        cfg.permission_timeout,
+    ));
     let app = Arc::new(App {
         cfg,
         llm,
         sessions: Mutex::new(HashMap::new()),
+        negotiated_version: AtomicU32::new(PROTOCOL_VERSION),
+        permissions,
         models_cache: tokio::sync::OnceCell::new(),
     });
     let (wire_tx, wire_rx) = mpsc::channel::<WireMsg>(64);
-    let writer = tokio::spawn(wire::writer_task(wire_rx));
-    if let Err(e) = read_loop(
-        BufReader::new(tokio::io::stdin()),
-        app.clone(),
-        wire_tx,
-        max_line,
-    )
-    .await
-    {
-        tracing::error!("io: reader: {e}");
+    let mut writer = tokio::spawn(wire::writer_task(wire_rx));
+    // Whichever ends first drives shutdown. The reader ending is the normal
+    // path (stdin EOF/error). The writer ending while the reader still runs
+    // means stdout is closed/broken: no reply can ever be written, so we must
+    // stop reading and cancel every session rather than leave the process
+    // reading input while outstanding permission asks wait out their full
+    // deadline for a response that can never arrive.
+    tokio::select! {
+        r = read_loop(
+            BufReader::new(tokio::io::stdin()),
+            app.clone(),
+            wire_tx,
+            max_line,
+        ) => {
+            if let Err(e) = r {
+                tracing::error!("io: reader: {e}");
+            }
+            cancel_all_sessions(&app).await;
+            let _ = writer.await;
+        }
+        _ = &mut writer => {
+            tracing::error!("io: writer exited (stdout closed); shutting down connection");
+            cancel_all_sessions(&app).await;
+        }
     }
+}
+
+/// Signal every live session to cancel. Run on connection teardown so in-flight
+/// prompts — including any waiting on a `session/request_permission` response —
+/// resolve promptly instead of waiting out their deadline.
+async fn cancel_all_sessions(app: &Arc<App>) {
     for session in app.sessions.lock().await.values() {
         let _ = session.cancel_tx.send(true);
     }
-    let _ = writer.await;
 }
 
 async fn read_loop<R: tokio::io::AsyncBufRead + Unpin>(
@@ -222,7 +287,10 @@ async fn dispatch(app: &Arc<App>, msg: Value, wire_tx: &WireSender) {
             handle_request(app, id, method, params, wire_tx).await
         }
         Inbound::Notification { method, params } => handle_notification(app, &method, params).await,
-        Inbound::Ignored => {}
+        // Client's answer to a `session/request_permission` we issued. The
+        // broker matches it to a live correlation id (waking that waiter) or
+        // ignores an unknown/late id.
+        Inbound::Response { id, result } => app.permissions.deliver(&id, result),
         Inbound::Invalid { id, code, message } => {
             wire::send(wire_tx, wire::err(id, code, &message)).await
         }
@@ -237,7 +305,7 @@ async fn handle_request(
     wire_tx: &WireSender,
 ) {
     match method.as_str() {
-        "initialize" => initialize(id, params, wire_tx).await,
+        "initialize" => initialize(app, id, params, wire_tx).await,
         "session/new" => {
             let app = app.clone();
             let wire_tx = wire_tx.clone();
@@ -278,7 +346,7 @@ async fn handle_notification(app: &Arc<App>, method: &str, params: Value) {
     }
 }
 
-async fn initialize(id: Value, params: Value, wire_tx: &WireSender) {
+async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
     let p: InitializeParams = match decode(params, "initialize") {
         Ok(p) => p,
         Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
@@ -290,6 +358,12 @@ async fn initialize(id: Value, params: Value, wire_tx: &WireSender) {
     // RFD. Revisit when that RFD merges; otherwise a genuine upstream-v2 agent
     // would silently lose `[Base]`.
     let negotiated_version = p.protocol_version.min(PROTOCOL_VERSION);
+    // Store the negotiated version for the connection lifetime: the
+    // `session/request_permission` wire shape derives from this value, never
+    // from a later mutable session field, so a strict client always receives
+    // exactly the shape it negotiated at `initialize`.
+    app.negotiated_version
+        .store(negotiated_version, Ordering::Relaxed);
     wire::send(
         wire_tx,
         wire::ok(
@@ -308,13 +382,17 @@ async fn initialize(id: Value, params: Value, wire_tx: &WireSender) {
     .await;
 }
 
-/// Resolve the Databricks model catalog for one `session/new` call.
+/// Resolve a Databricks model catalog for one `session/new` call.
 ///
-/// Tries to use a previously-cached successful discovery result. If the cache is empty,
-/// runs `discover` and — on success — populates the cache for future calls. On failure
-/// the error is returned and the cell is intentionally left empty so the next session retries.
+/// The active filter is part of the result's authority: discovery failure may
+/// not fall back to a configured model when it is present, because that would
+/// bypass the same restriction applied to a successful catalog.
 ///
-/// Extracted from `session_new` so that tests can drive this path with an injected
+/// Tries to use a previously cached successful discovery result. If the cache
+/// is empty, runs `discover` and — on success — populates the cache. On failure
+/// the error is returned and the cell remains empty so the next session retries.
+///
+/// Extracted from `session_new` so tests can drive this path with an injected
 /// discovery future without requiring a full `App` / transport stack.
 async fn resolve_models_catalog(
     cache: &tokio::sync::OnceCell<Vec<ModelEntry>>,
@@ -323,16 +401,30 @@ async fn resolve_models_catalog(
     cache.get_or_try_init(|| discover).await.cloned()
 }
 
-/// Return the configured model as a one-entry catalog for this response.
+/// Return the configured model as an unfiltered discovery fallback.
 ///
 /// This value is never written to `models_cache`; failed discovery must be retried by
 /// the next session rather than pinning degraded state for the process lifetime.
+///
+/// Only reached from the Databricks provider arm below, so the curated label is
+/// looked up from the Databricks manifest; `id` stays the raw configured value.
 fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
     let model = model.trim().to_string();
-    vec![ModelEntry {
-        id: model.clone(),
-        name: model,
-    }]
+    let name = crate::model_capabilities::databricks_registry_label(&model)
+        .unwrap_or(&model)
+        .to_string();
+    vec![ModelEntry { id: model, name }]
+}
+
+/// A discovery failure may use the configured model only when no visibility
+/// filter is active. Returning that model under an active filter would silently
+/// bypass the operator's authoritative catalog restriction.
+fn discovery_error_fallback(cfg: &Config) -> Vec<ModelEntry> {
+    if cfg.databricks_model_filter.is_some() {
+        Vec::new()
+    } else {
+        configured_model_fallback(&cfg.model)
+    }
 }
 
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
@@ -419,16 +511,18 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                     Err(error @ AgentError::LlmAuth(_)) => {
                         tracing::warn!(
                             error = %error,
-                            "Databricks OAuth model catalog unavailable; using configured model"
+                            filter_active = app.cfg.databricks_model_filter.is_some(),
+                            "Databricks OAuth model catalog unavailable; using filter-aware fallback"
                         );
-                        configured_model_fallback(&app.cfg.model)
+                        discovery_error_fallback(&app.cfg)
                     }
                     Err(error) => {
                         tracing::warn!(
                             error = %error,
-                            "Databricks model catalog unavailable; using configured model"
+                            filter_active = app.cfg.databricks_model_filter.is_some(),
+                            "Databricks model catalog unavailable; using filter-aware fallback"
                         );
-                        configured_model_fallback(&app.cfg.model)
+                        discovery_error_fallback(&app.cfg)
                     }
                 };
                 models
@@ -477,9 +571,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             last_request_history_bytes: None,
             effective_system_prompt,
             effective_model: None,
-            accumulated_input_tokens: 0,
-            accumulated_output_tokens: 0,
-            accumulated_cached_input_tokens: 0,
+            accumulated_input_tokens: crate::types::TurnIOState::Unseen,
+            accumulated_output_tokens: crate::types::TurnIOState::Unseen,
+            accumulated_cached_input_tokens: crate::types::CacheTotalState::Unseen,
+            accumulated_cache_write_tokens: crate::types::CacheTotalState::Unseen,
             accumulated_total_state: crate::types::TurnTotalState::Unseen,
         },
     );
@@ -696,10 +791,20 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let effective_model_str = effective_model_override
         .as_deref()
         .unwrap_or(&app.cfg.model);
-    let mut turn_input_tokens: Option<u64> = None;
-    let mut turn_output_tokens: Option<u64> = None;
-    let mut turn_cached_input_tokens: Option<u64> = None;
+    let mut turn_input_tokens: crate::types::TurnIOState = crate::types::TurnIOState::Unseen;
+    let mut turn_output_tokens: crate::types::TurnIOState = crate::types::TurnIOState::Unseen;
+    let mut turn_cached_input_tokens: crate::types::CacheTotalState =
+        crate::types::CacheTotalState::Unseen;
+    let mut turn_cache_write_tokens: crate::types::CacheTotalState =
+        crate::types::CacheTotalState::Unseen;
     let mut turn_total_state = crate::types::TurnTotalState::Unseen;
+    // Per-turn billing identity accumulator — three-state:
+    //   None          = no usage-bearing response seen yet (initial)
+    //   Some(Some(pi))= all usage-bearing responses carry the same proven identity
+    //   Some(None)    = poisoned (mixed identities, unproven response, etc.)
+    // Not stored in Session (not session-cumulative); used only for the final
+    // end-of-turn wire emission.
+    let mut turn_pricing_identity: Option<Option<crate::types::PricingIdentity>> = None;
     let mut ctx = RunCtx {
         cfg: &app.cfg,
         effective_model: effective_model_str,
@@ -707,6 +812,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         system_prompt: &effective_system_prompt,
         llm: &app.llm,
         mcp: &mcp,
+        permissions: &app.permissions,
+        protocol_version: app.negotiated_version.load(Ordering::Relaxed),
         skills: &skills,
         wire: &wire_tx,
         cancel: &mut cancel_rx,
@@ -720,7 +827,9 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         turn_input_tokens: &mut turn_input_tokens,
         turn_output_tokens: &mut turn_output_tokens,
         turn_cached_input_tokens: &mut turn_cached_input_tokens,
+        turn_cache_write_tokens: &mut turn_cache_write_tokens,
         turn_total_state: &mut turn_total_state,
+        turn_pricing_identity: &mut turn_pricing_identity,
         usage_baseline,
     };
     let result = ctx.run(p.prompt).await;
@@ -744,19 +853,29 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     // Only emit when at least one token count was observed — a turn with no
     // provider response (validation failure, pre-response cancellation) carries
     // no information and must not produce a kind 44200 record per NIP-AM.
-    if turn_input_tokens.is_some() || turn_output_tokens.is_some() {
+    if !matches!(turn_input_tokens, crate::types::TurnIOState::Unseen)
+        || !matches!(turn_output_tokens, crate::types::TurnIOState::Unseen)
+    {
         let accumulated = {
             let mut sessions = app.sessions.lock().await;
             if let Some(s) = sessions.get_mut(&sid) {
-                s.accumulated_input_tokens = s
-                    .accumulated_input_tokens
-                    .saturating_add(turn_input_tokens.unwrap_or(0));
+                // merge_session: Poisoned poisons permanently; Exact sums with
+                // overflow-check → Poisoned on wrap; Unseen leaves unchanged.
+                s.accumulated_input_tokens =
+                    s.accumulated_input_tokens.merge_session(turn_input_tokens);
                 s.accumulated_output_tokens = s
                     .accumulated_output_tokens
-                    .saturating_add(turn_output_tokens.unwrap_or(0));
+                    .merge_session(turn_output_tokens);
+                // D1 tri-state merge: merge_session propagates Unknown when
+                // the turn was poisoned (any usage-bearing round omitted the
+                // category), and is a no-op when the turn was Unseen (no
+                // usage-bearing response at all).
                 s.accumulated_cached_input_tokens = s
                     .accumulated_cached_input_tokens
-                    .saturating_add(turn_cached_input_tokens.unwrap_or(0));
+                    .merge_session(turn_cached_input_tokens);
+                s.accumulated_cache_write_tokens = s
+                    .accumulated_cache_write_tokens
+                    .merge_session(turn_cache_write_tokens);
                 // Fold the per-turn total state into the session cumulative.
                 // Unknown poisons the session permanently; Exact adds to running sum;
                 // Unseen (turn emitted no usage) leaves the cumulative unchanged.
@@ -768,6 +887,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                     s.accumulated_input_tokens,
                     s.accumulated_output_tokens,
                     s.accumulated_cached_input_tokens,
+                    s.accumulated_cache_write_tokens,
                     s.accumulated_total_state,
                 ))
             } else {
@@ -776,18 +896,28 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                 None
             }
         };
-        if let Some((accumulated_in, accumulated_out, accumulated_cached, accumulated_total)) =
-            accumulated
+        if let Some((
+            accumulated_in,
+            accumulated_out,
+            accumulated_cached,
+            accumulated_written,
+            accumulated_total,
+        )) = accumulated
         {
             // Same builder the run loop uses for its per-round reports, so the
             // final notification is shape-identical to the ones that preceded
             // it and a consumer taking the high-water mark lands on this one.
             let update = wire::usage_update_payload(
-                accumulated_in,
-                accumulated_out,
-                accumulated_cached,
+                accumulated_in.exact_value(),
+                accumulated_out.exact_value(),
+                accumulated_cached.exact_value(),
+                accumulated_written.exact_value(),
                 accumulated_total,
                 effective_model_str,
+                // Pass the proven per-turn identity if consistent; absent otherwise.
+                turn_pricing_identity
+                    .as_ref()
+                    .and_then(|inner| inner.as_ref()),
             );
             wire::send(&wire_tx, goose_session_update(&sid, update)).await;
         }
@@ -874,6 +1004,7 @@ async fn acquire_session(
             input_tokens: s.accumulated_input_tokens,
             output_tokens: s.accumulated_output_tokens,
             cached_input_tokens: s.accumulated_cached_input_tokens,
+            cache_write_tokens: s.accumulated_cache_write_tokens,
             total_state: s.accumulated_total_state,
         },
     ))
@@ -963,11 +1094,25 @@ mod tests {
 
     #[test]
     fn configured_model_fallback_is_trimmed_and_singular() {
+        // Unknown id: trimmed, and the raw id passes through as the name.
         assert_eq!(
             crate::configured_model_fallback("  configured-model  "),
             vec![ModelEntry {
                 id: "configured-model".into(),
                 name: "configured-model".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_model_fallback_curates_known_databricks_id() {
+        // A configured Databricks id known to the manifest gets its curated
+        // label; `id` stays the raw wire/config value.
+        assert_eq!(
+            crate::configured_model_fallback("databricks-gpt-5-5"),
+            vec![ModelEntry {
+                id: "databricks-gpt-5-5".into(),
+                name: "GPT-5.5".into(),
             }]
         );
     }

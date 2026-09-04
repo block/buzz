@@ -778,21 +778,22 @@ test.describe("thread unread indicator", () => {
       mentionPubkeys: [SELF_PUBKEY],
       createdAt: unreadTimestamp(),
     });
+    // The reply mentions the user, so the row shows the numeric mention badge
+    // (which subsumes the thread-activity dot).
+    await expect(page.getByTestId("channel-unread-all-replies")).toBeVisible();
     await expect(
       page.getByTestId("channel-unread-dot-all-replies"),
-    ).toBeVisible();
+    ).toHaveCount(0);
 
     // View all-replies while the reply is unread.
     await page.getByTestId("channel-all-replies").click();
     await expect(page.getByTestId("chat-title")).toHaveText("all-replies");
 
     // The crux: leave the channel. Its unopened thread reply should still keep
-    // a channel sidebar dot until the thread itself is read.
+    // a channel sidebar unread indicator until the thread itself is read.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
-    await expect(
-      page.getByTestId("channel-unread-dot-all-replies"),
-    ).toBeVisible();
+    await expect(page.getByTestId("channel-unread-all-replies")).toBeVisible();
   });
 
   // Regression guard for BUG-2 (clear-on-read): opening an unread thread marks

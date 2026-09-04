@@ -3,6 +3,9 @@ import 'dart:async';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
+import 'package:buzz/features/channels/manage_channel_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -12,7 +15,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 const _currentPubkey = 'me';
 
-Channel _channel({String type = 'stream', bool isArchived = false}) => Channel(
+Channel _channel({
+  String type = 'stream',
+  bool isArchived = false,
+  bool isMember = true,
+}) => Channel(
   id: 'channel-id',
   name: type == 'dm' ? 'Alice' : 'general',
   channelType: type,
@@ -21,7 +28,7 @@ Channel _channel({String type = 'stream', bool isArchived = false}) => Channel(
   createdBy: 'owner',
   createdAt: DateTime(2025),
   memberCount: 2,
-  isMember: true,
+  isMember: isMember,
   archivedAt: isArchived ? DateTime(2025, 1, 2) : null,
 );
 
@@ -58,6 +65,19 @@ Widget _modalApp({
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
     channelMembersProvider(channel.id).overrideWith((ref) => loadMembers()),
+    channelSectionsProvider.overrideWith(
+      () => _FakeChannelSectionsNotifier(const ChannelSectionStore()),
+    ),
+    agentOwnersProvider.overrideWithValue(
+      const AsyncValue.data(<String, String>{}),
+    ),
+    channelCanvasProvider(channel.id).overrideWith(
+      (ref) async => const ChannelCanvas(
+        content: null,
+        updatedAt: null,
+        authorPubkey: null,
+      ),
+    ),
     channelActionsProvider.overrideWith(createChannelActions),
   ],
   child: MaterialApp(
@@ -284,6 +304,7 @@ void main() {
 
     expect(find.text('Archive channel'), findsNothing);
     expect(find.text('Delete channel'), findsNothing);
+    expect(find.text('Move to section…'), findsOneWidget);
     expect(find.text('Leave channel'), findsOneWidget);
   });
 
@@ -302,29 +323,163 @@ void main() {
     expect(find.text('Channel actions unavailable'), findsOneWidget);
   });
 
-  testWidgets(
-    'manage leave closes both nested sheets without popping the page',
-    (tester) async {
-      await tester.pumpWidget(
-        _modalApp(
-          channel: _channel(),
-          loadMembers: () async => const [],
-          createChannelActions: (ref) => _FakeChannelActions(ref),
+  testWidgets('Manage contains editing and canvas, not mute or leave', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _modalApp(
+        channel: _channel(),
+        loadMembers: () async => const [],
+        createChannelActions: (ref) => _FakeChannelActions(ref),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open actions'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Manage channel'));
+    await tester.pumpAndSettle();
+
+    final manageSheet = find.byType(ManageChannelSheet);
+    expect(manageSheet, findsOneWidget);
+    expect(
+      find.descendant(
+        of: manageSheet,
+        matching: find.byKey(const ValueKey('manage-channel-name')),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: manageSheet, matching: find.text('Canvas')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: manageSheet, matching: find.text('Mute channel')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: manageSheet, matching: find.text('Leave channel')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: manageSheet, matching: find.text('Topic')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: manageSheet, matching: find.text('Purpose')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('Manage refreshes metadata after saving from actions', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _modalApp(
+        channel: _channel(),
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: _currentPubkey,
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        createChannelActions: (ref) => _FakeChannelActions(
+          ref,
+          onUpdateChannel: (channelId, name, description) async {},
         ),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Open actions'));
-      await tester.pumpAndSettle();
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage channel'));
+    await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Manage channel'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Leave channel').last);
-      await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('manage-channel-name')),
+      'renamed',
+    );
+    await tester.tap(find.byKey(const ValueKey('manage-channel-save-details')));
+    await tester.pumpAndSettle();
 
-      expect(find.byType(ChannelActionsSheet), findsNothing);
-      expect(find.byType(Scaffold), findsOneWidget);
-    },
-  );
+    expect(find.widgetWithText(ListTile, 'Manage channel'), findsOneWidget);
+    await tester.tap(find.widgetWithText(ListTile, 'Manage channel'));
+    await tester.pumpAndSettle();
+    final nameField = tester.widget<TextField>(
+      find.byKey(const ValueKey('manage-channel-name')),
+    );
+    expect(nameField.controller?.text, 'renamed');
+  });
+
+  testWidgets('non-member cannot edit canvas from Manage channel', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _modalApp(
+        channel: _channel(isMember: false),
+        loadMembers: () async => const [],
+        createChannelActions: (ref) => _FakeChannelActions(ref),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage channel'));
+    await tester.pumpAndSettle();
+
+    final editCanvas = find.widgetWithText(FilledButton, 'Create canvas');
+    expect(editCanvas, findsOneWidget);
+    expect(tester.widget<FilledButton>(editCanvas).onPressed, isNull);
+  });
+
+  testWidgets('regular members can move channels but cannot edit metadata', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _modalApp(
+        channel: _channel(),
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: _currentPubkey,
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        createChannelActions: (ref) => _FakeChannelActions(ref),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open actions'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Move to section…'), findsOneWidget);
+    await tester.tap(find.text('Manage channel'));
+    await tester.pumpAndSettle();
+
+    final nameField = find.byKey(const ValueKey('manage-channel-name'));
+    final descriptionField = find.byKey(
+      const ValueKey('manage-channel-description'),
+    );
+    expect(tester.widget<TextField>(nameField).enabled, isFalse);
+    expect(tester.widget<TextField>(descriptionField).enabled, isFalse);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('manage-channel-save-details')),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Create canvas'),
+          )
+          .onPressed,
+      isNotNull,
+    );
+  });
 
   testWidgets('DM omits quick actions, then shows mute and copy rows', (
     tester,
@@ -366,8 +521,25 @@ void main() {
   });
 }
 
+class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
+  _FakeChannelSectionsNotifier(this._store);
+
+  final ChannelSectionStore _store;
+
+  @override
+  ChannelSectionsState build() =>
+      ChannelSectionsState(isReady: true, store: _store, version: 1);
+}
+
 class _FakeChannelActions extends ChannelActions {
-  _FakeChannelActions(Ref ref)
+  final Future<void> Function(
+    String channelId,
+    String? name,
+    String? description,
+  )?
+  onUpdateChannel;
+
+  _FakeChannelActions(Ref ref, {this.onUpdateChannel})
     : super(
         ref: ref,
         session: ref.read(relaySessionProvider.notifier),
@@ -377,6 +549,15 @@ class _FakeChannelActions extends ChannelActions {
         ),
         currentPubkey: _currentPubkey,
       );
+
+  @override
+  Future<void> updateChannel({
+    required String channelId,
+    String? name,
+    String? description,
+  }) async {
+    await onUpdateChannel?.call(channelId, name, description);
+  }
 
   String? unarchivedChannelId;
 

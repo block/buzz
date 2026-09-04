@@ -80,6 +80,7 @@ test("channel browser sorts alphabetically or by member count", async ({
   await expect(rows).toHaveText([
     /#agents/,
     /#all-replies/,
+    /#buzz/,
     /#deep-history/,
     /#design/,
     /#engineering/,
@@ -103,6 +104,7 @@ test("channel browser sorts alphabetically or by member count", async ({
     /#design/,
     /#sales/,
     /#secret-projects/,
+    /#buzz/,
     /#welcome-everyone/,
   ]);
   await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
@@ -128,6 +130,7 @@ test("channel browser sorts by recent activity", async ({ page }) => {
     /#sales/,
     /#engineering/,
     /#design/,
+    /#buzz/,
     /#random/,
     /#secret-projects/,
     /#welcome-everyone/,

@@ -212,33 +212,28 @@ test.describe("global agent config screenshots", () => {
 
     await openAiDefaultsSettings(page);
 
-    const harness = page.getByTestId("global-agent-default-harness");
+    const defaultsCard = page.locator(
+      '[data-testid="settings-global-agent-config"]:visible',
+    );
+    const harness = defaultsCard.getByTestId("global-agent-default-harness");
+    await expect(defaultsCard).toHaveCount(1);
     await expect(harness).toHaveText("Claude Code");
     await expect(page.getByText("Provider", { exact: true })).toHaveCount(0);
-    await expect(page.locator("#global-agent-model")).toBeVisible();
+    await expect(defaultsCard.locator("#global-agent-model")).toBeVisible();
 
-    // Make the form dirty, then return to Claude with no model override. The
-    // harness-native default keeps the now-actionable Save button enabled.
     await harness.press("Enter");
     await page.getByTestId("global-agent-default-harness-option-codex").click();
-    await harness.press("Enter");
-    await page
-      .getByTestId("global-agent-default-harness-option-claude")
-      .click();
     await waitForAnimations(page);
-    await expect(page.getByTestId("global-agent-model")).toHaveText(
-      /Default model/,
+    const model = defaultsCard.locator(
+      '[data-testid="global-agent-model"]:visible',
     );
-    await expect(
-      page.getByRole("button", { name: "Save defaults" }),
-    ).toBeEnabled();
-
-    await harness.press("Enter");
-    await page.getByTestId("global-agent-default-harness-option-codex").click();
-    const model = page.getByTestId("global-agent-model");
+    await expect(model).toHaveCount(1);
     await model.click();
     await page.getByTestId("global-agent-model-option-gpt-5.5[high]").click();
-    await page.getByRole("button", { name: "Save defaults" }).click();
+    await defaultsCard
+      .getByRole("button", { name: "Save defaults" })
+      .filter({ visible: true })
+      .click();
 
     const saved = await page.evaluate(async () =>
       (
@@ -251,6 +246,93 @@ test.describe("global agent config screenshots", () => {
       ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
     );
     expect(saved).toMatchObject({ preferred_runtime: "codex" });
+  });
+
+  test("defaults render Databricks model labels without changing persisted ids", async ({
+    page,
+  }) => {
+    const modelId = "system.ai.glm-5-3";
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "goose",
+        provider: "databricks_v2",
+        model: modelId,
+        env_vars: {},
+      },
+      discoverAgentModels: {
+        models: [{ id: modelId, name: modelId }],
+        supportsSwitching: true,
+        selectedModel: modelId,
+      },
+      runtimeFileConfigs: {
+        goose: {
+          provider: "databricks_v2",
+          model: modelId,
+          satisfiedEnvKeys: ["DATABRICKS_HOST"],
+        },
+      },
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const model = page.getByTestId("global-agent-model");
+    await expect(model).toHaveText("GLM-5.3");
+
+    const persisted = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(persisted).toMatchObject({ model: modelId });
+  });
+
+  test("defaults render the Fable 5.1 label without changing the persisted id", async ({
+    page,
+  }) => {
+    const modelId = "databricks-claude-fable-5-1";
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "goose",
+        provider: "databricks_v2",
+        model: modelId,
+        env_vars: {},
+      },
+      discoverAgentModels: {
+        models: [{ id: modelId, name: modelId }],
+        supportsSwitching: true,
+        selectedModel: modelId,
+      },
+      runtimeFileConfigs: {
+        goose: {
+          provider: "databricks_v2",
+          model: modelId,
+          satisfiedEnvKeys: ["DATABRICKS_HOST"],
+        },
+      },
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const model = page.getByTestId("global-agent-model");
+    await expect(model).toHaveText("Claude Fable 5.1");
+    await expect(model).toHaveAttribute("data-value", modelId);
+
+    const persisted = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(persisted).toMatchObject({ model: modelId });
   });
 
   test("defaults honor credentials set in the harness config file", async ({

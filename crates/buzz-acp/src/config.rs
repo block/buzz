@@ -20,11 +20,11 @@ use crate::filter::SubscriptionRule;
 ///
 /// Sized for slow turns where the agent may go silent on its outer ACP channel
 /// while running long sub-tools (e.g. a buzz-agent running another agent, or
-/// codex/claude doing multi-minute single tool calls). 900s gives 300s of
-/// breathing room above the 600s max shell timeout, so legitimate long-running
+/// codex/claude doing multi-minute single tool calls). 1500s gives 300s of
+/// breathing room above the 1200s max shell timeout, so legitimate long-running
 /// tool calls don't race the idle deadline.
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
-pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
+pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1_500;
 
 /// Default absolute wall-clock cap per agent turn (2 hours).
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
@@ -116,6 +116,7 @@ impl std::fmt::Display for RespondTo {
 ///
 /// - `default` — agent's built-in behaviour (permission requests per tool call).
 /// - `acceptEdits` — auto-approve file edits, still ask for other tools.
+/// - `bypassPermissions` — skip the permission flow entirely.
 /// - `dontAsk` — never prompt; reject anything that would require permission.
 /// - `plan` — planning-only mode (no tool execution).
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
@@ -123,9 +124,17 @@ pub enum PermissionMode {
     /// Agent default — permission requests per tool call.
     #[value(alias = "default")]
     Default,
+    /// Auto mode — fully autonomous execution; model-gated (requires a model
+    /// that supports `supportsAutoMode`).  Degrades gracefully to `default`
+    /// when the session's active model does not support it.
+    #[value(alias = "auto")]
+    Auto,
     /// Auto-approve file edits, still ask for other tools.
     #[value(alias = "acceptEdits")]
     AcceptEdits,
+    /// Skip the permission flow entirely.
+    #[value(alias = "bypassPermissions")]
+    BypassPermissions,
     /// Never prompt; reject anything that would require permission.
     #[value(alias = "dontAsk")]
     DontAsk,
@@ -140,7 +149,9 @@ impl PermissionMode {
     pub fn as_wire_str(&self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::Auto => "auto",
             Self::AcceptEdits => "acceptEdits",
+            Self::BypassPermissions => "bypassPermissions",
             Self::DontAsk => "dontAsk",
             Self::Plan => "plan",
         }
@@ -339,6 +350,19 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_DEDUP", default_value = "queue", value_enum)]
     pub dedup: DedupMode,
 
+    /// How ACP provider sessions are scoped in channels.
+    /// channel (default): one provider session per channel (legacy behavior).
+    /// thread: each canonical channel thread gets an isolated provider session;
+    /// direct messages stay conversation-scoped either way. Ships as `channel`
+    /// so thread scoping can be canaried and rolled back without code changes.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_SESSION_POLICY",
+        default_value = "channel",
+        value_enum
+    )]
+    pub session_policy: crate::scope::SessionPolicy,
+
     /// How to handle new @mentions while a turn is already in-flight.
     /// steer (default): cancel+re-prompt, framing the new mention as a message
     /// that arrived mid-task — the agent keeps working and weaves it in.
@@ -380,7 +404,7 @@ pub struct CliArgs {
     ///
     /// Memory injection is on by default. When enabled, the harness
     /// fetches the agent's per-session core engram and renders it as an
-    /// `[Agent Memory — core]` prompt section (or renders the onboarding nudge
+    /// `<core-memory>` prompt section (or renders the onboarding nudge
     /// when the relay confirms no core engram exists). The `buzz mem` CLI
     /// and the relay's acceptance of kind:30174 engrams are unaffected — this
     /// flag controls prompt-time injection in the ACP harness only.
@@ -399,8 +423,8 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_MEMORY", conflicts_with = "memory")]
     pub no_memory: bool,
 
-    /// Disable the [Base] platform-context section prepended to every prompt.
-    /// When set, agents receive only the persona [System] prompt with no Buzz orientation.
+    /// Disable the `<base>` platform-context section prepended to every prompt.
+    /// When set, agents receive only the persona `<system>` prompt with no Buzz orientation.
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
@@ -418,6 +442,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
+    /// Persisted effort level value (e.g. "high", "medium", "low") to apply via
+    /// `session/set_config_option` at the first session creation. The configId is
+    /// resolved from the adapter's advertised `thought_level` capability — not
+    /// hardcoded. Non-fatal: if the adapter does not advertise `thought_level`,
+    /// the value is silently ignored and the persisted effort is not overwritten.
+    #[arg(long, env = "BUZZ_ACP_EFFORT_LEVEL")]
+    pub effort_level: Option<String>,
+
     /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
     /// `_meta`. Adapters that recognize it name the session after this value;
     /// others ignore it. Never enters the prompt.
@@ -427,12 +459,13 @@ pub struct CliArgs {
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
-    /// Defaults to `dontAsk`, which rejects operations that need interactive
-    /// approval because Buzz does not expose a human permission prompt.
+    /// Defaults to `bypassPermissions` which skips the per-tool-call
+    /// permission flow. Set to `default` to restore the agent's built-in
+    /// behaviour.
     #[arg(
         long,
         env = "BUZZ_ACP_PERMISSION_MODE",
-        default_value = "dont-ask",
+        default_value = "bypass-permissions",
         value_enum
     )]
     pub permission_mode: PermissionMode,
@@ -460,7 +493,7 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
-    /// Team-owned instructions layered after `[System]` and before agent memory.
+    /// Team-owned instructions layered after `<system>` and before agent memory.
     #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
     pub team_instructions: Option<String>,
 
@@ -476,6 +509,22 @@ pub struct CliArgs {
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
+
+    /// Tear the woken pool back down to the lazy empty-slot state after this
+    /// many seconds with no dispatched turn in flight and an empty queue,
+    /// releasing worker subprocesses until the next accepted event re-wakes.
+    /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
+    #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
+    pub idle_pool_sleep: u64,
+
+    /// Unix-seconds replay floor for the startup watermark. A publish-first
+    /// mention send publishes the triggering message and then spawns this
+    /// harness, passing the send timestamp here so the first REQ replays past
+    /// that message however long the spawn takes. Floors older than 15 minutes
+    /// are clamped to 15 minutes before startup; floors in the future are
+    /// ignored (the watermark stays at startup time).
+    #[arg(long, env = "BUZZ_ACP_REPLAY_FLOOR")]
+    pub replay_floor: Option<u64>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -509,6 +558,8 @@ pub struct Config {
     pub initial_message: Option<String>,
     pub subscribe_mode: SubscribeMode,
     pub dedup_mode: DedupMode,
+    /// How ACP provider sessions are scoped in channels (channel vs thread).
+    pub session_policy: crate::scope::SessionPolicy,
     pub multiple_event_handling: MultipleEventHandling,
     pub ignore_self: bool,
     pub kinds_override: Option<Vec<u32>>,
@@ -522,11 +573,17 @@ pub struct Config {
     pub typing_enabled: bool,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
     /// the harness skips the per-session core engram fetch and renders no
-    /// `[Agent Memory — core]` section. On by default; disabled via the
+    /// `<core-memory>` section. On by default; disabled via the
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY` opt-out.
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
+    /// Persisted effort level value (e.g. "high", "medium", "low"). Held as a
+    /// per-worker spawn-scoped value and applied at the first session creation
+    /// by pairing with the adapter's advertised `thought_level` configId.
+    /// Non-fatal when absent or when the adapter does not advertise
+    /// `thought_level`.
+    pub effort_level: Option<String>,
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
@@ -553,10 +610,20 @@ pub struct Config {
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
+    /// Seconds with no dispatched turn in flight and an empty queue before a
+    /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
+    /// Only meaningful when `lazy_pool` is true.
+    pub idle_pool_sleep_secs: u64,
+    /// Optional unix-seconds replay floor for the startup watermark
+    /// (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`), set by a publish-first
+    /// mention send so the first REQ replays past the already-published
+    /// triggering message. Clamped where consumed — see
+    /// `startup_watermark_with_floor`.
+    pub replay_floor_unix: Option<u64>,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
-    /// Disable the [Base] platform-context section prepended to every prompt.
+    /// Disable the `<base>` platform-context section prepended to every prompt.
     pub no_base_prompt: bool,
     /// Resolved content from `--base-prompt-file`, read and validated in
     /// `from_cli()`. `None` when using the compiled-in default or when
@@ -609,6 +676,35 @@ const SESSION_TITLE_SEPARATOR: &str = " · ";
 /// survives. Returns the bare agent name when there is no channel, the channel
 /// name is blank, or no room is left for it.
 pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> String {
+    compose_session_title_with_limit(agent, channel_name, SESSION_TITLE_MAX_CHARS)
+}
+
+/// Append the canonical thread root's first eight characters to a session title.
+/// Reserve suffix space before truncating names so thread identity always survives.
+/// Conversation and heartbeat sessions preserve their existing title behavior.
+pub(crate) fn compose_scoped_session_title(
+    agent: &str,
+    channel_name: Option<&str>,
+    thread_root: Option<&str>,
+) -> String {
+    let Some(root) = thread_root.filter(|root| !root.is_empty()) else {
+        return compose_session_title(agent, channel_name);
+    };
+    let short_root: String = root.chars().take(8).collect();
+    let suffix = format!("{SESSION_TITLE_SEPARATOR}{short_root}");
+    let budget = SESSION_TITLE_MAX_CHARS.saturating_sub(suffix.chars().count());
+    let agent: String = agent.chars().take(budget).collect();
+    format!(
+        "{}{suffix}",
+        compose_session_title_with_limit(agent.trim_end(), channel_name, budget)
+    )
+}
+
+fn compose_session_title_with_limit(
+    agent: &str,
+    channel_name: Option<&str>,
+    max_chars: usize,
+) -> String {
     let Some(channel) = channel_name.and_then(sanitize_session_title) else {
         return agent.to_string();
     };
@@ -616,7 +712,7 @@ pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> 
     let reserved = agent.chars().count() + SESSION_TITLE_SEPARATOR.chars().count() + 1;
     let channel: String = channel
         .chars()
-        .take(SESSION_TITLE_MAX_CHARS.saturating_sub(reserved))
+        .take(max_chars.saturating_sub(reserved))
         .collect::<String>()
         .trim_end()
         .to_string();
@@ -1076,6 +1172,7 @@ impl Config {
             initial_message: args.initial_message,
             subscribe_mode: args.subscribe,
             dedup_mode: args.dedup,
+            session_policy: args.session_policy,
             multiple_event_handling: args.multiple_event_handling,
             ignore_self: !args.no_ignore_self,
             kinds_override: args.kinds,
@@ -1088,6 +1185,7 @@ impl Config {
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
+            effort_level: args.effort_level,
             session_title: args
                 .session_title
                 .as_deref()
@@ -1101,6 +1199,8 @@ impl Config {
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
+            idle_pool_sleep_secs: args.idle_pool_sleep,
+            replay_floor_unix: args.replay_floor,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1125,7 +1225,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1137,6 +1237,7 @@ impl Config {
             self.heartbeat_interval_secs,
             self.subscribe_mode,
             self.dedup_mode,
+            self.session_policy,
             self.multiple_event_handling,
             self.ignore_self,
             self.context_message_limit,
@@ -1450,6 +1551,7 @@ mod tests {
             initial_message: None,
             subscribe_mode: mode,
             dedup_mode: DedupMode::Queue,
+            session_policy: crate::scope::SessionPolicy::Channel,
             multiple_event_handling: MultipleEventHandling::Queue,
             ignore_self: true,
             kinds_override: None,
@@ -1462,8 +1564,9 @@ mod tests {
             typing_enabled: true,
             memory_enabled: true,
             model: None,
+            effort_level: None,
             session_title: None,
-            permission_mode: PermissionMode::DontAsk,
+            permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
@@ -1472,6 +1575,8 @@ mod tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
+            replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2193,6 +2298,22 @@ channels = "ALL"
     }
 
     #[test]
+    fn idle_pool_sleep_defaults_disabled_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.idle_pool_sleep, 0);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--idle-pool-sleep",
+            "300",
+        ]);
+        assert_eq!(configured.idle_pool_sleep, 300);
+    }
+
+    #[test]
     fn lazy_pool_cli_flag_enables_deferred_startup() {
         let key = "0".repeat(64);
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
@@ -2263,7 +2384,12 @@ channels = "ALL"
     #[test]
     fn test_permission_mode_wire_strings() {
         assert_eq!(PermissionMode::Default.as_wire_str(), "default");
+        assert_eq!(PermissionMode::Auto.as_wire_str(), "auto");
         assert_eq!(PermissionMode::AcceptEdits.as_wire_str(), "acceptEdits");
+        assert_eq!(
+            PermissionMode::BypassPermissions.as_wire_str(),
+            "bypassPermissions"
+        );
         assert_eq!(PermissionMode::DontAsk.as_wire_str(), "dontAsk");
         assert_eq!(PermissionMode::Plan.as_wire_str(), "plan");
     }
@@ -2271,24 +2397,41 @@ channels = "ALL"
     #[test]
     fn test_permission_mode_is_default() {
         assert!(PermissionMode::Default.is_default());
+        assert!(!PermissionMode::Auto.is_default());
+        assert!(!PermissionMode::BypassPermissions.is_default());
         assert!(!PermissionMode::AcceptEdits.is_default());
         assert!(!PermissionMode::DontAsk.is_default());
         assert!(!PermissionMode::Plan.is_default());
     }
 
     #[test]
+    fn test_permission_mode_auto_degrades_to_default_when_unsupported() {
+        // The wire string is "auto" — the adapter handles graceful downgrade
+        // to "default" when the active model does not support Auto mode.
+        // Verify only that the wire string is correct and distinct from "default".
+        let auto = PermissionMode::Auto;
+        assert_eq!(auto.as_wire_str(), "auto");
+        assert_ne!(auto.as_wire_str(), "default");
+        assert!(!auto.is_default());
+    }
+
+    #[test]
     fn test_permission_mode_display() {
-        assert_eq!(format!("{}", PermissionMode::DontAsk), "dontAsk");
+        assert_eq!(
+            format!("{}", PermissionMode::BypassPermissions),
+            "bypassPermissions"
+        );
         assert_eq!(format!("{}", PermissionMode::Default), "default");
+        assert_eq!(format!("{}", PermissionMode::Auto), "auto");
     }
 
     #[test]
     fn test_summary_includes_permission_mode() {
         let mut config = test_config(SubscribeMode::Mentions);
-        config.permission_mode = PermissionMode::DontAsk;
+        config.permission_mode = PermissionMode::BypassPermissions;
         let s = config.summary();
         assert!(
-            s.contains("permission_mode=dontAsk"),
+            s.contains("permission_mode=bypassPermissions"),
             "summary should include permission_mode, got: {s}"
         );
     }
@@ -2305,9 +2448,9 @@ channels = "ALL"
     }
 
     #[test]
-    fn test_default_config_rejects_interactive_permissions() {
+    fn test_default_config_uses_bypass_permissions() {
         let config = test_config(SubscribeMode::Mentions);
-        assert_eq!(config.permission_mode, PermissionMode::DontAsk);
+        assert_eq!(config.permission_mode, PermissionMode::BypassPermissions);
     }
 
     #[test]
@@ -2317,7 +2460,9 @@ channels = "ALL"
         use clap::ValueEnum;
         let cases = [
             ("default", PermissionMode::Default),
+            ("auto", PermissionMode::Auto),
             ("accept-edits", PermissionMode::AcceptEdits),
+            ("bypass-permissions", PermissionMode::BypassPermissions),
             ("dont-ask", PermissionMode::DontAsk),
             ("plan", PermissionMode::Plan),
         ];
@@ -2332,12 +2477,15 @@ channels = "ALL"
 
     #[test]
     fn test_permission_mode_value_enum_camel_case_aliases() {
-        // Operators may set env vars using the camelCase wire-format strings.
-        // The #[value(alias)] attributes ensure these parse correctly.
+        // Operators may set env vars using the camelCase wire-format strings
+        // (e.g. BUZZ_ACP_PERMISSION_MODE=bypassPermissions). The #[value(alias)]
+        // attributes ensure these parse correctly.
         use clap::ValueEnum;
         let cases = [
             ("default", PermissionMode::Default),
+            ("auto", PermissionMode::Auto),
             ("acceptEdits", PermissionMode::AcceptEdits),
+            ("bypassPermissions", PermissionMode::BypassPermissions),
             ("dontAsk", PermissionMode::DontAsk),
             ("plan", PermissionMode::Plan),
         ];
@@ -2346,18 +2494,6 @@ channels = "ALL"
                 PermissionMode::from_str(input, true).unwrap(),
                 *expected,
                 "camelCase alias {input:?} should parse"
-            );
-        }
-    }
-
-    #[test]
-    fn test_permission_mode_rejects_unattended_bypass() {
-        use clap::ValueEnum;
-
-        for input in ["bypass-permissions", "bypassPermissions"] {
-            assert!(
-                PermissionMode::from_str(input, true).is_err(),
-                "{input:?} must not disable the ACP permission boundary"
             );
         }
     }
@@ -2546,6 +2682,42 @@ channels = "ALL"
         assert!(result.is_empty());
     }
 
+    // ── Session policy parsing + default ──────────────────────────────────────
+
+    #[test]
+    fn test_session_policy_default_is_channel() {
+        // Ships dark: the default must be `channel` so thread scoping is opt-in
+        // and can be rolled back without code changes.
+        let args = CliArgs::parse_from(["buzz-acp", "--private-key", &"0".repeat(64)]);
+        assert_eq!(args.session_policy, crate::scope::SessionPolicy::Channel);
+    }
+
+    #[test]
+    fn test_session_policy_thread_flag_parses() {
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &"0".repeat(64),
+            "--session-policy",
+            "thread",
+        ]);
+        assert_eq!(args.session_policy, crate::scope::SessionPolicy::Thread);
+    }
+
+    #[test]
+    fn test_session_policy_env_var_parses() {
+        // The env fallback (`BUZZ_ACP_SESSION_POLICY`) must resolve to the same
+        // value as the flag; this is what the managed-agent runtime sets.
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &"0".repeat(64),
+            "--session-policy=thread",
+        ]);
+        assert_eq!(args.session_policy, crate::scope::SessionPolicy::Thread);
+        assert_eq!(args.session_policy.to_string(), "thread");
+    }
+
     // ── Multiple-event-handling validation + default ──────────────────────────
 
     #[test]
@@ -2602,9 +2774,9 @@ channels = "ALL"
     // ── Idle timeout constant + guard (PR #935) ───────────────────────────────
 
     #[test]
-    fn default_idle_timeout_is_900_seconds() {
+    fn default_idle_timeout_is_1500_seconds() {
         // Lock the constant value so accidental changes are caught.
-        assert_eq!(DEFAULT_IDLE_TIMEOUT_SECS, 900);
+        assert_eq!(DEFAULT_IDLE_TIMEOUT_SECS, 1_500);
     }
 
     #[test]
@@ -2621,6 +2793,45 @@ channels = "ALL"
         // And the valid case (const assertion so clippy doesn't flag it):
         const {
             assert!(DEFAULT_IDLE_TIMEOUT_SECS < DEFAULT_MAX_TURN_DURATION_SECS);
+        }
+    }
+
+    #[test]
+    fn budget_ordering_invariant_shell_cap_plus_headroom_fits_within_idle_timeout() {
+        // Asserts the three-layer budget relationship introduced in PR #7185:
+        //   buzz-dev-mcp MAX_TIMEOUT_MS (1 200 000 ms = 1 200s)
+        //   ≤ buzz-agent BUZZ_AGENT_TOOL_TIMEOUT_SECS default (1 260s)
+        //   < buzz-acp DEFAULT_IDLE_TIMEOUT_SECS (1 500s)
+        //
+        // The idle deadline must strictly outlast the agent tool timeout so a
+        // legitimately long-running tool call is killed by buzz-agent first (at
+        // 1 260s) rather than the ACP idle watchdog. The 240s gap gives the agent
+        // time to handle the timeout, emit a response, and reset the idle clock
+        // before the ACP connection dies.
+        //
+        // If any of these constants change the compiler catches the inversion here.
+        // Cross-crate constants are mirrored as literals; grep for PR #7185 to
+        // find the authoritative source if you need to update them.
+        const SHELL_CAP_MS: u64 = 1_200_000; // buzz-dev-mcp MAX_TIMEOUT_MS
+        const SHELL_CAP_SECS: u64 = SHELL_CAP_MS / 1_000;
+        const AGENT_TOOL_TIMEOUT_SECS: u64 = 1_260; // buzz-agent BUZZ_AGENT_TOOL_TIMEOUT_SECS default
+
+        const {
+            // Shell cap must not exceed the agent's per-tool-call timeout.
+            assert!(
+                SHELL_CAP_SECS <= AGENT_TOOL_TIMEOUT_SECS,
+                "shell cap must be <= agent tool timeout"
+            );
+            // Agent tool timeout must be strictly less than the ACP idle deadline.
+            assert!(
+                AGENT_TOOL_TIMEOUT_SECS < DEFAULT_IDLE_TIMEOUT_SECS,
+                "agent tool timeout must be < ACP idle timeout"
+            );
+            // ACP idle timeout must remain below the max turn duration.
+            assert!(
+                DEFAULT_IDLE_TIMEOUT_SECS < DEFAULT_MAX_TURN_DURATION_SECS,
+                "ACP idle timeout must be < max turn duration"
+            );
         }
     }
 
@@ -2917,6 +3128,36 @@ channels = "ALL"
     fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
         let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
         assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+    }
+
+    #[test]
+    fn scoped_session_title_keeps_short_root_even_when_names_fill_the_cap() {
+        let root = "abcdef01".repeat(8);
+        assert_eq!(
+            compose_scoped_session_title("Fizz", Some("buzz-dev"), Some(&root)),
+            "Fizz · #buzz-dev · abcdef01"
+        );
+        assert_eq!(
+            compose_scoped_session_title("Fizz", None, Some(&root)),
+            "Fizz · abcdef01"
+        );
+        assert_eq!(
+            compose_scoped_session_title("Fizz", Some("buzz-dev"), Some("abc")),
+            "Fizz · #buzz-dev · abc"
+        );
+        for (agent, channel) in [
+            ("🐝".repeat(80), "work".into()),
+            ("Fizz".into(), "🐝".repeat(100)),
+        ] {
+            let title = compose_scoped_session_title(&agent, Some(&channel), Some(&root));
+            assert_eq!(title.chars().count(), SESSION_TITLE_MAX_CHARS);
+            assert!(title.ends_with(" · abcdef01"));
+        }
+        assert_eq!(
+            compose_scoped_session_title("Fizz", Some("buzz-dev"), None),
+            "Fizz · #buzz-dev"
+        );
+        assert_eq!(compose_scoped_session_title("Fizz", None, None), "Fizz");
     }
 
     /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH

@@ -3,6 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024;
+/// Maximum decoded Apple App Attest object accepted by the verifier.
+pub const MAX_APP_ATTESTATION_BYTES: usize = 16 * 1024;
+/// Enrollment carries the maximum App Attest object as standard base64 plus a
+/// bounded APNs endpoint and the closed JSON envelope. Other gateway requests
+/// remain subject to `MAX_REQUEST_BYTES`.
+pub const MAX_ENROLL_REQUEST_BYTES: usize =
+    MAX_APP_ATTESTATION_BYTES.div_ceil(3) * 4 + MAX_ENDPOINT_HEX_BYTES * 2 + 1024;
 pub const MAX_GRANT_BYTES: usize = 4096;
 pub const MAX_ENDPOINT_HEX_BYTES: usize = 512;
 pub const APNS_RECONNECT_PAYLOAD: &[u8] =
@@ -12,14 +19,12 @@ pub const WIRE_VERSION: u8 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppProfile {
-    BuzzIosProduction,
-    BuzzIosSandbox,
+    BuzzIosDogfood,
 }
 impl AppProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::BuzzIosProduction => "buzz-ios-production",
-            Self::BuzzIosSandbox => "buzz-ios-sandbox",
+            Self::BuzzIosDogfood => "buzz-ios-dogfood",
         }
     }
 }

@@ -5,15 +5,14 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { getThreadReference } from "@/features/messages/lib/threading";
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   collectHomeAlertItems,
   eligibleFeedNotificationItems,
+  formatFeedNotification,
   type NotificationChannel,
-  notificationBody,
-  notificationTitle,
 } from "./lib/feed";
+import { buildFeedItemNotificationTarget } from "./lib/target";
 import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
@@ -112,20 +111,11 @@ export function useFeedDesktopNotifications(
 
   const deliverFeedNotification = React.useEffectEvent(
     async (item: FeedItem, senderName?: string) => {
-      const threadRootId = getThreadReference(item.tags).rootId ?? null;
+      const { title, body } = formatFeedNotification(item, senderName);
       const didSend = await sendDesktopNotification({
-        body: notificationBody(item),
-        target: {
-          channelId: item.channelId,
-          channelName: item.channelName,
-          content: item.content,
-          createdAt: item.createdAt,
-          eventId: item.id,
-          kind: item.kind,
-          pubkey: item.pubkey,
-          threadRootId,
-        },
-        title: notificationTitle(item, senderName),
+        body,
+        target: buildFeedItemNotificationTarget(item),
+        title,
       });
 
       if (

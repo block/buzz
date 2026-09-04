@@ -165,6 +165,13 @@ export function cacheAndApplyCommunityTheme(
   apply(preference);
 }
 
+export function communityThemeScopeFallback(
+  migrated: boolean,
+  inherited: CommunityThemePreference,
+): CommunityThemePreference {
+  return migrated ? DEFAULT_COMMUNITY_THEME : inherited;
+}
+
 export function sameCommunityThemePreference(
   left: CommunityThemePreference,
   right: CommunityThemePreference,
@@ -179,8 +186,11 @@ export function sameCommunityThemePreference(
 export function communityThemeApplyExpectation(
   preference: CommunityThemePreference,
   current: CommunityThemePreference,
+  preserveNoop = false,
 ): CommunityThemePreference | null {
-  return sameCommunityThemePreference(preference, current) ? null : preference;
+  return preserveNoop || !sameCommunityThemePreference(preference, current)
+    ? preference
+    : null;
 }
 
 /**

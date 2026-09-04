@@ -26,6 +26,20 @@ test("keeps every unread channel navigable while adding working activity", () =>
   ]);
 });
 
+test("keeps working-only channels out of message overflow prioritization", () => {
+  const activity = getOffscreenActivityChannelIds({
+    activeWorkingByChannelId: new Map([["read-working-dm", {}]]),
+    previewActivityChannelIds: new Set(),
+    unreadChannelIds: new Set(["unread-channel"]),
+  });
+
+  assert.deepEqual([...activity.messageChannelIds], ["unread-channel"]);
+  assert.deepEqual(
+    [...activity.channelIds],
+    ["unread-channel", "read-working-dm"],
+  );
+});
+
 test("uses an activity-neutral overflow label when work contributes", () => {
   assert.equal(
     getSidebarActivityOverflowLabel({ activityCount: 2, messageCount: 1 }),

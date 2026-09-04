@@ -1,11 +1,13 @@
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
 use crate::app_state::AppState;
 use crate::commands::clipboard::with_clipboard;
 use crate::commands::export_util::save_bytes_with_dialog;
-use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth, sanitize_filename};
+use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth};
+use crate::commands::media_filename::sanitize_filename;
 use crate::commands::{
     personas::{
         parse_snapshot_payload_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
@@ -18,7 +20,7 @@ use crate::commands::{
 use crate::relay::{classify_request_error, relay_api_base_url_with_override, relay_error_message};
 
 /// Maximum download size: 50 MiB. Prevents OOM from oversized responses.
-const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+pub(super) const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Download request timeout.
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -29,7 +31,7 @@ const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60)
 /// - URL scheme is `https` (or `http` for localhost dev)
 /// - URL origin matches the relay base URL
 /// - URL path matches `/media/{hash}.{ext}`
-fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
+pub(super) fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| "invalid URL".to_string())?;
     let base = url::Url::parse(relay_base).map_err(|_| "invalid relay base URL".to_string())?;
 
@@ -139,32 +141,6 @@ pub async fn download_file(
     save_bytes_with_dialog(&app, &filename, "All Files", &extensions, &bytes).await
 }
 
-/// Fetch relay media bytes for the composer image editor.
-///
-/// The editor composites the image onto a canvas and needs pixel access.
-/// Handing the webview raw bytes over IPC (which it wraps in a same-origin
-/// `blob:` URL) keeps the canvas un-tainted without involving CORS — and
-/// therefore without any media-proxy header or origin-gate changes.
-///
-/// Same SSRF validation, size cap, and content policy as the download
-/// commands above.
-///
-/// Returns `tauri::ipc::Response` so the bytes cross IPC as a raw buffer
-/// instead of a JSON number array (which would be ~3x the size to
-/// serialize and deserialize at the 50 MiB cap).
-#[tauri::command]
-pub async fn fetch_media_bytes(
-    url: String,
-    state: State<'_, AppState>,
-) -> Result<tauri::ipc::Response, String> {
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
-
-    let bytes = fetch_blob_bytes(&url, &state).await?;
-    detect_and_validate_mime(&bytes)?;
-    Ok(tauri::ipc::Response::new(bytes))
-}
-
 /// Copy an image from a relay media URL directly to the system clipboard.
 ///
 /// Fetches the image, decodes it to RGBA8, and writes it to the clipboard via
@@ -255,7 +231,7 @@ pub async fn copy_text_to_clipboard(
 /// HTTP client, enforcing the download size cap. The caller is responsible for
 /// validating the URL origin and for any content-type checks on the result.
 async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<u8>, String> {
-    fetch_blob_bytes_with_cap(url, state, MAX_DOWNLOAD_BYTES).await
+    fetch_blob_bytes_with_cap(url, state, MAX_DOWNLOAD_BYTES, None).await
 }
 
 /// The command-facing error for a media-fetch response status, or `None` if
@@ -277,10 +253,11 @@ fn redirect_refusal_error(status: reqwest::StatusCode) -> Option<String> {
 }
 
 /// Core streaming fetcher with a caller-supplied byte cap.
-async fn fetch_blob_bytes_with_cap(
+pub(super) async fn fetch_blob_bytes_with_cap(
     url: &str,
     state: &State<'_, AppState>,
     cap: u64,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<Vec<u8>, String> {
     // Fetch bytes via the no-redirect media client (goes through the VPN tunnel).
     // A no-redirect client keeps the minted media auth token from being
@@ -296,7 +273,16 @@ async fn fetch_blob_bytes_with_cap(
         req = req.header("authorization", auth);
     }
 
-    let resp = req.send().await.map_err(|e| classify_request_error(&e))?;
+    let request = req.send();
+    let resp = if let Some(cancellation) = cancellation {
+        tokio::select! {
+            _ = cancellation.cancelled() => return Err("media fetch cancelled".to_string()),
+            result = request => result,
+        }
+    } else {
+        request.await
+    }
+    .map_err(|e| classify_request_error(&e))?;
 
     if let Some(err) = redirect_refusal_error(resp.status()) {
         return Err(err);
@@ -321,7 +307,18 @@ async fn fetch_blob_bytes_with_cap(
     // even when Content-Length is missing or dishonest.
     let mut bytes = Vec::new();
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = if let Some(cancellation) = cancellation {
+            tokio::select! {
+                _ = cancellation.cancelled() => return Err("media fetch cancelled".to_string()),
+                next = stream.next() => next,
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         let chunk = chunk.map_err(|e| classify_request_error(&e))?;
         if bytes.len() as u64 + chunk.len() as u64 > cap {
             return Err(format!("file too large (max {} MiB)", cap / (1024 * 1024)));
@@ -482,7 +479,7 @@ pub async fn fetch_snapshot_bytes(
     ensure_declared_size_within_cap(expected_size, kind)?;
 
     // ── Bounded fetch ─────────────────────────────────────────────────────
-    let bytes = fetch_blob_bytes_with_cap(&url, &state, cap).await?;
+    let bytes = fetch_blob_bytes_with_cap(&url, &state, cap, None).await?;
 
     // ── Post-fetch validation ─────────────────────────────────────────────
     // 1. Byte length must equal the declared imeta size.

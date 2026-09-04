@@ -22,6 +22,7 @@ type ProfileAvatarWithStatusProps = {
   geometry?: ProfileAvatarStatusGeometry;
   iconClassName?: string;
   label: string;
+  shape?: "circle" | "squircle";
   size: number;
   status?: PresenceStatus;
   statusTestId?: string;
@@ -56,6 +57,7 @@ export function ProfileAvatarWithStatus({
   geometry = DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   iconClassName,
   label,
+  shape = "circle",
   size,
   status,
   statusTestId,
@@ -97,15 +99,17 @@ export function ProfileAvatarWithStatus({
       }
       badgeBox={badgeBox}
       className={cn("inline-flex", className)}
+      cornerRadius={shape === "squircle" ? size * 0.3 : undefined}
       curve={STATUS_DOT_MASK_CURVE}
       cutout={cutout}
       size={size}
     >
       <ProfileAvatar
         avatarUrl={avatarUrl}
-        className={cn("h-full w-full rounded-full", avatarClassName)}
+        className={cn("h-full w-full", avatarClassName)}
         iconClassName={iconClassName}
         label={label}
+        shape={shape}
         testId={testId}
       />
     </MaskedAvatarBadgeFrame>
