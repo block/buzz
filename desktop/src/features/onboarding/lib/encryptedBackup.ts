@@ -41,6 +41,7 @@ export function encryptedBackupReducer(
       return {
         ...state,
         passphrase: event.value,
+        requestId: null,
         encrypted: null,
         createError: null,
       };
