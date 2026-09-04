@@ -885,14 +885,7 @@ test("defers agent mentions until DM members finish loading", async ({
 
   const threadPanel = page.getByTestId("message-thread-panel");
   const input = threadPanel.getByTestId("message-input");
-  await input.fill("Ask @ali");
-  await expect(
-    threadPanel
-      .getByTestId("mention-autocomplete")
-      .locator("button", { hasText: "alice" }),
-  ).toBeVisible();
-  await input.press("Enter");
-  await page.keyboard.type(" before members resolve");
+  await input.fill("Ask @alice before members resolve");
   const baselineCommands = await readCommandLog(page);
   await threadPanel.getByTestId("send-message").click();
 
@@ -900,6 +893,9 @@ test("defers agent mentions until DM members finish loading", async ({
     page.getByText(DM_THREAD_MEMBERS_LOADING_ERROR_TEXT).first(),
   ).toBeVisible();
   await page.mouse.move(0, 0);
+  expect(commandCount(await readCommandLog(page), "sign_event")).toBe(
+    commandCount(baselineCommands, "sign_event"),
+  );
   expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
     commandCount(baselineCommands, "add_channel_members"),
   );
@@ -914,8 +910,12 @@ test("defers agent mentions until DM members finish loading", async ({
   expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
     commandCount(baselineCommands, "add_channel_members"),
   );
-  await expect(input).toHaveText("@alice ");
+  // A one-time mention does not opt into automatic addressing after send.
+  await expect(input).toHaveText("");
   await expect(threadPanel).toContainText("before members resolve");
+  expect(
+    await readOutgoingMentionPubkeys(page, "Ask @alice before members resolve"),
+  ).toEqual([TEST_IDENTITIES.alice.pubkey]);
 });
 
 test("autocomplete filters managed-agent suggestions as user types", async ({
