@@ -110,9 +110,14 @@ async function reopenWorkflow(
   page: import("@playwright/test").Page,
   name: string,
 ) {
-  const card = page
-    .locator('[data-testid^="workflow-card-"]')
-    .filter({ hasText: name });
+  // Filter by the child workflow-card-name element to avoid a strict-mode
+  // violation: `[data-testid^="workflow-card-"]` prefix-matches the container
+  // div AND the inner <p data-testid="workflow-card-name">, so a bare hasText
+  // filter resolves to 2 elements. Scoping with `has` ensures only the
+  // container (which contains the name child) is selected.
+  const card = page.locator('[data-testid^="workflow-card-"]').filter({
+    has: page.getByTestId("workflow-card-name").filter({ hasText: name }),
+  });
   // Await the card before addressing its action: createEnabled() returns only
   // after dialog closure, but the card render is async and may not be in the
   // DOM yet when execution reaches here.
