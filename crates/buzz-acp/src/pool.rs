@@ -757,6 +757,14 @@ impl ChannelInfoResolver {
 
 pub struct PromptContext {
     pub mcp_servers: Vec<McpServer>,
+    /// Guard that removes the on-disk signing-key file (see
+    /// `write_secret_file` in `lib.rs`) when this context is dropped, i.e.
+    /// when the run that created it ends. `None` when the key was
+    /// advertised inline instead (`write_secret_file` failed or refused).
+    /// Never read — held purely for its `Drop` side effect, which fires
+    /// when the last `Arc<PromptContext>` goes away.
+    #[allow(dead_code)]
+    pub secret_file_guard: Option<crate::SecretFileGuard>,
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
     pub max_turn_duration: Duration,
@@ -8660,6 +8668,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         use crate::relay::RestClient;
         PromptContext {
             mcp_servers: vec![],
+            secret_file_guard: None,
             initial_message: None,
             idle_timeout: Duration::from_secs(60),
             max_turn_duration: Duration::from_secs(120),

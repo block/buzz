@@ -842,6 +842,7 @@ dependencies = [
  "httparse",
  "nix 0.31.3",
  "nostr 0.44.7",
+ "parking_lot",
  "reqwest 0.13.4",
  "rustls",
  "serde",
