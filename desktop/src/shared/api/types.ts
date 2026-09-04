@@ -374,6 +374,13 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
+  /**
+   * Canonical harness-agnostic effort level persisted on the record.
+   * `undefined`/absent means the agent uses the adapter default at launch.
+   * Exposed so the edit dialog's settlement comparator can detect a
+   * backend-rejected effort write rather than closing as success.
+   */
+  effortLevel?: string | null;
 };
 
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */

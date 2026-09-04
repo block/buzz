@@ -7,7 +7,7 @@ import type { AgentRunLocation } from "../lib/agentAccessWarning";
  *
  * Context rather than a prop on purpose: the only consumer is the respond-to
  * warning, buried several levels inside `AgentDefinitionDialog` (1000+ lines)
- * and `AgentInstanceEditDialog` (1200+ lines). Threading a prop through them
+ * and `AgentEditMergedDialog` (1700+ lines). Threading a prop through them
  * would grow two files that are already over the 1000-line ceiling enforced by
  * `desktop/scripts/check-file-sizes.mjs`, for a value neither of them uses.
  *

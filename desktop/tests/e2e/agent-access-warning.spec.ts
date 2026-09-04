@@ -192,12 +192,13 @@ test("full agent editor tightens the exact sidebar agent instance", async ({
   await page.getByTestId(`sidebar-member-${agent.pubkey}`).click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   await page.getByTestId("user-profile-edit-agent").click();
-  const dialog = page.getByRole("dialog", { name: "Edit agent" });
+  const dialog = page.getByTestId("edit-agent-dialog");
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Advanced" }).click();
+  // The merged dialog surfaces the instance-owned access control inline (no
+  // Advanced toggle, no per-agent tab): a linked agent's respond-to lives in
+  // the instance section directly.
   await choosePersonaAccess(page, "Only me (default)");
-  await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
-  const saveChanges = dialog.getByRole("button", { name: "Save changes" });
+  const saveChanges = dialog.getByTestId("edit-agent-dialog-submit");
   await expect(saveChanges).toBeEnabled();
   await saveChanges.click();
   await expect(dialog).not.toBeVisible();
@@ -228,14 +229,13 @@ test("full agent editor tightens the exact sidebar agent instance", async ({
   await page.getByTestId(`sidebar-member-${agent.pubkey}`).click();
   await page.getByTestId("user-profile-edit-agent").click();
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Advanced" }).click();
   await expect(page.locator("#agent-respond-to")).toHaveText(
     "Only me (default)",
   );
   await page
-    .locator("#persona-system-prompt")
+    .locator("#edit-agent-system-prompt")
     .fill("Test unrelated prompt editing after tightening access.");
-  await dialog.getByRole("button", { name: "Save changes" }).click();
+  await dialog.getByTestId("edit-agent-dialog-submit").click();
   await expect(dialog).not.toBeVisible();
 
   const unrelatedEditCommand = await page.evaluate(

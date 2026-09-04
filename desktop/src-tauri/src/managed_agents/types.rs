@@ -586,6 +586,12 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    /// Canonical harness-agnostic effort level persisted on the record.
+    /// `None` means the agent uses the adapter default at launch.
+    /// Exposed here so the edit dialog's settlement comparator can detect a
+    /// backend-rejected effort write rather than closing as success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_level: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

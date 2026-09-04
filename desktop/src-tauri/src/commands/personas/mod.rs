@@ -66,6 +66,10 @@ pub(super) use pending::tombstone_persona_pending;
 mod create;
 pub use create::create_persona;
 mod sharing;
+#[cfg(test)]
+pub(crate) use pending::{prepare_persona_publication_at, PreparedPersonaPublication};
+#[cfg(test)]
+pub(crate) use sharing::publish_and_refresh_teams_at;
 pub use sharing::set_persona_shared;
 pub use sharing::update_persona_and_publish;
 mod update;

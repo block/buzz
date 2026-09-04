@@ -65,9 +65,9 @@ async function openDefinitionEditDialog(page: Page, name: string) {
   });
   await page.getByRole("button", { name: `Open actions for ${name}` }).click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
-  const dialog = page.getByTestId("persona-dialog");
+  // Edit from agents library goes to the merged dialog (no tabs).
+  const dialog = page.getByTestId("edit-agent-dialog");
   await expect(dialog).toBeVisible({ timeout: 10_000 });
-  await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
   return dialog;
 }
 

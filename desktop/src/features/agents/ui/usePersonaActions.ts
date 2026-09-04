@@ -51,7 +51,6 @@ import type {
 } from "@/shared/api/types";
 import {
   duplicatePersonaDialogState,
-  editPersonaDialogState,
   type PersonaDialogState,
 } from "./personaDialogState";
 import {
@@ -65,6 +64,31 @@ import {
 } from "../lib/instanceInputForDefinition";
 
 type PersonaFeedbackSurface = "catalog" | "library";
+
+/**
+ * Resolve the persona to edit against the latest query data.
+ *
+ * `personaToEdit` stores the snapshot clicked at open time. A same-ID
+ * `personasQuery` refresh (a concurrent writer revising the definition) never
+ * rebinds that stored object, so passing it straight to the edit dialog as
+ * `ctx.definition` lets the stale full-replacement input clobber the newer
+ * writer's untouched fields. Re-derive the live entity by ID so `ctx` always
+ * advances with the store while the dialog's seed-time ref stays pinned — which
+ * is exactly what makes the coordinator's drift guard trip.
+ *
+ * Deleted-while-editing: when the ID vanishes from query data, fall back to the
+ * stored snapshot. Editing then still drift-guards (the snapshot's own
+ * `updatedAt` matches the seed ref, so a definition write proceeds against the
+ * last-known state) and closing/deleting stays reachable — less surprising than
+ * abruptly closing the dialog mid-edit.
+ */
+export function resolveLatestPersonaToEdit(
+  selected: AgentPersona | null,
+  personas: readonly AgentPersona[],
+): AgentPersona | null {
+  if (!selected) return null;
+  return personas.find((p) => p.id === selected.id) ?? selected;
+}
 
 export function usePersonaActions() {
   const queryClient = useQueryClient();
@@ -94,6 +118,10 @@ export function usePersonaActions() {
 
   const [personaDialogState, setPersonaDialogState] =
     React.useState<PersonaDialogState | null>(null);
+  // R5 route collapse: tracks the persona being edited via the merged surface.
+  const [personaToEdit, setPersonaToEdit] = React.useState<AgentPersona | null>(
+    null,
+  );
   const [personaToDelete, setPersonaToDelete] =
     React.useState<AgentPersona | null>(null);
   const [personaToShare, setPersonaToShare] = React.useState<{
@@ -161,6 +189,15 @@ export function usePersonaActions() {
   const personaLabelsById = React.useMemo(
     () => getPersonaLabelsById(personas),
     [personas],
+  );
+
+  // Re-derive the edited persona from the latest query data by ID so the edit
+  // dialog's `ctx.definition` advances when a concurrent writer revises the
+  // same definition. Without this, `personaToEdit` holds the open-time snapshot
+  // and the drift guard never trips on the Agents-library route.
+  const resolvedPersonaToEdit = React.useMemo(
+    () => resolveLatestPersonaToEdit(personaToEdit, personas),
+    [personaToEdit, personas],
   );
 
   function clearFeedback(
@@ -430,7 +467,8 @@ export function usePersonaActions() {
   function openEdit(persona: AgentPersona) {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
-    setPersonaDialogState(editPersonaDialogState(persona));
+    // R5: route to the merged AgentEditDialog surface (definition-only context).
+    setPersonaToEdit(persona);
   }
 
   function openDuplicate(persona: AgentPersona) {
@@ -575,6 +613,8 @@ export function usePersonaActions() {
     isPending,
     personaDialogState,
     setPersonaDialogState,
+    personaToEdit: resolvedPersonaToEdit,
+    setPersonaToEdit,
     personaToDelete,
     setPersonaToDelete,
     personaToShare,

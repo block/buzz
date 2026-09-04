@@ -971,6 +971,8 @@ type RawManagedAgent = {
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   backend_agent_id: string | null;
+  /** Non-null when the instance has an explicit harness pin (user chose a specific command). */
+  agent_command_override?: string | null;
   respond_to: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist: string[];
 };
@@ -1966,6 +1968,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend ?? { type: "local" as const },
     backend_agent_id: agent.backend_agent_id ?? null,
+    agent_command_override: agent.agent_command_override ?? null,
     respond_to: agent.respond_to ?? "owner-only",
     respond_to_allowlist: agent.respond_to_allowlist
       ? [...agent.respond_to_allowlist]
@@ -9863,10 +9866,16 @@ async function handleUpdateManagedAgent(args: {
     pubkey: string;
     name?: string;
     model?: string | null;
+    provider?: string | null;
     systemPrompt?: string | null;
     envVars?: Record<string, string>;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
+    agentCommand?: string;
+    harnessOverride?: boolean;
+    agentArgs?: string[];
+    acpCommand?: string;
+    parallelism?: number;
   };
 }): Promise<{ agent: RawManagedAgent; profile_sync_error: string | null }> {
   const agent = getMockManagedAgent(args.input.pubkey);
@@ -9875,6 +9884,9 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.model !== undefined) {
     agent.model = args.input.model;
+  }
+  if (args.input.provider !== undefined) {
+    agent.provider = args.input.provider;
   }
   if (args.input.systemPrompt !== undefined) {
     agent.system_prompt = args.input.systemPrompt;
@@ -9887,6 +9899,25 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.respondToAllowlist !== undefined) {
     agent.respond_to_allowlist = args.input.respondToAllowlist;
+  }
+  if (args.input.agentCommand !== undefined) {
+    agent.agent_command = args.input.agentCommand;
+    // Mirror Rust backend: non-empty command + harnessOverride=true → set override;
+    // empty string (inherit sentinel) → clear override.
+    if (args.input.agentCommand.length === 0) {
+      agent.agent_command_override = null;
+    } else if (args.input.harnessOverride) {
+      agent.agent_command_override = args.input.agentCommand;
+    }
+  }
+  if (args.input.agentArgs !== undefined) {
+    agent.agent_args = [...args.input.agentArgs];
+  }
+  if (args.input.acpCommand !== undefined) {
+    agent.acp_command = args.input.acpCommand;
+  }
+  if (args.input.parallelism !== undefined) {
+    agent.parallelism = args.input.parallelism;
   }
   agent.updated_at = new Date().toISOString();
   return { agent: cloneManagedAgent(agent), profile_sync_error: null };

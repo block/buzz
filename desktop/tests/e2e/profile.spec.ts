@@ -1219,9 +1219,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   expect(headerActionOrder.at(-2)).toBe("user-profile-header-edit-agent");
   expect(headerActionOrder.at(-1)).toBe("auxiliary-panel-close");
   await headerEditAgent.click();
-  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await expect(page.getByTestId("edit-agent-dialog")).toBeVisible();
   await page
-    .getByTestId("persona-dialog")
+    .getByTestId("edit-agent-dialog")
     .getByRole("button", { name: "Cancel" })
     .click();
   await expect(closePanelButton).toBeVisible();
@@ -1488,9 +1488,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   );
   await expect(page.getByTestId("user-profile-edit-agent-row")).toHaveCount(0);
   await instructionRow.click();
-  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await expect(page.getByTestId("edit-agent-dialog")).toBeVisible();
   await page
-    .getByTestId("persona-dialog")
+    .getByTestId("edit-agent-dialog")
     .getByRole("button", {
       name: "Cancel",
     })
@@ -1676,9 +1676,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await modelEditRow.hover();
   await expect(modelEditIndicator).toHaveCSS("opacity", "1");
   await modelEditRow.click();
-  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await expect(page.getByTestId("edit-agent-dialog")).toBeVisible();
   await page
-    .getByTestId("persona-dialog")
+    .getByTestId("edit-agent-dialog")
     .getByRole("button", { name: "Cancel" })
     .click();
   const acpRow = page.getByTestId("user-profile-acp");

@@ -1,0 +1,8 @@
+{
+  "personaId": "p1",
+  "beforeDisplayName": "Alice",
+  "afterDisplayName": "Alice Renamed",
+  "commandErrorContains": "failed to open retention db",
+  "relayProfileRequestCount": 1,
+  "retryPublicationStatus": "published"
+}
