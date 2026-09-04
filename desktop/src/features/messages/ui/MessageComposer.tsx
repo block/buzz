@@ -573,6 +573,7 @@ function MessageComposerImpl({
         queuedAttachments: media.queuedAttachmentsRef.current,
         spoileredAttachmentUrls,
         extractMentionPubkeys: extractMentionPubkeysRef.current,
+        getMentionDisplayName: mentions.getMentionDisplayName,
         save: onEditSaveRef.current,
         clearComposer: () => {
           setComposerContent("");

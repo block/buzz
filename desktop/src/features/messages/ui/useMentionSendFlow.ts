@@ -22,6 +22,7 @@ import {
   buildOutgoingMessage,
   type ImetaMedia,
 } from "@/features/messages/lib/imetaMediaMarkdown";
+import { buildNip27WireBody } from "@/features/messages/lib/collectMentionPubkeys";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
 import { useDetachedAgentStart } from "./useDetachedAgentStart";
 import { useEnsureAgentMentionsReady } from "./useEnsureAgentMentionsReady";
@@ -479,8 +480,13 @@ export function useMentionSendFlow({
           uploaded: ImetaMedia[],
           signal?: AbortSignal,
         ) => {
-          const { content: finalContent, mediaTags } = buildOutgoingMessage(
+          const wireBody = buildNip27WireBody(
             draft.trimmed,
+            draft.mentionPubkeys,
+            mentions.getMentionDisplayName,
+          );
+          const { content: finalContent, mediaTags } = buildOutgoingMessage(
+            wireBody,
             [...draft.savedImeta, ...uploaded],
             new Set([
               ...draft.savedSpoileredAttachmentUrls,

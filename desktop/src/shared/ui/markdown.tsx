@@ -30,6 +30,7 @@ import {
   selectNudgeLeadingContent,
   selectProseOrNudge,
 } from "@/shared/lib/computeConfigNudge";
+import { replaceNip27MentionsForDisplay } from "@/features/messages/lib/nip27Mentions";
 import {
   INLINE_CODE_CHIP_CLASS,
   MESSAGE_MARKDOWN_CLASS,
@@ -1775,6 +1776,13 @@ function MarkdownInner({
   // configNudge !== null, selectProseOrNudge() returns null — suppressing
   // the prose node entirely — so processedContent is never rendered and
   // stripConfigNudgeSentinel would be dead work on that path.
+
+  // NIP-27 wire bodies use nostr:npub1…; map known ones back to @name so the
+  // existing mention highlighter keeps working.
+  processedContent = replaceNip27MentionsForDisplay(
+    processedContent,
+    mentionPubkeysByName,
+  );
 
   if (/^(?:\s{2}\n)+/.test(processedContent)) {
     processedContent = `\u200B${processedContent}`;

@@ -97,6 +97,7 @@ export function HostedCommunityOnboarding({
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
     setCommunities(account.communities);
+    return account;
   }, []);
 
   React.useEffect(() => {
@@ -172,13 +173,6 @@ export function HostedCommunityOnboarding({
       setAvailability(null);
     });
 
-  const goBack = () => {
-    void run("Signing out…", async () => {
-      await clearBuilderlabAuth();
-      onBack();
-    });
-  };
-
   const connectIdentity = () =>
     run("Connecting identity…", async () => {
       const response = await bindBuilderlabIdentity();
@@ -203,6 +197,20 @@ export function HostedCommunityOnboarding({
       boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
   );
   const localNpub = localPubkey ? safeNpub(localPubkey) : null;
+
+  const goBack = () => {
+    // Once signed in with a linked identity, Back returns to the previous
+    // onboarding page without clearing Builderlab auth — otherwise creators
+    // lose their owned-community list and land on "Join a community".
+    if (auth && identity && !identityMismatch) {
+      onBack();
+      return;
+    }
+    void run("Signing out…", async () => {
+      await clearBuilderlabAuth();
+      onBack();
+    });
+  };
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {
@@ -318,7 +326,20 @@ export function HostedCommunityOnboarding({
           ),
         );
       }
-      connect(response.community, true);
+      const created = response.community;
+      // Refresh owned list so Connect recovery and Back still see the community
+      // even if the immediate connect handoff fails.
+      const account = await loadAccount();
+      const refreshed =
+        account.communities.find(
+          (community) =>
+            (created.id && community.id === created.id) ||
+            (created.slug && community.slug === created.slug) ||
+            (created.name && community.name === created.name) ||
+            community.slug === normalizedName ||
+            community.name === normalizedName,
+        ) ?? created;
+      connect(refreshed, true);
     });
   };
 
