@@ -17,8 +17,14 @@ export function getMentionTagPubkey(tag: string[]): string | null {
  * fact), so a single-alias match leaves chips that render but never resolve
  * to a pubkey. Emitting every known alias — display name, kind-0 `name`, and
  * the NIP-05 local part — keeps rendered chips and pubkey resolution in sync.
+ *
+ * Exported because the clipboard's paste-side trust check has to ask the same
+ * question in reverse: a copied `label → pubkey` pair is only believable if
+ * the community's own profile for that pubkey answers to that label. Deriving
+ * both from this one alias set means a legitimate copy of a chip rendered off
+ * an alias cannot be refused for naming that alias.
  */
-function collectProfileAliases(
+export function collectProfileAliases(
   profile: UserProfileSummary | undefined,
 ): string[] {
   if (!profile) {

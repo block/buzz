@@ -1,6 +1,7 @@
 import { MessageSquareText } from "lucide-react";
 import * as React from "react";
 
+import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
@@ -207,6 +208,7 @@ export function ForumView({
       <div
         className="flex-1 overflow-y-auto"
         data-scroll-restoration-id={`forum-list:${channel.id}`}
+        onCopy={handleTimelineMentionCopy}
         ref={postsScrollRef}
       >
         {postsQuery.isLoading ? (
