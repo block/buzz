@@ -507,6 +507,7 @@ for (const { kind, scale } of [
           await expect(chip).toHaveAttribute("data-mention-kind", expectedKind);
           const leading = chip.locator(".inline-chip-leading-fragment");
           await expect(leading).toHaveText("Scout");
+          expect(await leading.ariaSnapshot()).toContain("Scout");
           const icon = await leading.evaluate((element) => {
             const style = getComputedStyle(element, "::before");
             return {

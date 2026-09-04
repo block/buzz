@@ -57,7 +57,6 @@ export function createMarkdownMention(interactive: boolean) {
       >
         {/* Wrapping chips hide the outer icon; keep it with a bounded prefix. */}
         <span
-          aria-hidden="true"
           className={cn(
             "inline-chip-leading-fragment",
             inlineChipIconClasses(icon),

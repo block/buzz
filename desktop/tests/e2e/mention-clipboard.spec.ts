@@ -205,6 +205,11 @@ async function openInboxMentionItem(page: Page) {
     },
   );
 
+  const preview = page
+    .getByTestId(`home-inbox-item-${item.id}`)
+    .locator("[data-mention]");
+  await expect(preview).toHaveText("John Smith");
+  expect(await preview.ariaSnapshot()).toContain("John");
   await page.getByTestId(`home-inbox-item-${item.id}`).click();
   // The inbox resolves a non-member's display name off its own profile batch,
   // so wait for the chip's identity rather than for the row — same setup
@@ -213,6 +218,7 @@ async function openInboxMentionItem(page: Page) {
     .getByTestId("home-inbox-detail-scroll")
     .locator(`[data-mention-pubkey="${JOHN_SMITH_PUBKEY}"]`);
   await expect(chip).toHaveText("John Smith", { timeout: 15_000 });
+  expect(await chip.ariaSnapshot()).toContain("John");
   return item;
 }
 
