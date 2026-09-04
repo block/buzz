@@ -36,8 +36,8 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use nostr::EventId;
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,17 @@ use crate::{
     relay::{self, HarnessRelay, RelayEventPublisher},
     InboundAuthorGate, OwnerCache,
 };
+
+const DEFAULT_SETUP_MENTION_KINDS: &[u32] = &[
+    KIND_STREAM_MESSAGE,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_FORUM_POST,
+    KIND_FORUM_COMMENT,
+];
+
+fn is_setup_nudge_kind(kind: u32) -> bool {
+    DEFAULT_SETUP_MENTION_KINDS.contains(&kind)
+}
 
 // ── Payload ───────────────────────────────────────────────────────────────────
 
@@ -414,7 +425,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         }
 
         // Ignore non-message kinds (relay housekeeping, etc.).
-        if kind_u32 != KIND_STREAM_MESSAGE && kind_u32 != KIND_WORKFLOW_APPROVAL_REQUESTED {
+        if !is_setup_nudge_kind(kind_u32) {
             continue;
         }
 
@@ -563,7 +574,7 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
     let kinds = config
         .kinds_override
         .clone()
-        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
+        .unwrap_or_else(|| DEFAULT_SETUP_MENTION_KINDS.to_vec());
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
@@ -690,6 +701,18 @@ async fn publish_setup_nudge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_default_kinds_include_mentioned_forum_events_not_votes() {
+        assert!(DEFAULT_SETUP_MENTION_KINDS.contains(&KIND_FORUM_POST));
+        assert!(DEFAULT_SETUP_MENTION_KINDS.contains(&KIND_FORUM_COMMENT));
+        assert!(!DEFAULT_SETUP_MENTION_KINDS.contains(&buzz_core::kind::KIND_FORUM_VOTE));
+
+        for kind in DEFAULT_SETUP_MENTION_KINDS {
+            assert!(is_setup_nudge_kind(*kind));
+        }
+        assert!(!is_setup_nudge_kind(buzz_core::kind::KIND_FORUM_VOTE));
+    }
 
     #[test]
     fn setup_payload_from_raw_returns_none_when_absent() {
