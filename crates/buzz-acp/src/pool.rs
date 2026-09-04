@@ -3168,7 +3168,31 @@ pub async fn run_prompt_task(
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
-            if !matches!(e, AcpError::AgentError { .. }) {
+            //
+            // EXCEPT when the AgentError *is* "the session is gone". Then the
+            // session is the opposite of healthy, and keeping it is fatal: the
+            // channel's id stays in `state.sessions`, every later turn reuses
+            // it, the agent answers "Session not found" forever, and nothing
+            // ever calls session/new again. The seat is dead until the process
+            // restarts.
+            //
+            // This is not hypothetical. `claude-agent-acp` deletes its session
+            // whenever the Claude worker process dies for any reason — reaped,
+            // OOM-killed, crashed — and then answers exactly this. On
+            // 2026-08-11 a stale-turn reaper killed the workers of 13 seats and
+            // the whole roster stayed wedged for ~9.5h overnight, then ~2.5h
+            // again the next morning, while `launchctl` showed live PIDs and
+            // every log stayed fresh.
+            //
+            // Invalidating only this source is the conservative repair: the
+            // very next turn creates a fresh session and the seat recovers on
+            // its own, with no restart and nothing else discarded.
+            let session_is_gone = matches!(
+                &e,
+                AcpError::AgentError { message, .. }
+                    if message.to_ascii_lowercase().contains("session not found")
+            );
+            if !matches!(e, AcpError::AgentError { .. }) || session_is_gone {
                 agent.state.invalidate(&source);
             }
             let usage = agent.acp.take_turn_usage();
