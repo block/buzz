@@ -54,9 +54,8 @@ fn conversation(values: &[u8], channel_id: Uuid, epoch: &str) -> ExecutionDomain
     .expect("coherent conversation domain")
 }
 
-/// Reader identities enter the IFC lattice and domain key, so accepting an
-/// arbitrary 32-byte string would let malformed identities become distinct
-/// policy principals.
+/// A correctly sized hex string is not necessarily a public key. Reject invalid
+/// curve points, and check that uppercase input returns the same lowercase key.
 #[test]
 fn principals_must_be_valid_x_only_secp256k1_points() {
     for invalid in ["00".repeat(32), "ff".repeat(32), format!("{:064x}", 5)] {
@@ -75,9 +74,8 @@ fn principals_must_be_valid_x_only_secp256k1_points() {
     );
 }
 
-/// The Buzz specialization must preserve the generic reader-set lattice: the
-/// combined label may flow only to readers authorized for every input, and it
-/// must never cross communities.
+/// Combining data for readers {1, 2} with data for {1, 3} leaves only reader 1.
+/// Also check that even public data cannot flow into a different community.
 #[test]
 fn buzz_labels_intersect_readers_and_never_cross_communities() {
     let combined = label(&[1, 2])
@@ -94,9 +92,8 @@ fn buzz_labels_intersect_readers_and_never_cross_communities() {
     );
 }
 
-/// Every capability ceiling must admit an operation. Conflicting effect
-/// declarations keep the classification that requires more checking, so an
-/// egressing operation cannot become an ordinary call.
+/// Only `buzz.post` appears in all three policies. It must remain a publication
+/// even though one policy says otherwise, or the destination check could be lost.
 #[test]
 fn capability_intersection_keeps_the_most_restrictive_effect() {
     let bot = CapabilitySet::from_operations([
@@ -115,9 +112,9 @@ fn capability_intersection_keeps_the_most_restrictive_effect() {
     );
 }
 
-/// Appendix B's domain mapping gives personal capabilities only to a genuine
-/// two-party owner/agent DM. Shared conversations must use the narrower
-/// conversation ceiling even when the owner initiated the work.
+/// With this policy, an owner's DM can use `email.read`; a public-channel request
+/// from the same owner cannot. Check the audience and context too, so personal
+/// capabilities cannot be paired with public state.
 #[test]
 fn derivation_grants_personal_capabilities_only_to_owner_private_work() {
     let owner = principal(1);
@@ -177,8 +174,8 @@ fn derivation_grants_personal_capabilities_only_to_owner_private_work() {
     assert_eq!(public.capabilities, non_egressing(["buzz.read.current"]));
 }
 
-/// Restricted-domain derivation fails closed when authenticated requesters or
-/// the executing agent are absent from the verified membership snapshot.
+/// Reject a private-channel invocation with no requester, a missing agent, or
+/// an outside requester. Knowing the channel ID is not enough to act in it.
 #[test]
 fn restricted_derivation_requires_verified_membership() {
     let owner = principal(1);
@@ -220,9 +217,9 @@ fn restricted_derivation_requires_verified_membership() {
     );
 }
 
-/// The domain identifier is a security boundary for retained-state reuse. Every
-/// field in `D = (agent, owner, audience, context, epoch, capabilities)` must
-/// change the routing key independently.
+/// Change each of the six domain fields separately and require a different key.
+/// Omitting one from the hash could reuse history from a different agent, owner,
+/// audience, conversation, membership version, or capability set.
 #[test]
 fn every_domain_component_changes_the_routing_key() {
     let base = conversation(&[1, 2], Uuid::from_u128(1), "v1");
@@ -301,8 +298,8 @@ fn every_domain_component_changes_the_routing_key() {
     assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
 }
 
-/// This fixed value detects accidental changes to the canonical domain-key
-/// encoding, which would otherwise strand or incorrectly reuse retained state.
+/// Keep the same key for the same domain across code changes. An accidental
+/// encoding change would break lookups of state saved under the old key.
 #[test]
 fn domain_key_has_a_canonical_golden_value() {
     let domain = conversation(&[1, 2], Uuid::from_u128(1), "membership:event-1");
@@ -312,9 +309,8 @@ fn domain_key_has_a_canonical_golden_value() {
     );
 }
 
-/// Audience shape and retained context are independent inputs but must remain
-/// coherent: public labels select public context, while restricted labels
-/// select a conversation or exact owner-private context.
+/// A public audience cannot be paired with another community's context or with
+/// private conversation state. Check both errors at the domain constructor.
 #[test]
 fn domains_reject_incoherent_audience_context_pairs() {
     assert_eq!(

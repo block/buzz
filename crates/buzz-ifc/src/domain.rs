@@ -6,34 +6,29 @@ use uuid::Uuid;
 
 use crate::label::{CommunityId, ConfidentialityLabel, Principal, ReaderSet};
 
-/// Defines where an agent's retained state may be reused.
+/// Which conversations may share an agent's history, files, and caches.
 ///
-/// After a turn, an agent may retain conversation history, files, or cached
-/// data. Changing this context must select different retained state. Matching
-/// contexts alone do not permit reuse: the broker must match the complete
-/// [`DomainKey`], which also covers the agent, audience, membership epoch, and
-/// capabilities.
+/// Two private channels keep separate state even if they have the same members.
+/// Public channels share a community-wide context. A DM between an agent and
+/// its owner has a separate owner-private context.
 ///
-/// Audience answers who may read information; context answers which
-/// conversation history and managed memory may carry into later turns. These
-/// are independent boundaries. Two conversations with identical participants
-/// do not implicitly share state, while public conversations deliberately use
-/// one community-wide public context. Owner-private state is likewise distinct
-/// from ordinary conversation state, even within the same community.
+/// A matching context is not enough to reuse state. The broker must compare the
+/// full [`DomainKey`], so a change in agent, owner, audience, membership version,
+/// or capabilities also prevents reuse.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum DomainContext {
     /// Shared state for public conversations in one community.
     CommunityPublic(CommunityId),
-    /// State retained for one specific restricted conversation.
+    /// State kept for one private channel or DM.
     Conversation {
-        /// The Buzz community containing the conversation.
+        /// The community the conversation belongs to.
         community: CommunityId,
         /// The channel, DM, or group-DM identifier.
         channel_id: Uuid,
     },
-    /// State visible only to the bot owner.
+    /// State kept for conversations between the agent and its owner.
     OwnerPrivate {
-        /// The Buzz community containing the owner relationship.
+        /// The community where this agent has this owner.
         community: CommunityId,
         /// The bot owner.
         owner: Principal,
@@ -73,19 +68,17 @@ impl DomainContext {
     }
 }
 
-/// Whether invoking an operation can publish information outside the current
-/// execution boundary.
+/// Whether an operation can send information out of the agent's environment.
 ///
-/// This classification belongs to trusted policy configuration, not to the
-/// agent's call request. Publication operations require both capability
-/// admission and an information-flow decision before the broker may execute
-/// them. Concrete destination policy remains the broker's responsibility.
+/// The broker configures this; the agent does not get to classify its own calls.
+/// For a publication, permission to call the operation is not enough: the broker
+/// must also check whether the information may flow to the destination's readers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationEffect {
-    /// The operation cannot publish information outside the execution boundary.
+    /// Does not expose information outside the agent's environment.
     NonEgressing,
-    /// The operation publishes information to a broker-resolved destination.
+    /// Sends information to a destination the broker must resolve and check.
     Publication,
 }
 
@@ -105,10 +98,11 @@ impl OperationEffect {
     }
 }
 
-/// The complete set of operations admitted for one execution domain.
+/// Operations a policy allows, with each operation's publication behavior.
 ///
-/// Raw membership is intentionally private because it is not an authorization
-/// decision:
+/// An operation's presence in this set does not authorize a call on its own.
+/// Publications still need an information-flow check, so there is no public
+/// membership check that a caller could mistake for permission to execute:
 ///
 /// ```compile_fail
 /// let capabilities = buzz_ifc::CapabilitySet::default();
@@ -118,10 +112,10 @@ impl OperationEffect {
 pub struct CapabilitySet(BTreeMap<String, OperationEffect>);
 
 impl CapabilitySet {
-    /// Build a set from stable operation names and trusted effect classes.
+    /// Build a set from stable operation names and broker-configured effects.
     ///
-    /// If an operation is repeated with different effects, publication wins so
-    /// conflicting configuration cannot downgrade an egressing operation.
+    /// If a name appears more than once, keep `Publication` if any entry uses it.
+    /// A duplicate must not remove the requirement to check the destination.
     pub fn from_operations<I, S>(operations: I) -> Self
     where
         I: IntoIterator<Item = (S, OperationEffect)>,
@@ -137,15 +131,10 @@ impl CapabilitySet {
         Self(capabilities)
     }
 
-    /// Compute the operations admitted by every independent capability
-    /// ceiling: the bot, the authenticated requester, and the execution
-    /// domain.
+    /// Keep only operations allowed by the bot, requester, and domain policies.
     ///
-    /// An operation missing from any ceiling is denied. When the same
-    /// operation has conflicting effect classifications, the result preserves
-    /// the classification that requires more checking: publication wins over
-    /// non-egressing. No policy layer can accidentally downgrade an egressing
-    /// operation into an unchecked call.
+    /// All three must list an operation for it to survive. If any marks it as a
+    /// publication, the result does too, even if the others mark it non-egressing.
     pub(crate) fn effective(bot: &Self, requester: &Self, domain: &Self) -> Self {
         let mut effective = BTreeMap::new();
         for (name, bot_effect) in &bot.0 {
@@ -173,7 +162,11 @@ impl CapabilitySet {
     }
 }
 
-/// Capability ceilings used while deriving an invocation's effective set.
+/// Limits on the operations available to an agent.
+///
+/// `bot` lists everything the agent may use. An owner-private DM uses this set
+/// when every request comes from the owner. All other work is limited to
+/// operations that also appear in `conversation`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityPolicy {
     bot: CapabilitySet,
@@ -181,103 +174,106 @@ pub struct CapabilityPolicy {
 }
 
 impl CapabilityPolicy {
-    /// Construct policy from the bot's full ceiling and the ceiling permitted
-    /// in shared Buzz conversations.
+    /// Set the bot's allowed operations and the narrower set for shared
+    /// conversations. Entries in `conversation` cannot grant anything absent
+    /// from `bot`.
     pub fn new(bot: CapabilitySet, conversation: CapabilitySet) -> Self {
         Self { bot, conversation }
     }
 }
 
-/// The membership or policy version under which state was created.
+/// Version of the membership or access policy used to derive a domain.
+///
+/// The broker must change this value when the relevant membership or policy
+/// changes. It becomes part of the domain key, preventing the broker from
+/// selecting old state with the new key. This crate does not check freshness.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct MembershipEpoch(String);
 
 impl MembershipEpoch {
-    /// Construct an epoch from a stable, verifier-controlled identifier.
+    /// Use a broker-verified version, such as a membership event ID.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 }
 
-/// Buzz conversation classification after signed metadata verification.
+/// Conversation type read from metadata the broker has verified.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationKind {
-    /// Community-wide public channel. All public channels intentionally share
-    /// one execution domain.
+    /// A public channel, using the community's shared public context.
     Public,
-    /// Invite-only channel or group DM with conversation-specific state.
+    /// A private channel or group DM that keeps its own state.
     Restricted,
-    /// A DM. A two-party owner/bot DM becomes owner-private; group DMs remain
-    /// conversation-specific.
+    /// A DM. If its only members are the agent and its owner, use owner-private
+    /// context. Otherwise, keep state specific to this DM.
     DirectMessage,
 }
 
-/// Verified Buzz facts from which the shared policy derives an execution
-/// domain.
+/// Inputs the broker must authenticate before deriving an execution domain.
 ///
-/// The trusted broker constructs this only after checking trigger signatures,
-/// channel binding, and the relay signature on metadata and membership.
+/// Before constructing this value, the broker must verify the triggering
+/// events' signatures and channel IDs, and the relay signatures on conversation
+/// metadata and membership. The fields are public; constructing this struct
+/// does not perform those checks.
 pub struct DomainFacts {
-    /// Community selected by the trusted broker's resolved tenant context.
+    /// Community resolved by the broker, not chosen by the agent.
     pub community: CommunityId,
     /// Channel, DM, or group-DM identifier that triggered the invocation.
     pub channel_id: Uuid,
-    /// Verified conversation classification.
+    /// Conversation type from verified metadata.
     pub kind: ConversationKind,
-    /// Relay-controlled membership or community policy version.
+    /// Current membership or community policy version supplied by the relay.
     pub epoch: MembershipEpoch,
-    /// Complete verified roster. Public derivation does not consume this set.
+    /// Complete verified member list, including the agent. Ignored for public
+    /// channels, whose audience is the whole community.
     pub members: BTreeSet<Principal>,
-    /// Managed Buzz identity whose work the execution domain contains.
+    /// Agent processing the invocation. Removed from the member list when
+    /// deriving the audience: processing data does not make the agent a recipient.
     pub executing_agent: Principal,
-    /// Authors whose events are included in this invocation.
+    /// Authors of the events being processed in this invocation.
     pub requesters: BTreeSet<Principal>,
-    /// Optional relay principal allowed to author trusted workflow events.
+    /// Relay identity that may trigger workflows without being a channel member.
+    /// This exception does not add it to the audience or grant owner rights.
     pub system_principal: Option<Principal>,
-    /// Optional human owner of the executing agent.
+    /// Owner of the executing agent, if one is configured.
     pub owner: Option<Principal>,
 }
 
-/// Domain derivation failed despite the broker's claim that its facts were
-/// already verified.
+/// The supplied facts cannot form a valid execution domain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DerivationError {
-    /// Every invocation must contain at least one authenticated requester.
+    /// No authenticated requester was supplied.
     #[error("invocation has no authenticated requester")]
     EmptyRequesters,
-    /// Restricted conversations must include the executing agent in their
-    /// verified roster.
+    /// The executing agent is missing from the private conversation's member list.
     #[error("executing agent is absent from channel membership")]
     AgentNotMember,
-    /// A non-system requester is absent from restricted membership.
+    /// A requester other than the trusted relay identity is not a member.
     #[error("requester is absent from channel membership")]
     RequesterNotMember,
-    /// Removing the executing processor left no authorized recipient.
+    /// No recipients remain after removing the executing agent from the members.
     #[error("restricted conversation has no recipient audience")]
     EmptyRestrictedAudience,
-    /// The derived audience and context violated a domain invariant.
+    /// The audience and context disagree on the community or permitted readers.
     #[error("derived execution domain is inconsistent")]
     InvalidDomain,
 }
 
-/// Derive a complete execution domain from verified Buzz facts.
+/// Choose the audience, saved-state context, and allowed operations for a turn.
 ///
-/// The trusted broker supplies authenticated requesters, verified conversation
-/// membership, and a relay-controlled membership epoch; the agent cannot
-/// assert any of these values. Public conversations receive the community-wide
-/// audience and shared public context. Restricted conversations receive the
-/// verified member audience, excluding the executing agent, and retain state
-/// only for their channel. A two-party owner/agent DM instead receives the
-/// owner's private context. Effective capabilities are the intersection of
-/// the bot, requester, and context ceilings.
+/// Public channels use the whole community as their audience and share a public
+/// context. Private channels and DMs use their members, minus the executing
+/// agent, as readers and keep state per conversation. A DM containing only the
+/// agent and its owner uses owner-private context instead.
 ///
-/// Agent identity, owner, audience, context, epoch, and capabilities all feed
-/// the domain identifier used to select retained agent state. A change to any
-/// component therefore selects a different domain rather than silently reusing
-/// state that may contain information admitted under older authority. A broker
-/// can use the resulting [`DomainKey`] when it selects an ACP or remote-agent
-/// session.
+/// When the context is owner-private and every requester is the owner, use the
+/// bot's capability set. Otherwise, keep only operations allowed by both the bot
+/// and conversation policies, even if the owner made the request.
+///
+/// The broker must supply verified [`DomainFacts`] and use the resulting
+/// [`DomainKey`] to select saved state. This function does not load or clear
+/// sessions itself.
 pub fn derive_execution_domain(
     facts: DomainFacts,
     policy: &CapabilityPolicy,
@@ -359,22 +355,31 @@ fn effective_capabilities(
     CapabilitySet::effective(&policy.bot, requester, domain)
 }
 
-/// Opaque routing key for one complete execution domain.
+/// Key the broker uses to select an agent's saved state.
+///
+/// Compare the full key when deciding whether to reuse a session. Matching only
+/// a channel or member list would miss changes in owner, policy, or capabilities.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct DomainKey(String);
 
 impl DomainKey {
-    /// Return the full stable identifier used to route turns to retained state.
+    /// Return the key as a hexadecimal string for storage or lookup.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// `D = (Agent, Owner, Audience, Context, Epoch, Capabilities)`.
+/// The identity, readers, context, and policy for an agent invocation.
 ///
-/// This is the executable form of the domain model in [Appendix B of the
-/// design paper](../../../docs/practical-information-flow-for-buzz-agents.md#appendix-b-formal-execution-domains).
+/// The audience says who may receive information. The context says which
+/// conversations may share saved state. The epoch records the membership or
+/// policy version, and the capabilities list the allowed operations. Agent and
+/// owner identities keep different agents and ownership relationships separate.
+///
+/// This extends the domain model in
+/// [Appendix B of the design paper](../../../docs/practical-information-flow-for-buzz-agents.md#appendix-b-formal-execution-domains)
+/// by including the owner and capabilities in the key as well.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionDomain {
     agent: Principal,
@@ -386,7 +391,7 @@ pub struct ExecutionDomain {
 }
 
 impl ExecutionDomain {
-    /// Construct a domain after the trusted broker has resolved its inputs.
+    /// Check that the audience and context agree on community and readers.
     pub(crate) fn new(
         agent: Principal,
         owner: Option<Principal>,
@@ -411,7 +416,10 @@ impl ExecutionDomain {
         })
     }
 
-    /// Return the opaque key used to route turns to retained state.
+    /// Hash every domain field into a stable key for session lookup.
+    ///
+    /// Changing any field changes the key. The broker must use this complete key
+    /// so it cannot reuse a session that has seen data under a different policy.
     pub fn key(&self) -> DomainKey {
         let mut hasher = Sha256::new();
         hasher.update(b"buzz-ifc-domain-v6");
@@ -465,14 +473,14 @@ fn audience_context_shape_matches(
     }
 }
 
-/// An execution domain contains inconsistent communities.
+/// The audience and context cannot be used together.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum DomainError {
-    /// The audience and retained context belong to different Buzz communities.
+    /// The audience and context belong to different communities.
     #[error("execution-domain audience and context belong to different communities")]
     ContextCommunityMismatch,
-    /// Public, conversation, and owner-private contexts require their
-    /// corresponding audience shape.
+    /// Public context needs a public audience; conversation context needs a
+    /// nonempty reader set; owner-private context needs exactly the owner.
     #[error("execution-domain audience does not match its context")]
     AudienceContextMismatch,
 }
