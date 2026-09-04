@@ -12,33 +12,20 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
+    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC, KIND_AUTH, KIND_DELETION,
+    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FORUM_COMMENT, KIND_FORUM_POST,
+    KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_REPO_ANNOUNCEMENT, KIND_HUDDLE_ENDED,
+    KIND_HUDDLE_STARTED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP43_LEAVE_REQUEST, KIND_PERSONA,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
+    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_TEAM_CATALOG,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
+use buzz_kinds::{RequiredScope, Scoping};
 use nostr::Event;
 
 use crate::state::AppState;
@@ -431,121 +418,6 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
     }
 }
 
-/// Determine the required scope for a given event kind.
-///
-/// Returns `Err` for unknown kinds — the relay rejects them.
-fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
-    match kind {
-        KIND_PROFILE => Ok(Scope::UsersWrite),
-        KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
-        KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
-        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
-        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
-            Ok(Scope::UsersWrite)
-        }
-        // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
-        KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
-        // NIP-56 reports are ordinary member writes into the mod-only queue.
-        // Ingest persists them to `moderation_reports` and suppresses public
-        // storage/fanout; reports are signals, never enforcement triggers.
-        KIND_REPORT | KIND_PRODUCT_FEEDBACK => Ok(Scope::MessagesWrite),
-        // Community moderation commands are direct, mod-authz-gated writes.
-        // Scope only proves the transport can submit message writes; the
-        // command handler owns role/capability authorization.
-        k if buzz_core::kind::is_moderation_command_kind(k) => Ok(Scope::MessagesWrite),
-        // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
-        // same ownership shape as kind:3 (contacts) and kind:0 (profile).
-        KIND_MUTE_LIST
-        | KIND_PIN_LIST
-        | KIND_NIP65_RELAY_LIST_METADATA
-        | KIND_BOOKMARK_LIST
-        | KIND_FOLLOW_SET
-        | KIND_BOOKMARK_SET
-        // NIP-30/NIP-51: per-user custom emoji set (30030) and emoji list (10030).
-        // User-owned global state, keyed by (pubkey, kind[, d_tag]); the workspace
-        // palette is the client-side union of every member's own set.
-        | KIND_EMOJI_SET
-        | KIND_EMOJI_LIST
-        | KIND_AGENT_PROFILE => Ok(Scope::UsersWrite),
-        KIND_DELETION
-        | KIND_REACTION
-        | KIND_GIFT_WRAP
-        | KIND_STREAM_MESSAGE
-        | KIND_STREAM_MESSAGE_V2
-        | KIND_NIP29_DELETE_EVENT
-        | KIND_STREAM_MESSAGE_EDIT
-        | KIND_STREAM_MESSAGE_PINNED
-        | KIND_STREAM_MESSAGE_BOOKMARKED
-        | KIND_STREAM_MESSAGE_SCHEDULED
-        | KIND_STREAM_REMINDER
-        | KIND_STREAM_MESSAGE_DIFF
-        | KIND_FORUM_POST
-        | KIND_FORUM_VOTE
-        | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
-        KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
-            Ok(Scope::AdminChannels)
-        }
-        // NIP-43: relay membership admin commands (9030–9032) + Buzz
-        // workspace-profile command (9033).
-        k if k == RELAY_ADMIN_ADD_MEMBER
-            || k == RELAY_ADMIN_REMOVE_MEMBER
-            || k == RELAY_ADMIN_CHANGE_ROLE
-            || k == RELAY_ADMIN_SET_WORKSPACE_PROFILE =>
-        {
-            Ok(Scope::AdminUsers)
-        }
-        // NIP-IA: identity archive/unarchive requests (9035/9036).
-        // Scope is intentionally UsersWrite, not AdminUsers: NIP-IA's self and
-        // owner-of-agent paths are open to ordinary users (a user retiring their
-        // own key, or an owner archiving their agent). Real authorization is the
-        // consent-path check inside handle_identity_archive_event — the relay
-        // verifies self / admin-role / owner-via-live-kind:0 there. This gate
-        // only ensures the actor can write user-scoped state, which any
-        // profile-publishing user already holds.
-        KIND_IA_ARCHIVE_REQUEST | KIND_IA_UNARCHIVE_REQUEST => Ok(Scope::UsersWrite),
-        KIND_NIP29_EDIT_METADATA => {
-            // kind:9002 scope split: archived tag → AdminChannels, else ChannelsWrite
-            let has_archived = event
-                .tags
-                .iter()
-                .any(|t| t.kind().to_string() == "archived");
-            if has_archived {
-                Ok(Scope::AdminChannels)
-            } else {
-                Ok(Scope::ChannelsWrite)
-            }
-        }
-        KIND_NIP29_CREATE_GROUP | KIND_CANVAS => Ok(Scope::ChannelsWrite),
-        KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST | KIND_NIP43_LEAVE_REQUEST => {
-            Ok(Scope::ChannelsRead)
-        }
-        // Huddle lifecycle events + guidelines
-        KIND_HUDDLE_STARTED
-        | KIND_HUDDLE_PARTICIPANT_JOINED
-        | KIND_HUDDLE_PARTICIPANT_LEFT
-        | KIND_HUDDLE_ENDED
-        | KIND_HUDDLE_GUIDELINES => Ok(Scope::ChannelsWrite),
-        // NIP-34: Git repository events
-        KIND_GIT_REPO_ANNOUNCEMENT | KIND_GIT_REPO_STATE => Ok(Scope::ReposWrite),
-        // NIP-MP: a project is repository metadata — grouping repositories needs
-        // the same scope as announcing them.
-        KIND_PROJECT => Ok(Scope::ReposWrite),
-        KIND_GIT_PATCH
-        | KIND_GIT_PULL_REQUEST
-        | KIND_GIT_PR_UPDATE
-        | KIND_GIT_ISSUE
-        | KIND_GIT_STATUS_OPEN
-        | KIND_GIT_STATUS_MERGED
-        | KIND_GIT_STATUS_CLOSED
-        | KIND_GIT_STATUS_DRAFT => Ok(Scope::MessagesWrite),
-        // Command kinds — DM management, workflows, approvals
-        KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
-        KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
-        KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
-        _ => Err("restricted: unknown event kind"),
-    }
-}
-
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
 pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
     for tag in event.tags.iter() {
@@ -608,131 +480,6 @@ pub(crate) async fn derive_reaction_channel(
         Ok(None) => ReactionChannelResult::NotFound,
         Err(e) => ReactionChannelResult::DbError(e.to_string()),
     }
-}
-
-/// Kinds that are always global (`channel_id = NULL`).
-///
-/// If a client includes a stray `h` tag on these kinds, the ingest pipeline
-/// sets `channel_id = None` — these events are never channel-scoped.
-///
-/// Note: the raw `h` tag remains on the stored event (Nostr events are signed,
-/// so tags cannot be stripped without invalidating the signature). The read-path
-/// filter matching in `filter.rs` treats explicit `h` tags as authoritative,
-/// which means a stray `h` tag can still match `#h` queries. This is a known
-/// limitation affecting all global-only kinds and should be addressed in the
-/// filter layer as a follow-up.
-pub(crate) fn is_global_only_kind(kind: u32) -> bool {
-    matches!(
-        kind,
-        KIND_PROFILE
-            | KIND_TEXT_NOTE
-            | KIND_CONTACT_LIST
-            | KIND_LONG_FORM
-            | KIND_USER_STATUS
-            | KIND_READ_STATE
-            // NIP-51 standard lists + sets and NIP-65 relay list — user-owned global state.
-            // Same as kind:3 (contacts): keyed by (pubkey, kind) or (pubkey, kind, d_tag),
-            // never channel-scoped. A stray `h` tag must not channel-scope them.
-            | KIND_MUTE_LIST
-            | KIND_PIN_LIST
-            | KIND_NIP65_RELAY_LIST_METADATA
-            | KIND_BOOKMARK_LIST
-            | KIND_FOLLOW_SET
-            | KIND_BOOKMARK_SET
-            // NIP-30 custom emoji set (30030) + emoji list (10030): user-owned,
-            // keyed by (pubkey, kind[, d_tag]). A stray `h` tag must not channel-scope them.
-            | KIND_EMOJI_SET
-            | KIND_EMOJI_LIST
-            // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
-            | KIND_AGENT_ENGRAM
-            // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
-            | KIND_EVENT_REMINDER
-            // Agent profile (10100): user-owned replaceable, keyed by pubkey.
-            | KIND_AGENT_PROFILE
-            // NIP-AP: persona definitions (30175): owner-authored, keyed by (pubkey, kind, d_tag).
-            | KIND_PERSONA
-            // NIP-AP: team (30176) + managed-agent (30177) definitions and the
-            // team-catalog projection (30178): owner-authored, keyed by
-            // (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
-            | KIND_TEAM
-            | KIND_MANAGED_AGENT
-            | KIND_PRIVATE_MANAGED_AGENT
-            | KIND_TEAM_CATALOG
-            // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
-            // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
-            | KIND_GIT_REPO_ANNOUNCEMENT
-            | KIND_GIT_REPO_STATE
-            | KIND_GIT_PATCH
-            | KIND_GIT_PULL_REQUEST
-            | KIND_GIT_PR_UPDATE
-            | KIND_GIT_ISSUE
-            | KIND_GIT_STATUS_OPEN
-            | KIND_GIT_STATUS_MERGED
-            | KIND_GIT_STATUS_CLOSED
-            | KIND_GIT_STATUS_DRAFT
-            // NIP-MP: projects are addressed by (pubkey, kind, d_tag). The
-            // `buzz-channel` tag is a metadata reference, not a routing directive,
-            // so a project's state is never channel-scoped.
-            | KIND_PROJECT
-            // Community moderation commands (9040–9044): community-global
-            // direct commands, same model as the NIP-43 9030-series. A stray
-            // `h` tag must never channel-scope them (pinned contract —
-            // handlers/moderation_commands.rs routing docs).
-            | KIND_MODERATION_BAN
-            | KIND_MODERATION_UNBAN
-            | KIND_MODERATION_TIMEOUT
-            | KIND_MODERATION_UNTIMEOUT
-            | KIND_MODERATION_RESOLVE_REPORT
-            // NIP-43: relay admin commands and leave requests are global — they
-            // must never be channel-scoped, even if the event carries a stray `h` tag.
-            | RELAY_ADMIN_ADD_MEMBER
-            | RELAY_ADMIN_REMOVE_MEMBER
-            | RELAY_ADMIN_CHANGE_ROLE
-            | RELAY_ADMIN_SET_WORKSPACE_PROFILE
-            | KIND_NIP43_LEAVE_REQUEST
-            // NIP-IA: identity archive/unarchive requests drive relay-global
-            // archive state (8002/8003/13535) and are audited as global request
-            // events. A stray `h` tag must not channel-scope them.
-            | KIND_IA_ARCHIVE_REQUEST
-            | KIND_IA_UNARCHIVE_REQUEST
-            // NIP-AM: agent turn metrics are owner-scoped global events.
-            // Channel identity is encrypted inside the payload — no `h` tag.
-            | KIND_AGENT_TURN_METRIC
-            // NIP-PL leases are author-owned, addressable global state.
-            | super::push_lease::KIND_PUSH_LEASE
-    )
-}
-
-/// Kinds that require an `h` tag for channel scoping.
-pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
-    matches!(
-        kind,
-        KIND_STREAM_MESSAGE
-            | KIND_STREAM_MESSAGE_V2
-            | KIND_STREAM_MESSAGE_EDIT
-            | KIND_STREAM_MESSAGE_PINNED
-            | KIND_STREAM_MESSAGE_BOOKMARKED
-            | KIND_STREAM_MESSAGE_SCHEDULED
-            | KIND_STREAM_REMINDER
-            | KIND_STREAM_MESSAGE_DIFF
-            | KIND_CANVAS
-            | KIND_FORUM_POST
-            | KIND_FORUM_VOTE
-            | KIND_FORUM_COMMENT
-            // NIP-29 admin kinds (except CREATE_GROUP which creates the channel)
-            | KIND_NIP29_PUT_USER
-            | KIND_NIP29_REMOVE_USER
-            | KIND_NIP29_EDIT_METADATA
-            | KIND_NIP29_DELETE_EVENT
-            | KIND_NIP29_DELETE_GROUP
-            | KIND_NIP29_LEAVE_REQUEST
-            // Huddle lifecycle events + guidelines
-            | KIND_HUDDLE_STARTED
-            | KIND_HUDDLE_PARTICIPANT_JOINED
-            | KIND_HUDDLE_PARTICIPANT_LEFT
-            | KIND_HUDDLE_ENDED
-            | KIND_HUDDLE_GUIDELINES
-    )
 }
 
 /// Check channel membership: member OR open-visibility channel.
@@ -2256,12 +2003,46 @@ async fn ingest_event_inner(
         ));
     }
 
-    let required = match required_scope_for_kind(kind_u32, &event) {
-        Ok(scope) => scope,
-        Err(msg) => return Err(IngestError::Rejected(msg.into())),
+    // Seam A: resolve the base write-scope and the channel-scoping
+    // classification from the kind registry rather than the former inline
+    // `required_scope_for_kind` / `is_global_only_kind` /
+    // `requires_h_channel_scope` policy functions (see `buzz-kinds`). A
+    // registry miss reproduces the old terminal
+    // `_ => Err("restricted: unknown event kind")` reject verbatim.
+    //
+    // `KIND_PUSH_LEASE` (30350) is not registered (see `buzz_kinds::registry`
+    // module docs) and flows through this resolution before its dedicated
+    // handler further below, so it keeps its former inline special case.
+    let (required, scoping) = if kind_u32 == super::push_lease::KIND_PUSH_LEASE {
+        (Scope::UsersWrite, Scoping::Global)
+    } else {
+        let descriptor = match state.kind_registry.get(kind_u32) {
+            Some(descriptor) => descriptor,
+            None => {
+                return Err(IngestError::Rejected(
+                    "restricted: unknown event kind".into(),
+                ));
+            }
+        };
+        let required = match &descriptor.required_scope {
+            RequiredScope::Static(scope) => scope.clone(),
+            RequiredScope::Dynamic => {
+                // Dynamic-scope kinds resolve their scope from the event via
+                // the kind's extension (the NIP-29 edit-metadata archive/
+                // non-archive split). Fail closed if a `Dynamic` descriptor
+                // somehow has no extension wired.
+                let Some(extension) = descriptor.extension else {
+                    return Err(IngestError::Rejected(
+                        "restricted: event kind has no scope resolver".into(),
+                    ));
+                };
+                extension.required_scope(&event)
+            }
+        };
+        (required, descriptor.scoping)
     };
     // NIP-43: relay admin commands are global — channel-scoped tokens cannot
-    // issue them even if the event has no `h` tag (is_global_only_kind strips
+    // issue them even if the event has no `h` tag (Scoping::Global strips
     // channel_id, but we still need to reject the token itself).
     if is_relay_admin_kind(kind_u32) && auth.channel_ids().is_some() {
         return Err(IngestError::AuthFailed(
@@ -2463,11 +2244,11 @@ async fn ingest_event_inner(
         extract_channel_id(&event)
     };
 
-    if is_global_only_kind(kind_u32) {
+    if matches!(scoping, Scoping::Global) {
         channel_id = None;
     }
 
-    if requires_h_channel_scope(kind_u32) && channel_id.is_none() {
+    if matches!(scoping, Scoping::ChannelRequired) && channel_id.is_none() {
         return Err(IngestError::Rejected(
             "invalid: channel-scoped events must include an h tag".into(),
         ));
@@ -2998,7 +2779,7 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    let thread_meta = if requires_h_channel_scope(kind_u32) {
+    let thread_meta = if matches!(scoping, Scoping::ChannelRequired) {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await
@@ -3288,6 +3069,69 @@ async fn ingest_event_inner(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Test-only registry adapters
+// ---------------------------------------------------------------------------
+//
+// Seam A removed the inline `required_scope_for_kind` / `is_global_only_kind`
+// / `requires_h_channel_scope` policy functions: the live ingest path now
+// resolves a kind's base scope and channel scoping through
+// `AppState.kind_registry`. These thin `#[cfg(test)]` adapters reproduce
+// those functions' former signatures over a freshly-built built-in registry
+// so the existing policy unit tests below (and in `event.rs`) keep asserting
+// the same facts, now sourced from the registry rather than a parallel
+// inline list. They are test scaffolding, not policy; the registry is the
+// single source of truth.
+
+/// Build a registry populated with every built-in kind, exactly as
+/// `AppState::new` does. Used only by the test adapters below.
+#[cfg(test)]
+fn test_builtin_registry() -> buzz_kinds::KindRegistry {
+    let mut registry = buzz_kinds::KindRegistry::new();
+    buzz_kinds::register_builtin(&mut registry);
+    registry
+}
+
+/// Registry-backed adapter reproducing the former `required_scope_for_kind`:
+/// a registry miss is the fail-closed `Err("restricted: unknown event kind")`,
+/// and a `Dynamic` descriptor defers to its extension. `KIND_PUSH_LEASE`
+/// (unregistered, see `buzz_kinds::registry` module docs) reproduces its
+/// former inline special case.
+#[cfg(test)]
+pub(crate) fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
+    if kind == super::push_lease::KIND_PUSH_LEASE {
+        return Ok(Scope::UsersWrite);
+    }
+    let registry = test_builtin_registry();
+    let descriptor = registry.get(kind).ok_or("restricted: unknown event kind")?;
+    match &descriptor.required_scope {
+        RequiredScope::Static(scope) => Ok(scope.clone()),
+        RequiredScope::Dynamic => descriptor
+            .extension
+            .map(|extension| extension.required_scope(event))
+            .ok_or("restricted: unknown event kind"),
+    }
+}
+
+/// Registry-backed adapter reproducing the former `is_global_only_kind`.
+#[cfg(test)]
+pub(crate) fn is_global_only_kind(kind: u32) -> bool {
+    if kind == super::push_lease::KIND_PUSH_LEASE {
+        return true;
+    }
+    test_builtin_registry()
+        .get(kind)
+        .is_some_and(|descriptor| matches!(descriptor.scoping, Scoping::Global))
+}
+
+/// Registry-backed adapter reproducing the former `requires_h_channel_scope`.
+#[cfg(test)]
+pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
+    test_builtin_registry()
+        .get(kind)
+        .is_some_and(|descriptor| matches!(descriptor.scoping, Scoping::ChannelRequired))
+}
+
 #[cfg(test)]
 mod postgres_tests {
     use std::sync::Mutex;
@@ -3295,9 +3139,12 @@ mod postgres_tests {
     use super::*;
     use buzz_conformance::{TraceStep, Tracer};
     use buzz_core::kind::{
-        KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
-        KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
-        KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
+        KIND_AGENT_PROFILE, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS, KIND_FOLLOW_SET,
+        KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_LEAVE_REQUEST,
+        KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP65_RELAY_LIST_METADATA, KIND_PIN_LIST,
+        KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
 

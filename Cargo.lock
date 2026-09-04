@@ -1130,6 +1130,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-kinds"
+version = "0.1.0"
+dependencies = [
+ "buzz-auth",
+ "buzz-core",
+ "nostr 0.44.7",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
@@ -1274,6 +1283,7 @@ dependencies = [
  "buzz-datastore-tracing",
  "buzz-db",
  "buzz-deletion",
+ "buzz-kinds",
  "buzz-media",
  "buzz-pubsub",
  "buzz-relay-mesh",
