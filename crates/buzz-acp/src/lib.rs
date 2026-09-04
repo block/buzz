@@ -870,8 +870,6 @@ async fn check_sibling_via_profile(
 /// half that budget — regardless of how many channels are active. A slower
 /// tick (e.g. 2s → 30/min) would leave more quota headroom for chat at the
 /// price of doubled viewer latency; this constant is the knob.
-const OBSERVER_PUBLISH_TICK: Duration = Duration::from_secs(1);
-
 /// Byte budget for EVERYTHING retained while awaiting a publish slot: the
 /// event FIFO (serialized, post-`fit_observer_event_to_budget` bytes) PLUS
 /// the chunk coalescer's pending buffer (serialized event skeletons + raw
@@ -1104,6 +1102,7 @@ fn spawn_relay_observer_publisher(
     agent_pubkey_hex: String,
     owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
+    observer_publish_tick_secs: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Subscribe BEFORE snapshotting so an event emitted between the two
@@ -1120,6 +1119,7 @@ fn spawn_relay_observer_publisher(
             agent_pubkey_hex,
             owner_pubkey_hex,
             owner_pubkey,
+            observer_publish_tick_secs,
         )
         .await;
     })
@@ -1133,6 +1133,7 @@ async fn run_relay_observer_publisher(
     agent_pubkey_hex: String,
     owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
+    observer_publish_tick_secs: u64,
 ) {
     let mut queue = ObserverPublishQueue::default();
     let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
@@ -1145,9 +1146,10 @@ async fn run_relay_observer_publisher(
     // the first tick a full period out, so a pre-loaded snapshot (up to the
     // 1,000-event replay buffer on reconnect) cannot burst at t=0 — the old
     // pacer's explicit "no initial burst" property, restored.
+    let tick = Duration::from_secs(observer_publish_tick_secs.max(1));
     let mut publish_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + OBSERVER_PUBLISH_TICK,
-        OBSERVER_PUBLISH_TICK,
+        tokio::time::Instant::now() + tick,
+        tick,
     );
     publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut closed = false;
@@ -2729,6 +2731,7 @@ async fn tokio_main() -> Result<()> {
             agent_pubkey,
             owner_pubkey,
             owner,
+            config.observer_publish_tick_secs,
         ));
     }
 
@@ -8015,6 +8018,7 @@ mod observer_snapshot_race_tests {
             agent_keys.public_key().to_hex(),
             owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
+            1,
         )
         .await;
 
@@ -8739,6 +8743,7 @@ mod observer_publish_cadence_tests {
             agent_keys.public_key().to_hex(),
             owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
+            1,
         ));
 
         // t=0: nothing may publish, no matter how full the snapshot was.
@@ -8818,6 +8823,7 @@ mod observer_publish_cadence_tests {
             agent_keys.public_key().to_hex(),
             owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
+            1,
         ));
 
         settle().await;
@@ -8884,6 +8890,7 @@ mod observer_publish_cadence_tests {
             agent_keys.public_key().to_hex(),
             owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
+            1,
         ));
         settle().await;
 
