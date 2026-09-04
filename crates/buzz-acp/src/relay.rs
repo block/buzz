@@ -29,6 +29,9 @@ use std::time::Duration;
 const EVENT_CHANNEL_CAPACITY_DEFAULT: usize = 256;
 /// Capacity of the command channel from harness to background task.
 const CMD_CHANNEL_CAPACITY: usize = 64;
+/// Upgrade-response header emitted by buzz-relay for joining client and server
+/// diagnostics without exposing a tenant or identity.
+const RELAY_CONNECTION_ID_HEADER: &str = "x-buzz-connection-id";
 
 /// Read the event channel capacity from the environment, falling back to the
 /// compiled-in default. Parsed once at call-site (connect time).
@@ -121,7 +124,7 @@ use buzz_core::kind::{
     KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
+use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -766,7 +769,7 @@ impl HarnessRelay {
         // jittered backoff. A terminal error (bad URL, bad auth tag,
         // rejected/invalid signing key) fails immediately — see
         // `is_terminal_connect_error`.
-        let (ws, handshake_buffer) =
+        let (ws, handshake_buffer, relay_connection_id) =
             retry_initial_connect(|| do_connect(relay_url, keys, auth_tag.as_ref())).await?;
 
         let (event_tx, event_rx) = mpsc::channel::<Option<BuzzEvent>>(event_channel_capacity());
@@ -790,6 +793,7 @@ impl HarnessRelay {
                 bg_relay_url,
                 bg_agent_pubkey_hex,
                 bg_auth_tag,
+                relay_connection_id,
             )
             .await;
         });
@@ -1136,6 +1140,13 @@ impl TwoGenDedup {
 
 /// State maintained by the background WebSocket task.
 struct BgState {
+    /// Opaque connection ID supplied by the relay in the WebSocket upgrade.
+    /// This joins harness logs to one exact server-side connection without
+    /// logging message content or client identity.
+    relay_connection_id: Option<String>,
+    /// Relay connection establishment time, used to identify events that
+    /// predate the current socket and therefore likely arrived via replay.
+    connected_at: u64,
     /// Active subscriptions: channel_id → subscription_id string.
     active_subscriptions: HashMap<Uuid, String>,
     /// Most recent `created_at` timestamp seen per channel (for `since` filter).
@@ -1228,6 +1239,8 @@ struct BgState {
 impl BgState {
     fn new() -> Self {
         Self {
+            relay_connection_id: None,
+            connected_at: 0,
             active_subscriptions: HashMap::new(),
             last_seen: HashMap::new(),
             seen_ids: TwoGenDedup::new(SEEN_ID_LIMIT),
@@ -1251,6 +1264,12 @@ impl BgState {
             connection_generation: 0,
             backoff_step: 0,
         }
+    }
+
+    fn note_connection(&mut self, relay_connection_id: Option<String>) {
+        self.relay_connection_id = relay_connection_id;
+        self.connection_generation = self.connection_generation.saturating_add(1);
+        self.connected_at = Timestamp::now().as_secs();
     }
 
     /// Record a received event for dedup and `since` tracking.
@@ -1742,8 +1761,10 @@ async fn run_background_task(
     relay_url: String,
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
+    initial_relay_connection_id: Option<String>,
 ) {
     let mut state = BgState::new();
+    state.note_connection(initial_relay_connection_id);
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -2007,11 +2028,20 @@ async fn run_background_task(
                                }
                            }
                            Some(Err(e)) => {
-                               warn!("WebSocket error in background task: {e}");
+                               warn!(
+                                   relay_connection_id = state.relay_connection_id.as_deref().unwrap_or("unavailable"),
+                                   connection_generation = state.connection_generation,
+                                   error = %e,
+                                   "WebSocket error in background task"
+                               );
                                true
                            }
                            None => {
-                               debug!("WebSocket stream ended");
+                               warn!(
+                                   relay_connection_id = state.relay_connection_id.as_deref().unwrap_or("unavailable"),
+                                   connection_generation = state.connection_generation,
+                                   "WebSocket stream ended without a Close frame"
+                               );
                                true
                            }
                        };
@@ -2138,7 +2168,12 @@ async fn run_background_task(
                    _ = ping_interval.tick() => {
                        if ping_sent && last_pong.elapsed() > PONG_TIMEOUT {
                            // No pong received after our last ping — connection is dead.
-                           warn!("no pong received within {:?} — connection dead, reconnecting", PONG_TIMEOUT);
+                           warn!(
+                               relay_connection_id = state.relay_connection_id.as_deref().unwrap_or("unavailable"),
+                               connection_generation = state.connection_generation,
+                               timeout_secs = PONG_TIMEOUT.as_secs(),
+                               "no pong received — connection dead, reconnecting"
+                           );
                            // Use try_send to avoid blocking on backpressure during recovery.
                            let _ = event_tx.try_send(None);
                            match try_autonomous_reconnect(
@@ -2372,6 +2407,18 @@ async fn handle_ws_message(
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
                         if state.record_event(channel_id, &event) {
+                            let received_at = Timestamp::now().as_secs();
+                            debug!(
+                                relay_connection_id = state.relay_connection_id.as_deref().unwrap_or("unavailable"),
+                                connection_generation = state.connection_generation,
+                                subscription_id = %subscription_id,
+                                channel_id = %channel_id,
+                                event_id = %event_id_hex,
+                                event_created_at = ts,
+                                delivery_age_secs = received_at.saturating_sub(ts),
+                                event_predates_connection = ts < state.connected_at,
+                                "relay channel event received"
+                            );
                             let buzz_event = BuzzEvent {
                                 connection_generation: state.connection_generation,
                                 channel_id,
@@ -2629,8 +2676,24 @@ async fn handle_ws_message(
             }
             true
         }
-        Message::Close(_) => {
-            debug!("relay sent Close frame");
+        Message::Close(frame) => {
+            match frame {
+                Some(frame) => warn!(
+                    relay_connection_id = state.relay_connection_id.as_deref().unwrap_or("unavailable"),
+                    connection_generation = state.connection_generation,
+                    close_code = ?frame.code,
+                    close_reason = %frame.reason,
+                    "relay sent Close frame"
+                ),
+                None => warn!(
+                    relay_connection_id = state
+                        .relay_connection_id
+                        .as_deref()
+                        .unwrap_or("unavailable"),
+                    connection_generation = state.connection_generation,
+                    "relay sent Close frame without code or reason"
+                ),
+            }
             false
         }
         // Binary, Pong, Frame — ignore
@@ -3177,10 +3240,18 @@ async fn try_autonomous_reconnect(
             backoffs.len()
         );
         match do_connect(relay_url, keys, auth_tag).await {
-            Ok((new_ws, handshake_buffer)) => {
+            Ok((new_ws, handshake_buffer, relay_connection_id)) => {
                 *ws = new_ws;
-                state.connection_generation = state.connection_generation.saturating_add(1);
-                info!("autonomous reconnect succeeded (attempt {})", attempt + 1);
+                state.note_connection(relay_connection_id);
+                info!(
+                    relay_connection_id = state
+                        .relay_connection_id
+                        .as_deref()
+                        .unwrap_or("unavailable"),
+                    connection_generation = state.connection_generation,
+                    attempt = attempt + 1,
+                    "autonomous reconnect succeeded"
+                );
                 let handshake_ok = process_handshake_buffer(
                     ws,
                     handshake_buffer,
@@ -3316,10 +3387,18 @@ async fn wait_for_reconnect(
     loop {
         info!("attempting relay reconnect to {relay_url}…");
         match do_connect(relay_url, keys, auth_tag).await {
-            Ok((new_ws, handshake_buffer)) => {
+            Ok((new_ws, handshake_buffer, relay_connection_id)) => {
                 *ws = new_ws;
-                state.connection_generation = state.connection_generation.saturating_add(1);
-                info!("relay reconnected to {relay_url}");
+                state.note_connection(relay_connection_id);
+                info!(
+                    relay_connection_id = state
+                        .relay_connection_id
+                        .as_deref()
+                        .unwrap_or("unavailable"),
+                    connection_generation = state.connection_generation,
+                    relay_url,
+                    "relay reconnected"
+                );
                 let handshake_ok = process_handshake_buffer(
                     ws,
                     handshake_buffer,
@@ -4083,16 +4162,24 @@ async fn do_connect(
     relay_url: &str,
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
-) -> Result<(WsStream, VecDeque<RelayMessage>), RelayError> {
+) -> Result<(WsStream, VecDeque<RelayMessage>, Option<String>), RelayError> {
     let parsed = relay_url
         .parse::<url::Url>()
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
-    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+    let (ws, response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
         .await
         .map_err(|_| RelayError::ConnectionClosed)? // timeout → treat as connection failure
         .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
-    debug!("connected to relay at {relay_url}");
+    let relay_connection_id = response
+        .headers()
+        .get(RELAY_CONNECTION_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    info!(
+        relay_connection_id = relay_connection_id.as_deref().unwrap_or("unavailable"),
+        relay_url, "connected to relay"
+    );
 
     let mut ws = ws;
     let mut buffer: VecDeque<RelayMessage> = VecDeque::new();
@@ -4115,7 +4202,7 @@ async fn do_connect(
     };
 
     debug!("NIP-42 authentication successful (event {event_id})");
-    Ok((ws, buffer))
+    Ok((ws, buffer, relay_connection_id))
 }
 
 /// Wait for an `AUTH` challenge from the relay, buffering any other messages.
@@ -5051,6 +5138,21 @@ mod tests {
                 replay_since: Some(1_000),
             },
         );
+    }
+
+    #[test]
+    fn connection_diagnostics_advance_generation_and_replace_relay_id() {
+        let mut state = BgState::new();
+
+        state.note_connection(Some("first".to_string()));
+        let first_connected_at = state.connected_at;
+        assert_eq!(state.connection_generation, 1);
+        assert_eq!(state.relay_connection_id.as_deref(), Some("first"));
+
+        state.note_connection(Some("second".to_string()));
+        assert_eq!(state.connection_generation, 2);
+        assert_eq!(state.relay_connection_id.as_deref(), Some("second"));
+        assert!(state.connected_at >= first_connected_at);
     }
 
     #[tokio::test]

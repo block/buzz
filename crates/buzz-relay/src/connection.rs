@@ -128,8 +128,8 @@ pub async fn handle_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    conn_id: Uuid,
 ) {
-    let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
     let control = CommunityConnectionControl::new(cancel);
     let community_id = tenant.community();
