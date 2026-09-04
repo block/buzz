@@ -1,4 +1,4 @@
-//! Pi-specific native launch setup.
+//! Pi-specific native launcher setup.
 //!
 //! `pi-acp` does not currently consume ACP `session/new.systemPrompt`, but it
 //! does let callers replace the `pi` executable through

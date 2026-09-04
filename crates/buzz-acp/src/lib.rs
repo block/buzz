@@ -5,7 +5,7 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
-mod pi_system_prompt;
+mod pi_launcher;
 mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
@@ -2532,10 +2532,10 @@ async fn tokio_main() -> Result<()> {
         .persona_env_vars
         .iter()
         .rev()
-        .find(|(key, _)| key == pi_system_prompt::PI_ACP_PI_COMMAND_ENV)
+        .find(|(key, _)| key == pi_launcher::PI_ACP_PI_COMMAND_ENV)
         .map(|(_, value)| value.clone());
     let managed_skills_dir = std::path::Path::new(&cwd).join(".agents/skills");
-    let (pi_launch_override, base_prompt) = pi_system_prompt::PiLaunchOverride::prepare(
+    let (pi_launch_override, base_prompt) = pi_launcher::PiLaunchOverride::prepare(
         &config.agent_command,
         base_prompt,
         configured_pi_command.as_deref(),
@@ -2547,11 +2547,11 @@ async fn tokio_main() -> Result<()> {
         // remove any persona copy before installing the one forced adapter
         // override that pi-acp must observe.
         config.persona_env_vars.retain(|(key, _)| {
-            key != pi_system_prompt::PI_ACP_PI_COMMAND_ENV
-                && key != pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV
+            key != pi_launcher::PI_ACP_PI_COMMAND_ENV
+                && key != pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV
         });
         config.persona_env_vars.push((
-            pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV.to_string(),
+            pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV.to_string(),
             prepared.launcher_path().to_string_lossy().into_owned(),
         ));
         tracing::info!(

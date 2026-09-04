@@ -2046,15 +2046,15 @@ impl AcpClient {
 /// consumed by `pi-acp`. All real adapter environment keys continue through
 /// the ordinary operator-wins path.
 fn extra_env_target_key(key: &str) -> &str {
-    if key == crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV {
-        crate::pi_system_prompt::PI_ACP_PI_COMMAND_ENV
+    if key == crate::pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV {
+        crate::pi_launcher::PI_ACP_PI_COMMAND_ENV
     } else {
         key
     }
 }
 
 fn should_apply_extra_env(key: &str, parent_has_value: bool) -> bool {
-    key == crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV || !parent_has_value
+    key == crate::pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV || !parent_has_value
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
@@ -2416,12 +2416,12 @@ mod tests {
     #[test]
     fn buzz_pi_launcher_overrides_inherited_adapter_command() {
         assert_eq!(
-            extra_env_target_key(crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV),
-            crate::pi_system_prompt::PI_ACP_PI_COMMAND_ENV
+            extra_env_target_key(crate::pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV),
+            crate::pi_launcher::PI_ACP_PI_COMMAND_ENV
         );
         assert_eq!(extra_env_target_key("ORDINARY_ENV"), "ORDINARY_ENV");
         assert!(should_apply_extra_env(
-            crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV,
+            crate::pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV,
             true
         ));
         assert!(!should_apply_extra_env("ORDINARY_ENV", true));
@@ -3162,14 +3162,14 @@ mod tests {
     async fn spawn_forces_generated_pi_launcher_into_adapter_environment() {
         let launcher = "/tmp/buzz-generated-pi-launcher";
         let extra_env = [(
-            crate::pi_system_prompt::BUZZ_PI_LAUNCHER_OVERRIDE_ENV.to_string(),
+            crate::pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV.to_string(),
             launcher.to_string(),
         )];
 
         assert_eq!(
             spawn_named_and_read_child_env(
                 "pi-acp",
-                crate::pi_system_prompt::PI_ACP_PI_COMMAND_ENV,
+                crate::pi_launcher::PI_ACP_PI_COMMAND_ENV,
                 &extra_env,
             )
             .await,
