@@ -182,10 +182,86 @@ impl Drop for CommunityConnectionGuard {
     }
 }
 
+/// Message reported when the one-time Redis bootstrap gate rejects startup.
+///
+/// Bounded and stable so operators and the boot regression test can match on
+/// it without parsing the underlying driver error.
+pub const REDIS_BOOTSTRAP_FAILURE: &str = "Redis command path unavailable at startup";
+
+/// Budget for the one-time bootstrap PING. A refused port answers immediately;
+/// this only bounds a blackholed address, where hanging forever would be worse
+/// than exiting.
+const REDIS_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Proves once, during startup, that the Redis command path this pod will serve
+/// from can actually be reached.
+///
+/// `deadpool_redis` pools dial lazily and `PubSubManager::new` only allocates
+/// channels, so without this nothing in boot ever opened a command connection:
+/// a relay came up against a dead Redis, bound its health listener, and — since
+/// readiness reports local lifecycle only — advertised ready forever. Binding
+/// that listener is a one-way latch, so the check has to happen before it, and
+/// it is deliberately a *startup* gate: once serving, a Redis blip is a
+/// dependency failure and must never change readiness.
+pub async fn verify_redis_command_path(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
+    let ping = async {
+        let mut connection = pool
+            .get()
+            .await
+            .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))?;
+        redis::cmd("PING")
+            .query_async::<String>(&mut connection)
+            .await
+            .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))
+    };
+
+    match tokio::time::timeout(REDIS_BOOTSTRAP_TIMEOUT, ping).await {
+        Err(_) => Err(anyhow::anyhow!(
+            "{REDIS_BOOTSTRAP_FAILURE}: no response within {REDIS_BOOTSTRAP_TIMEOUT:?}"
+        )),
+        Ok(result) => result.map(|_| ()),
+    }
+}
+
+/// Bounded outcome of the durable community-active check run when a socket is
+/// admitted.
+///
+/// `outcome` is the only dimension. Community, tenant, connection, and error
+/// text are request-controlled and deliberately absent from the label set.
+#[derive(Debug, Clone, Copy)]
+enum AdmissionOutcome {
+    Active,
+    Inactive,
+    CheckError,
+}
+
+impl AdmissionOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+            Self::CheckError => "check_error",
+        }
+    }
+}
+
+fn record_admission_check(outcome: AdmissionOutcome) {
+    metrics::counter!(
+        "buzz_community_admission_checks_total",
+        "outcome" => outcome.label(),
+    )
+    .increment(1);
+}
+
 /// Registers a socket, durably revalidates its community, then runs it.
 ///
 /// The ordering is the archival admission invariant: archive-before-query is
 /// observed by the query, while archive-after-registration sees the token.
+///
+/// Only a confirmed `Ok(false)` cancels. A lookup `Err` admits the socket and
+/// defers to [`AppState::revalidate_live_communities`], because a database blip
+/// is not evidence of archival and dropping sockets on one amplifies the very
+/// pressure that caused it.
 pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run, RunFuture>(
     registry: &CommunityConnectionRegistry,
     connection_id: Uuid,
@@ -201,9 +277,28 @@ pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run,
 {
     let cancel = control.cancel.clone();
     let _guard = registry.register(connection_id, community_id, control.clone());
-    if !matches!(check_active().await, Ok(true)) {
-        cancel.cancel();
-        return;
+    match check_active().await {
+        Ok(true) => record_admission_check(AdmissionOutcome::Active),
+        Ok(false) => {
+            record_admission_check(AdmissionOutcome::Inactive);
+            cancel.cancel();
+            return;
+        }
+        Err(error) => {
+            // A lookup failure is not an answer, and dropping the socket on one
+            // turns shared database pressure into a reconnect storm that feeds
+            // straight back into the exhausted pool. Admitting costs nothing
+            // durable: writes still fail closed on their own per-event fence
+            // (`handlers::ingest::map_serving_fence_state`), and
+            // `AppState::revalidate_live_communities` closes the socket on the
+            // next tick if the community really is inactive.
+            record_admission_check(AdmissionOutcome::CheckError);
+            tracing::warn!(
+                %community_id,
+                %error,
+                "community active check failed; admitting the socket pending lifecycle revalidation"
+            );
+        }
     }
     if cancel.is_cancelled() {
         return;
@@ -719,8 +814,9 @@ pub struct AppState {
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
     pub shutting_down: Arc<AtomicBool>,
-    /// Orders readiness gauge publication against terminal shutdown.
-    pub(crate) readiness: Arc<crate::readiness::ReadinessCoordinator>,
+    /// Shared-dependency evaluation behind the diagnostic `/_status` endpoint.
+    /// Never consulted by a Kubernetes probe.
+    pub(crate) dependency_diagnostics: Arc<crate::readiness::DependencyDiagnostics>,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
     /// Shared, community-scoped NIP-98 replay prevention.
@@ -923,7 +1019,7 @@ impl AppState {
             git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
-            readiness: Arc::new(crate::readiness::ReadinessCoordinator::default()),
+            dependency_diagnostics: Arc::new(crate::readiness::DependencyDiagnostics::default()),
             started_at: Instant::now(),
             nip98_replay,
             gif_http_client,
@@ -965,21 +1061,22 @@ impl AppState {
         )
     }
 
-    /// Atomically closes readiness publication before exposing shutdown to
-    /// the relay's other fast-path lifecycle checks.
+    /// Withdraws this pod from routing. The lifecycle flag is authoritative for
+    /// `/_readiness`; the gauge is published immediately so a draining pod does
+    /// not report ready until its next probe.
     pub fn begin_shutdown(&self) {
-        self.readiness.begin_shutdown();
         self.shutting_down.store(true, Ordering::Release);
+        crate::readiness::record_overall_state(false);
     }
 
     #[cfg(test)]
-    pub(crate) fn set_readiness_evaluator(
+    pub(crate) fn set_dependency_evaluator(
         &mut self,
-        evaluator: Arc<dyn crate::readiness::ReadinessEvaluator>,
+        evaluator: Arc<dyn crate::readiness::DependencyEvaluator>,
     ) {
-        self.readiness = Arc::new(crate::readiness::ReadinessCoordinator::with_evaluator(
-            evaluator,
-        ));
+        self.dependency_diagnostics = Arc::new(
+            crate::readiness::DependencyDiagnostics::with_evaluator(evaluator),
+        );
     }
 
     /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers
@@ -1993,6 +2090,136 @@ pub(crate) mod tests {
         future.await;
         assert!(cancel_during.is_cancelled());
         assert!(!started_during.load(Ordering::SeqCst));
+    }
+
+    /// Reads one `buzz_community_admission_checks_total` series by exact label set.
+    fn admission_counter(
+        snapshot: &[(
+            metrics_util::CompositeKey,
+            Option<metrics::Unit>,
+            Option<metrics::SharedString>,
+            metrics_util::debugging::DebugValue,
+        )],
+        outcome: &str,
+    ) -> Option<u64> {
+        snapshot.iter().find_map(|(key, _, _, value)| {
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect::<Vec<_>>();
+            if key.key().name() != "buzz_community_admission_checks_total"
+                || labels != [("outcome", outcome)]
+            {
+                return None;
+            }
+            match value {
+                metrics_util::debugging::DebugValue::Counter(count) => Some(*count),
+                _ => panic!("community admission checks must be a counter"),
+            }
+        })
+    }
+
+    /// The reconnect-amplification regression. A durable *answer* of "inactive"
+    /// cancels the socket, but a lookup *failure* is not an answer: the socket is
+    /// admitted and the periodic revalidation backstop owns eviction. Collapsing
+    /// both into "not active" turned shared database pressure into a reconnect
+    /// storm that fed straight back into the exhausted pool.
+    #[test]
+    fn confirmed_inactive_cancels_while_an_active_check_error_admits_the_socket() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        let (inactive_cancel, inactive_started, error_started, active_started) =
+            metrics::with_local_recorder(&recorder, || {
+                runtime.block_on(async {
+                    let registry = CommunityConnectionRegistry::new();
+                    let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
+
+                    let inactive_cancel = CancellationToken::new();
+                    let inactive_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&inactive_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(inactive_cancel.clone()),
+                        || async { Ok(false) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                    )
+                    .await;
+
+                    let error_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&error_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(CancellationToken::new()),
+                        || async { Err(buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut)) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                    )
+                    .await;
+
+                    let active_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&active_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(CancellationToken::new()),
+                        || async { Ok(true) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                    )
+                    .await;
+
+                    (
+                        inactive_cancel,
+                        inactive_started,
+                        error_started,
+                        active_started,
+                    )
+                })
+            });
+
+        assert!(
+            inactive_cancel.is_cancelled(),
+            "a confirmed-inactive community must still cancel its socket"
+        );
+        assert!(
+            !inactive_started.load(Ordering::SeqCst),
+            "a confirmed-inactive community must never start the socket body"
+        );
+        assert!(
+            error_started.load(Ordering::SeqCst),
+            "an active-check error must admit the socket and leave eviction to revalidation"
+        );
+        assert!(active_started.load(Ordering::SeqCst));
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(admission_counter(&snapshot, "inactive"), Some(1));
+        assert_eq!(admission_counter(&snapshot, "check_error"), Some(1));
+        assert_eq!(admission_counter(&snapshot, "active"), Some(1));
+
+        let label_sets = snapshot
+            .iter()
+            .filter(|(key, _, _, _)| key.key().name() == "buzz_community_admission_checks_total")
+            .map(|(key, _, _, _)| {
+                key.key()
+                    .labels()
+                    .map(|label| label.key().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(label_sets.len(), 3, "outcome is the only dimension");
+        assert!(
+            label_sets.iter().all(|labels| labels == &["outcome"]),
+            "admission telemetry must never carry community, tenant, or error labels: {label_sets:?}"
+        );
     }
 
     #[tokio::test]

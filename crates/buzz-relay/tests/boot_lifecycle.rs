@@ -10,6 +10,7 @@ use std::{
 use serde_json::Value;
 
 use buzz_relay::lifecycle::StartupPhase;
+use buzz_relay::state::REDIS_BOOTSTRAP_FAILURE;
 
 const VALID_RELAY_PRIVATE_KEY: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
@@ -454,4 +455,92 @@ fn successful_main_emits_complete_lifecycle_without_startup_metrics() {
     assert_terminal(&events, "key_load", "succeeded", None);
     assert_terminal(&events, "metrics_bind", "succeeded", None);
     assert_terminal(&events, "process_telemetry", "succeeded", None);
+}
+
+/// Boot gates that need a live Postgres to reach the code under test. Named
+/// `postgres_tests` so `.config/nextest.toml`'s `postgres-ci` default filter
+/// discovers them structurally; the wrapper hands each test its own database
+/// through `DATABASE_URL`.
+mod postgres_tests {
+    use super::*;
+
+    fn reserve_closed_port() -> u16 {
+        let reserved = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+        let port = reserved.local_addr().expect("reserved address").port();
+        drop(reserved);
+        port
+    }
+
+    /// Runs the relay until it exits on its own, or kills it once `timeout`
+    /// passes. Unlike `run_relay`, a relay that keeps serving is a result to
+    /// assert on rather than a panic, which is the whole point here.
+    fn run_until_exit(environment: &[(&str, &str)], timeout: Duration) -> (bool, Output) {
+        let mut process = RelayProcess::spawn(environment);
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if process.try_wait().is_some() {
+                return (true, process.wait(Duration::from_secs(2)));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        (false, process.terminate())
+    }
+
+    /// Redis is required for pub/sub fan-out, presence, and typing, but nothing
+    /// in boot ever opened a command connection: `deadpool_redis` pools dial
+    /// lazily and `PubSubManager::new` only allocates channels, so "Redis
+    /// pub/sub connected" was logged against a dead port. A relay could
+    /// therefore boot with Redis unreachable, bind its health listener, and —
+    /// now that readiness answers from local lifecycle alone — advertise ready
+    /// for the rest of its life. The bootstrap gate is the one-time proof that
+    /// the command path has connected at least once, and it has to land before
+    /// the listener binds, because binding is the one-way latch that makes this
+    /// pod routable.
+    ///
+    /// The git conformance probe is disabled so the only remaining startup-fatal
+    /// gate is the one under test.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn unreachable_redis_fails_boot_before_the_health_listener_binds() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_url = format!("redis://127.0.0.1:{}", reserve_closed_port());
+        let metrics_port = reserve_closed_port().to_string();
+        let health_port = reserve_closed_port();
+        let health_port_value = health_port.to_string();
+
+        let (exited, output) = run_until_exit(
+            &[
+                ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+                ("BUZZ_METRICS_PORT", &metrics_port),
+                ("BUZZ_HEALTH_PORT", &health_port_value),
+                ("DATABASE_URL", &database_url),
+                ("REDIS_URL", &redis_url),
+                ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+            ],
+            CHILD_TIMEOUT,
+        );
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(
+            !logs.contains("Health probe listener started"),
+            "the Redis bootstrap gate must run before the health listener binds: {logs}"
+        );
+        assert!(
+            exited && !output.status.success(),
+            "an unreachable Redis command path must be startup-fatal: {logs}"
+        );
+        assert!(
+            logs.contains(REDIS_BOOTSTRAP_FAILURE),
+            "the failure must name the gate that rejected boot: {logs}"
+        );
+        assert!(
+            TcpListener::bind(("0.0.0.0", health_port)).is_ok(),
+            "the health port must never have been bound"
+        );
+    }
 }
