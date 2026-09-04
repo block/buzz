@@ -1,5 +1,8 @@
 import type { QueryClient } from "@tanstack/react-query";
 
+import type { ChannelMember } from "@/shared/api/types";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+
 const directoryQueryKey = ["relay-agents"] as const;
 const COALESCE_MS = 200;
 const MAX_EVENT_IDS = 256;
@@ -77,4 +80,35 @@ export function refreshDirectoryAfterMembershipChange(
       return queryClient.invalidateQueries({ queryKey: directoryQueryKey });
     });
   }, COALESCE_MS);
+}
+
+function membershipFingerprint(members: readonly ChannelMember[]): string {
+  return members
+    .map(
+      (member) =>
+        `${normalizePubkey(member.pubkey)}:${member.role ?? ""}:${member.isAgent === true}`,
+    )
+    .sort()
+    .join("|");
+}
+
+/**
+ * A later roster can observe a write that the acceptance-time directory read
+ * could not yet see. Refresh once for that semantic change, not for names,
+ * ordering, repeated snapshots, or every local store notification. An initial
+ * agent-bearing roster also repairs discovery when no previous roster exists.
+ */
+export function refreshDirectoryForRosterChange(
+  queryClient: QueryClient,
+  previous: readonly ChannelMember[] | undefined,
+  current: readonly ChannelMember[],
+): void {
+  if (
+    previous
+      ? membershipFingerprint(previous) === membershipFingerprint(current)
+      : !current.some((member) => member.isAgent || member.role === "bot")
+  ) {
+    return;
+  }
+  refreshDirectoryAfterMembershipChange(queryClient);
 }

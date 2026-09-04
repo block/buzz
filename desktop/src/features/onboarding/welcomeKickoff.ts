@@ -1,4 +1,5 @@
 import * as React from "react";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 
 import {
   managedAgentsQueryKey,
@@ -579,6 +580,8 @@ export function useWelcomeKickoff(
           channelId,
           activeCommunity?.relayUrl,
         );
+        // Kickoff can add starters after the composer cached the initial roster.
+        await invalidateChannelMembersRosters(queryClient, [channelId]);
         await queryClient.invalidateQueries({
           queryKey: managedAgentsQueryKey,
         });

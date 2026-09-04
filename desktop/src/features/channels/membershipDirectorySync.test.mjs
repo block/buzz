@@ -3,6 +3,7 @@ import { afterEach, test } from "node:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import {
   refreshDirectoryAfterMembershipChange as refresh,
+  refreshDirectoryForRosterChange as rosterChanged,
   resetMembershipDirectorySync,
 } from "./membershipDirectorySync.ts";
 
@@ -116,6 +117,34 @@ test("failed refresh ends in error and does not schedule a self-sustaining retry
   assert.equal(value.getQueryState(KEY).status, "error");
   await settle();
   assert.equal(calls, 1);
+});
+
+test("only changed membership or agent classification refreshes; names and ordering do not", async () => {
+  const value = client();
+  let calls = 0;
+  observe(value, async () => {
+    calls += 1;
+    return [];
+  });
+  const person = { pubkey: "a".repeat(64), role: "member", isAgent: false };
+  const agent = { pubkey: "b".repeat(64), role: "member", isAgent: true };
+  rosterChanged(value, undefined, [person]);
+  rosterChanged(
+    value,
+    [person, agent],
+    [{ ...agent, displayName: "Renamed" }, person],
+  );
+  await settle();
+  assert.equal(calls, 0);
+  rosterChanged(value, [person], [person, agent]);
+  await settle();
+  assert.equal(calls, 1);
+  rosterChanged(value, [person, agent], [person]);
+  await settle();
+  assert.equal(calls, 2);
+  rosterChanged(value, undefined, [agent]);
+  await settle();
+  assert.equal(calls, 3);
 });
 
 test("community reset cancels queued work and event deduplication is client-scoped", async () => {
