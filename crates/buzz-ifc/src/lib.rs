@@ -1,10 +1,14 @@
-//! Buzz-specific execution domains built on `ifc-core`.
+//! Derives an agent's execution domain from Buzz membership and capability policy.
 //!
-//! The trusted broker verifies events, conversation metadata, membership, and
-//! requester identities before constructing [`DomainFacts`]. This crate
-//! deterministically derives an [`ExecutionDomain`] from those facts. The
-//! domain binds the executing agent, authorized audience, retained context,
-//! membership epoch, and effective capabilities into one stable routing key.
+//! An [`ExecutionDomain`] records which agent is running, who may receive its
+//! output, which conversations may share its saved state, and which operations
+//! it may use. Its [`DomainKey`] includes all of those decisions, plus the owner
+//! and membership version, so a change produces a different key.
+//!
+//! The broker must verify events and membership before supplying [`DomainFacts`].
+//! It must also use the resulting key when selecting a session. This crate
+//! computes the domain; it does not verify signatures, manage sessions, or
+//! enforce tool calls.
 
 mod domain;
 mod label;
