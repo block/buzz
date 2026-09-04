@@ -25,7 +25,7 @@ const THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM = 0.25;
 const THREAD_SUMMARY_AVATAR_SIZE = 24;
 const THREAD_SUMMARY_AVATAR_OVERLAP = 4;
 const THREAD_SUMMARY_STACK_CUTOUT = {
-  cx: THREAD_SUMMARY_AVATAR_SIZE + THREAD_SUMMARY_AVATAR_OVERLAP,
+  cx: THREAD_SUMMARY_AVATAR_SIZE * 1.5 - THREAD_SUMMARY_AVATAR_OVERLAP,
   cy: THREAD_SUMMARY_AVATAR_SIZE / 2,
   r: THREAD_SUMMARY_AVATAR_SIZE / 2 + 2,
 } as const;
@@ -34,10 +34,12 @@ function ParticipantAvatar({
   participant,
   index,
   participantCount,
+  foregroundIsAgent,
 }: {
   participant: TimelineThreadSummaryParticipant;
   index: number;
   participantCount: number;
+  foregroundIsAgent: boolean;
 }) {
   const hasForegroundAvatar = index < participantCount - 1;
   const avatar = (
@@ -63,7 +65,8 @@ function ParticipantAvatar({
         <MaskedAvatarBadgeFrame
           clipTestId={`message-thread-summary-stack-mask-${index}`}
           cutout={THREAD_SUMMARY_STACK_CUTOUT}
-          maskMode="radial"
+          cutoutShape={foregroundIsAgent ? "squircle" : "circle"}
+          maskMode="shape"
           size={THREAD_SUMMARY_AVATAR_SIZE}
         >
           {avatar}
@@ -254,6 +257,9 @@ export function MessageThreadSummaryRow({
         <div className="relative z-10 flex shrink-0 items-center">
           {summary.participants.map((participant, index) => (
             <ParticipantAvatar
+              foregroundIsAgent={
+                summary.participants[index + 1]?.isAgent === true
+              }
               index={index}
               key={participant.id}
               participant={participant}

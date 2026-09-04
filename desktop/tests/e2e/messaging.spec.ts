@@ -2808,6 +2808,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   const firstReply = `First threaded reply ${timestamp}`;
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
+  const nestedReplyFromAgent = `Nested reply from agent ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
   const fillerReplies = Array.from(
     { length: 14 },
@@ -3047,6 +3048,27 @@ test("opens a single-level thread panel with inline expansion", async ({
     .first();
   await expect(nestedReplyFromBobRow).toBeVisible();
 
+  await page.evaluate(
+    ({ content, parentEventId, pubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content,
+        parentEventId,
+        pubkey,
+      });
+    },
+    {
+      content: nestedReplyFromAgent,
+      parentEventId: firstReplyId,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+  const nestedReplyFromAgentRow = threadReplies
+    .getByTestId("message-row")
+    .filter({ hasText: nestedReplyFromAgent })
+    .first();
+  await expect(nestedReplyFromAgentRow).toBeVisible();
+
   const firstReplySummaryRow = threadReplies.locator(
     `[data-testid="message-thread-summary"][data-thread-head-id="${firstReplyId}"]`,
   );
@@ -3056,10 +3078,10 @@ test("opens a single-level thread panel with inline expansion", async ({
   );
   await expect(firstReplyBranchGuide).not.toHaveCount(0);
 
-  await expect(rootSummaryRow).toContainText("18 replies");
+  await expect(rootSummaryRow).toContainText("19 replies");
   await expect(
     rootSummaryRow.getByTestId("message-thread-summary-participant"),
-  ).toHaveCount(2);
+  ).toHaveCount(3);
   await expect
     .poll(() =>
       rootSummaryRow
@@ -3070,18 +3092,57 @@ test("opens a single-level thread panel with inline expansion", async ({
             .join(","),
         ),
     )
-    .toBe("1,2");
-  const stackedAvatarMask = rootSummaryRow.getByTestId(
-    "message-thread-summary-stack-mask-0",
+    .toBe("1,2,3");
+  const stackedParticipants = rootSummaryRow.getByTestId(
+    "message-thread-summary-participant",
   );
-  await expect(stackedAvatarMask).toHaveCSS("mask-image", /radial-gradient/);
-  await expect(stackedAvatarMask).not.toHaveCSS("mask-image", "none");
+  const stackGeometry = await stackedParticipants.evaluateAll((participants) =>
+    participants.map((participant) => {
+      const avatar = participant.querySelector<HTMLElement>(
+        '[data-testid^="message-thread-summary-avatar-"]',
+      );
+      if (!avatar) throw new Error("Expected a stacked thread avatar.");
+      const rect = avatar.getBoundingClientRect();
+      return { left: rect.left, width: rect.width };
+    }),
+  );
+  expect(stackGeometry[1].left - stackGeometry[0].left).toBeCloseTo(
+    stackGeometry[0].width - 4,
+    1,
+  );
+  expect(stackGeometry[2].left - stackGeometry[1].left).toBeCloseTo(
+    stackGeometry[1].width - 4,
+    1,
+  );
+  let foregroundAgentIndex = -1;
+  await expect
+    .poll(async () => {
+      foregroundAgentIndex = await stackedParticipants.evaluateAll(
+        (participants) =>
+          participants.findIndex(
+            (participant, index) =>
+              index > 0 && participant.querySelector(".agent-avatar-squircle"),
+          ),
+      );
+      return foregroundAgentIndex;
+    })
+    .toBeGreaterThan(0);
+  const maskBehindAgent = rootSummaryRow.getByTestId(
+    `message-thread-summary-stack-mask-${foregroundAgentIndex - 1}`,
+  );
+  const stackMaskImage = await maskBehindAgent.evaluate(
+    (element) => getComputedStyle(element).maskImage,
+  );
+  expect(stackMaskImage).toContain("data:image/svg+xml");
+  expect(decodeURIComponent(stackMaskImage)).toContain(
+    'd="M .5 0 C .93 0 1 .07 1 .5',
+  );
 
   await expectThreadReplyUnobscured(nestedReplyRow);
 
   await firstReplyBranchGuide.first().click();
   await expect(firstReplySummaryRow).toHaveCount(1);
-  await expect(firstReplySummaryRow).toContainText("2 replies");
+  await expect(firstReplySummaryRow).toContainText("3 replies");
   await expect(
     threadReplies.getByTestId("message-row").filter({ hasText: nestedReply }),
   ).toHaveCount(0);
@@ -3089,6 +3150,11 @@ test("opens a single-level thread panel with inline expansion", async ({
     threadReplies
       .getByTestId("message-row")
       .filter({ hasText: nestedReplyFromBob }),
+  ).toHaveCount(0);
+  await expect(
+    threadReplies
+      .getByTestId("message-row")
+      .filter({ hasText: nestedReplyFromAgent }),
   ).toHaveCount(0);
 });
 
