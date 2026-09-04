@@ -6,6 +6,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { refreshDirectoryAfterMembershipChange } from "@/features/channels/membershipDirectorySync";
 
 import {
   channelMessagesKey,
@@ -379,6 +380,7 @@ export function useChannelSubscription(channel: Channel | null) {
           payload.type === "member_left" ||
           payload.type === "member_removed"
         ) {
+          refreshDirectoryAfterMembershipChange(queryClient, event.id);
           void queryClient.invalidateQueries({
             queryKey: ["channels", channelId, "members"],
           });

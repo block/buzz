@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
+import { refreshDirectoryAfterMembershipChange } from "./membershipDirectorySync";
 import { getChannelIdFromTags } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
@@ -26,6 +27,7 @@ export function useMembershipNotifications(currentPubkey?: string) {
         return;
       }
 
+      refreshDirectoryAfterMembershipChange(queryClient, event.id);
       void queryClient.invalidateQueries({
         queryKey: ["channels", channelId, "detail"],
       });

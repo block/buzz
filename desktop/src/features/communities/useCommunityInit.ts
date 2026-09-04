@@ -38,6 +38,7 @@ import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useS
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
+import { resetMembershipDirectorySync } from "@/features/channels/membershipDirectorySync";
 
 import {
   initFirstCommunity,
@@ -58,6 +59,7 @@ async function resetCommunityState({
   resetAvatarState: boolean;
 }): Promise<void> {
   relayClient.disconnect();
+  resetMembershipDirectorySync();
   await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
   clearAllDrafts();
