@@ -50,13 +50,16 @@ pub async fn prepare_desktop_capabilities(
     let facts =
         project(super::agent_discovery::discover_acp_providers(app.clone(), Some(false)).await?)?;
     let scope = scope(&app, &state, &owner, &community)?;
-    Ok(json!({ "event": prepare_report(&mut open_retention_db(&scope.db_path)?, &scope, facts)? }))
+    Ok(
+        json!({ "event": prepare_report(&mut open_retention_db(&scope.db_path)?, &scope, facts, nostr::Timestamp::now)? }),
+    )
 }
 
 fn prepare_report(
     conn: &mut Connection,
     scope: &RetentionScope,
     facts: Vec<RuntimeFact>,
+    clock: impl FnOnce() -> nostr::Timestamp,
 ) -> Result<Event, String> {
     let saved = prepare(conn, scope)?;
     let profile: Event =
@@ -90,8 +93,16 @@ fn prepare_report(
         .unwrap_or(false);
     let event = match previous {
         Some(event) if unchanged => event,
-        _ => {
-            let event = report.sign(&scope.owner_keys)?;
+        previous => {
+            let now = clock();
+            // Keep the prior retry record until real time advances. Signing tied
+            // ciphertext can lose NIP-33's lower-ID tie; never cache that loss or
+            // future-date a replacement. The existing pulse/reconnect/Refresh
+            // retries discovery, not a captured projection, without waiting here.
+            if previous.as_ref().is_some_and(|e| now <= e.created_at) {
+                return Err("Desktop capability facts deferred until the clock advances".into());
+            }
+            let event = report.sign_at(&scope.owner_keys, now)?;
             tx.execute(
                 "INSERT OR REPLACE INTO desktop_capabilities VALUES (1, ?1)",
                 [event.as_json()],
@@ -123,7 +134,7 @@ pub fn read_desktop_capabilities(
 mod tests {
     use super::*;
     #[test]
-    fn unchanged_facts_reopen_exact_bytes_changed_facts_replace_atomically() {
+    fn changed_facts_defer_until_real_clock_advances_then_win_signed_order() {
         let dir = tempfile::tempdir().unwrap();
         let scope = RetentionScope {
             db_path: dir.path().join("report.db"),
@@ -134,26 +145,80 @@ mod tests {
             &mut open_retention_db(&scope.db_path).unwrap(),
             &scope,
             vec![],
+            || nostr::Timestamp::from(1000),
         )
         .unwrap();
         let mut reopened = open_retention_db(&scope.db_path).unwrap();
         assert_eq!(
-            prepare_report(&mut reopened, &scope, vec![]).unwrap(),
+            prepare_report(&mut reopened, &scope, vec![], || panic!(
+                "unchanged must not sign"
+            ))
+            .unwrap(),
             first
         );
         assert_eq!(reopened.total_changes(), 0);
-        let facts = vec![RuntimeFact {
+        let mut facts = vec![RuntimeFact {
             id: "goose".into(),
             availability: "available".into(),
             requires_external_cli: true,
             max_parallelism: None,
         }];
-        let changed = prepare_report(&mut reopened, &scope, facts).unwrap();
-        assert_ne!(changed.id, first.id);
+        for now in [1000, 990, 999, 1000] {
+            let error = prepare_report(&mut reopened, &scope, facts.clone(), || {
+                nostr::Timestamp::from(now)
+            })
+            .unwrap_err();
+            assert!(error.contains("clock advances"));
+            assert_eq!(reopened.total_changes(), 0, "deferral must not persist");
+            // Returning to old facts cancels the proposed change, even after a
+            // restart/rollback: no deferred payload or timestamp renewal survives.
+            assert_eq!(
+                prepare_report(&mut reopened, &scope, vec![], || panic!("exact retry")).unwrap(),
+                first
+            );
+            reopened = open_retention_db(&scope.db_path).unwrap();
+        }
+        // The retry observes today's facts, not the projection first deferred.
+        facts[0].availability = "cli_missing".into();
+        let changed = prepare_report(&mut reopened, &scope, facts.clone(), || {
+            nostr::Timestamp::from(1001)
+        })
+        .unwrap();
+        first.verify().unwrap();
+        changed.verify().unwrap();
+        assert_eq!(changed.created_at.as_secs(), 1001, "no future timestamp");
+        assert!(changed.created_at > first.created_at);
         assert_eq!(changed.tags, first.tags);
+        for events in [
+            vec![first.clone(), changed.clone()],
+            vec![changed.clone(), first],
+        ] {
+            let rows =
+                DesktopCapabilities::read_latest(events, &scope.owner_keys, &scope.relay_url)
+                    .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0.runtimes, facts);
+            assert_eq!(rows[0].1, 1001);
+        }
+        let mut reopened = open_retention_db(&scope.db_path).unwrap();
+        let mut invalid = facts.clone();
+        invalid[0].max_parallelism = Some(0);
+        assert!(prepare_report(&mut reopened, &scope, invalid, || {
+            nostr::Timestamp::from(1002)
+        })
+        .is_err());
+        assert_eq!(
+            prepare_report(&mut reopened, &scope, facts, || panic!("exact retry")).unwrap(),
+            changed
+        );
+        assert_eq!(
+            reopened.total_changes(),
+            0,
+            "failed signing must not persist"
+        );
         reopened
             .execute("UPDATE desktop_capabilities SET raw = 'corrupt'", [])
             .unwrap();
-        assert!(prepare_report(&mut reopened, &scope, vec![]).is_err());
+        assert!(prepare_report(&mut reopened, &scope, vec![], nostr::Timestamp::now).is_err());
     }
 }
