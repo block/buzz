@@ -798,3 +798,75 @@ for (const selection of ["picker", "automatic"]) {
     await expect.poll(() => recipients(page, content)).toEqual([[a, b]]);
   });
 }
+
+for (const mismatchedKey of [false, true]) {
+  test(`qualified chip copy/paste ${mismatchedKey ? "rejects a mismatched key" : "preserves its exact recipient"}`, async ({
+    page,
+  }) => {
+    await install(page);
+    const input = page.getByTestId("message-input");
+    await input.fill("@Scout");
+    await page.getByTestId(`mention-suggestion-${FIRST}`).click();
+    await page.keyboard.type("and @Scout");
+    await page.getByTestId(`mention-suggestion-${SECOND}`).click();
+    await page.keyboard.type("qualified clipboard roundtrip");
+    await page.getByTestId("send-message").click();
+    const chip = page
+      .getByTestId("message-row")
+      .filter({ hasText: "qualified clipboard roundtrip" })
+      .locator(`[data-mention-pubkey="${SECOND}"]`);
+    await expect(chip).toHaveText(`Scout (${SECOND})`);
+    const flavors = await chip.evaluate((element) => {
+      const range = document.createRange();
+      range.selectNode(element);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      const clipboardData = new DataTransfer();
+      const event = new ClipboardEvent("copy", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData,
+      });
+      element.dispatchEvent(event);
+      return {
+        handled: event.defaultPrevented,
+        text: clipboardData.getData("text/plain"),
+        html: clipboardData.getData("text/html"),
+      };
+    });
+    expect(flavors.handled).toBe(true);
+    expect(flavors.text.trim()).toBe(`@Scout (${SECOND})`);
+    expect(flavors.html).toContain(`data-mention-pubkey="${SECOND}"`);
+    if (mismatchedKey) {
+      // Both keys have the trusted alias Scout; the qualifier must ALSO agree.
+      flavors.html = flavors.html.replace(
+        `data-mention-pubkey="${SECOND}"`,
+        `data-mention-pubkey="${FIRST}"`,
+      );
+    }
+    // Remount to discard source-composer selections. A channel (not a DM)
+    // also avoids an automatic conversation p tag masking a lost mention.
+    await page.reload();
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await input.focus();
+    await input.evaluate((element, { text, html }) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", text);
+      clipboardData.setData("text/html", html);
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        }),
+      );
+    }, flavors);
+    await expect(input).toHaveText(flavors.text);
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() => recipients(page, flavors.text.trim()))
+      .toEqual([mismatchedKey ? [] : [SECOND]]);
+  });
+}
