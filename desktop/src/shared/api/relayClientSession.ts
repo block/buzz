@@ -115,6 +115,11 @@ export class RelayClient {
   getSessionEpoch() {
     return this.sessionEpoch;
   }
+
+  /** Invalidates one-shot lifecycle coordinators on a transport interruption. */
+  getConnectionGeneration() {
+    return this.connectionGeneration;
+  }
   disconnect() {
     const error = new Error("Relay disconnected for community switch.");
 
