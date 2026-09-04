@@ -1,3 +1,4 @@
+import { DesktopListStartup } from "@/features/agents/ui/KnownDesktops";
 import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -261,7 +262,10 @@ function CommunityQueryProvider({
   }, [queryClient]);
 
   return (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <QueryClientProvider client={queryClient}>
+      <DesktopListStartup />
+      {children}
+    </QueryClientProvider>
   );
 }
 

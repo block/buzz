@@ -111,6 +111,10 @@ export class RelayClient {
   setVisibleChannelId(id: string | null) {
     this.visibleChannelId = id;
   }
+  /** Scope epoch changes before a community or identity transport is replaced. */
+  getSessionEpoch() {
+    return this.sessionEpoch;
+  }
   disconnect() {
     const error = new Error("Relay disconnected for community switch.");
 
