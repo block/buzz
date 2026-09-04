@@ -358,11 +358,20 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                                 "reason" => "deny_set_post_registration"
                             )
                             .increment(1);
-                            // Set reason BEFORE cancel fires so the send loop's cancel
-                            // branch reads AuthorizationDenied and emits 1008. [FI-TRACE-CLOSE-CODE]
-                            conn.nip_fi_reason_tx.send_replace(Some(
-                                crate::state::CommunityDisconnectReason::AuthorizationDenied,
-                            ));
+                            // First-writer-wins: only set when the slot is still None so a
+                            // concurrent CommunityDeleted is not clobbered. Set BEFORE cancel
+                            // so the send loop's cancel branch reads AuthorizationDenied and
+                            // emits 1008. [FI-TRACE-CLOSE-CODE]
+                            let _ =
+                                conn.nip_fi_reason_tx.send_if_modified(|current| match current {
+                                    None => {
+                                        *current = Some(
+                                            crate::state::CommunityDisconnectReason::AuthorizationDenied,
+                                        );
+                                        true
+                                    }
+                                    Some(_) => false,
+                                });
                             let _ = conn.ctrl_tx.try_send(
                                 crate::nip_fi_session::authorization_denied_frame(
                                     crate::nip_fi_session::NipFiWsRoute::Root,
