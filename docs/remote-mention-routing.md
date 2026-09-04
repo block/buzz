@@ -66,7 +66,11 @@ completion cannot revive that recovery or release a newer attempt's latch.
 The editor's authored revision distinguishes an intentional edit → clear from an
 optimistic empty composer. Programmatic send clear/recovery runs inside the draft
 lifecycle's restoration boundary, so it does not mark the source as authoritatively
-deleted. Exact selected mention refs are captured before asynchronous preparation.
+deleted. Pending clipboard identity verification settles before exact selected
+mention refs are captured. The source visit and authored revision are captured
+before that wait: an edit, navigation (including A → B → A), or unmount cancels
+rather than reading the new draft's maps. Subsequent asynchronous preparation
+consumes the captured selections.
 Persona preparation similarly consumes captured selections and returns resolved
 refs, writing them into the editor only while the original visit/revision remains
 current. Normal persona creation/reuse and ordinary destination-bound background

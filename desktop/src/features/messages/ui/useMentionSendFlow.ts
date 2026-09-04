@@ -741,13 +741,9 @@ export function useMentionSendFlow({
       }
       isMentionSendPendingRef.current = true;
       setIsMentionSendPending(true);
-      // Capture exact selections before any async preparation can navigate the
-      // reused editor to another draft (possibly with identical display text).
+      // Bind settlement to this authored visit before reading its recipients.
       claimDraftSend(effectiveDraftKey);
       const composerRevision = getComposerRevision();
-      const savedMentionRefs = mentions.getDraftMentionRefs(trimmed).slice();
-      const selectedMentionPubkeys = mentions.extractMentionPubkeys(trimmed);
-      const selectedPersonas = mentions.extractMentionPersonas(trimmed);
       const isSendCancelled = () =>
         preparedLinkPreviews?.signal.aborted === true;
       let sendPromoted = false;
@@ -762,7 +758,18 @@ export function useMentionSendFlow({
         // publish a readable `@Label` with no `p` tag. Bounded inside, so a
         // lookup that never answers delays the send rather than blocking it.
         await mentions.settlePendingMentionBindings();
-        if (isSendCancelled()) return;
+        // Settlement may outlive an edit or A → B → A navigation. In that
+        // case the live mention maps no longer belong to this send.
+        if (
+          isSendCancelled() ||
+          !isMountedRef.current ||
+          sourceOwnerRef.current !== sourceOwner ||
+          getComposerRevision() !== composerRevision
+        )
+          return;
+        const savedMentionRefs = mentions.getDraftMentionRefs(trimmed).slice();
+        const selectedMentionPubkeys = mentions.extractMentionPubkeys(trimmed);
+        const selectedPersonas = mentions.extractMentionPersonas(trimmed);
         const dmThreadAgentMentionErrorMessage = dmThreadAgentMentionError({
           trimmed,
           isThreadReply: capturedThreadContext != null,

@@ -473,19 +473,23 @@ test("ordinary send may clean its untouched source even if navigation preceded o
     s.calls.push(["mark-sent", ...args]);
   const gate = deferred();
   s.control.publish = gate;
+  // Hold destination preparation AFTER clipboard settlement has captured the
+  // source selections; navigation during settlement now cancels before capture.
+  const preparation = deferred();
+  s.options.onPrepareSendChannel = () => preparation.promise;
   s.rerender();
   let send;
-  s.act(() => {
+  await s.act(async () => {
     send = s.result.current.sendMessageWithMentionFlow({
-      capturedChannelId: "general",
+      capturedChannelId: null,
       pendingImeta: [],
       trimmed: TEXT,
       recoveryDraftKey: "thread:a",
       sentDraftKey: "thread:a",
     });
-    // Preparation yields before completeSend can clear the composer.
-    s.navigate("thread:b");
   });
+  s.navigate("thread:b");
+  preparation.resolve("general");
   await s.flush();
   assert.equal(s.events("publish").length, 1);
   assert.equal(s.store.get("thread:a").content, TEXT);
@@ -518,5 +522,85 @@ for (const upload of [false, true]) {
       ["error", "Message failed to send: relay rejected publication"],
     ]);
     assert.equal(s.result.current.isPreparingMentionSend, false);
+  });
+}
+
+// Clipboard verification is the only pre-capture await. Later preparation
+// consumes a snapshot; this await must instead fence the maps before reading.
+test("settled paste supplies exact recipient and recovery refs before preparation", async () => {
+  const s = await setup({ lifecycle: true });
+  s.dismiss();
+  const gate = deferred();
+  const pastedRefs = [
+    { displayName: "RemoteScout", pubkey: "c".repeat(64), isAgent: true },
+  ];
+  s.options.mentions.settlePendingMentionBindings = async () => {
+    await gate.promise;
+    s.control.currentRefs = pastedRefs;
+  };
+  s.options.mentions.extractMentionPubkeys = () =>
+    s.control.currentRefs.map((ref) => ref.pubkey);
+  s.rerender();
+  let sending;
+  await s.act(async () => {
+    sending = s.result.current.sendMessageWithMentionFlow({
+      capturedChannelId: "general",
+      trimmed: TEXT,
+      pendingImeta: [],
+    });
+  });
+  await s.finish(gate);
+  await sending;
+  await s.invite();
+  assert.deepEqual(Array.from(s.events("SEND")[0][2]), [pastedRefs[0].pubkey]);
+});
+
+for (const action of ["edit", "delete", "navigation", "return", "unmount"]) {
+  test(`paste settlement after ${action} cannot read another draft or publish`, async () => {
+    const s = await setup({ lifecycle: true });
+    s.dismiss();
+    const gate = deferred();
+    s.options.mentions.settlePendingMentionBindings = () => gate.promise;
+    s.rerender();
+    let sending;
+    await s.act(async () => {
+      sending = s.result.current.sendMessageWithMentionFlow({
+        capturedChannelId: "general",
+        trimmed: TEXT,
+        pendingImeta: [],
+      });
+    });
+    const otherRefs = [
+      { displayName: "RemoteScout", pubkey: "c".repeat(64), isAgent: true },
+    ];
+    if (action === "edit") s.edit(TEXT, otherRefs);
+    if (action === "delete") s.edit("");
+    if (action === "navigation" || action === "return") {
+      s.store.set("thread:b", {
+        content: TEXT,
+        channelId: "general",
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        mentionRefs: otherRefs,
+      });
+      s.navigate("thread:b");
+      if (action === "return") s.navigate("thread:a");
+    }
+    if (action === "unmount") s.unmount();
+    let reads = 0;
+    s.options.mentions.getDraftMentionRefs = () => {
+      reads++;
+      return otherRefs;
+    };
+    await s.finish(gate);
+    await sending;
+    assert.equal(reads, 0);
+    assert.equal(s.events("add").length, 0);
+    assert.equal(s.events("persona").length, 0);
+    assert.equal(s.events("SEND").length, 0);
+    assert.equal(s.result.current.nonMemberPromptProps.open, false);
+    if (action === "delete") assert.equal(s.options.contentRef.current, "");
+    if (action === "edit" || action === "navigation")
+      assert.deepEqual(s.control.currentRefs, otherRefs);
   });
 }
