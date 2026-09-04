@@ -105,12 +105,19 @@ pub(crate) async fn enforce_nip_fi_key_pairing(
                 "NIP-FI key pairing mismatch — closing connection"
             );
             *conn.auth_state.write().await = crate::connection::AuthState::Failed;
-            // Set reason BEFORE cancel fires so the send loop's cancel branch
-            // reads AuthorizationDenied and emits a 1008 POLICY close frame.
-            // [FI-TRACE-CLOSE-CODE]
-            conn.nip_fi_reason_tx.send_replace(Some(
-                crate::state::CommunityDisconnectReason::AuthorizationDenied,
-            ));
+            // Publish reason first-writer-wins: set AuthorizationDenied only
+            // when the slot is still None — a concurrent CommunityDeleted must
+            // not be clobbered, and vice versa. [FI-TRACE-CLOSE-CODE]
+            let _ = conn
+                .nip_fi_reason_tx
+                .send_if_modified(|current| match current {
+                    None => {
+                        *current =
+                            Some(crate::state::CommunityDisconnectReason::AuthorizationDenied);
+                        true
+                    }
+                    Some(_) => false,
+                });
             // Use the dedicated terminal channel — guaranteed one free slot even
             // when ctrl_tx (capacity 8) is saturated by ordinary control traffic.
             let _ = conn
@@ -213,11 +220,19 @@ pub(crate) fn spawn_nip_fi_expiry_task(
                 // handle before remove_connection) cannot start until pre-expiry
                 // effects have finished their bounded commits.
                 gate.expire(|| {
-                    // Set reason BEFORE cancel fires so the send loop's cancel
-                    // branch reads AuthorizationDenied and emits 1008. [FI-TRACE-CLOSE-CODE]
-                    deny_reason_tx.send_replace(Some(
-                        crate::state::CommunityDisconnectReason::AuthorizationDenied,
-                    ));
+                    // Publish reason first-writer-wins so the send loop's
+                    // cancel branch reads AuthorizationDenied and emits 1008;
+                    // a concurrent CommunityDeleted must not be clobbered.
+                    // [FI-TRACE-CLOSE-CODE]
+                    let _ = deny_reason_tx.send_if_modified(|current| match current {
+                        None => {
+                            *current = Some(
+                                crate::state::CommunityDisconnectReason::AuthorizationDenied,
+                            );
+                            true
+                        }
+                        Some(_) => false,
+                    });
                     let _ = terminal_ctrl_tx.try_send(authorization_denied_frame(route));
                     metrics::counter!("buzz_nip_fi_lease_expirations_total").increment(1);
                     warn!(

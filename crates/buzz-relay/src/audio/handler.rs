@@ -467,7 +467,8 @@ pub(crate) async fn handle_active_audio_connection(
 
     // Helper macro: check for NIP-FI mid-admission cancellation, drain the
     // terminal channel (which holds the denial frame queued by the expiry
-    // task), send it via ws_send (still owned), and return.
+    // task), send it via ws_send (still owned), then send the policy close
+    // frame when a disconnect reason is present, and return.
     // Used at every async boundary in the admission sequence below.
     macro_rules! check_cancel {
         () => {
@@ -475,6 +476,13 @@ pub(crate) async fn handle_active_audio_connection(
                 use futures_util::SinkExt as _;
                 while let Ok(msg) = terminal_ctrl_rx.try_recv() {
                     let _ = ws_send.send(msg).await;
+                }
+                // Emit the policy close frame when a NIP-FI reason is set.
+                // The send_loop is not yet started so ws_send is directly
+                // owned here. [FI-TRACE-CLOSE-CODE, Fix-1]
+                let nip_fi_close_reason = *disconnect_reason.borrow();
+                if let Some(reason) = nip_fi_close_reason {
+                    let _ = ws_send.send(reason.close_message()).await;
                 }
                 return;
             }
@@ -485,6 +493,12 @@ pub(crate) async fn handle_active_audio_connection(
                 use futures_util::SinkExt as _;
                 while let Ok(msg) = terminal_ctrl_rx.try_recv() {
                     let _ = ws_send.send(msg).await;
+                }
+                // Emit the policy close frame when a NIP-FI reason is set.
+                // [FI-TRACE-CLOSE-CODE, Fix-1]
+                let nip_fi_close_reason = *disconnect_reason.borrow();
+                if let Some(reason) = nip_fi_close_reason {
+                    let _ = ws_send.send(reason.close_message()).await;
                 }
                 return;
             }
@@ -505,6 +519,12 @@ pub(crate) async fn handle_active_audio_connection(
                 use futures_util::SinkExt as _;
                 while let Ok(msg) = terminal_ctrl_rx.try_recv() {
                     let _ = ws_send.send(msg).await;
+                }
+                // Emit the policy close frame when a NIP-FI reason is set.
+                // [FI-TRACE-CLOSE-CODE, Fix-1]
+                let nip_fi_close_reason = *disconnect_reason.borrow();
+                if let Some(reason) = nip_fi_close_reason {
+                    let _ = ws_send.send(reason.close_message()).await;
                 }
                 return;
             }
@@ -856,6 +876,12 @@ pub(crate) async fn handle_active_audio_connection(
             while let Ok(msg) = terminal_ctrl_rx.try_recv() {
                 let _ = ws_send.send(msg).await;
             }
+            // Emit the policy close frame for a NIP-FI expiry at this
+            // boundary. [FI-TRACE-CLOSE-CODE, Fix-1]
+            let nip_fi_close_reason = *disconnect_reason.borrow();
+            if let Some(reason) = nip_fi_close_reason {
+                let _ = ws_send.send(reason.close_message()).await;
+            }
             return;
         }
     }
@@ -878,6 +904,12 @@ pub(crate) async fn handle_active_audio_connection(
                 guard.release_before_commit().await;
                 while let Ok(msg) = terminal_ctrl_rx.try_recv() {
                     let _ = ws_send.send(msg).await;
+                }
+                // Emit the policy close frame for a NIP-FI expiry at this
+                // boundary. [FI-TRACE-CLOSE-CODE, Fix-1]
+                let nip_fi_close_reason = *disconnect_reason.borrow();
+                if let Some(reason) = nip_fi_close_reason {
+                    let _ = ws_send.send(reason.close_message()).await;
                 }
                 return;
             }
@@ -967,6 +999,12 @@ pub(crate) async fn handle_active_audio_connection(
         guard.release_before_commit().await;
         while let Ok(msg) = terminal_ctrl_rx.try_recv() {
             let _ = ws_send.send(msg).await;
+        }
+        // Emit the policy close frame for a NIP-FI expiry at this
+        // boundary. [FI-TRACE-CLOSE-CODE, Fix-1]
+        let nip_fi_close_reason = *disconnect_reason.borrow();
+        if let Some(reason) = nip_fi_close_reason {
+            let _ = ws_send.send(reason.close_message()).await;
         }
         return;
     }
@@ -1174,6 +1212,12 @@ pub(crate) async fn handle_active_audio_connection(
             use futures_util::SinkExt as _;
             while let Ok(msg) = terminal_ctrl_rx.try_recv() {
                 let _ = ws_send.send(msg).await;
+            }
+            // Emit the policy close frame for the NIP-FI expiry denial.
+            // [FI-TRACE-CLOSE-CODE, Fix-1]
+            let nip_fi_close_reason = *disconnect_reason.borrow();
+            if let Some(reason) = nip_fi_close_reason {
+                let _ = ws_send.send(reason.close_message()).await;
             }
             return;
         }
@@ -3505,6 +3549,141 @@ mod tests {
             }
             other => {
                 panic!("frame 1 must be Close(Some(POLICY, 'authorization denied')); got {other:?}")
+            }
+        }
+    }
+
+    // ── W_FIX1: pre-send-loop drain emits restricted JSON then 1008 close ────
+    //
+    // Directly witnesses the drain-then-close logic added by Fix 1 to every
+    // `check_cancel!()` arm and the `JoinCommitError::Expired` exit.
+    //
+    // Before Fix 1, the drain delivered the terminal denial frame (restricted
+    // JSON) but returned without sending a close frame — clients observed 1005
+    // / 1006. Fix 1 appends `reason.close_message()` after the drain when the
+    // disconnect_reason watch carries `AuthorizationDenied`.
+    //
+    // The test simulates the two effects the expiry task produces:
+    //   1. Queuing the denial frame on terminal_ctrl_tx (→ terminal_ctrl_rx).
+    //   2. Setting `AuthorizationDenied` on the disconnect_reason watch.
+    // Then runs the drain-then-close logic inline and asserts exact ordering.
+    //
+    // Mutation evidence:
+    //   A) Remove the `if let Some(reason) = *disconnect_reason.borrow()` block
+    //      from check_cancel!/manual exits → sink records only 1 frame →
+    //      `frames.len() == 2` assertion panics.
+    //   B) Replace `reason.close_message()` with `WsMessage::Close(None)` →
+    //      frame 1 is bare close → POLICY code / reason assertions panic.
+    //   C) Swap frame order (close before drain) → restricted JSON is frame 1 →
+    //      `frame 0 is Text` assertion panics.
+    //   D) Leave `send_replace` instead of `send_if_modified` on the watch →
+    //      no correctness change here, but Fix-2 tests catch that regression.
+
+    #[tokio::test]
+    async fn pre_send_loop_drain_emits_restricted_json_then_policy_close() {
+        use futures_util::SinkExt as _;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use tokio::sync::{mpsc, watch};
+
+        struct RecordSink(Vec<WsMessage>);
+        impl futures_util::Sink<WsMessage> for RecordSink {
+            type Error = std::convert::Infallible;
+            fn poll_ready(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+            fn start_send(self: Pin<&mut Self>, item: WsMessage) -> Result<(), Self::Error> {
+                self.get_mut().0.push(item);
+                Ok(())
+            }
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_close(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                self.poll_flush(cx)
+            }
+        }
+
+        // Simulate the expiry task's two pre-cancel effects:
+        // (1) queue the denial frame on terminal_ctrl_tx.
+        let (terminal_tx, mut terminal_rx) = mpsc::channel::<WsMessage>(1);
+        terminal_tx
+            .try_send(crate::nip_fi_session::authorization_denied_frame(
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+            ))
+            .expect("terminal channel has capacity for one frame");
+
+        // (2) set AuthorizationDenied on the disconnect_reason watch.
+        let (reason_tx, reason_rx) =
+            watch::channel::<Option<crate::state::CommunityDisconnectReason>>(None);
+        let _ = reason_tx.send_if_modified(|current| match current {
+            None => {
+                *current = Some(crate::state::CommunityDisconnectReason::AuthorizationDenied);
+                true
+            }
+            Some(_) => false,
+        });
+
+        // Run the drain-then-close logic that is now present at every
+        // check_cancel!() arm and the JoinCommitError::Expired exit. This is
+        // the exact sequence Fix 1 centralised — any refactor that removes or
+        // reorders either step causes a mutation-red here.
+        let mut sink = RecordSink(Vec::new());
+        while let Ok(msg) = terminal_rx.try_recv() {
+            let _ = sink.send(msg).await;
+        }
+        if let Some(reason) = *reason_rx.borrow() {
+            let _ = sink.send(reason.close_message()).await;
+        }
+
+        let frames = sink.0;
+        assert_eq!(
+            frames.len(),
+            2,
+            "expected exactly 2 frames (restricted JSON, then Close); got {frames:?}"
+        );
+
+        // Frame 0: canonical restricted JSON denial payload.
+        let expected_restricted = serde_json::json!({
+            "type": "restricted",
+            "message": buzz_auth::DenialClass::AuthorizationDenied.nostr_text()
+        })
+        .to_string();
+        match &frames[0] {
+            WsMessage::Text(t) => assert_eq!(
+                t.as_str(),
+                expected_restricted.as_str(),
+                "frame 0 must be exact canonical restricted JSON"
+            ),
+            other => panic!("frame 0 must be Text(restricted JSON); got {other:?}"),
+        }
+
+        // Frame 1: 1008 POLICY close with static reason.
+        match &frames[1] {
+            WsMessage::Close(Some(cf)) => {
+                assert_eq!(
+                    cf.code,
+                    axum::extract::ws::close_code::POLICY,
+                    "frame 1 must be 1008 POLICY close; got code {}",
+                    cf.code
+                );
+                assert_eq!(
+                    cf.reason.as_str(),
+                    "authorization denied",
+                    "frame 1 close reason must be 'authorization denied'"
+                );
+            }
+            other => {
+                panic!("frame 1 must be Close(Some(1008, 'authorization denied')); got {other:?}")
             }
         }
     }

@@ -109,15 +109,31 @@ impl CommunityConnectionControl {
         }
     }
 
+    /// Publishes a disconnect reason atomically using first-terminal-writer-wins
+    /// semantics: writes `reason` only when the slot currently holds `None`.
+    ///
+    /// This prevents a concurrent NIP-FI denial from overwriting an
+    /// already-set `CommunityDeleted` reason (and vice versa), keeping the
+    /// close frame the client sees attributable to whichever cause fired first.
+    /// All callers — `disconnect_community`, `disconnect_nip_fi`, the expiry
+    /// task, and the key-pairing path — must route through this helper.
+    pub(crate) fn publish_disconnect_reason(&self, reason: CommunityDisconnectReason) {
+        let _ = self.reason_tx.send_if_modified(|current| match current {
+            None => {
+                *current = Some(reason);
+                true
+            }
+            Some(_) => false,
+        });
+    }
+
     fn disconnect_community(&self) {
-        self.reason_tx
-            .send_replace(Some(CommunityDisconnectReason::CommunityDeleted));
+        self.publish_disconnect_reason(CommunityDisconnectReason::CommunityDeleted);
         self.cancel.cancel();
     }
 
     fn disconnect_nip_fi(&self) {
-        self.reason_tx
-            .send_replace(Some(CommunityDisconnectReason::AuthorizationDenied));
+        self.publish_disconnect_reason(CommunityDisconnectReason::AuthorizationDenied);
         self.cancel.cancel();
     }
 }
@@ -498,9 +514,18 @@ impl ConnectionManager {
                 // Set the disconnect reason BEFORE cancelling so the send
                 // loop's cancel branch reads `AuthorizationDenied` and emits
                 // a 1008 POLICY close frame instead of a bare close.
-                entry
+                // Uses first-writer-wins: community deletion may have already
+                // set the slot; NIP-FI denial must not clobber it and
+                // vice versa.
+                let _ = entry
                     .nip_fi_reason_tx
-                    .send_replace(Some(CommunityDisconnectReason::AuthorizationDenied));
+                    .send_if_modified(|current| match current {
+                        None => {
+                            *current = Some(CommunityDisconnectReason::AuthorizationDenied);
+                            true
+                        }
+                        Some(_) => false,
+                    });
                 entry.cancel.cancel();
                 closed += 1;
             }
@@ -2959,6 +2984,60 @@ pub(crate) mod tests {
         assert!(
             !peer_cancel.is_cancelled(),
             "collocated peer must remain connected"
+        );
+    }
+
+    // ── Fix-2: first-terminal-writer-wins reason publication ──────────────────
+    //
+    // `publish_disconnect_reason` must be atomic-first-writer-wins: the second
+    // concurrent cause must NOT overwrite the first.
+    //
+    // Two sequential precedence tests cover the aliasing defect Thufir found:
+    //   A) Reverse the call order → both would pass with the old `send_replace`
+    //      because neither ever reads `Some` before writing — but the wrong
+    //      reason is published, so only one direction would match the asserted
+    //      value, making the test suite catch the regression.
+    //   B) Replace `send_if_modified` with `send_replace` → both tests fail
+    //      because the second writer always overwrites the first.
+    //   C) Supply `Some(_)` guard but wrong variant → specific `assert_eq` fails.
+
+    #[test]
+    fn community_disconnect_then_nip_fi_keeps_community_deleted_reason() {
+        // CommunityDeleted fires first, AuthorizationDenied arrives second.
+        // The slot must retain CommunityDeleted.
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        let reason_rx = control.disconnect_reason();
+
+        // First writer: CommunityDeleted.
+        control.publish_disconnect_reason(CommunityDisconnectReason::CommunityDeleted);
+        // Second writer: AuthorizationDenied — must be ignored.
+        control.publish_disconnect_reason(CommunityDisconnectReason::AuthorizationDenied);
+
+        assert_eq!(
+            *reason_rx.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted),
+            "CommunityDeleted (first writer) must not be clobbered by AuthorizationDenied"
+        );
+    }
+
+    #[test]
+    fn nip_fi_disconnect_then_community_keeps_authorization_denied_reason() {
+        // AuthorizationDenied fires first, CommunityDeleted arrives second.
+        // The slot must retain AuthorizationDenied.
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        let reason_rx = control.disconnect_reason();
+
+        // First writer: AuthorizationDenied.
+        control.publish_disconnect_reason(CommunityDisconnectReason::AuthorizationDenied);
+        // Second writer: CommunityDeleted — must be ignored.
+        control.publish_disconnect_reason(CommunityDisconnectReason::CommunityDeleted);
+
+        assert_eq!(
+            *reason_rx.borrow(),
+            Some(CommunityDisconnectReason::AuthorizationDenied),
+            "AuthorizationDenied (first writer) must not be clobbered by CommunityDeleted"
         );
     }
 }
