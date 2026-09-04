@@ -1198,9 +1198,46 @@ function updateMockRelayMembershipFromAdminEvent(event: RelayEvent): boolean {
   return false;
 }
 
+/**
+ * Mirror the native clipboard command's dual-flavor write.
+ *
+ * `navigator.clipboard.writeText` can only carry the plain flavor, so specs
+ * asserting on the identity sidecar read the captured payload instead. The
+ * rich write is still attempted so real paste round-trips work.
+ */
+async function writeClipboardFlavors({
+  html,
+  text,
+}: {
+  html?: string;
+  text: string;
+}): Promise<void> {
+  window.__BUZZ_E2E_LAST_CLIPBOARD__ = { html: html ?? null, text };
+  if (
+    html &&
+    typeof ClipboardItem !== "undefined" &&
+    navigator.clipboard?.write
+  ) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // Fall back to the plain flavor; headless permissions vary by browser.
+    }
+  }
+  await navigator.clipboard.writeText(text);
+}
+
 declare global {
   interface Window {
     __BUZZ_E2E__?: E2eConfig;
+    /** Last payload written through the native clipboard command. */
+    __BUZZ_E2E_LAST_CLIPBOARD__?: { html: string | null; text: string };
     __BUZZ_E2E_COMMANDS__?: string[];
     __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
       command: string;
@@ -1551,6 +1588,12 @@ declare global {
     /** Number of `get_thread_replies` calls currently held by
      *  `deferThreadReplies`. */
     __BUZZ_E2E_THREAD_REPLIES_PENDING__?: () => number;
+    /** Start or stop holding `get_users_batch` responses. Turning the hold off
+     *  flushes everything held; either call returns the number released, so a
+     *  spec can prove a relay identity lookup was genuinely pinned open. */
+    __BUZZ_E2E_HOLD_USERS_BATCH__?: (hold: boolean) => number;
+    /** Number of `get_users_batch` calls currently held. */
+    __BUZZ_E2E_USERS_BATCH_PENDING__?: () => number;
     /** Uploads that passed mock-native registration and began relay work. */
     __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
     /** Hold renderer-owned media fetches until their cancellation command. */
@@ -1628,6 +1671,11 @@ const CHARLIE_PUBKEY =
   "554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea";
 const OUTSIDER_PUBKEY =
   "df8e91b86fda13a9a67896df77232f7bdab2ba9c3e165378e1ba3d24c13a328e";
+// A non-member human whose display name has a space in it. Multi-word names are
+// the case a plain-text copy cannot recover — "@John Smith" is indistinguishable
+// from "@John" followed by a word — so the clipboard round-trip fixtures use it.
+const MULTI_WORD_NON_MEMBER_PUBKEY =
+  "7c1f2ad0b4e93856a1d0c2f4e6b8093a5d7f1c3e5a79b1d3f5072a4c6e80931b";
 const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
 // A relay-classified bot agent whose declared NIP-OA owner is the mock viewer,
@@ -1667,6 +1715,14 @@ let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
 let deferredLinkPreviewUploadQueue: Array<() => void> = [];
 let deferredThreadRepliesQueue: Array<() => void> = [];
+// ── get_users_batch hold seam ───────────────────────────────────────────────
+// Toggled at runtime by `__BUZZ_E2E_HOLD_USERS_BATCH__(hold)` rather than fixed
+// at boot by a mock-config flag, because a mention-identity spec needs both
+// sides of the hold in one page: profiles resolved normally first (so one paste
+// verifies instantly from local state), then the relay lookup pinned open (so a
+// second paste of the same label is provably still deciding).
+let holdUsersBatch = false;
+let heldUsersBatchReleases: Array<() => void> = [];
 // Starts currently held behind `startManagedAgentDelayMs`, releasable early
 // via `__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__()`: a spec that holds a
 // start across a community round-trip needs the hold long enough to be
@@ -1691,6 +1747,7 @@ const mockDisplayNames = new Map<string, string>([
   [PROFILE_ONLY_AGENT_PUBKEY, "mira"],
   [OWNED_RELAY_AGENT_PUBKEY, "nadia"],
   [OUTSIDER_PUBKEY, "outsider"],
+  [MULTI_WORD_NON_MEMBER_PUBKEY, "John Smith"],
   [DEFAULT_REAL_IDENTITY.pubkey, DEFAULT_REAL_IDENTITY.username],
 ]);
 const mockAgentPubkeys = new Set([
@@ -4156,6 +4213,7 @@ const mockPresence = new Map<string, PresenceStatus>([
   [PROFILE_ONLY_AGENT_PUBKEY, "online"],
   [OWNED_RELAY_AGENT_PUBKEY, "online"],
   [OUTSIDER_PUBKEY, "offline"],
+  [MULTI_WORD_NON_MEMBER_PUBKEY, "offline"],
 ]);
 const mockFeedOverrides: RawHomeFeedResponse["feed"] = {
   mentions: [],
@@ -6864,6 +6922,11 @@ async function handleGetUsersBatch(
   if (usersBatchDelayMs > 0) {
     await new Promise<void>((resolve) => {
       window.setTimeout(resolve, usersBatchDelayMs);
+    });
+  }
+  if (holdUsersBatch) {
+    await new Promise<void>((resolve) => {
+      heldUsersBatchReleases.push(resolve);
     });
   }
 
@@ -11256,6 +11319,8 @@ export function maybeInstallE2eTauriMocks() {
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
   deferredThreadRepliesQueue = [];
+  holdUsersBatch = false;
+  heldUsersBatchReleases = [];
   cancelledMediaUploadIds = new Set<string>();
   for (const controller of mockMediaFetchControllers.values()) {
     controller.abort();
@@ -11281,6 +11346,15 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_THREAD_REPLIES_PENDING__ = () =>
     deferredThreadRepliesQueue.length;
+  window.__BUZZ_E2E_HOLD_USERS_BATCH__ = (hold: boolean) => {
+    holdUsersBatch = hold;
+    // Releasing on the way out of the hold, not on the way in, is what lets a
+    // spec keep one lookup pinned while another resolves from local state.
+    const queued = hold ? [] : heldUsersBatchReleases.splice(0);
+    for (const release of queued) release();
+    return queued.length;
+  };
+  window.__BUZZ_E2E_USERS_BATCH_PENDING__ = () => heldUsersBatchReleases.length;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -14419,7 +14493,7 @@ export function maybeInstallE2eTauriMocks() {
       case "copy_image_to_clipboard":
         return;
       case "copy_text_to_clipboard":
-        await navigator.clipboard.writeText((payload as { text: string }).text);
+        await writeClipboardFlavors(payload as { html?: string; text: string });
         return;
       case "read_clipboard_text":
         return navigator.clipboard.readText();

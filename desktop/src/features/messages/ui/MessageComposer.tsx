@@ -285,6 +285,7 @@ function MessageComposerImpl({
     channelNames: channelLinks.knownChannelNames,
     messageLinkChannels: channelLinks.channels,
     customEmoji,
+    getMentionIdentities: mentions.getMentionIdentities,
     onSubmit: () => submitMessageRef.current(),
     onEditLastOwnMessage: () => {
       if (editTargetRef.current) return false;
@@ -556,6 +557,9 @@ function MessageComposerImpl({
       if (isEditSubmissionLocked || voiceNote.statusRef.current !== "idle") {
         return;
       }
+      // An edit extracts from the same mention map a pasted identity binds
+      // into, so wait on any check still deciding. Bounded internally.
+      await mentions.settlePendingMentionBindings();
       // Empty edits delete the message through handleEditSave.
       await submitMessageEdit({
         content: trimmed,
@@ -681,6 +685,7 @@ function MessageComposerImpl({
     mentions.getDraftMentionRefs,
     mentions.restoreDraftMentionRefs,
     mentions.revalidateMentionPubkeys,
+    mentions.settlePendingMentionBindings,
     voiceNote.statusRef,
   ]);
   submitMessageRef.current = submitMessage;
@@ -791,6 +796,7 @@ function MessageComposerImpl({
   );
   useComposerPasteHandler({
     editor: richText.editor,
+    bindMentionIdentities: mentions.bindPastedMentionIdentities,
     scrollToBottom: scrollComposerToBottom,
     setPendingImeta: voiceNote.setPendingImetaWhenIdle,
     uploadFile: voiceNote.uploadFileWhenIdle,

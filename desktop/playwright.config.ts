@@ -78,6 +78,7 @@ export default defineConfig({
         "**/composer-tooltip-dismiss.spec.ts",
         "**/mentions.spec.ts",
         "**/mention-spacing.spec.ts",
+        "**/mention-clipboard.spec.ts",
         "**/cloud-provenance.spec.ts",
         "**/team-mentions.spec.ts",
         "**/persistent-agent-audience.spec.ts",
