@@ -34,6 +34,19 @@ export function WorkflowTriggerFeedback({
         Run created: {state.result?.runId}
       </p>
     );
+  if (state.failurePhase === "prepare")
+    return (
+      <div
+        role="alert"
+        className="pointer-events-auto space-y-2 text-xs text-destructive"
+      >
+        <p>Workflow run was not started. {state.error}</p>
+        <p>Retry prepares a new request before submitting it.</p>
+        <Button size="sm" variant="outline" onClick={onRetry}>
+          Retry trigger
+        </Button>
+      </div>
+    );
   return (
     <div
       role="alert"

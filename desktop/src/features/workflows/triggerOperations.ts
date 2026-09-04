@@ -8,6 +8,7 @@ import type { RelayEvent, TriggerWorkflowResponse } from "@/shared/api/types";
 export type TriggerState = {
   status: "idle" | "pending" | "error" | "success";
   error?: string;
+  failurePhase?: "prepare" | "submit";
   result?: TriggerWorkflowResponse;
 };
 const idle: TriggerState = { status: "idle" };
@@ -61,7 +62,8 @@ export class WorkflowTriggerOperations {
     let op = this.operations.get(key);
     if (op?.inFlight) return op.inFlight;
     // A settled success means the next explicit Trigger is a distinct run.
-    // An error means Retry of the same event unless the user explicitly opts out.
+    // Submission errors retry the same event unless the user explicitly opts out.
+    // Preparation errors have not published anything and may prepare again.
     if (!op || newRun || op.state.status === "success") {
       if (!op && this.operations.size >= 256) {
         for (const [oldKey, old] of this.operations) {
@@ -99,6 +101,7 @@ export class WorkflowTriggerOperations {
         operation.state = {
           status: "error",
           error: error instanceof Error ? error.message : String(error),
+          failurePhase: operation.event ? "submit" : "prepare",
         };
         throw error;
       } finally {

@@ -45,7 +45,7 @@ after(() => dom.window.close());
 // Actual card + detail hook + IPC adapters. Unlike the former invocation-count
 // assertion, this peer signs and commits an event, loses the response, then
 // verifies the exact retry bytes and returns the same persisted run identity.
-test("card/detail share pending, accessible error/retry and confirmed-only success animation", async () => {
+test("card/detail distinguish preparation from ambiguous submission and animate only confirmed success", async () => {
   const keys = generateSecretKey();
   const pubkey = getPublicKey(keys);
   localStorage.setItem(
@@ -92,6 +92,7 @@ test("card/detail share pending, accessible error/retry and confirmed-only succe
       if (command === "get_run_approvals") return { approvals: [] };
       if (command === "prepare_workflow_trigger") {
         prepares++;
+        if (prepares === 1) throw new Error("revision lookup failed");
         assert.equal(args.expectedRelayUrl, "wss://a.example");
         assert.equal(args.expectedSignerPubkey, pubkey);
         return finalizeEvent(
@@ -196,6 +197,26 @@ test("card/detail share pending, accessible error/retry and confirmed-only succe
     fireEvent.click(
       rendered.getByRole("menuitem", { name: "Trigger", exact: true }),
     );
+    await waitFor(() =>
+      assert.match(
+        card.getByRole("alert").textContent,
+        /revision lookup failed/,
+      ),
+    );
+    for (const surface of [card, detail]) {
+      const text = surface.getByRole("alert").textContent;
+      assert.match(text, /Workflow run was not started/);
+      assert.doesNotMatch(text, /may already exist|same signed request/);
+      assert.equal(
+        surface.queryByRole("button", { name: "Start a distinct run…" }),
+        null,
+      );
+    }
+    assert.equal(posts.length, 0, "preparation failure cannot publish");
+    assert.equal(stack.firstChild, originalTile);
+    fireEvent.click(
+      card.getByRole("button", { name: "Retry trigger", exact: true }),
+    );
     await waitFor(() => assert.equal(posts.length, 1));
     assert.match(card.getByRole("status").textContent, /Triggering/);
     assert.equal(
@@ -226,6 +247,13 @@ test("card/detail share pending, accessible error/retry and confirmed-only succe
       ),
     );
     assert.match(detail.getByRole("alert").textContent, /same signed request/);
+    for (const surface of [card, detail]) {
+      assert.doesNotMatch(
+        surface.getByRole("alert").textContent,
+        /was not started/,
+      );
+      assert.ok(surface.getByRole("button", { name: "Start a distinct run…" }));
+    }
     assert.equal(
       stack.firstChild,
       originalTile,
@@ -236,7 +264,7 @@ test("card/detail share pending, accessible error/retry and confirmed-only succe
     );
     await waitFor(() => assert.equal(posts.length, 2));
     assert.equal(posts[0], posts[1]);
-    assert.equal(prepares, 1);
+    assert.equal(prepares, 2);
     assert.equal(runs.size, 1);
     await act(async () => {
       resolvePost();

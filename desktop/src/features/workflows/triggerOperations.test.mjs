@@ -58,6 +58,7 @@ test("production owner retains exact signed payload after committed response los
   release();
   await assert.rejects(first, /response lost/);
   assert.equal(owner.state(key).status, "error");
+  assert.equal(owner.state(key).failurePhase, "submit");
   const result = await owner.run("workflow", scope);
   assert.equal(result.runId, "run-1");
   assert.equal(prepared, 1);
@@ -119,6 +120,10 @@ test("preflight rejection retries preparation without inventing a submitted even
       assert.fail("preflight failure must not publish"),
   });
   await assert.rejects(owner.run("workflow", scope), /stale revision/);
+  assert.equal(
+    owner.state(owner.key("workflow", scope)).failurePhase,
+    "prepare",
+  );
   await assert.rejects(owner.run("workflow", scope), /stale revision/);
   assert.equal(tries, 2);
 });
