@@ -13,7 +13,7 @@ const OK_INFO = {
   meetings: {
     provider: "hivetalk",
     proxy: "/meetings",
-    api_base: "https://premrelay.exe.xyz",
+    api_base: "https://l402relay.exe.xyz",
   },
   supported_extensions: ["nip-er", "buzz-meetings"],
 };
@@ -21,7 +21,7 @@ const OK_INFO = {
 test("relayMeetingsCapability accepts a well-formed descriptor", () => {
   assert.deepEqual(relayMeetingsCapability(OK_INFO), {
     proxyPrefix: "/meetings",
-    apiBase: "https://premrelay.exe.xyz",
+    apiBase: "https://l402relay.exe.xyz",
   });
 });
 
@@ -29,9 +29,9 @@ test("relayMeetingsCapability strips a trailing slash from api_base", () => {
   assert.deepEqual(
     relayMeetingsCapability({
       ...OK_INFO,
-      meetings: { ...OK_INFO.meetings, api_base: "https://premrelay.exe.xyz/" },
+      meetings: { ...OK_INFO.meetings, api_base: "https://l402relay.exe.xyz/" },
     }),
-    { proxyPrefix: "/meetings", apiBase: "https://premrelay.exe.xyz" },
+    { proxyPrefix: "/meetings", apiBase: "https://l402relay.exe.xyz" },
   );
 });
 
@@ -73,9 +73,9 @@ test("relayMeetingsCapability rejects unsafe proxy paths", () => {
 
 test("relayMeetingsCapability requires an https api_base", () => {
   for (const api_base of [
-    "http://premrelay.exe.xyz",
-    "ftp://premrelay.exe.xyz",
-    "premrelay.exe.xyz",
+    "http://l402relay.exe.xyz",
+    "ftp://l402relay.exe.xyz",
+    "l402relay.exe.xyz",
     "",
     "not a url",
   ]) {
@@ -181,7 +181,7 @@ test("decodeMeetingTokenClaims never throws on garbage", () => {
   }
 });
 
-// Live HiveTalk body, captured from `GET https://premrelay.exe.xyz/api/plans`.
+// Live HiveTalk body, captured from `GET https://l402relay.exe.xyz/api/plans`.
 const HIVETALK_PLANS = {
   free_quota: 3,
   plans: [

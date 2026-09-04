@@ -21,8 +21,8 @@
 
 import {
   classifyMeetingError,
+  MeetingError,
   type ActiveRoom,
-  type MeetingError,
   type MeetingPlan,
   type MeetingToken,
   type PaymentStatus,
@@ -219,7 +219,15 @@ async function meetingsRequest<T>(
       unknown
     >;
     const err: MeetingError = classifyMeetingError(response.status, parsed);
-    if (response.status === 409 && typeof parsed.bolt11 === "string") {
+    // Two statuses can carry a live BOLT11: `409 pending_invoice` (an existing
+    // intent) and, since the l402relay deployment, `402` — HiveTalk answers
+    // `/api/subscribe` with the L402 challenge instead of the old `201`, same
+    // invoice body. `register-room` / `get-token` also 402, but with `plans[]`
+    // and no invoice, so gating on `bolt11` keeps them on the hosting path.
+    if (
+      (response.status === 409 || response.status === 402) &&
+      typeof parsed.bolt11 === "string"
+    ) {
       err.pendingInvoice = parsed as unknown as SubscribeIntent;
     }
     throw err;
@@ -337,21 +345,45 @@ export function getSubscription(
   });
 }
 
-export function subscribe(
+/**
+ * Buy a subscription.
+ *
+ * HiveTalk on `l402relay` returns the new invoice as an **L402 `402`** rather
+ * than the `201` the previous deployment sent; the body is the same
+ * `SubscribeIntent`. Treat that as the success it is, so the caller reaches the
+ * invoice step instead of a "subscription required" dead end. `/api/payment/status`
+ * still settles the entitlement on poll, so the macaroon/preimage retry half of
+ * L402 is not needed here.
+ *
+ * A `409` (an intent already in flight) stays a rejection — `SubscribeView`
+ * resumes it from `error.pendingInvoice`.
+ */
+export async function subscribe(
   relayWsUrl: string,
   cap: Pick<RelayMeetingsCapability, "apiBase">,
   plan: string,
   signal?: AbortSignal,
 ): Promise<SubscribeIntent> {
   const body = JSON.stringify({ plan });
-  return challengeFlow(relayWsUrl, cap, {
-    action: "subscribe",
-    method: "POST",
-    localPath: "/subscribe",
-    upstreamPath: "/api/subscribe",
-    body,
-    signal,
-  });
+  try {
+    return await challengeFlow<SubscribeIntent>(relayWsUrl, cap, {
+      action: "subscribe",
+      method: "POST",
+      localPath: "/subscribe",
+      upstreamPath: "/api/subscribe",
+      body,
+      signal,
+    });
+  } catch (error) {
+    if (
+      error instanceof MeetingError &&
+      error.status === 402 &&
+      error.pendingInvoice
+    ) {
+      return error.pendingInvoice;
+    }
+    throw error;
+  }
 }
 
 export function getPaymentStatus(

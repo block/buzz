@@ -171,6 +171,17 @@ If you find yourself reaching for a new HTTP endpoint, first check whether
 an event kind would do the job — it usually will, and you get realtime
 fan-out, NIP-29 scoping, and the existing auth pipeline for free.
 
+**Standing exception — third-party control-plane proxies.** `/gifs/*` (KLIPY)
+and `/meetings/*` (HiveTalk, 21 routes) mirror an external provider's HTTP API
+one-to-one. They are exempt because an event kind cannot do the job, not because
+the rule was inconvenient: the provider verifies a signature over the caller's
+raw request bytes, so re-encoding through an event breaks it by construction, and
+the provider sends no CORS header, which is the only reason the relay is in the
+path at all. Buzz owns the membership gate, the rate limit, and the response
+allowlist; the provider owns the operations. See `docs/meetings.md` §"Why this is
+HTTP and not an event kind". A **new Buzz** operation is still an event kind —
+adding routes here is not a precedent for that.
+
 Reference https://github.com/nostr-protocol/nips
 
 **Event kinds**: All event kind integers are defined in

@@ -260,7 +260,7 @@ pub struct Config {
 
     /// Relay-owned HiveTalk "Meetings" proxy. Unset means the `/meetings/*`
     /// routes return 404 and NIP-11 does not advertise Meetings. Set via
-    /// `BUZZ_HIVETALK_API_ROOT` (e.g. `https://premrelay.exe.xyz`). Holds no
+    /// `BUZZ_HIVETALK_API_ROOT` (e.g. `https://l402relay.exe.xyz`). Holds no
     /// credential.
     pub hivetalk: Option<HivetalkConfig>,
 
@@ -419,6 +419,45 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
         ));
     }
     Ok(raw.trim_end_matches('/').to_string())
+}
+
+/// Validate `BUZZ_HIVETALK_API_ROOT` into a [`HivetalkConfig`].
+///
+/// The value is echoed to every client as the NIP-11 `meetings.api_base`, and
+/// the client needs it to build the `u` tag of its *own* HiveTalk-signed
+/// request. Clients accept it only if it parses as an `https:` URL
+/// (`relayMeetingsCapability` in `desktop/src/features/meetings/api.ts`), and a
+/// descriptor they reject makes Meetings silently unavailable: the user sees a
+/// feature that is simply absent, and the operator sees nothing at all. So an
+/// unusable root has to fail here, at startup, where somebody is watching —
+/// same choice, and the same shape, as `BUZZ_PAIRING_RELAY_URL` above.
+///
+/// A path prefix is allowed (HiveTalk behind a reverse proxy); credentials, a
+/// query, or a fragment are not — the proxy appends `/api/...` to this string,
+/// which would land after them and produce a URL nobody intended.
+fn parse_hivetalk_api_root(raw: &str) -> Result<HivetalkConfig, ConfigError> {
+    let url = url::Url::parse(raw).map_err(|e| {
+        ConfigError::InvalidValue(format!("BUZZ_HIVETALK_API_ROOT is not a valid URL: {e}"))
+    })?;
+    if url.scheme() != "https"
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidValue(
+            concat!(
+                "BUZZ_HIVETALK_API_ROOT must be an https URL with a host and no ",
+                "credentials, query, or fragment — clients reject anything else ",
+                "and Meetings goes silently dark",
+            )
+            .to_string(),
+        ));
+    }
+    Ok(HivetalkConfig {
+        api_root: raw.to_string(),
+    })
 }
 
 const DEFAULT_PUSH_GATEWAY_DELIVERY_URL: &str = "https://push.buzz.xyz/v1/deliveries/apns";
@@ -692,7 +731,8 @@ impl Config {
             .ok()
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty())
-            .map(|api_root| HivetalkConfig { api_root });
+            .map(|value| parse_hivetalk_api_root(&value))
+            .transpose()?;
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -1138,7 +1178,7 @@ mod tests {
             .expect("config with meetings unset")
             .hivetalk;
 
-        std::env::set_var("BUZZ_HIVETALK_API_ROOT", "  https://premrelay.exe.xyz/  ");
+        std::env::set_var("BUZZ_HIVETALK_API_ROOT", "  https://l402relay.exe.xyz/  ");
         let configured = Config::from_env()
             .expect("config with meetings set")
             .hivetalk;
@@ -1161,9 +1201,51 @@ mod tests {
         // A trailing slash would produce `.../api//plans` upstream.
         assert_eq!(
             configured.expect("hivetalk configured").api_root,
-            "https://premrelay.exe.xyz"
+            "https://l402relay.exe.xyz"
         );
         assert!(blank.is_none());
+    }
+
+    /// A root the client will refuse must not boot the relay advertising
+    /// Meetings. `relayMeetingsCapability` requires an `https:` URL, so each of
+    /// these would leave the feature dark with no error on either side.
+    #[test]
+    fn hivetalk_api_root_must_be_a_credential_free_https_url() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_HIVETALK_API_ROOT");
+
+        for rejected in [
+            "hunter2",                            // not a URL at all
+            "l402relay.exe.xyz",                  // no scheme
+            "http://l402relay.exe.xyz",           // clients accept https only
+            "ftp://l402relay.exe.xyz",            // wrong scheme entirely
+            "https://",                           // no host
+            "https://user:pw@l402relay.exe.xyz",  // credentials in the URL
+            "https://l402relay.exe.xyz?tenant=1", // query would precede /api/...
+            "https://l402relay.exe.xyz#frag",     // as would a fragment
+        ] {
+            std::env::set_var("BUZZ_HIVETALK_API_ROOT", rejected);
+            let error = Config::from_env().expect_err(rejected);
+            assert!(
+                matches!(error, ConfigError::InvalidValue(ref message)
+                    if message.contains("BUZZ_HIVETALK_API_ROOT")),
+                "{rejected} produced the wrong error: {error:?}"
+            );
+        }
+
+        // A reverse-proxied HiveTalk under a path prefix stays valid.
+        std::env::set_var("BUZZ_HIVETALK_API_ROOT", "https://relay.example/hivetalk/");
+        let prefixed = Config::from_env()
+            .expect("path-prefixed root is valid")
+            .hivetalk
+            .expect("hivetalk configured");
+        assert_eq!(prefixed.api_root, "https://relay.example/hivetalk");
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_HIVETALK_API_ROOT", value);
+        } else {
+            std::env::remove_var("BUZZ_HIVETALK_API_ROOT");
+        }
     }
 
     // Mutex to serialize tests that mutate environment variables.

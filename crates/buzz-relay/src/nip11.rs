@@ -576,12 +576,12 @@ mod tests {
             None,
             None,
             Some("hivetalk"),
-            Some("https://premrelay.exe.xyz"),
+            Some("https://l402relay.exe.xyz"),
         );
         let json = serde_json::to_value(&info).expect("serialize");
         assert_eq!(json["meetings"]["provider"], "hivetalk");
         assert_eq!(json["meetings"]["proxy"], "/meetings");
-        assert_eq!(json["meetings"]["api_base"], "https://premrelay.exe.xyz");
+        assert_eq!(json["meetings"]["api_base"], "https://l402relay.exe.xyz");
         assert!(json["supported_extensions"]
             .as_array()
             .expect("extensions")

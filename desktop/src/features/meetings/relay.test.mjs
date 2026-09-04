@@ -13,7 +13,7 @@ import {
 import { participantActionPayload } from "./moderationPayloads.ts";
 
 const RELAY_WS = "wss://relay.example";
-const API_BASE = "https://premrelay.exe.xyz";
+const API_BASE = "https://l402relay.exe.xyz";
 const CAP = { apiBase: API_BASE };
 
 /**
@@ -72,7 +72,7 @@ function withChallengeAndCapture(realResponse, run) {
           challenge: "challenge-jwt",
           nonce: "nonce-123",
           expires_at: "2099",
-          domain: "premrelay.exe.xyz",
+          domain: "l402relay.exe.xyz",
         }),
         { status: 200 },
       );
@@ -109,7 +109,7 @@ test("subscribe signs two events with different `u` tags (relay vs upstream)", a
       );
       assert.equal(
         tag(htEvent, "u"),
-        "https://premrelay.exe.xyz/api/subscribe",
+        "https://l402relay.exe.xyz/api/subscribe",
       );
       assert.equal(tag(htEvent, "action"), "subscribe");
       assert.equal(tag(htEvent, "nonce"), "nonce-123");
@@ -168,6 +168,58 @@ test("subscribe on a 409 attaches the pending invoice", async () => {
   );
 });
 
+test("subscribe resolves the invoice HiveTalk returns as an L402 402", async () => {
+  setupSigner();
+  // Captured live from `POST https://l402relay.exe.xyz/api/subscribe` on
+  // 2026-09-04: the deployment answers with the L402 challenge status instead
+  // of the `201` the previous provider sent, carrying the same intent body.
+  await withChallengeAndCapture(
+    new Response(
+      JSON.stringify({
+        intent_id: "i402",
+        plan: "bulk10_1y",
+        amount_sats: 360,
+        bolt11: "lnbc3600n1...",
+        payment_hash: "ph",
+        expires_at: 1893456000,
+        status: "pending",
+      }),
+      {
+        status: 402,
+        headers: {
+          "www-authenticate": 'L402 macaroon="Ag...", invoice="lnbc3600n1..."',
+        },
+      },
+    ),
+    async () => {
+      const intent = await subscribe(RELAY_WS, CAP, "bulk10_1y");
+      assert.equal(intent.intent_id, "i402");
+      assert.equal(intent.bolt11, "lnbc3600n1...");
+      assert.equal(intent.status, "pending");
+    },
+  );
+});
+
+test("registerRoom keeps a 402 without an invoice on the hosting path", async () => {
+  setupSigner();
+  // `register-room` and `get-token` also answer 402, but with `plans[]` and no
+  // BOLT11 — the L402 rescue must not swallow those into a success.
+  await withChallengeAndCapture(
+    new Response(
+      JSON.stringify({ reason: "subscription_required", plans: [] }),
+      { status: 402 },
+    ),
+    async () => {
+      await assert.rejects(registerRoom(RELAY_WS, CAP, "room"), (err) => {
+        assert.equal(err.kind, "subscription_required");
+        assert.equal(err.status, 402);
+        assert.equal(err.pendingInvoice, undefined);
+        return true;
+      });
+    },
+  );
+});
+
 test("getPaymentStatus signs the `u` tag with the id query string on both events", async () => {
   setupSigner();
   await withChallengeAndCapture(
@@ -195,7 +247,7 @@ test("getPaymentStatus signs the `u` tag with the id query string on both events
       );
       assert.equal(
         tag(htEvent, "u"),
-        "https://premrelay.exe.xyz/api/payment/status?id=i1",
+        "https://l402relay.exe.xyz/api/payment/status?id=i1",
       );
       assert.equal(tag(htEvent, "action"), "payment-status");
     },
@@ -248,7 +300,7 @@ test("getMeetingToken embeds a body-signed event with the upstream `u` tag", asy
     assert.equal(body.participantName, "Alice");
     assert.equal(typeof body.attributes.signed_event, "string");
     const inner = JSON.parse(body.attributes.signed_event);
-    assert.equal(tag(inner, "u"), "https://premrelay.exe.xyz/api/get-token");
+    assert.equal(tag(inner, "u"), "https://l402relay.exe.xyz/api/get-token");
     assert.ok(Math.abs(inner.created_at - Math.floor(Date.now() / 1000)) < 300);
   } finally {
     teardown();

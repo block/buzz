@@ -24,7 +24,7 @@ export type RelayMeetingsCapability = {
   proxyPrefix: string;
   /**
    * Public HiveTalk API root the relay forwards to, e.g.
-   * `https://premrelay.exe.xyz`. The client needs it to build the `u` tag of
+   * `https://l402relay.exe.xyz`. The client needs it to build the `u` tag of
    * its own HiveTalk-signed request — HiveTalk verifies that signature against
    * the upstream URL, not the relay URL.
    */
@@ -83,7 +83,11 @@ export type MeetingPlan = {
   amount_sats: number;
   room_quota?: number;
   can_record?: boolean;
-  /** HiveTalk may add fields; the relay passes `/plans` through unfiltered. */
+  /**
+   * Open-ended because HiveTalk names some fields two ways and `normalizePlans`
+   * reconciles them. The relay allowlists `/plans` (envelope *and* entries), so
+   * a field HiveTalk adds without the relay knowing about it never arrives.
+   */
   [key: string]: unknown;
 };
 
@@ -107,10 +111,9 @@ function planPeriod(days: unknown): string | undefined {
 /**
  * Map the HiveTalk `/api/plans` envelope onto `MeetingPlan[]`.
  *
- * Accepts a bare array too: the endpoint is passed through the relay
- * unfiltered, so a future HiveTalk that drops the envelope must not blank the
- * plan grid. Entries missing an id or a price are dropped rather than rendered
- * as `undefined sats`.
+ * Accepts a bare array too, so a future HiveTalk that drops the envelope does
+ * not blank the plan grid. Entries missing an id or a price are dropped rather
+ * than rendered as `undefined sats`.
  */
 export function normalizePlans(body: unknown): MeetingPlan[] {
   const raw = Array.isArray(body)
@@ -339,6 +342,13 @@ export function classifyMeetingError(
       // no HiveTalk config. Any other 404 came from HiveTalk itself —
       // `/api/room-info` answers a name that is not in the registry with a
       // plain-text `404 Room not found`, which the relay forwards verbatim.
+      //
+      // Caveat for a future `/room-info` caller: on `l402relay` a 404 there is
+      // NOT proof the room is unregistered. `buzz-meet-control` is returned by
+      // `rooms-by-pubkey` and still 404s on `room-info` — it is the one registry
+      // row with no `identifier`. Treat `rooms-by-pubkey` as the authority for
+      // registration and a `room-info` 404 as "no detail available". Nothing
+      // calls `/room-info` today, which is why this stays a note.
       if (reason === "meetings is not configured")
         return pick("not_configured");
       return pick("room_not_registered");

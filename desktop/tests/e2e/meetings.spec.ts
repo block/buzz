@@ -45,7 +45,7 @@ const CAPABLE_INFO: MeetingsInfo = {
   meetings: {
     provider: "hivetalk",
     proxy: "/meetings",
-    api_base: "https://premrelay.exe.xyz",
+    api_base: "https://l402relay.exe.xyz",
   },
   supported_extensions: ["buzz-meetings"],
 };
@@ -132,7 +132,7 @@ async function stubMeetings(
           challenge: "e2e-challenge-jwt",
           nonce: `nonce-${Math.random().toString(36).slice(2)}`,
           expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
-          domain: "premrelay.exe.xyz",
+          domain: "l402relay.exe.xyz",
         });
 
       case "/plans":

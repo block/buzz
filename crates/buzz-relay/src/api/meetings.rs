@@ -21,9 +21,23 @@
 //!
 //! The proxy forwards the **raw request body bytes** unmodified (HiveTalk's
 //! `payload` tag is `sha256(rawBody)`; re-serializing JSON would break the
-//! signature) and filters the response so provider diagnostics cannot cross the
-//! relay boundary. Media (audio/video RTC) never transits the relay — the client
-//! connects to the LiveKit SFU directly with the token from `get-token`.
+//! signature) and filters **every** response through a static allowlist, so
+//! provider diagnostics and room metadata cannot cross the relay boundary. Media
+//! (audio/video RTC) never transits the relay — the client connects to the
+//! LiveKit SFU directly with the token from `get-token`.
+//!
+//! ## Why every endpoint is filtered
+//!
+//! Five endpoints (`/auth/challenge`, `/plans`, `/room-info`, `/rooms-by-pubkey`,
+//! `/list-rooms`) used to be forwarded verbatim on the grounds that their
+//! responses hold nothing sensitive. That is a claim about the provider's
+//! *current* output, and it is not one the relay can keep: HiveTalk's schema for
+//! `/api/room-info` is explicitly `additionalProperties: true`, and the client's
+//! `normalizeRooms` / `normalizePlans` both spread `...record`, so anything new
+//! upstream lands in client state rather than being ignored. The allowlists are
+//! derived from HiveTalk's `openapi.yaml` (archived at
+//! `RESEARCH/HIVETALK_OPENAPI.yaml`) unioned with the fields the client's own
+//! types name; there is no pass-through variant of [`Filter`] to reach for.
 //!
 //! Disabled unless `BUZZ_HIVETALK_API_ROOT` is set; otherwise every route 404s
 //! before doing any work and NIP-11 does not advertise the capability.
@@ -69,13 +83,26 @@ enum HivetalkAuth {
 }
 
 /// Response-body filtering strategy for a proxied endpoint.
+///
+/// Every proxied endpoint filters. There is no pass-through variant: HiveTalk's
+/// own schema for `/api/room-info` is `additionalProperties: true`, so "this
+/// response has nothing in it today" is not a property the relay can rely on
+/// staying true across provider deploys.
 #[derive(Clone, Copy)]
 enum Filter {
     /// Object response: keep only these keys, plus the standard error envelope.
     Object(&'static [&'static str]),
-    /// Public HiveTalk endpoint with no credentials or diagnostics in its
-    /// response — forward as-is, only capping top-level array length.
-    Public,
+    /// Array-of-objects response: cap the length, then allowlist each element.
+    /// A non-array body means an error status (these endpoints answer errors
+    /// with an object), so it degrades to the error envelope alone.
+    Array(&'static [&'static str]),
+    /// Object carrying an array of objects under `array_key` — both levels are
+    /// allowlisted, because `Object` alone would copy the nested elements whole.
+    Envelope {
+        fields: &'static [&'static str],
+        array_key: &'static str,
+        item_fields: &'static [&'static str],
+    },
 }
 
 /// One proxied HiveTalk endpoint.
@@ -136,6 +163,91 @@ const GET_TOKEN_FIELDS: &[&str] = &[
     "url",
 ];
 
+/// `GET /api/auth/challenge`. The client destructures exactly these four.
+const CHALLENGE_FIELDS: &[&str] = &["challenge", "domain", "expires_at", "nonce"];
+/// `GET /api/room-info` (`RoomInfo`). The schema is `additionalProperties: true`
+/// upstream, which is precisely why the relay pins the response instead of
+/// forwarding whatever the provider decides to attach.
+///
+/// The documented schema names only `is_private` / `owner_pubkey` / `room_id` /
+/// `room_name`, but the deployed provider answers with the registry row instead
+/// (`status`, `pubkey`, `identifier`, and the moderation defaults) — captured
+/// live from `l402relay.exe.xyz` on 2026-09-04, where a spec-only allowlist left
+/// `room_name` as the single surviving key. So this is the union of both, on the
+/// same reasoning as `ROOM_LIST_FIELDS`: a field in neither is a provider
+/// addition, which is the thing being kept out.
+const ROOM_INFO_FIELDS: &[&str] = &[
+    // RoomInfo as documented.
+    "is_private",
+    "owner_pubkey",
+    "room_id",
+    "room_name",
+    // The registry row the deployed provider actually returns.
+    "audience_mode",
+    "identifier",
+    "lobby_enabled",
+    "locked",
+    "mute_on_join",
+    "pubkey",
+    "status",
+    "updated_at",
+    "username",
+];
+/// The `/api/plans` envelope around the `Plan` list.
+const PLANS_ENVELOPE_FIELDS: &[&str] = &["free_quota", "plans"];
+/// One `Plan` entry. HiveTalk names these `id` / `price_sats`; `normalizePlans`
+/// in the client also accepts `plan` / `amount_sats` / `period` / `interval`, so
+/// the allowlist carries both spellings rather than deciding for it.
+const PLAN_FIELDS: &[&str] = &[
+    "amount_sats",
+    "can_record",
+    "days",
+    "id",
+    "interval",
+    "period",
+    "plan",
+    "price_sats",
+    "room_quota",
+];
+/// One entry of `/api/list-rooms` (`RoomSummary`, live LiveKit rooms) or
+/// `/api/rooms-by-pubkey` (`OwnedRoom`, registry rows).
+///
+/// One list for both because the client runs both through the same
+/// `normalizeRooms`, which reads `name` **or** `room_name` and `numParticipants`
+/// **or** `num_participants`. The contents are the union of the two upstream
+/// schemas plus every key the client's own `ActiveRoom` type names — a field in
+/// neither source is a provider addition, which is the thing being kept out.
+const ROOM_LIST_FIELDS: &[&str] = &[
+    // RoomSummary — live LiveKit rooms.
+    "createdAt",
+    "description",
+    "name",
+    "numParticipants",
+    "pictureUrl",
+    "sid",
+    "status",
+    // OwnedRoom — registered rooms.
+    "audience_mode",
+    "created_via",
+    "identifier",
+    "lobby_enabled",
+    "locked",
+    "mute_on_join",
+    "pubkey",
+    "room_description",
+    "room_id",
+    "room_name",
+    "room_picture_url",
+    "updated_at",
+    // Registry columns the deployed provider returns but the schema omits,
+    // captured live 2026-09-04.
+    "username",
+    // Spellings only the client names: `normalizeRooms` reads the first, and
+    // `ActiveRoom` declares the second.
+    "num_participants",
+    "room_kind",
+];
+
 const ROUTE_CHALLENGE: Proxied = Proxied {
     local: "/auth/challenge",
     upstream: "/api/auth/challenge",
@@ -143,7 +255,7 @@ const ROUTE_CHALLENGE: Proxied = Proxied {
     auth: HivetalkAuth::None,
     metered: false,
     required_query: &[],
-    filter: Filter::Public,
+    filter: Filter::Object(CHALLENGE_FIELDS),
 };
 const ROUTE_PLANS: Proxied = Proxied {
     local: "/plans",
@@ -152,7 +264,11 @@ const ROUTE_PLANS: Proxied = Proxied {
     auth: HivetalkAuth::None,
     metered: false,
     required_query: &[],
-    filter: Filter::Public,
+    filter: Filter::Envelope {
+        fields: PLANS_ENVELOPE_FIELDS,
+        array_key: "plans",
+        item_fields: PLAN_FIELDS,
+    },
 };
 const ROUTE_SUBSCRIPTION: Proxied = Proxied {
     local: "/subscription",
@@ -247,7 +363,7 @@ const ROUTE_ROOM_INFO: Proxied = Proxied {
     auth: HivetalkAuth::None,
     metered: false,
     required_query: &["room_name"],
-    filter: Filter::Public,
+    filter: Filter::Object(ROOM_INFO_FIELDS),
 };
 const ROUTE_ROOMS_BY_PUBKEY: Proxied = Proxied {
     local: "/rooms-by-pubkey",
@@ -256,7 +372,7 @@ const ROUTE_ROOMS_BY_PUBKEY: Proxied = Proxied {
     auth: HivetalkAuth::None,
     metered: false,
     required_query: &["pubkey"],
-    filter: Filter::Public,
+    filter: Filter::Array(ROOM_LIST_FIELDS),
 };
 const ROUTE_LIST_ROOMS: Proxied = Proxied {
     local: "/list-rooms",
@@ -265,7 +381,7 @@ const ROUTE_LIST_ROOMS: Proxied = Proxied {
     auth: HivetalkAuth::None,
     metered: false,
     required_query: &[],
-    filter: Filter::Public,
+    filter: Filter::Array(ROOM_LIST_FIELDS),
 };
 const ROUTE_GET_TOKEN: Proxied = Proxied {
     local: "/get-token",
@@ -645,13 +761,34 @@ const ERROR_ENVELOPE: &[&str] = &[
 
 fn filter_body(filter: Filter, upstream: Value) -> Value {
     match filter {
-        Filter::Public => match upstream {
-            Value::Array(items) => {
-                Value::Array(items.into_iter().take(MAX_ARRAY_ELEMENTS).collect())
-            }
-            other => other,
-        },
         Filter::Object(fields) => pick_fields(&upstream, fields),
+        Filter::Array(item_fields) => match upstream {
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .take(MAX_ARRAY_ELEMENTS)
+                    .map(|item| pick_fields(&item, item_fields))
+                    .collect(),
+            ),
+            // Not an array: an error status, or `limited_json`'s plain-text
+            // wrapper. Keep the envelope, drop everything else.
+            other => pick_fields(&other, &[]),
+        },
+        Filter::Envelope {
+            fields,
+            array_key,
+            item_fields,
+        } => {
+            let mut out = pick_fields(&upstream, fields);
+            if let Some(Value::Array(items)) = out.get_mut(array_key) {
+                *items = std::mem::take(items)
+                    .into_iter()
+                    .take(MAX_ARRAY_ELEMENTS)
+                    .map(|item| pick_fields(&item, item_fields))
+                    .collect();
+            }
+            out
+        }
     }
 }
 
@@ -775,7 +912,7 @@ mod tests {
     fn invoice_fields_reach_every_allowlist_that_can_409() {
         let subscribe_fields = match ROUTE_SUBSCRIBE.filter {
             Filter::Object(fields) => fields,
-            Filter::Public => panic!("/subscribe must filter its response object"),
+            _ => panic!("/subscribe must filter its response object"),
         };
         for allowlist in [ROOM_FIELDS, GET_TOKEN_FIELDS, subscribe_fields] {
             for field in INVOICE_FIELDS {
@@ -921,16 +1058,143 @@ mod tests {
         assert!(!filtered.to_string().contains("internal_debug"));
     }
 
+    /// The `RoomInfo` schema and the deployed provider disagree: the live
+    /// response is the registry row, not the four documented keys. Body captured
+    /// verbatim from `GET https://l402relay.exe.xyz/api/room-info` on 2026-09-04.
+    /// A spec-only allowlist reduced this to `{"room_name": ...}`.
     #[test]
-    fn filter_public_caps_array_length_but_passes_content() {
-        let big: Vec<Value> = (0..(MAX_ARRAY_ELEMENTS + 50))
-            .map(|i| serde_json::json!({ "name": format!("room-{i}") }))
-            .collect();
-        let filtered = filter_body(Filter::Public, Value::Array(big));
-        assert_eq!(
-            filtered.as_array().expect("array").len(),
-            MAX_ARRAY_ELEMENTS
+    fn filter_object_keeps_the_live_room_info_row() {
+        let filtered = filter_body(
+            ROUTE_ROOM_INFO.filter,
+            serde_json::json!({
+                "room_name": "buzz-meet-spike",
+                "status": "private",
+                "updated_at": "2026-08-21T01:13:17Z",
+                "identifier": "buzz-meet-spike",
+                "pubkey": "1f0cb6f1e65c98b224b385f9f7c7a11d2bfb3f40a06ae599a2081ecc4b0fd2dd",
+                "username": "buzz-spike",
+                "locked": false,
+                "lobby_enabled": false,
+                "mute_on_join": false,
+                "audience_mode": false,
+                "sfu_node": "internal-diagnostic",
+            }),
         );
+        let object = filtered.as_object().expect("object");
+        for key in [
+            "room_name",
+            "status",
+            "updated_at",
+            "identifier",
+            "pubkey",
+            "username",
+            "locked",
+            "lobby_enabled",
+            "mute_on_join",
+            "audience_mode",
+        ] {
+            assert!(object.contains_key(key), "allowlist dropped live key {key}");
+        }
+        assert!(
+            !filtered.to_string().contains("sfu_node"),
+            "provider addition survived the allowlist"
+        );
+    }
+
+    #[test]
+    fn filter_array_caps_length_and_allowlists_each_element() {
+        let big: Vec<Value> = (0..(MAX_ARRAY_ELEMENTS + 50))
+            .map(|i| serde_json::json!({ "name": format!("room-{i}"), "host_ip": "10.0.0.1" }))
+            .collect();
+        let filtered = filter_body(ROUTE_LIST_ROOMS.filter, Value::Array(big));
+        let items = filtered.as_array().expect("array");
+        assert_eq!(items.len(), MAX_ARRAY_ELEMENTS);
+        assert_eq!(items[0]["name"], "room-0");
+        assert!(
+            !filtered.to_string().contains("host_ip"),
+            "per-element allowlist did not apply"
+        );
+    }
+
+    /// The five endpoints that used to forward their response verbatim. A
+    /// provider that starts attaching diagnostics — or room metadata a member
+    /// should not see — must not reach the client through any of them.
+    #[test]
+    fn every_formerly_public_endpoint_drops_unknown_fields() {
+        let list = filter_body(
+            ROUTE_LIST_ROOMS.filter,
+            serde_json::json!([{ "name": "standup", "numParticipants": 3, "sfu_node": "leak" }]),
+        );
+        assert_eq!(
+            list,
+            serde_json::json!([{ "name": "standup", "numParticipants": 3 }])
+        );
+
+        let owned = filter_body(
+            ROUTE_ROOMS_BY_PUBKEY.filter,
+            serde_json::json!([{ "room_name": "mine", "locked": true, "owner_email": "leak" }]),
+        );
+        assert_eq!(
+            owned,
+            serde_json::json!([{ "room_name": "mine", "locked": true }])
+        );
+
+        let info = filter_body(
+            ROUTE_ROOM_INFO.filter,
+            serde_json::json!({
+                "room_name": "standup",
+                "is_private": false,
+                "internal_notes": "leak",
+            }),
+        );
+        assert_eq!(
+            info,
+            serde_json::json!({ "room_name": "standup", "is_private": false })
+        );
+
+        let challenge = filter_body(
+            ROUTE_CHALLENGE.filter,
+            serde_json::json!({ "challenge": "jwt", "nonce": "n", "server_secret": "leak" }),
+        );
+        assert_eq!(
+            challenge,
+            serde_json::json!({ "challenge": "jwt", "nonce": "n" })
+        );
+    }
+
+    /// `/plans` is an envelope, so the elements need filtering too — an
+    /// envelope-only allowlist copies each `Plan` object whole.
+    #[test]
+    fn filter_envelope_allowlists_the_nested_plan_entries() {
+        let filtered = filter_body(
+            ROUTE_PLANS.filter,
+            serde_json::json!({
+                "free_quota": 1,
+                "internal_pricing_engine": "leak",
+                "plans": [
+                    { "id": "standard_1y", "price_sats": 21_000, "cost_basis_msat": "leak" },
+                ],
+            }),
+        );
+        assert_eq!(
+            filtered,
+            serde_json::json!({
+                "free_quota": 1,
+                "plans": [{ "id": "standard_1y", "price_sats": 21_000 }],
+            })
+        );
+    }
+
+    /// These endpoints answer errors with an object, not an array: `/room-info`
+    /// 404s an unregistered name, which is how the client tells a permanent room
+    /// from an ephemeral one. The status and the envelope must survive.
+    #[test]
+    fn filter_array_on_an_error_object_keeps_only_the_envelope() {
+        let filtered = filter_body(
+            ROUTE_LIST_ROOMS.filter,
+            serde_json::json!({ "error": "Room not found", "stack": "leak" }),
+        );
+        assert_eq!(filtered, serde_json::json!({ "error": "Room not found" }));
     }
 
     fn upstream_response(status: u16, body: &'static str) -> reqwest::Response {
@@ -945,8 +1209,13 @@ mod tests {
     #[test]
     fn plain_text_error_keeps_a_short_provider_message() {
         assert_eq!(plain_text_error(b"Room not found"), "Room not found");
-        assert_eq!(plain_text_error(b"  pubkey is required
-"), "pubkey is required");
+        assert_eq!(
+            plain_text_error(
+                b"  pubkey is required
+"
+            ),
+            "pubkey is required"
+        );
     }
 
     #[test]
@@ -1007,7 +1276,7 @@ mod tests {
                 "error": "subscription required",
                 "reason": "subscription_required",
                 "plans": [{ "plan": "standard_1y" }],
-                "subscribe_url": "https://stage5.exe.xyz/dashboard/subscribe",
+                "subscribe_url": "https://l402stage.exe.xyz/dashboard/subscribe",
                 "trace_id": "leak-me",
             }),
         );
@@ -1017,7 +1286,7 @@ mod tests {
                 "error": "subscription required",
                 "reason": "subscription_required",
                 "plans": [{ "plan": "standard_1y" }],
-                "subscribe_url": "https://stage5.exe.xyz/dashboard/subscribe",
+                "subscribe_url": "https://l402stage.exe.xyz/dashboard/subscribe",
             })
         );
     }
