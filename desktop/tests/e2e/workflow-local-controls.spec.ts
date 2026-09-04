@@ -288,18 +288,28 @@ test("round-trips and reopens structured message-text conditions", async ({
   await openTriggerInspector(dialog);
   const matchControls = dialog.getByRole("group", { name: "Match" });
   const operatorButtons = matchControls.getByRole("button");
-  const firstOperatorBox = await operatorButtons.nth(0).boundingBox();
-  const secondOperatorBox = await operatorButtons.nth(1).boundingBox();
-  const thirdOperatorBox = await operatorButtons.nth(2).boundingBox();
-  expect(firstOperatorBox).not.toBeNull();
-  expect(secondOperatorBox).not.toBeNull();
-  expect(thirdOperatorBox).not.toBeNull();
-  expect(secondOperatorBox?.x).toBeGreaterThan(firstOperatorBox?.x ?? 0);
-  expect(
-    Math.abs((secondOperatorBox?.y ?? 0) - (firstOperatorBox?.y ?? 0)),
-  ).toBeLessThan(1);
-  expect(thirdOperatorBox?.y).toBeGreaterThan(firstOperatorBox?.y ?? 0);
+  // Await all three operator buttons before reading geometry: ensures the
+  // inspector has fully rendered after the tab switch and openTriggerInspector
+  // before any bounding-box reads (one-shot reads during transitions were the
+  // source of intermittent null / reversed-coordinate failures).
+  await expect(operatorButtons.nth(0)).toBeVisible();
+  await expect(operatorButtons.nth(1)).toBeVisible();
+  await expect(operatorButtons.nth(2)).toBeVisible();
   await waitForAnimations(page);
+  // Use poll-based layout assertions so a render frame between measurement and
+  // assertion cannot produce a stale reading.
+  await expect
+    .poll(async () => {
+      const b0 = await operatorButtons.nth(0).boundingBox();
+      const b1 = await operatorButtons.nth(1).boundingBox();
+      const b2 = await operatorButtons.nth(2).boundingBox();
+      if (!b0 || !b1 || !b2) return null;
+      return {
+        row: Math.abs(b1.y - b0.y) < 1 && b1.x > b0.x,
+        col: b2.y > b0.y,
+      };
+    })
+    .toEqual({ row: true, col: true });
   await matchControls.screenshot({
     path: "test-results/workflow-message-condition-operators.png",
   });
