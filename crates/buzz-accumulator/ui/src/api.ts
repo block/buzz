@@ -43,6 +43,7 @@ export type Channel = {
   backfill_cursor: number | null;
   backfill_done: boolean;
   active: boolean;
+  excluded: boolean;
   discovered_at: number;
 };
 

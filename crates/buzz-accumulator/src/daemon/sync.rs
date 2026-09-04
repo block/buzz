@@ -18,7 +18,10 @@
 //!   frames for subscriptions it does not own. Observed live 2026-08-31.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::sync::Notify;
 
 use buzz_ws_client::{build_auth_event, NostrWsConnection, RelayMessage};
 use nostr::{Keys, Tag};
@@ -58,6 +61,9 @@ pub struct SyncConfig {
     pub keys: Keys,
     /// Optional NIP-OA ownership tag (agent identities only).
     pub auth_tag: Option<Tag>,
+    /// Nudged by the HTTP layer (e.g. an exclusion toggle) to request an
+    /// immediate clean resync instead of waiting for relay traffic.
+    pub resync: Arc<Notify>,
 }
 
 /// Runs the sync loop forever, reconnecting with capped exponential backoff.
@@ -102,6 +108,11 @@ async fn sync_once(
     let now = chrono::Utc::now().timestamp();
     registry.connected(now);
     info!(relay = %cfg.relay_url, "connected and authenticated");
+
+    // Absorb any resync nudge issued before this point: its store write
+    // happened before the notify, so the reads below already reflect it. A
+    // nudge arriving after this line stores a permit the live loop picks up.
+    let _ = tokio::time::timeout(Duration::ZERO, cfg.resync.notified()).await;
 
     discover_channels(&mut conn, cfg, store, registry).await?;
     // Discovery just read the authoritative rosters, so membership is known
@@ -217,6 +228,13 @@ fn channel_type_from_meta(ev: &nostr::Event) -> &'static str {
     }
 }
 
+/// Whether the sync loop backfills and tails a channel: it must be active
+/// (access not revoked) and not excluded by the person. Excluded channels
+/// stay in the mirror, listable and queryable, but receive no traffic.
+pub(crate) fn sync_eligible(c: &super::store::ChannelRow) -> bool {
+    c.active && !c.excluded
+}
+
 /// Pages every not-yet-complete channel from its persisted cursor down to the
 /// beginning of history. Progress survives restarts: the cursor is persisted
 /// after every page.
@@ -227,6 +245,13 @@ async fn backfill(
 ) -> anyhow::Result<()> {
     let channels = store.channels().await?;
     for ch in channels.iter().filter(|c| c.active) {
+        if ch.excluded {
+            registry.channel(&ch.id, |c| {
+                c.backfill = "excluded".into();
+                c.live = false;
+            });
+            continue;
+        }
         if ch.backfill_done {
             // Already complete in a prior run; reflect that in status.
             registry.channel(&ch.id, |c| c.backfill = "done".into());
@@ -386,7 +411,7 @@ async fn live_tail(
     let me = cfg.keys.public_key().to_hex();
     let now = chrono::Utc::now().timestamp();
     let channels = store.channels().await?;
-    for ch in channels.iter().filter(|c| c.active) {
+    for ch in channels.iter().filter(|c| sync_eligible(c)) {
         tokio::time::sleep(REQ_PACING).await;
         let newest = store.newest_ts(&ch.id).await?;
         let since = newest
@@ -439,7 +464,16 @@ async fn live_tail(
     info!("live tail active");
 
     loop {
-        let msg = match conn.next_event(LIVE_TICK).await {
+        // A dropped ws frame at this cancellation point is repaired by the
+        // resync itself (fresh connection, discovery, gap-fill).
+        let next = tokio::select! {
+            _ = cfg.resync.notified() => {
+                info!("resync requested (exclusion change)");
+                return Ok(());
+            }
+            next = conn.next_event(LIVE_TICK) => next,
+        };
+        let msg = match next {
             Ok(msg) => msg,
             Err(buzz_ws_client::WsClientError::Timeout) => continue, // quiet period
             Err(e) => return Err(e.into()),
@@ -641,6 +675,24 @@ mod tests {
     #[test]
     fn cursor_advances_to_page_oldest() {
         assert_eq!(advance_cursor(1000, Some(900), 10), 900);
+    }
+
+    #[test]
+    fn excluded_or_revoked_channels_are_not_sync_eligible() {
+        let row = |active: bool, excluded: bool| super::super::store::ChannelRow {
+            id: "cha".into(),
+            name: None,
+            channel_type: "stream".into(),
+            backfill_cursor: None,
+            backfill_done: false,
+            active,
+            excluded,
+            discovered_at: 0,
+        };
+        assert!(sync_eligible(&row(true, false)));
+        assert!(!sync_eligible(&row(true, true)));
+        assert!(!sync_eligible(&row(false, false)));
+        assert!(!sync_eligible(&row(false, true)));
     }
 
     #[test]

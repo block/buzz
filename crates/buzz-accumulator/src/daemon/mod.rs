@@ -158,10 +158,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         keys: keys.clone(),
         auth_tag: auth_tag.clone(),
     });
+    let resync = Arc::new(tokio::sync::Notify::new());
     let sync_cfg = sync::SyncConfig {
         relay_url: cfg.relay.clone(),
         keys,
         auth_tag,
+        resync: resync.clone(),
     };
     let sync_task = tokio::spawn(sync::run_sync(sync_cfg, store.clone(), registry.clone()));
 
@@ -171,6 +173,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         runner: Arc::new(crate::SubprocessRunner::new()),
         runs: folds::RunGuard::default(),
         publisher,
+        resync,
     };
     let addr: std::net::SocketAddr = cfg
         .http_addr

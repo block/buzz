@@ -35,6 +35,8 @@ pub struct AppState {
     pub runs: RunGuard,
     /// Publishes artifacts back into channels as messages.
     pub publisher: Arc<dyn Publisher>,
+    /// Nudges the sync loop into an immediate clean resync (exclusion toggles).
+    pub resync: Arc<tokio::sync::Notify>,
 }
 
 /// Builds the router. Separated from serving for tests.
@@ -42,6 +44,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/status", get(get_status))
         .route("/channels", get(get_channels))
+        .route(
+            "/channels/{id}/excluded",
+            axum::routing::put(set_channel_excluded),
+        )
         .route("/events/{id}", get(get_event))
         .route("/select/preview", post(select_preview))
         .route("/select/events", post(select_events))
@@ -121,6 +127,40 @@ async fn get_status(State(s): State<AppState>) -> Result<Json<Value>, ApiError> 
 async fn get_channels(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
     let channels = s.store.channels().await?;
     Ok(Json(json!({ "channels": channels })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExcludedBody {
+    excluded: bool,
+}
+
+/// Toggles a channel's exclusion. Excluded channels keep their mirrored
+/// events (folds stay truthful) but get no live subscription or backfill;
+/// re-including restarts the backfill walk so the gap is repaired. Either
+/// direction nudges the sync loop into an immediate resync.
+async fn set_channel_excluded(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ExcludedBody>,
+) -> Result<Json<Value>, ApiError> {
+    let id = id.trim().to_lowercase();
+    let now = chrono::Utc::now().timestamp();
+    let known = s
+        .store
+        .set_channel_excluded(&id, body.excluded, now)
+        .await?;
+    if !known {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("channel not found: {id}"),
+        ));
+    }
+    s.resync.notify_one();
+    Ok(Json(json!({
+        "channel": id,
+        "excluded": body.excluded,
+        "resync": true,
+    })))
 }
 
 /// Optional window clamp shared by preview/preflight/run bodies. The
@@ -578,6 +618,7 @@ mod tests {
             runner: Arc::new(NoRunner),
             runs: RunGuard::default(),
             publisher,
+            resync: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -645,6 +686,72 @@ mod tests {
             app.oneshot(get).await.expect("resp").status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn channel_exclusion_toggle_over_http() {
+        let state = test_state().await;
+        let store = state.store.clone();
+        let resync = state.resync.clone();
+        store
+            .upsert_channel(CHANNEL, Some("Test"), "stream", 50)
+            .await
+            .expect("ch");
+        let app = router(state);
+
+        // Unknown channel → 404 and no resync nudge.
+        let put = Request::put("/channels/11111111-1111-1111-1111-111111111111/excluded")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "excluded": true }).to_string()))
+            .expect("req");
+        assert_eq!(
+            app.clone().oneshot(put).await.expect("resp").status(),
+            StatusCode::NOT_FOUND
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, resync.notified())
+                .await
+                .is_err(),
+            "404 must not nudge the sync loop"
+        );
+
+        // Known channel toggles (uppercase id normalizes) and nudges resync.
+        let put = Request::put(format!("/channels/{}/excluded", CHANNEL.to_uppercase()))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "excluded": true }).to_string()))
+            .expect("req");
+        let resp = app.clone().oneshot(put).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["excluded"], true);
+        tokio::time::timeout(std::time::Duration::ZERO, resync.notified())
+            .await
+            .expect("toggle nudges the sync loop");
+
+        // /channels carries the flag for every row.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/channels").body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        let v = body_json(resp).await;
+        assert_eq!(v["channels"][0]["excluded"], true);
+
+        // And toggles back off.
+        let put = Request::put(format!("/channels/{CHANNEL}/excluded"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "excluded": false }).to_string()))
+            .expect("req");
+        assert_eq!(
+            app.clone().oneshot(put).await.expect("resp").status(),
+            StatusCode::OK
+        );
+        let resp = app
+            .oneshot(Request::get("/channels").body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        let v = body_json(resp).await;
+        assert_eq!(v["channels"][0]["excluded"], false);
     }
 
     #[tokio::test]

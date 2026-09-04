@@ -51,6 +51,10 @@ pub struct ChannelRow {
     pub backfill_done: bool,
     /// False once the relay revoked access (kept for local history).
     pub active: bool,
+    /// True when the person excluded this channel: mirrored events are kept
+    /// and queryable, but the sync loop opens no live subscription and runs
+    /// no backfill until it is re-included.
+    pub excluded: bool,
     /// Unix seconds when the daemon first discovered the channel.
     pub discovered_at: i64,
 }
@@ -105,6 +109,7 @@ CREATE TABLE IF NOT EXISTS channels (
     backfill_cursor INTEGER,
     backfill_done   INTEGER NOT NULL DEFAULT 0,
     active          INTEGER NOT NULL DEFAULT 1,
+    excluded        INTEGER NOT NULL DEFAULT 0,
     discovered_at   INTEGER NOT NULL
 );
 
@@ -153,6 +158,7 @@ impl Store {
         sqlx::raw_sql(SCHEMA).execute(&pool).await?;
         let store = Self { pool };
         store.migrate_parent_column().await?;
+        store.migrate_excluded_column().await?;
         Ok(store)
     }
 
@@ -217,6 +223,25 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Adds the `excluded` column to mirrors created before channel exclusion
+    /// existed. No backfill needed: the default (not excluded) is correct for
+    /// every pre-existing row.
+    async fn migrate_excluded_column(&self) -> Result<(), sqlx::Error> {
+        let has = sqlx::query(
+            "SELECT COUNT(*) AS n FROM pragma_table_info('channels') WHERE name = 'excluded'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .get::<i64, _>("n")
+            > 0;
+        if !has {
+            sqlx::raw_sql("ALTER TABLE channels ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -404,7 +429,7 @@ impl Store {
     /// All channel rows.
     pub async fn channels(&self) -> Result<Vec<ChannelRow>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, name, channel_type, backfill_cursor, backfill_done, active, discovered_at
+            "SELECT id, name, channel_type, backfill_cursor, backfill_done, active, excluded, discovered_at
              FROM channels ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -418,6 +443,7 @@ impl Store {
                 backfill_cursor: r.get("backfill_cursor"),
                 backfill_done: r.get::<i64, _>("backfill_done") != 0,
                 active: r.get::<i64, _>("active") != 0,
+                excluded: r.get::<i64, _>("excluded") != 0,
                 discovered_at: r.get("discovered_at"),
             })
             .collect())
@@ -446,6 +472,35 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Sets a channel's exclusion flag. Returns false when the channel is
+    /// unknown. Re-including resets backfill (cursor at `now`, not done) so
+    /// the paged walk repairs the excluded-period gap by construction —
+    /// idempotent inserts skip the history it already holds. Mirrored events
+    /// are never touched either way.
+    pub async fn set_channel_excluded(
+        &self,
+        id: &str,
+        excluded: bool,
+        now: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let done = if excluded {
+            sqlx::query("UPDATE channels SET excluded = 1 WHERE id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+        } else {
+            sqlx::query(
+                "UPDATE channels SET excluded = 0, backfill_cursor = ?, backfill_done = 0
+                 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+        };
+        Ok(done.rows_affected() > 0)
     }
 
     // ---- profiles ----
@@ -668,6 +723,12 @@ impl Store {
 /// The subtree is resolved by a recursive CTE over the mirror's `parent`
 /// links; `UNION` (not `UNION ALL`) makes it terminate even on a pathological
 /// parent cycle.
+///
+/// Exclusion rule: a broad selection (no channels, no threads — i.e.
+/// authors-only) omits events from excluded channels. Explicitly naming a
+/// channel or thread anchor overrides: its (stale) mirror stays queryable, so
+/// a fold that names an excluded channel keeps returning exactly the events
+/// it was defined over.
 fn signal_query(
     selection: &Selection,
     since: i64,
@@ -708,7 +769,16 @@ fn signal_query(
         (true, false) => {
             qb.push(" AND id IN (SELECT id FROM thread_scope)");
         }
-        (true, true) => {}
+        (true, true) => {
+            // Broad scope: no explicit channel or thread grant, so excluded
+            // channels are omitted here — the one query every consumer
+            // (preview, events browser, fold plan/coverage/run) shares.
+            // NOT EXISTS keeps channel-less events, unlike NOT IN over NULL.
+            qb.push(
+                " AND NOT EXISTS (SELECT 1 FROM channels x \
+                 WHERE x.id = events.channel AND x.excluded != 0)",
+            );
+        }
     }
     if !selection.authors.is_empty() {
         qb.push(" AND pubkey IN (");
@@ -1256,5 +1326,140 @@ mod tests {
         assert_eq!(store.folds().await.expect("list").len(), 1);
         assert!(store.delete_fold("weekly").await.expect("delete"));
         assert!(store.get_fold("weekly").await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn broad_scope_omits_excluded_channels_but_explicit_naming_overrides() {
+        let store = Store::open(":memory:").await.expect("open");
+        store
+            .upsert_channel("cha", None, "stream", 50)
+            .await
+            .expect("cha");
+        store
+            .upsert_channel("chb", None, "stream", 50)
+            .await
+            .expect("chb");
+        store
+            .upsert_events(&[
+                ev("1", Some("cha"), 9, 100),
+                ev("2", Some("chb"), 9, 101),
+                reply("3", "2", Some("chb"), 102),
+                ev("4", None, 9, 103),        // channel-less event
+                ev("5", Some("chz"), 9, 104), // channel with no row at all
+            ])
+            .await
+            .expect("insert");
+        assert!(store
+            .set_channel_excluded("chb", true, 200)
+            .await
+            .expect("exclude"));
+        let ids = |signals: Vec<crate::Signal>| -> Vec<String> {
+            signals.into_iter().map(|s| s.id).collect()
+        };
+        let broad = Selection {
+            authors: vec!["a".repeat(64)],
+            ..Selection::default()
+        };
+
+        // Broad (authors-only) scope omits the excluded channel on BOTH query
+        // paths — fold plan/coverage/run go through query_signals, the events
+        // browser pages. Channel-less and unlisted-channel events survive.
+        let expect_broad = vec![full_id("1"), full_id("4"), full_id("5")];
+        let got = store.query_signals(&broad, 0, 300).await.expect("query");
+        assert_eq!(ids(got), expect_broad);
+        let got = store
+            .page_signals(&broad, 0, 300, None, 10)
+            .await
+            .expect("page");
+        assert_eq!(ids(got), expect_broad);
+
+        // Explicitly naming the excluded channel still queries its stale
+        // mirror, so a fold defined over it keeps its exact signal set.
+        let got = store
+            .query_signals(&selection(&["chb"]), 0, 300)
+            .await
+            .expect("query");
+        assert_eq!(ids(got), vec![full_id("2"), full_id("3")]);
+
+        // An explicit thread anchor inside the excluded channel overrides too.
+        let anchored = Selection {
+            threads: vec![full_id("2")],
+            ..Selection::default()
+        };
+        let got = store.query_signals(&anchored, 0, 300).await.expect("query");
+        assert_eq!(ids(got), vec![full_id("2"), full_id("3")]);
+
+        // Re-including restores broad visibility.
+        assert!(store
+            .set_channel_excluded("chb", false, 250)
+            .await
+            .expect("include"));
+        let got = store.query_signals(&broad, 0, 300).await.expect("query");
+        assert_eq!(got.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn exclusion_state_survives_rediscovery_and_reinclude_restarts_backfill() {
+        let store = Store::open(":memory:").await.expect("open");
+        assert!(
+            !store
+                .set_channel_excluded("nope", true, 100)
+                .await
+                .expect("unknown"),
+            "unknown channel reports false"
+        );
+        store
+            .upsert_channel("cha", Some("A"), "stream", 50)
+            .await
+            .expect("ch");
+        store
+            .upsert_events(&[ev("1", Some("cha"), 9, 100)])
+            .await
+            .expect("insert");
+        store.set_backfill("cha", None, true).await.expect("done");
+
+        assert!(store
+            .set_channel_excluded("cha", true, 200)
+            .await
+            .expect("exclude"));
+        // Discovery upserts must not clear the flag.
+        store
+            .upsert_channel("cha", Some("A"), "stream", 60)
+            .await
+            .expect("rediscover");
+        let ch = &store.channels().await.expect("channels")[0];
+        assert!(ch.excluded, "rediscovery preserved exclusion");
+        assert!(ch.backfill_done, "exclusion alone does not touch backfill");
+        let (total, _) = store.event_counts().await.expect("counts");
+        assert_eq!(total, 1, "mirrored events are never deleted");
+
+        // Re-include restarts the backfill walk from `now`.
+        assert!(store
+            .set_channel_excluded("cha", false, 300)
+            .await
+            .expect("include"));
+        let ch = &store.channels().await.expect("channels")[0];
+        assert!(!ch.excluded);
+        assert_eq!(ch.backfill_cursor, Some(300));
+        assert!(!ch.backfill_done);
+    }
+
+    #[tokio::test]
+    async fn excluded_column_migration_is_idempotent_and_defaults_off() {
+        let store = Store::open(":memory:").await.expect("open");
+        store
+            .upsert_channel("cha", None, "stream", 50)
+            .await
+            .expect("ch");
+        // Simulate a mirror created before exclusion existed, then migrate.
+        sqlx::raw_sql("ALTER TABLE channels DROP COLUMN excluded")
+            .execute(&store.pool)
+            .await
+            .expect("drop");
+        store.migrate_excluded_column().await.expect("migrate");
+        store.migrate_excluded_column().await.expect("idempotent");
+        let chans = store.channels().await.expect("channels");
+        assert_eq!(chans.len(), 1);
+        assert!(!chans[0].excluded, "pre-existing rows default to included");
     }
 }

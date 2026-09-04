@@ -105,7 +105,8 @@ so any non-loopback bind must add authentication first.
 | Route | What |
 |---|---|
 | `GET /status` | Connection, backfill, mirror counts. |
-| `GET /channels` | Discovered channels. |
+| `GET /channels` | Discovered channels, each with its `excluded` flag. |
+| `PUT /channels/{id}/excluded` | `{excluded: bool}` — toggle exclusion. Excluded: no live subscription/backfill, omitted from broad (authors-only) selections; mirrored events kept, still queryable when the channel or a thread in it is named explicitly. Re-include restarts the backfill walk to repair the gap. |
 | `GET /events/{id}` | One mirrored event (the citation-chip endpoint), with `parent` + `thread_root` reply lineage. |
 | `POST /select/preview` | `{selection, since?, until_exclusive?}` → count, size, daily rhythm. $0. |
 | `POST /select/events` | Same body + `limit`, `after` keyset cursor → the actual events, paged. |
