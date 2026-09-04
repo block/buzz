@@ -264,7 +264,13 @@ impl<Universe: Clone + Eq, Principal: Clone + Ord> FlowState<Universe, Principal
         let Some(accumulated) = &self.accumulated else {
             return Ok(());
         };
-        if !accumulated.can_flow_to(destination) {
+        if accumulated.universe() != destination.universe() {
+            return Err(EgressError::DestinationUniverseMismatch);
+        }
+        if !accumulated
+            .reader_set()
+            .can_flow_to(destination.reader_set())
+        {
             return Err(EgressError::DestinationWidensReaders);
         }
         Ok(())
@@ -306,6 +312,8 @@ pub struct FlowSnapshot<Universe, Principal> {
 pub enum EgressError {
     /// Some input had unknown provenance or belonged to another universe.
     UnresolvedInput,
+    /// The destination belongs to a different confidentiality universe.
+    DestinationUniverseMismatch,
     /// The destination introduces readers not authorized for every input.
     DestinationWidensReaders,
 }
@@ -314,6 +322,9 @@ impl Display for EgressError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnresolvedInput => formatter.write_str("input provenance is unresolved"),
+            Self::DestinationUniverseMismatch => {
+                formatter.write_str("destination belongs to a different universe")
+            }
             Self::DestinationWidensReaders => {
                 formatter.write_str("destination widens the accumulated reader set")
             }
@@ -458,6 +469,21 @@ mod tests {
         assert_eq!(
             state.check_egress(&label(0b0010)),
             Err(EgressError::UnresolvedInput)
+        );
+    }
+
+    /// Checks that an egress destination in another universe is distinguished
+    /// from a destination that widens the reader set.
+    #[test]
+    fn cross_universe_destination_reports_universe_mismatch() {
+        let mut state = FlowState::default();
+        state.observe(&label(0b0011));
+        let destination =
+            ConfidentialityLabel::restricted(2, readers(0b0001)).expect("non-empty readers");
+
+        assert_eq!(
+            state.check_egress(&destination),
+            Err(EgressError::DestinationUniverseMismatch)
         );
     }
 
