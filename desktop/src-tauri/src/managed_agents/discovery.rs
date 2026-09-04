@@ -1130,6 +1130,7 @@ pub fn discover_acp_runtimes_from(
     // Track all ids seen so far (builtins) to prevent preset/custom collisions.
     let mut seen_ids: std::collections::HashSet<String> =
         entries.iter().map(|e| e.id.clone()).collect();
+    let pi_command_override = std::env::var(presets::PI_ACP_PI_COMMAND_ENV).ok();
 
     // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
     for def in PRESET_HARNESSES {
@@ -1139,7 +1140,11 @@ pub fn discover_acp_runtimes_from(
         }
         seen_ids.insert(def.id.to_string());
 
-        entries.push(preset_catalog_entry(def, resolve));
+        entries.push(preset_catalog_entry(
+            def,
+            resolve,
+            pi_command_override.as_deref(),
+        ));
     }
 
     // Phase 3: load and append custom harness definitions.
