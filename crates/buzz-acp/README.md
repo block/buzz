@@ -270,6 +270,10 @@ Forum event kinds:
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
+   If the inbound queue overflows, the harness attempts replay for affected
+   subscriptions when capacity and relay quota permit, with at least five seconds
+   between attempts. Recovery depends on available relay history and the consumer
+   making progress; complete delivery is not guaranteed.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
 
