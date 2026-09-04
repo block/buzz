@@ -2570,6 +2570,7 @@ fn apply_anthropic_cache_control(body: &mut serde_json::Map<String, Value>) {
 
 #[cfg(test)]
 mod tests {
+    include!("llm_fqn_tests.rs");
     use super::*;
     use crate::config::{Config, HookServers, OpenAiApi, Provider, ThinkingSummary};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
