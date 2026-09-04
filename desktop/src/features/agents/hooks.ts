@@ -45,6 +45,7 @@ import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import {
   setManagedAgentAutoRestart,
+  setManagedAgentDisableLocalSpawn,
   setManagedAgentStartOnAppLaunch,
   startManagedAgent,
   stopManagedAgent,
@@ -660,6 +661,24 @@ export function useSetManagedAgentStartOnAppLaunchMutation() {
       pubkey: string;
       startOnAppLaunch: boolean;
     }) => setManagedAgentStartOnAppLaunch(pubkey, startOnAppLaunch),
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+      await queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
+    },
+  });
+}
+
+export function useSetManagedAgentDisableLocalSpawnMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      pubkey,
+      disableLocalSpawn,
+    }: {
+      pubkey: string;
+      disableLocalSpawn: boolean;
+    }) => setManagedAgentDisableLocalSpawn(pubkey, disableLocalSpawn),
     onSettled: async () => {
       await queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
       await queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });

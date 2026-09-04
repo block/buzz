@@ -132,6 +132,7 @@ impl AgentDefinition {
             persona_source_version: None,
             env_vars: self.env_vars,
             start_on_app_launch: false,
+            disable_local_spawn: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: BackendKind::default(),
@@ -324,6 +325,13 @@ pub struct ManagedAgentRecord {
     pub env_vars: BTreeMap<String, String>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
+    /// When `true`, Desktop never spawns a local process for this agent — neither
+    /// at boot-time reconciliation nor on reactive triggers (channel open, @mention).
+    /// The persona and key remain in the store so the agent can be re-activated at
+    /// any time by flipping this back to `false`. Intended for agents whose canonical
+    /// runtime is an external host (e.g. a VPS systemd unit).
+    #[serde(default)]
+    pub disable_local_spawn: bool,
     /// Auto-restart this agent when its effective spawn config drifts from
     /// the running process (Chunk F). Default ON; the policy loop in the
     /// frontend only fires when the agent is idle, connected, and local.
@@ -582,6 +590,7 @@ pub struct ManagedAgentSummary {
     pub last_error: Option<String>,
     pub last_error_code: Option<i64>,
     pub start_on_app_launch: bool,
+    pub disable_local_spawn: bool,
     pub auto_restart_on_config_change: bool,
     pub log_path: String,
     pub respond_to: RespondTo,

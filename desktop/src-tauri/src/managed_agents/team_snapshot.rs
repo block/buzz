@@ -282,6 +282,7 @@ mod tests {
                 m
             },
             start_on_app_launch: false,
+            disable_local_spawn: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: BackendKind::Local,

@@ -191,6 +191,7 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         persona_source_version: None,
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
+        disable_local_spawn: false,
         auto_restart_on_config_change: false,
         runtime_pid: None,
         backend: crate::managed_agents::BackendKind::Local,

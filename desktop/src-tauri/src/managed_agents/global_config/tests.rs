@@ -322,6 +322,7 @@ fn bare_record() -> ManagedAgentRecord {
         persona_source_version: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
+        disable_local_spawn: false,
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,

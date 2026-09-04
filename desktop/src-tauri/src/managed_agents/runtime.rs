@@ -330,6 +330,7 @@ pub fn build_managed_agent_summary(
         last_error: record.last_error.clone(),
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
+        disable_local_spawn: record.disable_local_spawn,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
         log_path,
         respond_to: record.respond_to,

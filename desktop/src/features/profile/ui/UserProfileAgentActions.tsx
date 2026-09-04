@@ -5,6 +5,7 @@ import {
   CopyPlus,
   Download,
   Power,
+  Server,
   Settings,
 } from "lucide-react";
 
@@ -29,6 +30,7 @@ export function UserProfileAgentSettingsMenu({
   onDuplicatePersona,
   onExportPersona,
   onToggleAutoStart,
+  onToggleDisableLocalSpawn,
   personaActionKey,
 }: {
   archiveActions?: IdentityArchiveActions;
@@ -38,6 +40,7 @@ export function UserProfileAgentSettingsMenu({
   onDuplicatePersona?: () => void;
   onExportPersona?: () => void;
   onToggleAutoStart?: () => void;
+  onToggleDisableLocalSpawn?: () => void;
   personaActionKey?: string;
 }) {
   const [archiveConfirmOpen, setArchiveConfirmOpen] = React.useState(false);
@@ -47,13 +50,21 @@ export function UserProfileAgentSettingsMenu({
     managedAgent !== undefined &&
     managedAgent.backend.type === "local" &&
     onToggleAutoStart !== undefined;
+  const canToggleDisableLocalSpawn =
+    managedAgent !== undefined &&
+    managedAgent.backend.type === "local" &&
+    onToggleDisableLocalSpawn !== undefined;
   const autoStartSwitchId = `user-profile-agent-auto-start-${actionKey}`;
+  const disableLocalSpawnSwitchId = `user-profile-agent-disable-local-spawn-${actionKey}`;
   const hasPrimaryActions = Boolean(onDuplicatePersona || onExportPersona);
   const hasArchiveAction =
     archiveActions?.canArchive === true &&
     archiveActions.isArchived !== undefined;
   const hasActions =
-    canToggleAutoStart || hasPrimaryActions || hasArchiveAction;
+    canToggleAutoStart ||
+    canToggleDisableLocalSpawn ||
+    hasPrimaryActions ||
+    hasArchiveAction;
 
   if (!hasActions) {
     return null;
@@ -101,6 +112,30 @@ export function UserProfileAgentSettingsMenu({
                 disabled={isPending}
                 id={autoStartSwitchId}
                 onCheckedChange={onToggleAutoStart}
+                onClick={(event) => event.stopPropagation()}
+              />
+            </DropdownMenuItem>
+          ) : null}
+          {canToggleDisableLocalSpawn ? (
+            <DropdownMenuItem
+              className="gap-3 pr-2"
+              disabled={isPending}
+              onSelect={(event) => {
+                event.preventDefault();
+                onToggleDisableLocalSpawn();
+              }}
+            >
+              <Server className="h-4 w-4 text-muted-foreground" />
+              <span className="min-w-0 flex-1 text-sm font-medium">
+                Remote runtime only
+              </span>
+              <Switch
+                aria-label="Remote runtime only"
+                checked={managedAgent.disableLocalSpawn}
+                data-testid={disableLocalSpawnSwitchId}
+                disabled={isPending}
+                id={disableLocalSpawnSwitchId}
+                onCheckedChange={onToggleDisableLocalSpawn}
                 onClick={(event) => event.stopPropagation()}
               />
             </DropdownMenuItem>
@@ -177,6 +212,7 @@ export function UserProfileAgentSettingsMenuSlot({
   onDuplicatePersona,
   onExportPersona,
   onToggleAutoStart,
+  onToggleDisableLocalSpawn,
   personaActionKey,
   viewerIsOwner,
 }: {
@@ -189,6 +225,7 @@ export function UserProfileAgentSettingsMenuSlot({
   onDuplicatePersona: () => void;
   onExportPersona: () => void;
   onToggleAutoStart: () => void;
+  onToggleDisableLocalSpawn?: () => void;
   personaActionKey?: string;
   viewerIsOwner: boolean;
 }) {
@@ -212,6 +249,7 @@ export function UserProfileAgentSettingsMenuSlot({
         {...sharedProps}
         managedAgent={managedAgent}
         onToggleAutoStart={onToggleAutoStart}
+        onToggleDisableLocalSpawn={onToggleDisableLocalSpawn}
       />
     );
   }

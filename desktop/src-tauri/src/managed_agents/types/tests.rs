@@ -757,6 +757,7 @@ fn summary_fixture(
         last_error: None,
         last_error_code: None,
         start_on_app_launch: false,
+        disable_local_spawn: false,
         auto_restart_on_config_change: false,
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,

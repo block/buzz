@@ -15,6 +15,7 @@ import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
   usePersonasQuery,
+  useSetManagedAgentDisableLocalSpawnMutation,
   useSetManagedAgentStartOnAppLaunchMutation,
   useSetPersonaActiveMutation,
   useStartManagedAgentMutation,
@@ -243,6 +244,7 @@ export function UserProfilePanel({
   const stopAgentMutation = useStopManagedAgentMutation();
   const deleteAgentMutation = useDeleteManagedAgentMutation();
   const startOnLaunchMutation = useSetManagedAgentStartOnAppLaunchMutation();
+  const disableLocalSpawnMutation = useSetManagedAgentDisableLocalSpawnMutation();
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const deletePersonaMutation = useDeletePersonaMutation();
@@ -501,6 +503,28 @@ export function UserProfilePanel({
     }
   }, [managedAgent, startOnLaunchMutation.mutateAsync]);
 
+  const handleToggleDisableLocalSpawn = React.useCallback(async () => {
+    if (managedAgent?.backend.type !== "local") return;
+
+    try {
+      const updated = await disableLocalSpawnMutation.mutateAsync({
+        pubkey: managedAgent.pubkey,
+        disableLocalSpawn: !managedAgent.disableLocalSpawn,
+      });
+      toast.success(
+        updated.disableLocalSpawn
+          ? `${updated.name} will not spawn locally — remote runtime owns it.`
+          : `${updated.name} will spawn locally on Desktop again.`,
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to update spawn preference.",
+      );
+    }
+  }, [managedAgent, disableLocalSpawnMutation.mutateAsync]);
+
   const handleDeleteAgent = React.useCallback(async () => {
     if (!managedAgent) return;
 
@@ -728,6 +752,7 @@ export function UserProfilePanel({
       onDuplicatePersona={handleDuplicatePersona}
       onExportPersona={handleExportPersona}
       onToggleAutoStart={handleToggleAgentAutoStart}
+      onToggleDisableLocalSpawn={handleToggleDisableLocalSpawn}
       personaActionKey={resolvedPersona?.id}
       viewerIsOwner={viewerIsOwner}
     />
