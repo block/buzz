@@ -80,6 +80,36 @@ Buzz is a place where people build together and bring their agents into the room
 - **Never use a status colour decoratively.** A green that does not mean success teaches people to stop trusting green.
 - **Categorical colours are the one place appearance-naming is allowed.** Telling two projects apart genuinely is a choice about appearance.
 
+## Contrast
+
+Buzz judges contrast with **APCA** (the perceptual algorithm in the WCAG 3
+draft), not the WCAG 2 ratio. Target **Lc 60** for body text, Lc 45 for large
+or non-essential text. This is a deliberate position, taken with evidence, and
+it is the rule a generated theme is measured against.
+
+- **Why.** The WCAG 2 ratio underweights blue and ignores polarity, so it
+  systematically recommends dark text on saturated mid-tone fills where light
+  text is plainly more readable. Measured: white on `#3b82f6` scores WCAG 3.68
+  (fail) but APCA Lc 69 (pass); black on the same fill scores WCAG 5.71 (pass)
+  but Lc 40 — badly unreadable. Apple ships white on `#0088ff`–`#3daefc` in
+  Messages at WCAG 2.4–3.5, and Tailwind, Bootstrap, and Radix all ship white
+  on their primary blue below or near the WCAG threshold. Three independent
+  signals agree with the eye; one number disagrees with all of them.
+- **APCA is not the looser choice.** It is stricter wherever WCAG 2 is
+  permissive: red on black (WCAG 5.25 pass, Lc 38 fail) and every dark-mode
+  mid-grey. Adopting it tightens more pairings than it relaxes.
+- **Report both.** WCAG 2 is what an audit measures and what regulators
+  recognise today. Design to APCA, and know the WCAG number before shipping a
+  surface that will be scanned. Where they disagree, say so in the change.
+- **Constrain the fill, never degrade the text.** If neither black nor white
+  carries a fill legibly, the fill is wrong — it is not a valid solid. Move the
+  fill's lightness and keep the hue; do not settle for the less-bad text.
+- **A paired text token is derived, not authored.** `text-on-*` is a function of
+  its fill, so it is generated with the fill and never hand-set. Every hand-set
+  pairing in this system has been wrong at least once.
+- **One implementation of the rule.** Desktop, mobile, and web must not each
+  compute their own pairing; they diverge and the same defect ships three times.
+
 ## Writing
 
 - **Every word earns its place.** Prefer the shortest phrasing that stays accurate.

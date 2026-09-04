@@ -43,7 +43,7 @@ const GLASS_VIBRANCY_MATERIAL = "sidebar";
 
 export const ACCENT_COLORS = [
   { name: "Neutral", value: NEUTRAL_ACCENT },
-  { name: "Blue", value: "#3b82f6" },
+  { name: "Blue", value: "#2563eb" },
   { name: "Cyan", value: "#06b6d4" },
   { name: "Green", value: "#22c55e" },
   { name: "Orange", value: "#f97316" },
@@ -54,7 +54,37 @@ export const ACCENT_COLORS = [
   { name: "Indigo", value: "#6366f1" },
 ] as const;
 
-const DEFAULT_ACCENT = "#3b82f6";
+/**
+ * One step deeper than the blue it replaced (`#3b82f6`), so white label text is
+ * legible on it by both standards: WCAG 5.17:1 and APCA Lc 80, against 3.68 and
+ * Lc 69 before. The old value failed WCAG AA on every primary button and active
+ * sidebar row in the default install.
+ *
+ * Darkening the fill is the fix rather than switching the label to black —
+ * black on this hue measures Lc 40, which is perceptually unreadable even
+ * though WCAG 2 scores it 5.71 and calls it a pass. See DESIGN.md § Contrast.
+ */
+const DEFAULT_ACCENT = "#2563eb";
+
+/**
+ * Accent hexes that were offered once and are still in people's storage, mapped
+ * to what replaced them.
+ *
+ * A retired hex is not merely cosmetic debt: it is no longer in
+ * `ACCENT_COLORS`, so it fails the community-theme allowlist and would
+ * otherwise persist locally forever, leaving one surface on a value the product
+ * has decided is not legible.
+ */
+const RETIRED_ACCENTS: Record<string, string> = {
+  "#3b82f6": "#2563eb",
+};
+
+/** Reads the stored accent, upgrading a retired value on the way through. */
+function readStoredAccent(): string {
+  const stored = getStorageItem(ACCENT_STORAGE_KEY);
+  if (!stored) return DEFAULT_ACCENT;
+  return RETIRED_ACCENTS[stored] ?? stored;
+}
 
 type ThemeContextValue = {
   themeName: string;
@@ -410,7 +440,7 @@ function applyCachedVars(): string | null {
     applyBuzzSidebar(themeName);
     glassThemeReady = true;
 
-    const accent = getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
+    const accent = readStoredAccent();
     // Pin Buzz themes to the neutral accent here too, matching applyTheme.
     // Otherwise a cached Buzz theme + non-neutral stored accent flashes the
     // old accent on reload until the async applyTheme effect runs.
@@ -457,12 +487,7 @@ async function applyTheme(name: SyntaxThemeName): Promise<{
   // microtask (e.g. the caller's `.then`) let the previous accent flash on the
   // new theme for a frame — the flicker seen when switching to Buzz. Buzz
   // themes resolve to the neutral accent regardless of the stored value.
-  applyAccentColor(
-    resolveEffectiveAccent(
-      name,
-      getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
-    ),
-  );
+  applyAccentColor(resolveEffectiveAccent(name, readStoredAccent()));
 
   // Cache for FOUC prevention
   try {
@@ -499,7 +524,7 @@ export function ThemeProvider({
   const [accentColor, setAccentColorState] = useState<string>(() => {
     // block/buzz#5078 — use the throw-safe accessor for init-time reads; a
     // denied-storage origin would otherwise kill the root on first mount.
-    return getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
+    return readStoredAccent();
   });
   const [glassBackground, setGlassBackgroundState] = useState<boolean>(() => {
     const stored = getStorageItem(GLASS_BACKGROUND_STORAGE_KEY);
