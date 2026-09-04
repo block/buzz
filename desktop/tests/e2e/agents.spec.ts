@@ -643,7 +643,7 @@ test("team cards use the thread-style overlapping avatar stack", async ({
       return {
         maskImage: styles.maskImage,
         outlineBackground: outline.backgroundColor,
-        outlineBorderRadius: outline.borderRadius,
+        outlineClipPath: outline.clipPath,
         outlineInset: outline.inset,
       };
     }),
@@ -652,19 +652,19 @@ test("team cards use the thread-style overlapping avatar stack", async ({
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineBorderRadius: "calc(30% + 2px)",
+      outlineClipPath: 'url("#agent-avatar-squircle-clip")',
       outlineInset: "-2px",
     },
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineBorderRadius: "calc(30% + 2px)",
+      outlineClipPath: 'url("#agent-avatar-squircle-clip")',
       outlineInset: "-2px",
     },
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineBorderRadius: "calc(30% + 2px)",
+      outlineClipPath: 'url("#agent-avatar-squircle-clip")',
       outlineInset: "-2px",
     },
   ]);
