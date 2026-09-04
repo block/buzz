@@ -21,7 +21,7 @@ type SummaryPayload = {
   reply_count: number;
   descendant_count: number;
   last_reply_at: number | null;
-  participants: string[];
+  participants?: string[];
 };
 
 function targetId(event: RelayEvent, tagName: "d" | "e") {
@@ -43,7 +43,7 @@ const mapSummary = (payload: SummaryPayload): ChannelWindowThreadSummary => ({
   replyCount: payload.reply_count,
   descendantCount: payload.descendant_count,
   lastReplyAt: payload.last_reply_at,
-  participantPubkeys: payload.participants,
+  participantPubkeys: payload.participants ?? [],
 });
 
 /**
