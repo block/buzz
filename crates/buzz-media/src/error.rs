@@ -89,6 +89,58 @@ pub enum MediaError {
     /// I/O error during streaming upload.
     #[error("io error: {0}")]
     Io(String),
+    /// The request body stopped making progress and hit the idle deadline.
+    ///
+    /// Distinct from [`MediaError::Io`] (a real transport/storage failure,
+    /// 500) and [`MediaError::FileTooLarge`] (a genuine length-limit breach,
+    /// 413): this is the client withholding bytes, and it maps to 408 so
+    /// operators never page on it as a storage failure.
+    #[error("request body timed out: no data received within the idle deadline")]
+    RequestBodyTimeout,
+}
+
+/// Classification of a request-body read error, used to pick the response
+/// status at every body-consumption path. Typed check first, then the
+/// length-limit Display patterns (axum wraps `LengthLimitError` in its error
+/// chain without exposing the type for downcast — see
+/// `test_body_limit_error_detection`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyErrorKind {
+    /// The media router's idle-progress deadline fired
+    /// ([`tower_http::timeout::TimeoutError`] in the source chain): the
+    /// client withheld bytes. Maps to [`MediaError::RequestBodyTimeout`] /
+    /// `408`.
+    IdleTimeout,
+    /// A body length limit was breached. Maps to
+    /// [`MediaError::FileTooLarge`] / `413`.
+    LengthLimit,
+    /// Any other transport/stream failure. Maps to [`MediaError::Io`] /
+    /// `500`.
+    Other,
+}
+
+/// Walk the error's source chain and classify it — see [`BodyErrorKind`].
+///
+/// The distinction is the response contract: a withheld body is the client's
+/// fault (`408`), an oversized body is a policy rejection (`413`), and
+/// collapsing either into [`MediaError::Io`] would surface a `500` and page
+/// operators for a storage failure that never happened.
+pub fn classify_body_error(error: &(dyn std::error::Error + 'static)) -> BodyErrorKind {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = source {
+        if err.is::<tower_http::timeout::TimeoutError>() {
+            return BodyErrorKind::IdleTimeout;
+        }
+        let msg = err.to_string();
+        if msg.contains("length limit")
+            || msg.contains("body limit")
+            || msg.contains("LengthLimitError")
+        {
+            return BodyErrorKind::LengthLimit;
+        }
+        source = err.source();
+    }
+    BodyErrorKind::Other
 }
 
 impl From<image::ImageError> for MediaError {
@@ -151,6 +203,7 @@ impl IntoResponse for MediaError {
             Self::UploadRateLimitExceeded | Self::UploadConcurrencyLimitReached => {
                 (StatusCode::TOO_MANY_REQUESTS, self.to_string())
             }
+            Self::RequestBodyTimeout => (StatusCode::REQUEST_TIMEOUT, self.to_string()),
             Self::UnknownContentType | Self::UnsupportedContainer | Self::WrongCodec => {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, self.to_string())
             }
