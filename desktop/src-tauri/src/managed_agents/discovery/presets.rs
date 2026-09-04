@@ -188,6 +188,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             Gateway's own environment separately.",
         underlying_cli: None,
     },
+    PresetHarness {
+        id: "cybara",
+        label: "Cybara",
+        command: "cybara",
+        args: &["acp"],
+        install_instructions_url: "https://cybara.ai/download#cli-tui",
+        install_hint: "Buzz talks to Cybara through its CLI's ACP mode (cybara acp).",
+        underlying_cli: None,
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
