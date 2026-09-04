@@ -32,8 +32,9 @@ Port 1430, so it can run alongside the existing client on 1420.
 
 ```bash
 pnpm typecheck      # tsc --noEmit
-pnpm check          # biome + the type-system guard
+pnpm check          # biome + the type-system and contrast guards
 pnpm check:type     # the type-system guard alone
+pnpm check:contrast # the contrast guard alone
 pnpm biome check --write .   # auto-fix
 ```
 
@@ -41,6 +42,14 @@ pnpm biome check --write .   # auto-fix
 a token: no arbitrary text sizes (px **or** rem), no `uppercase`, no
 hand-applied `tracking-*`, and no size role paired with a weight or leading
 utility. Each one is a defect the existing client already paid for.
+
+`scripts/check-contrast.mjs` measures every text role against every surface it
+can sit on, in both modes, and fails the build below its **APCA** target (Lc 60
+body, Lc 45 meta). It parses `tokens.css` rather than a copied list of values,
+so it cannot drift from the tokens it audits. Buzz judges contrast with APCA,
+not the WCAG 2 ratio — see DESIGN.md § Contrast for the evidence, and note the
+consequence: a pairing can pass WCAG AA and still fail here, which is the point.
+`#8f8f8f` on `#1c1c1c` scores WCAG 5.27:1 and APCA Lc 40.
 
 ---
 

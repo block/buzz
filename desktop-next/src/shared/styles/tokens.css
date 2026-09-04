@@ -31,7 +31,7 @@
   --neutral-6: #e5e5e5; /* subtle border         */
   --neutral-7: #d4d4d4; /* border                */
   --neutral-8: #b8b8b8; /* border hover          */
-  --neutral-9: #a3a3a3; /* solid fill            */
+  --neutral-9: #909090; /* solid fill, tertiary text */
   --neutral-10: #737373; /* solid fill hover     */
   --neutral-11: #262626; /* dark fill            */
   --neutral-12: #0a0a0a; /* high-contrast text   */
@@ -115,8 +115,14 @@
   --neutral-6: #333333;
   --neutral-7: #424242;
   --neutral-8: #5a5a5a;
-  --neutral-9: #6e6e6e;
-  --neutral-10: #8f8f8f;
+  /* Steps 9 and 10 are lighter than a linear ramp would put them, because in
+     dark mode they carry text and APCA is polarity-asymmetric: light-on-dark
+     needs more separation than the WCAG ratio implies. At #6e6e6e and #8f8f8f
+     they measured Lc 23–26 and Lc 38–41 against the Lc 60 body-text target
+     while passing WCAG AA — legal, and visibly murky. Sized against the
+     lightest dark surface (bg-float #2a2a2a), which is the binding case. */
+  --neutral-9: #a6a6a6;
+  --neutral-10: #c1c1c1;
   --neutral-11: #e5e5e5;
   --neutral-12: #f5f5f5;
 
@@ -192,6 +198,10 @@
   --text-primary: var(--neutral-12);
   --text-secondary: var(--neutral-10);
   --text-tertiary: var(--neutral-9);
+  /* Deliberately below the contrast targets: low contrast is the signal that a
+     control is unavailable, and WCAG exempts inactive controls for the same
+     reason. Raising it to Lc 60 would make disabled read as enabled. Never put
+     information here that a person needs. */
   --text-disabled: var(--neutral-8);
 
   --border-primary: var(--neutral-7);
@@ -265,7 +275,11 @@
      computed when the lightness rule lands. */
   --text-on-danger: #ffffff;
   --text-on-success: #ffffff;
-  --text-on-warning: var(--neutral-12);
+  /* A literal, not `var(--neutral-12)`: the warning fill is the same amber in
+     both modes, so its paired text must be dark in both. neutral-12 flips to
+     near-white in dark mode, which put #f5f5f5 on #eab308 — APCA Lc 34, WCAG
+     1.76. A paired-text token follows its fill, never the mode. */
+  --text-on-warning: #0a0a0a;
   --text-on-info: #ffffff;
 
   /*  2. The glass rim. A directional light effect, not a solid

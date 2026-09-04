@@ -9,9 +9,10 @@
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "lint": "biome lint .",
-    "check": "biome check . && node scripts/check-type.mjs",
+    "check": "biome check . && node scripts/check-type.mjs && node scripts/check-contrast.mjs",
     "format": "biome format --write .",
-    "check:type": "node scripts/check-type.mjs"
+    "check:type": "node scripts/check-type.mjs",
+    "check:contrast": "node scripts/check-contrast.mjs"
   },
   "dependencies": {
     "@base-ui-components/react": "1.0.0-rc.0",

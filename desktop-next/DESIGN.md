@@ -109,6 +109,20 @@ it is the rule a generated theme is measured against.
   pairing in this system has been wrong at least once.
 - **One implementation of the rule.** Desktop, mobile, and web must not each
   compute their own pairing; they diverge and the same defect ships three times.
+- **Size a text step against the worst surface it can land on**, not the most
+  common one. `bg-float` is the lightest dark surface, so it is the binding case
+  in dark mode; a step that only clears the target on `bg-inset` fails wherever
+  a popover opens.
+- **Dark mode is not light mode inverted.** APCA is polarity-asymmetric:
+  light-on-dark needs more separation than the same WCAG ratio suggests. The
+  dark ramp's text steps are therefore lighter than a mirrored ramp would put
+  them — steps 9 and 10 sit above where linear spacing would.
+- **`text-disabled` is deliberately below target.** Low contrast is the signal
+  that a control is unavailable. Never put information a person needs there.
+- **`pnpm check:contrast` enforces this.** Every text role is measured against
+  every surface it can sit on, in both modes, parsed from `tokens.css` so the
+  check cannot drift from the tokens. Exceptions live in that script with a
+  stated reason, which keeps the list short and arguable.
 
 ## Writing
 
