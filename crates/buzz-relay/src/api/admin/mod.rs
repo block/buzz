@@ -2120,10 +2120,12 @@ mod postgres_tests {
 
         let community_uuid = Uuid::new_v4();
         let host = format!("list-restrictions-{}.example", community_uuid.simple());
-        db.ensure_configured_community(&host)
+        let community = db
+            .ensure_configured_community(&host)
             .await
-            .expect("create test community");
-        let community = buzz_core::CommunityId::from_uuid(community_uuid);
+            .expect("create test community")
+            .id;
+        let community_uuid = *community.as_uuid();
 
         let banned_pubkey = vec![0xAAu8; 32];
         let timed_out_pubkey = vec![0xBBu8; 32];
@@ -2209,10 +2211,12 @@ mod postgres_tests {
 
         let community_uuid = Uuid::new_v4();
         let host = format!("unban-success-{}.example", community_uuid.simple());
-        db.ensure_configured_community(&host)
+        let community = db
+            .ensure_configured_community(&host)
             .await
-            .expect("create test community");
-        let community = buzz_core::CommunityId::from_uuid(community_uuid);
+            .expect("create other community")
+            .id;
+        let community_uuid = *community.as_uuid();
 
         // Insert a permanent ban as the target member.
         let target_pubkey = vec![0xCCu8; 32];
@@ -2237,10 +2241,11 @@ mod postgres_tests {
         // we can verify the DELETE only clears the intended restriction.
         let other_community_uuid = Uuid::new_v4();
         let other_host = format!("unban-other-{}.example", other_community_uuid.simple());
-        db.ensure_configured_community(&other_host)
+        let other_community = db
+            .ensure_configured_community(&other_host)
             .await
-            .expect("create other community");
-        let other_community = buzz_core::CommunityId::from_uuid(other_community_uuid);
+            .expect("create other community")
+            .id;
         db.ban_community_member(other_community, &target_pubkey, &actor_pubkey, None, None)
             .await
             .expect("insert ban fixture for other community");
@@ -2331,10 +2336,12 @@ mod postgres_tests {
 
         let community_uuid = Uuid::new_v4();
         let host = format!("untimeout-success-{}.example", community_uuid.simple());
-        db.ensure_configured_community(&host)
+        let community = db
+            .ensure_configured_community(&host)
             .await
-            .expect("create test community");
-        let community = buzz_core::CommunityId::from_uuid(community_uuid);
+            .expect("create test community")
+            .id;
+        let community_uuid = *community.as_uuid();
 
         let target_pubkey = vec![0xDDu8; 32];
         let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
@@ -2358,10 +2365,11 @@ mod postgres_tests {
         // community. The untimeout must NOT clear it (binds community_id = $1).
         let other_community_uuid = Uuid::new_v4();
         let other_host = format!("untimeout-other-{}.example", other_community_uuid.simple());
-        db.ensure_configured_community(&other_host)
+        let other_community = db
+            .ensure_configured_community(&other_host)
             .await
-            .expect("create other community");
-        let other_community = buzz_core::CommunityId::from_uuid(other_community_uuid);
+            .expect("create other community")
+            .id;
         db.timeout_community_member(
             other_community,
             &target_pubkey,
@@ -2466,10 +2474,12 @@ mod postgres_tests {
 
         let community_uuid = Uuid::new_v4();
         let host = format!("unban-expired-{}.example", community_uuid.simple());
-        db.ensure_configured_community(&host)
+        let community = db
+            .ensure_configured_community(&host)
             .await
-            .expect("create test community");
-        let community = buzz_core::CommunityId::from_uuid(community_uuid);
+            .expect("create test community")
+            .id;
+        let community_uuid = *community.as_uuid();
 
         // Insert a ban that already expired.
         let target_pubkey = vec![0xEEu8; 32];
