@@ -5859,9 +5859,101 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     });
                 }
             }
+            env.extend(operator_forwarded_env(
+                std::env::var(MCP_ENV_FORWARD_VAR).ok().as_deref(),
+                |name| std::env::var(name).ok(),
+            ));
             env
         },
     }]
+}
+
+/// Names the operator wants forwarded from this process to the MCP server.
+pub const MCP_ENV_FORWARD_VAR: &str = "BUZZ_ACP_MCP_ENV";
+
+/// Resolve `BUZZ_ACP_MCP_ENV` (a comma-separated list of variable NAMES) into
+/// the entries to append to the MCP server's declared environment.
+///
+/// The agent spawns MCP servers with `env_clear()` plus a fixed allowlist, so
+/// anything an operator configures for a specific deployment — an endpoint
+/// manifest, a credential for it — is dropped unless it is declared here. The
+/// alternative was hardcoding deployment-specific variable names into the
+/// allowlist of an OSS crate, which does not scale past the first deployment.
+///
+/// Only NAMES are configured; values are read from this process's environment,
+/// so a secret never has to be written into a config file to reach the server.
+/// Unset or empty names are skipped silently — an operator listing a variable
+/// they have not set yet gets the same "not configured" behaviour as one who
+/// listed nothing, rather than an empty value that looks configured.
+fn operator_forwarded_env(
+    spec: Option<&str>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<EnvVar> {
+    let Some(spec) = spec else {
+        return vec![];
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    spec.split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter(|name| seen.insert(name.to_string()))
+        .filter_map(|name| {
+            lookup(name)
+                .filter(|value| !value.is_empty())
+                .map(|value| EnvVar {
+                    name: name.to_string(),
+                    value,
+                })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod operator_forwarded_env_tests {
+    use super::*;
+
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+        let map: std::collections::BTreeMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name: &str| map.get(name).cloned()
+    }
+
+    #[test]
+    fn unset_spec_forwards_nothing() {
+        assert!(operator_forwarded_env(None, lookup(&[("A", "1")])).is_empty());
+    }
+
+    #[test]
+    fn forwards_named_vars_with_their_values() {
+        let out =
+            operator_forwarded_env(Some("A,B"), lookup(&[("A", "1"), ("B", "2"), ("C", "3")]));
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].name, "A");
+        assert_eq!(out[0].value, "1");
+        assert_eq!(out[1].name, "B");
+        // C was not listed, so it is not forwarded even though it is set.
+        assert!(out.iter().all(|e| e.name != "C"));
+    }
+
+    #[test]
+    fn tolerates_whitespace_blanks_and_duplicates() {
+        let out = operator_forwarded_env(Some(" A , ,A, B "), lookup(&[("A", "1"), ("B", "2")]));
+        assert_eq!(out.len(), 2, "duplicates and empty entries must collapse");
+    }
+
+    #[test]
+    fn skips_unset_and_empty_values() {
+        // Listing a variable that is not set (or set empty) must behave like
+        // "not configured", not like "configured with an empty value".
+        let out = operator_forwarded_env(
+            Some("A,MISSING,EMPTY"),
+            lookup(&[("A", "1"), ("EMPTY", "")]),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "A");
+    }
 }
 
 #[cfg(test)]
