@@ -110,6 +110,7 @@ export default defineConfig({
         "**/reminder-click-repro.spec.ts",
         "**/virtualization.spec.ts",
         "**/scroll-history.spec.ts",
+        "**/history-transactions.spec.ts",
         "**/channel-dense-second-reach.spec.ts",
         "**/channel-window-mock-paging.spec.ts",
         "**/channel-head-restart.spec.ts",

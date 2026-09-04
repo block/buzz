@@ -1,7 +1,7 @@
 import * as React from "react";
 
 type UseLoadOlderOnScrollOptions = {
-  fetchOlder?: () => Promise<void>;
+  fetchOlder?: () => Promise<unknown>;
   hasOlderMessages: boolean;
   isLoading: boolean;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;

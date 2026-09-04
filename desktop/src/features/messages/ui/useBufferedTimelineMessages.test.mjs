@@ -50,3 +50,14 @@ test("accepts an authoritative replacement when its old tail disappeared", () =>
     messages,
   );
 });
+
+test("admits reconnect gap rows inside the frozen window, buffering only rows after its tail", () => {
+  assert.deepEqual(
+    selectBufferedTimelineMessages({
+      frozenMessageIds: ["old-live", "newer", "tail"],
+      isAtBottom: false,
+      messages: rows("old-live", "gap-1", "gap-2", "newer", "tail", "live"),
+    }).map((e) => e.id),
+    ["old-live", "gap-1", "gap-2", "newer", "tail"],
+  );
+});

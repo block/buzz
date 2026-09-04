@@ -21,13 +21,16 @@ test("reader wheel retires Virtua shift mode without publishing scroll end", () 
       .filter(Boolean),
   );
   assert.deepEqual(addedActionBodies, [["I = 0;"], ["w = 0;"]]);
+  // Retirement must also work while idle: keyed reconciliation can be waiting
+  // for late measurement without an active native scroll. Zoom/zero motion are
+  // not reader input. The installed-distribution tests exercise these bindings.
   assert.match(
     patch,
-    /if \(!e\.M\(\) \|\| t\.ctrlKey\) return;\n\+\s+e\.q\(9\);\n\+\s+if \(f\) return;/,
+    /if \(t\.ctrlKey\) return;\n\+\s+\(o \? t\.deltaX : t\.deltaY\) && e\.q\(9\);\n\+\s+if \(!e\.M\(\)\) return;\n\+\s+if \(f\) return;/,
   );
   assert.match(
     patch,
-    /if \(!e\.M\(\) \|\| t\.ctrlKey\) return;\n\+\s+e\.B\(9\);\n\+\s+if \(c\) return;/,
+    /if \(t\.ctrlKey\) return;\n\+\s+\(o \? t\.deltaX : t\.deltaY\) && e\.B\(9\);\n\+\s+if \(!e\.M\(\)\) return;\n\+\s+if \(c\) return;/,
   );
   assert.doesNotMatch(
     patch,

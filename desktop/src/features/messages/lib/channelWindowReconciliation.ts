@@ -6,6 +6,7 @@ import {
   type ChannelWindowStore,
 } from "./channelWindowStore";
 import { reconcileIncomingMessage } from "./messageMerge";
+import { dedupeMessagesById } from "./messageQueryKeys";
 import { getThreadReference, isBroadcastReply } from "./threading";
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
@@ -41,22 +42,31 @@ export function reconcileChannelWindowMessages(
     return [...merged].sort((left, right) => compareRelayOrder(right, left));
   }
   const authoritativeIds = new Set(windowEvents.map((event) => event.id));
-  const retained = retainRefetchReconciliationEvents(messages).filter(
-    (event) => !authoritativeIds.has(event.id),
-  );
+  const retained = dedupeMessagesById(
+    retainRefetchReconciliationEvents(messages),
+  ).filter((event) => !authoritativeIds.has(event.id));
 
   // Reconcile acknowledgements against cache-only rows without changing the
   // authoritative window's order. The render key moves from an optimistic row
   // to its relay acknowledgement while the relay row remains in its original
   // cursor position.
-  let cacheOnly = retained;
+  // Only pending sends can match acknowledgements. Do not repeatedly dedupe
+  // and scan all cached thread replies for each retained history row: that is
+  // quadratic in scrollback depth on every live event.
+  let pending = retained.filter((event) => event.pending);
   const authoritative = windowEvents.map((event) => {
-    const reconciled = reconcileIncomingMessage(cacheOnly, event);
+    if (pending.length === 0) return event;
+    const reconciled = reconcileIncomingMessage(pending, event);
     const incoming = reconciled.at(-1);
-    cacheOnly = reconciled.slice(0, -1);
+    pending = reconciled.slice(0, -1);
     return incoming ?? event;
   });
-
+  const authoritativeKeys = new Set(
+    authoritative.map((event) => event.localKey ?? event.id),
+  );
+  const cacheOnly = retained.filter(
+    (event) => !authoritativeKeys.has(event.localKey ?? event.id),
+  );
   return mergeChronologicalMessages(cacheOnly, authoritative);
 }
 

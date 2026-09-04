@@ -25,12 +25,16 @@ import { TimelineMessageList } from "./TimelineMessageList";
 import type { TimelineVirtualizerApi } from "./TimelineMessageList";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
-import { useBufferedTimelineMessages } from "./useBufferedTimelineMessages";
+import {
+  useAdmittedTimelineSnapshot,
+  type TimelineSnapshot,
+} from "./useAdmittedTimelineSnapshot";
+import { HistoryRefreshNotice } from "./HistoryRefreshNotice";
+import { useHistoryPagination } from "./useHistoryPagination";
 import {
   DirectMessageIntroAvatarStack,
   type DirectMessageIntroParticipant,
 } from "./DirectMessageIntroAvatarStack";
-import { useSettleGatedPrependMessages } from "./useSettleGatedPrependMessages";
 
 export type MessageTimelineHandle = {
   scrollToBottomOnNextUpdate: () => void;
@@ -61,7 +65,9 @@ type MessageTimelineProps = {
   emptyTitle?: string;
   emptyDescription?: string;
   currentPubkey?: string;
-  fetchOlder?: () => Promise<void>;
+  fetchOlder?: () => Promise<number | undefined>;
+  /** Authoritative history publication paired with the message snapshot. */
+  historyRevision?: number;
   hasOlderMessages?: boolean;
   /**
    * True when the loaded window provably starts at the channel's beginning
@@ -133,28 +139,6 @@ type MessageTimelineProps = {
  *  message list. Must be module-level so its identity never changes. */
 const EMPTY_MESSAGES: TimelineMessage[] = [];
 
-type TimelineSnapshot = {
-  channelId: string | null;
-  messages: TimelineMessage[];
-  /**
-   * History-exhaustion proof captured with the SAME rows it was derived from.
-   * The oldest-day divider may only exist when this is true, and rows and
-   * proof must travel every transport stage (deferral, buffering, settle
-   * gating) as one value: delivering a fresh proof on the urgent render path
-   * while the rows ride the deferred path lets an intermediate commit mint a
-   * divider against the previous, partially-loaded oldest day — which breaks
-   * Virtua's exact-suffix shift admission when the withheld same-day rows
-   * finally land (the pass-1 tear, ledgered 2026-07-11).
-   */
-  historyExhausted: boolean;
-};
-
-const EMPTY_TIMELINE_SNAPSHOT: TimelineSnapshot = {
-  channelId: null,
-  messages: EMPTY_MESSAGES,
-  historyExhausted: false,
-};
-
 const MessageTimelineBase = React.forwardRef<
   MessageTimelineHandle,
   MessageTimelineProps
@@ -182,6 +166,7 @@ const MessageTimelineBase = React.forwardRef<
     pinnedIntro,
     hasOlderMessages = true,
     historyExhausted = false,
+    historyRevision = 0,
     isFetchingOlder = false,
     followThreadById,
     huddleMemberPubkeys,
@@ -252,13 +237,44 @@ const MessageTimelineBase = React.forwardRef<
   // route change can paint the previous channel's deferred rows for a frame even
   // though the sidebar/header already moved to the new channel.
   const liveSnapshot = React.useMemo<TimelineSnapshot>(
-    () => ({ channelId: channelId ?? null, messages, historyExhausted }),
-    [channelId, historyExhausted, messages],
+    () => ({
+      channelId: channelId ?? null,
+      messages,
+      historyExhausted,
+      historyRevision,
+      firstUnreadMessageId,
+      threadSummaries,
+      mainEntries,
+    }),
+    [
+      channelId,
+      historyExhausted,
+      historyRevision,
+      messages,
+      firstUnreadMessageId,
+      threadSummaries,
+      mainEntries,
+    ],
   );
-  const deferredSnapshot = React.useDeferredValue(
-    liveSnapshot,
-    EMPTY_TIMELINE_SNAPSHOT,
-  );
+  const [isSemanticallyAtBottom, setIsSemanticallyAtBottom] =
+    React.useState(true);
+  const {
+    deferred: deferredSnapshot,
+    admitted,
+    pendingCount,
+  } = useAdmittedTimelineSnapshot({
+    snapshot: liveSnapshot,
+    isAtBottom:
+      isSemanticallyAtBottom ||
+      targetMessageId !== null ||
+      searchActiveMessageId !== null,
+    scrollElementRef: activeScrollContainerRef,
+  });
+  const {
+    messages: renderedMessages,
+    meta: renderedSnapshot,
+    isHoldingPrepend,
+  } = admitted;
   const deferredMessages = deferredSnapshot.messages;
   const imagePreloadStateRef = React.useRef({
     activeImages: new Set<HTMLImageElement>(),
@@ -310,45 +326,27 @@ const MessageTimelineBase = React.forwardRef<
   });
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
   const showTimelineError = timelineBodySurface === "error";
-  const [isSemanticallyAtBottom, setIsSemanticallyAtBottom] =
-    React.useState(true);
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset semantic tail state when the active channel changes
   React.useEffect(() => {
     setIsSemanticallyAtBottom(true);
   }, [channelId]);
-  // Zulip-style data semantics: once the reader leaves the bottom, keep the
-  // virtualizer's logical tail frozen. Live arrivals accumulate behind the
-  // "new messages" affordance instead of changing Virtua's item model under
-  // the reading position. Prepends still flow through immediately and Virtua's
-  // `shift` transaction preserves the stable keyed row.
-  const bufferedTimeline = useBufferedTimelineMessages({
+  const historyPagination = useHistoryPagination({
     channelId,
-    isAtBottom:
-      isSemanticallyAtBottom ||
-      targetMessageId !== null ||
-      searchActiveMessageId !== null,
-    messages: deferredMessages,
-  });
-  // Hold older-page render commits until the scroller is at rest: WKWebView
-  // can drop scrollTop compensation writes during live trackpad momentum.
-  // Full rationale in useSettleGatedPrependMessages.
-  //
-  // The history-exhaustion proof rides through this gate as snapshot metadata
-  // (`meta`), so while a prepend is withheld the rendered rows keep the proof
-  // they were projected with. The buffering stage above cannot split the pair:
-  // it only freezes the TAIL (live arrivals) and passes history prepends
-  // through unchanged, so the oldest rows the proof speaks about are exactly
-  // the deferred snapshot's oldest rows.
-  const {
-    messages: renderedMessages,
-    meta: renderedHistoryExhausted,
-    isHoldingPrepend,
-  } = useSettleGatedPrependMessages({
-    channelId,
-    messages: bufferedTimeline.messages,
-    meta: deferredSnapshot.historyExhausted,
+    fetchOlder,
+    canLoad:
+      !searchActiveMessageId &&
+      !targetMessageId &&
+      !isFetchingOlder &&
+      !isHoldingPrepend &&
+      !showTimelineSkeleton &&
+      hasOlderMessages &&
+      !isRenderedTimelineBehindHistoryPrepend(renderedMessages, messages),
+    renderedRevision: renderedSnapshot.historyRevision,
+    renderedChannelId: renderedSnapshot.channelId,
+    fillViewport: !isLoading && !isDeferredSnapshotStale,
     scrollElementRef: activeScrollContainerRef,
   });
+  const cancelHistoryPagination = historyPagination.cancel;
 
   const {
     highlightedMessageId,
@@ -437,10 +435,7 @@ const MessageTimelineBase = React.forwardRef<
     : selectTimelineIntroSurface({
         hasChannelIntro: channelIntro !== null && directMessageIntro === null,
         hasDirectMessageIntro: directMessageIntro !== null,
-        hasReachedChannelStart:
-          !isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) &&
-          !isHoldingPrepend &&
-          (messages.length === 0 || (!hasOlderMessages && !isFetchingOlder)),
+        hasReachedChannelStart: renderedSnapshot.historyExhausted,
         isSkeletonVisible: showTimelineSkeleton,
       });
   const showDirectMessageIntro =
@@ -465,9 +460,10 @@ const MessageTimelineBase = React.forwardRef<
     // The user's own send is the deliberate Zulip exception: release buffered
     // output before arming the next-append bottom pin so the sent row can enter
     // Virtua's model and become the new physical floor.
+    cancelHistoryPagination();
     setIsSemanticallyAtBottom(true);
     scrollToBottomOnNextUpdate();
-  }, [scrollToBottomOnNextUpdate]);
+  }, [cancelHistoryPagination, scrollToBottomOnNextUpdate]);
 
   React.useImperativeHandle(
     ref,
@@ -475,15 +471,21 @@ const MessageTimelineBase = React.forwardRef<
       scrollToBottomOnNextUpdate: prepareForOwnMessage,
       settleAtBottom: () => {
         if (!timelineVirtualizerApi) return false;
+        cancelHistoryPagination();
         scrollToBottom("auto");
         return true;
       },
     }),
-    [prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
+    [
+      cancelHistoryPagination,
+      prepareForOwnMessage,
+      scrollToBottom,
+      timelineVirtualizerApi,
+    ],
   );
 
-  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
-  // `scrollToMessage` always finds the target row. No virtualizer convergence.
+  // The virtualizer realizes an offscreen target before the DOM-based
+  // centering/highlight path retries on its rendered-range notification.
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {
       return scrollToMessage(messageId, { highlight: true, ...options });
@@ -575,33 +577,6 @@ const MessageTimelineBase = React.forwardRef<
     virtualizerRenderVersion,
   ]);
 
-  const loadOlderViaVirtualizer = React.useCallback((): boolean => {
-    // Indexed find navigation can legitimately land near the current history
-    // boundary. Do not mistake that programmatic jump for scrollback intent and
-    // prepend underneath the active match.
-    // A settle-gate hold means the reader is still parked at the OLD
-    // boundary — don't stack more page fetches behind the held commit.
-    if (
-      searchActiveMessageId ||
-      !fetchOlder ||
-      isFetchingOlder ||
-      isHoldingPrepend ||
-      showTimelineSkeleton ||
-      !hasOlderMessages
-    ) {
-      return false;
-    }
-    void fetchOlder();
-    return true;
-  }, [
-    fetchOlder,
-    hasOlderMessages,
-    isFetchingOlder,
-    isHoldingPrepend,
-    searchActiveMessageId,
-    showTimelineSkeleton,
-  ]);
-
   useLoadOlderOnScroll({
     fetchOlder: useTimelineVirtualizer ? undefined : fetchOlder,
     hasOlderMessages,
@@ -656,7 +631,7 @@ const MessageTimelineBase = React.forwardRef<
       channelName={channelName}
       channelType={channelType}
       currentPubkey={currentPubkey}
-      firstUnreadMessageId={firstUnreadMessageId}
+      firstUnreadMessageId={renderedSnapshot.firstUnreadMessageId}
       followThreadById={followThreadById}
       highlightedMessageId={highlightedMessageId}
       huddleMemberPubkeys={huddleMemberPubkeys}
@@ -666,13 +641,17 @@ const MessageTimelineBase = React.forwardRef<
       entranceMessageId={entranceMessageId}
       onEntranceMessageComplete={onEntranceMessageComplete}
       messageFooters={messageFooters}
-      mainEntries={renderedMessages === messages ? mainEntries : undefined}
+      mainEntries={
+        renderedMessages === renderedSnapshot.messages
+          ? renderedSnapshot.mainEntries
+          : undefined
+      }
       leadingContent={virtualizedLeadingContent}
-      historyExhausted={renderedHistoryExhausted}
+      historyExhausted={renderedSnapshot.historyExhausted}
       hideDayDividers={hideDayDividers}
       alwaysShowMessageIdentity={alwaysShowMessageIdentity}
       hideAgentAccessBadges={hideAgentAccessBadges}
-      threadSummaries={threadSummaries}
+      threadSummaries={renderedSnapshot.threadSummaries}
       messages={renderedMessages}
       onDelete={onDelete}
       onEdit={onEdit}
@@ -682,7 +661,7 @@ const MessageTimelineBase = React.forwardRef<
       onOpenThread={onOpenThread}
       isSendingVideoReviewComment={isSendingVideoReviewComment}
       onSendVideoReviewComment={onSendVideoReviewComment}
-      onStartReached={loadOlderViaVirtualizer}
+      onStartReached={historyPagination.start}
       onToggleReaction={onToggleReaction}
       onVirtualizerApiChange={setTimelineVirtualizerApi}
       onVirtualizerRangeChanged={handleVirtualizerRangeChanged}
@@ -721,7 +700,8 @@ const MessageTimelineBase = React.forwardRef<
         {/* `isFetchingOlder` clears on fetch resolve, but rows paint a frame
             later (deferred snapshot / settle-gate hold) — keep the spinner up
             until the page actually renders. */}
-        {isFetchingOlder ||
+        {historyPagination.isPending ||
+        isFetchingOlder ||
         isHoldingPrepend ||
         isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
           <div
@@ -875,6 +855,16 @@ const MessageTimelineBase = React.forwardRef<
           )}
         </div>
 
+        <div className="pointer-events-none absolute inset-x-0 top-20 z-50 flex justify-center px-4">
+          <HistoryRefreshNotice
+            channelId={channelId}
+            onLoadLatest={() => {
+              cancelHistoryPagination();
+              setIsSemanticallyAtBottom(true);
+              window.requestAnimationFrame(() => scrollToBottom("auto"));
+            }}
+          />
+        </div>
         {!isAtBottom ? (
           <div
             className={cn(
@@ -890,13 +880,14 @@ const MessageTimelineBase = React.forwardRef<
             <UnreadPill
               direction="down"
               label={
-                bufferedTimeline.pendingCount > 0
-                  ? unreadCountLabel(bufferedTimeline.pendingCount)
+                pendingCount > 0
+                  ? unreadCountLabel(pendingCount)
                   : newMessageCount > 0
                     ? unreadCountLabel(newMessageCount)
                     : "Jump to latest"
               }
               onClick={() => {
+                cancelHistoryPagination();
                 setIsSemanticallyAtBottom(true);
                 window.requestAnimationFrame(() => scrollToBottom("auto"));
               }}

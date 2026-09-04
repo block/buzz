@@ -654,6 +654,53 @@ test("auth-required CLOSED restores the active live subscription", async ({
     .toBe(true);
 });
 
+for (const age of [0, 300]) {
+  test(`fresh exhausted channel admits a live event backdated ${age}s without a reader gesture`, async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: "general",
+            kind: 9,
+          }),
+        ),
+      )
+      .toBe(true);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const client = window.__BUZZ_E2E_QUERY_CLIENT__ as unknown as {
+            getQueryData: (
+              key: string[],
+            ) => { pages: Array<{ hasMore: boolean }> } | undefined;
+            isFetching: (filters: { queryKey: string[] }) => number;
+          };
+          const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+          return (
+            client.getQueryData(["channel-window", channelId])?.pages.at(-1)
+              ?.hasMore === false &&
+            client.isFetching({ queryKey: ["channel-messages", channelId] }) ===
+              0
+          );
+        }),
+      )
+      .toBe(true);
+
+    // No reconnect or refresh can mask admission: this is a single live
+    // delivery into a fully retained window, including below its oldest row.
+    const content = `fresh live delivery backdated ${age}s`;
+    await emitMockMessages(page, [
+      { content, createdAt: Math.floor(Date.now() / 1_000) - age },
+    ]);
+    await expect(page.getByTestId("message-timeline")).toContainText(content);
+  });
+}
+
 test("reconnect backfills more missed channel messages than the live subscription limit", async ({
   page,
 }) => {
