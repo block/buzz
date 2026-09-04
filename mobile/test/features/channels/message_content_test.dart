@@ -2780,6 +2780,63 @@ Photos
         expect(_allRichText(tester), contains('https://example.com/docs#frag'));
         expect(find.text('#frag'), findsNothing);
       });
+
+      testWidgets('digits-only bare #token is not a channel pill', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Issue #2959 is open',
+              channelNames: {},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.hash), findsNothing);
+        expect(_allRichText(tester), contains('#2959'));
+      });
+    });
+
+    group('authored markdown links with # labels', () {
+      testWidgets('keeps #-prefixed link labels visible (not channel pills)', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'See [#2959](https://github.com/block/buzz/issues/2959) for details.',
+              channelNames: {},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.hash), findsNothing);
+        expect(find.textContaining('#2959'), findsOneWidget);
+        expect(_allRichText(tester), contains('#2959'));
+        // Surrounding prose must still be there — the old bug left only
+        // punctuation: "See  for details."
+        expect(_allRichText(tester), contains('See'));
+        expect(_allRichText(tester), contains('for details'));
+      });
+
+      testWidgets('known channel name inside a link label stays plain text', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Docs: [#general](https://example.com/general)',
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        // Must not promote the label into a channel pill (hash icon).
+        expect(find.byIcon(LucideIcons.hash), findsNothing);
+        expect(find.textContaining('#general'), findsOneWidget);
+      });
     });
 
     group('mixed content', () {

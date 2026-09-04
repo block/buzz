@@ -284,6 +284,10 @@ class MessageContent extends HookConsumerWidget {
         textAlign: textAlign,
         maxLines: maxLines,
         inlineComponents: [
+          // Own ATag first so link *labels* never re-enter mention/channel/
+          // emoji components (those would turn `[#2959](url)` into an empty
+          // nested WidgetSpan on device). Drop the stock ATagMd below.
+          _AuthoredMarkdownLinkMd(),
           _MentionMd(
             mentionNames: resolvedMentionNames,
             agentMentionPubkeys: resolvedAgentMentionPubkeys,
@@ -298,7 +302,9 @@ class MessageContent extends HookConsumerWidget {
             channelNames: resolvedChannelNames,
             onChannelTap: resolvedChannelTap,
           ),
-          ...MarkdownComponent.inlineComponents,
+          ...MarkdownComponent.inlineComponents.where(
+            (component) => component is! ATagMd,
+          ),
         ],
       ),
     );
