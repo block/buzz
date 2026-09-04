@@ -244,6 +244,12 @@ async fn recovery_is_fair_and_paced_even_with_new_loss_and_stale_eose() {
     let (tx, _rx) = mpsc::channel(1);
     let mut visited = HashSet::new();
     for round in 0..9 {
+        timeout(
+            Duration::from_millis(100),
+            recovery::ready(&tx, recovery::ready_at(&mut state)),
+        )
+        .await
+        .unwrap();
         recovery::recover_one(&mut client, &mut state, &tx, "agent").await;
         let req = next_test_frame(&mut server).await;
         let sub = req[1].as_str().unwrap();
@@ -377,3 +383,6 @@ async fn socket_frame(
         }
     }
 }
+
+#[path = "recovery_wake_tests.rs"]
+mod wake;
