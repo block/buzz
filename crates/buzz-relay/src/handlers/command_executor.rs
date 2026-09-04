@@ -5,7 +5,7 @@
 //!
 //! SECURITY: This module is only reachable AFTER the ingest pipeline has verified:
 //! 1. Event signature (verify_event)
-//! 2. Timestamp freshness (±15 min)
+//! 2. Timestamp freshness (±15 min), except read-only manual recovery
 //! 3. Pubkey/auth identity match
 //! 4. Per-kind scope authorization
 
@@ -916,6 +916,41 @@ async fn handle_workflow_trigger(
     event: &Event,
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    workflow_trigger(tenant, state, event, auth, TriggerAdmission::Fresh).await
+}
+
+/// Recover only an already committed manual operation after ingest authentication.
+/// This path cannot insert an event/run or spawn execution, even on a lookup miss.
+pub(super) async fn recover_workflow_trigger(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+    tracer: &Arc<dyn buzz_conformance::Tracer>,
+) -> Result<IngestResult, IngestError> {
+    workflow_trigger(
+        tenant,
+        state,
+        event,
+        auth,
+        TriggerAdmission::CommittedOnly(tracer),
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum TriggerAdmission<'a> {
+    Fresh,
+    CommittedOnly(&'a Arc<dyn buzz_conformance::Tracer>),
+}
+
+async fn workflow_trigger(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+    admission: TriggerAdmission<'_>,
+) -> Result<IngestResult, IngestError> {
     let self_bytes = auth.pubkey().to_bytes().to_vec();
 
     // 1. Bind the command to both the workflow UUID and one exact signed revision.
@@ -986,22 +1021,31 @@ async fn handle_workflow_trigger(
             IngestError::Rejected("forbidden: not authorized to trigger this workflow".into())
         })?;
 
+    if let TriggerAdmission::CommittedOnly(tracer) = admission {
+        let response =
+            committed_workflow_trigger_response(state, community_id, &workflow, event).await?;
+        // This early ingest return acknowledges existing work; it is neither
+        // fresh admission nor an untraced exit from the conformance seam.
+        use crate::conformance as conf;
+        conf::emit(
+            tracer,
+            conf::TraceAction::WriteDuplicate {
+                msg_id: conf::msg_id_label(event.id.as_bytes()),
+                channel: conf::channel_label(wf_channel_id),
+                claimed_community: conf::claimed_community_from_event(event),
+            },
+            conf::state_for_request(tenant, auth.pubkey()),
+        );
+        return Ok(response);
+    }
+
     // Persist the command event under the workflow channel even though the
     // trigger event itself only carries the workflow UUID. Storing channel
     // triggers as global events leaks workflow IDs to unrelated relay members.
     let mut tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
         PersistResult::Duplicate => {
-            // A lost response does not lose the result: event and run committed
-            // together. Read from the primary, including after a concurrent retry.
-            let run_id = state
-                .db
-                .get_workflow_run_id_by_trigger(community_id, workflow_id, event.id.as_bytes())
-                .await
-                .map_err(|e| IngestError::Internal(format!("error: recover workflow run: {e}")))?
-                .ok_or_else(|| {
-                    IngestError::Internal("error: stored workflow trigger has no run".into())
-                })?;
-            return Ok(workflow_trigger_response(event, run_id));
+            return committed_workflow_trigger_response(state, community_id, &workflow, event)
+                .await;
         }
         PersistResult::Inserted(tx) => tx,
     };
@@ -1123,6 +1167,44 @@ async fn handle_workflow_trigger(
     });
 
     // 6. Return the same result shape for initial delivery and exact replay.
+    Ok(workflow_trigger_response(event, run_id))
+}
+
+// One recovery authority for fresh duplicates and expired retries. Reads use
+// the primary, never content equivalence or a client-provided run ID. A retained
+// event without its run (legacy/retention gap) is not permission to execute it.
+async fn committed_workflow_trigger_response(
+    state: &AppState,
+    community_id: CommunityId,
+    workflow: &buzz_db::workflow::WorkflowRecord,
+    event: &Event,
+) -> Result<IngestResult, IngestError> {
+    let stored = state
+        .db
+        .get_event_by_id(community_id, event.id.as_bytes())
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: recover workflow trigger: {e}")))?
+        .ok_or_else(|| {
+            IngestError::Rejected(
+                "invalid: no retained committed workflow trigger; stale events cannot start work"
+                    .into(),
+            )
+        })?;
+    if stored.event.id != event.id
+        || !stored.event.verify_id()
+        || !stored.event.verify_signature()
+        || stored.channel_id != workflow.channel_id
+    {
+        return Err(IngestError::Rejected(
+            "invalid: stored workflow trigger binding mismatch".into(),
+        ));
+    }
+    let run_id = state
+        .db
+        .get_workflow_run_id_by_trigger(community_id, workflow.id, event.id.as_bytes())
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: recover workflow run: {e}")))?
+        .ok_or_else(|| IngestError::Internal("error: stored workflow trigger has no run".into()))?;
     Ok(workflow_trigger_response(event, run_id))
 }
 
@@ -1599,6 +1681,18 @@ mod postgres_tests {
 
     async fn manual_trigger_test_context() -> (Arc<AppState>, TenantContext, Keys, Keys, Uuid, Event)
     {
+        manual_trigger_test_context_with_yaml(concat!(
+            "name: manual-trigger-pool\n",
+            "trigger:\n  on: message_posted\n",
+            "steps:\n",
+            "  - id: approval\n    action: request_approval\n    from: '@owner'\n    message: approve\n",
+            "  - id: send\n    action: send_message\n    text: done\n",
+        )).await
+    }
+
+    async fn manual_trigger_test_context_with_yaml(
+        yaml: &str,
+    ) -> (Arc<AppState>, TenantContext, Keys, Keys, Uuid, Event) {
         use buzz_core::channel::{ChannelType, ChannelVisibility};
 
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -1646,22 +1740,13 @@ mod postgres_tests {
             .await
             .expect("create workflow channel");
         let workflow_id = Uuid::new_v4();
-        let definition = EventBuilder::new(
-            Kind::Custom(KIND_WORKFLOW_DEF as u16),
-            concat!(
-                "name: manual-trigger-pool\n",
-                "trigger:\n  on: message_posted\n",
-                "steps:\n",
-                "  - id: approval\n    action: request_approval\n    from: '@owner'\n    message: approve\n",
-                "  - id: send\n    action: send_message\n    text: done\n",
-            ),
-        )
-        .tags(vec![
-            Tag::parse(["d", workflow_id.to_string().as_str()]).expect("d tag"),
-            Tag::parse(["h", channel.id.to_string().as_str()]).expect("h tag"),
-        ])
-        .sign_with_keys(&agent)
-        .expect("sign workflow definition");
+        let definition = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml)
+            .tags(vec![
+                Tag::parse(["d", workflow_id.to_string().as_str()]).expect("d tag"),
+                Tag::parse(["h", channel.id.to_string().as_str()]).expect("h tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign workflow definition");
         let (_, definition_json) = buzz_workflow::WorkflowEngine::parse_yaml(&definition.content)
             .expect("parse signed workflow definition");
         let definition_hash = compute_definition_hash(&definition_json);
@@ -2101,6 +2186,7 @@ mod postgres_tests {
     }
 
     mod trigger_delivery;
+    mod trigger_ingest;
 
     #[test]
     fn workflow_revision_parser_accepts_create_and_valid_update() {
