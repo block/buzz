@@ -1,3 +1,4 @@
+import { DesktopStopControl, DesktopStopReceiver } from "./DesktopStopControl";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -19,6 +20,7 @@ import {
 import { DesktopCapabilityDetails } from "./DesktopCapabilityDetails";
 
 type View = {
+  scope?: import("../desktopList").DesktopScope;
   capabilities?: DesktopCapabilities[];
   capabilityWarning?: string;
   list: DesktopList | null;
@@ -78,7 +80,7 @@ export function DesktopListStartup() {
       unsubscribe();
     };
   }, [refetch, pulse, report]);
-  return null;
+  return <DesktopStopReceiver scope={useDesktopScope()} />;
 }
 
 export function KnownDesktops() {
@@ -92,6 +94,7 @@ export function KnownDesktops() {
   }, []);
   return (
     <DesktopListView
+      scope={useDesktopScope() ?? undefined}
       capabilities={capabilities.data?.rows}
       capabilityWarning={
         capabilities.isError
@@ -122,6 +125,7 @@ export function KnownDesktops() {
 }
 
 export function DesktopListView({
+  scope,
   list,
   loading,
   error,
@@ -184,6 +188,13 @@ export function DesktopListView({
                 now,
               )}
             </div>
+            {scope && (
+              <DesktopStopControl
+                key={`${scope.owner}:${scope.community}:${row.id}`}
+                scope={scope}
+                desktop={row}
+              />
+            )}
             <DesktopCapabilityDetails
               report={capabilities?.find((item) => item.id === row.id)}
               now={now}
