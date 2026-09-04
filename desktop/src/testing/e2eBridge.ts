@@ -306,6 +306,7 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    desktopLifecycleObservationError?: string;
     /** Result returned by the mocked `add_agent_to_huddle` command. */
     addAgentToHuddleResult?: {
       ephemeral_added: boolean;
@@ -13906,6 +13907,11 @@ export function maybeInstallE2eTauriMocks() {
             },
           ],
         };
+      }
+      case "observe_desktop_placement": {
+        const error = activeConfig?.mock?.desktopLifecycleObservationError;
+        if (error) throw new Error(error);
+        return null;
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);

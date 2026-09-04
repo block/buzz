@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 type TauriConfig = {
   app: {
@@ -109,8 +110,18 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     page,
   }) => {
     await spoofMacPlatform(page);
-    await installMockBridge(page);
+    await installMockBridge(page, {
+      desktopLifecycleObservationError:
+        "fixture: lifecycle storage unavailable",
+    });
     await page.goto("/");
+    // A failed global receiver must remain visible without entering the shell's
+    // layout flow. This also forces the error to settle before measuring chrome.
+    await expect(
+      page.getByText("Desktop lifecycle receiver is unavailable.", {
+        exact: true,
+      }),
+    ).toBeVisible();
 
     // Lock the native and webview placements together: removing this explicit
     // Tauri inset or shifting the nav row regresses the macOS chrome alignment.
@@ -133,6 +144,10 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     );
     await expectNavButtonsFixedSize(page);
     await expectTopChromeFixedHeight(page);
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: "test-results/desktop-lifecycle/receiver-error-chrome.png",
+    });
   });
 
   test("nav buttons still clear the traffic lights when zoomed out", async ({

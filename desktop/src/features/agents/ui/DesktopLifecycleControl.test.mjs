@@ -3,7 +3,11 @@ import test from "node:test";
 import React from "react";
 import { JSDOM } from "jsdom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { DesktopLifecycleControl } from "./DesktopLifecycleControl.tsx";
+import {
+  DesktopLifecycleControl,
+  DesktopLifecycleReceiver,
+} from "./DesktopLifecycleControl.tsx";
+import { toast } from "sonner";
 import { relayClient } from "../../../shared/api/relayClient.ts";
 
 test("mounted Start exposes unavailable provisioning and exact retry; Restart resolves source", async () => {
@@ -128,6 +132,108 @@ test("mounted Start exposes unavailable provisioning and exact retry; Restart re
     client.clear();
     relayClient.fetchEvents = originals.fetch;
     relayClient.publishEvent = originals.publish;
+    dom.window.close();
+  }
+});
+
+test("receiver failure is a scope-owned notification, not pre-shell layout", async () => {
+  const originalRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  const dom = new JSDOM("<div id='root'></div>", {
+    url: "https://desktop.test",
+  });
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    localStorage: dom.window.localStorage,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const { createRoot } = await import("react-dom/client");
+  const originals = {
+    fetch: relayClient.fetchEvents,
+    subscribe: relayClient.subscribeLive,
+  };
+  let readiness;
+  let closed = 0;
+  let rejectLate;
+  let delayed = false;
+  relayClient.fetchEvents = async () => {
+    if (delayed)
+      return new Promise((_, reject) => {
+        rejectLate = reject;
+      });
+    return [];
+  };
+  relayClient.subscribeLive = async (_filter, _event, onReadiness) => {
+    readiness = onReadiness;
+    return () => {
+      closed++;
+    };
+  };
+  window.__TAURI_INTERNALS__ = {
+    invoke: async () => {
+      throw new Error("fixture: storage unavailable");
+    },
+  };
+  const root = createRoot(document.getElementById("root"));
+  const scope = { owner: "owner", community: "wss://one.example" };
+  const warnings = () =>
+    toast
+      .getToasts()
+      .filter((t) => String(t.title).startsWith("Desktop lifecycle"));
+  try {
+    await React.act(async () =>
+      root.render(React.createElement(DesktopLifecycleReceiver, { scope })),
+    );
+    assert.equal(
+      document.getElementById("root").childElementCount,
+      0,
+      "startup must not render in-flow failure UI",
+    );
+    assert.equal(warnings().length, 1);
+    assert.equal(
+      warnings()[0].title,
+      "Desktop lifecycle receiver is unavailable.",
+    );
+    assert.equal(warnings()[0].duration, Infinity);
+    assert.equal(warnings()[0].closeButton, true);
+    readiness("closed");
+    assert.equal(
+      warnings().length,
+      1,
+      "repeated failures update one notification",
+    );
+    await React.act(async () =>
+      root.render(
+        React.createElement(DesktopLifecycleReceiver, { scope: null }),
+      ),
+    );
+    assert.equal(warnings().length, 0, "leaving the scope removes its warning");
+    readiness("closed");
+    assert.equal(
+      warnings().length,
+      0,
+      "retired receiver cannot notify another scope",
+    );
+    delayed = true;
+    await React.act(async () =>
+      root.render(React.createElement(DesktopLifecycleReceiver, { scope })),
+    );
+    assert.equal(typeof rejectLate, "function");
+    await React.act(async () => root.unmount());
+    await React.act(async () => rejectLate(new Error("late failure")));
+    assert.equal(
+      warnings().length,
+      0,
+      "late startup rejection must not recreate the warning",
+    );
+    assert.equal(closed, 2, "both failed subscriptions are released");
+  } finally {
+    await React.act(async () => root.unmount());
+    relayClient.fetchEvents = originals.fetch;
+    relayClient.subscribeLive = originals.subscribe;
+    for (const warning of warnings()) toast.dismiss(warning.id);
+    globalThis.requestAnimationFrame = originalRaf;
     dom.window.close();
   }
 });
