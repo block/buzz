@@ -1324,6 +1324,137 @@ async fn test_unarchive_emits_member_added_notification() {
     ws.disconnect().await.expect("disconnect");
 }
 
+/// Regression for #2954: an owner must be able to delete an archived channel.
+/// Both archived-channel guards used to exempt only kind:9002 unarchive, so an
+/// owner's kind:9008 DELETE_GROUP bounced with "channel is archived" — the
+/// user-visible case being auto-archived huddle channels. Kind:9008 now passes
+/// the archived gates while its own owner-only validation still rejects
+/// everyone else.
+#[tokio::test]
+#[ignore]
+async fn test_owner_can_delete_archived_channel() {
+    let url = relay_url();
+
+    let owner_keys = Keys::generate();
+    let outsider_keys = Keys::generate();
+
+    // Creating the channel makes the owner its sole member.
+    let channel_id = create_test_channel(&owner_keys).await;
+
+    let mut ws = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+
+    // Archive → unarchive → re-archive via kind:9002 edit-metadata. The
+    // middle step proves the 9002 archived=false exemption still passes the
+    // archived guards alongside the new 9008 exemption. Each event carries a
+    // unique nonce tag: created_at has second resolution, so back-to-back
+    // toggles with identical tags produce identical event IDs and the relay
+    // silently drops the repeat as a duplicate (accepted=true, side effects
+    // skipped) — leaving the channel NOT archived and this test vacuous.
+    for (i, archived) in ["true", "false", "true"].into_iter().enumerate() {
+        let event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel_id]).unwrap(),
+                Tag::parse(["archived", archived]).unwrap(),
+                Tag::parse(["nonce", &i.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&owner_keys)
+            .unwrap();
+        let ok = ws.send_event(event).await.expect("send kind 9002");
+        assert!(
+            ok.accepted,
+            "edit-metadata archived={archived} rejected: {}",
+            ok.message
+        );
+        assert!(
+            !ok.message.starts_with("duplicate"),
+            "edit-metadata archived={archived} deduplicated — side effects skipped: {}",
+            ok.message
+        );
+    }
+
+    // Prove the channel is genuinely archived and the guard is armed before
+    // exercising the delete: a plain metadata edit must bounce off it.
+    let name_edit = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["name", "renamed-while-archived"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let guarded = ws.send_event(name_edit).await.expect("send kind 9002");
+    assert!(
+        !guarded.accepted,
+        "metadata edit on archived channel should be rejected"
+    );
+    assert!(
+        guarded.message.contains("channel is archived"),
+        "metadata edit should hit the archived guard, got: {}",
+        guarded.message
+    );
+
+    // A non-owner's kind:9008 must still be rejected — by the owner check,
+    // not swallowed by the archived-channel guard.
+    let mut outsider_ws = BuzzTestClient::connect(&url, &outsider_keys)
+        .await
+        .expect("connect as outsider");
+    let non_owner_delete = EventBuilder::new(Kind::Custom(9008), "")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&outsider_keys)
+        .unwrap();
+    let rejected = outsider_ws
+        .send_event(non_owner_delete)
+        .await
+        .expect("send non-owner kind 9008");
+    assert!(
+        !rejected.accepted,
+        "non-owner delete of archived channel must be rejected"
+    );
+    assert!(
+        rejected.message.contains("only owner can delete group"),
+        "non-owner delete should fail the owner check, got: {}",
+        rejected.message
+    );
+
+    // The owner's kind:9008 must pass the archived gates and soft-delete.
+    let owner_delete = EventBuilder::new(Kind::Custom(9008), "")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = ws.send_event(owner_delete).await.expect("send kind 9008");
+    assert!(
+        ok.accepted,
+        "owner delete of archived channel rejected: {}",
+        ok.message
+    );
+
+    // The channel is soft-deleted: a follow-up admin event no longer finds it.
+    let unarchive = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["archived", "false"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let gone = ws
+        .send_event(unarchive)
+        .await
+        .expect("send post-delete kind 9002");
+    assert!(
+        !gone.accepted,
+        "channel should be deleted, but unarchive was accepted"
+    );
+    assert!(
+        gone.message.contains("channel not found"),
+        "post-delete admin event should fail with channel not found, got: {}",
+        gone.message
+    );
+
+    outsider_ws.disconnect().await.expect("disconnect outsider");
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// NIP-29 kind 9000 (PUT_USER): "nobody" policy blocks a third party from adding the agent.
 #[tokio::test]
 #[ignore]
