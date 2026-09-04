@@ -152,6 +152,47 @@ test("edit upload pause revalidates revoked mentions only after upload completes
   ]);
 });
 
+test("edit revalidates exact selected agents before snapshotting newly typed recipients", async () => {
+  const selectedAgent = "c".repeat(64);
+  const typedUser = "d".repeat(64);
+  const label = `Scout (${selectedAgent})`;
+  const calls = [];
+  await submitMessageEdit({
+    ...baseOptions(async (_content, tags, notifying) => {
+      calls.push(["save", tags, notifying]);
+    }),
+    originalContent: "hello",
+    content: `hello @${label} @Alice`,
+    editTarget: { mentionRefs: [], unresolvedMentionPubkeys: [] },
+    getMentionRefs: () => [
+      { displayName: label, pubkey: selectedAgent, isAgent: true },
+    ],
+    extractMentionPubkeys: () => [selectedAgent, typedUser],
+    revalidateMentionPubkeys: async (pubkeys, channelId, options) => {
+      calls.push(["revalidate", pubkeys, channelId, options]);
+      return pubkeys;
+    },
+  });
+  assert.deepEqual(calls, [
+    [
+      "revalidate",
+      [selectedAgent, typedUser],
+      undefined,
+      {
+        intendedAgentPubkeys: [selectedAgent],
+      },
+    ],
+    [
+      "save",
+      [
+        ["mention", selectedAgent],
+        ["mention", typedUser],
+      ],
+      [selectedAgent, typedUser],
+    ],
+  ]);
+});
+
 test("ambiguous extractor failure is visible before edit draft clearing or save", async () => {
   const calls = [];
   const error =
