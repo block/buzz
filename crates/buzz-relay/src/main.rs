@@ -1104,14 +1104,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 interval.tick().await;
                 let db_stats = pool_state.db.pool_stats();
                 let read_stats = pool_state.db.read_pool_stats();
-                relay_metrics::record_db_pool_metrics(
-                    db_stats,
-                    read_stats,
-                    audit_metrics_pool
+                relay_metrics::record_db_pool_metrics(relay_metrics::DbPoolMetricsInput {
+                    writer: db_stats,
+                    reader: read_stats,
+                    audit: audit_metrics_pool
                         .as_ref()
                         .map(buzz_db::DbPoolStats::from_pool),
-                    buzz_db::DbPoolStats::from_pool(&search_metrics_pool),
-                );
+                    search: buzz_db::DbPoolStats::from_pool(&search_metrics_pool),
+                });
                 pool_state.db.refresh_pool_waiter_metrics();
 
                 if read_stats.is_some() {

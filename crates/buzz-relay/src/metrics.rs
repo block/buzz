@@ -265,18 +265,31 @@ pub(crate) fn describe_db_pool_metrics() {
     );
 }
 
+/// Named utilization snapshots for every physical Postgres pool role.
+pub struct DbPoolMetricsInput {
+    /// Primary writer pool utilization.
+    pub writer: buzz_db::DbPoolStats,
+    /// Optional read-replica pool utilization.
+    pub reader: Option<buzz_db::DbPoolStats>,
+    /// Optional audit pool utilization.
+    pub audit: Option<buzz_db::DbPoolStats>,
+    /// Search pool utilization.
+    pub search: buzz_db::DbPoolStats,
+}
+
 /// Record fixed-cardinality utilization for every physical Postgres pool role.
 ///
 /// Optional roles emit zero-valued utilization when absent so the unified
 /// scrape always contains four roles by four states plus four configured
 /// series. The original writer and reader gauges are also emitted unchanged
 /// for dashboard compatibility.
-pub fn record_db_pool_metrics(
-    writer: buzz_db::DbPoolStats,
-    reader: Option<buzz_db::DbPoolStats>,
-    audit: Option<buzz_db::DbPoolStats>,
-    search: buzz_db::DbPoolStats,
-) {
+pub fn record_db_pool_metrics(input: DbPoolMetricsInput) {
+    let DbPoolMetricsInput {
+        writer,
+        reader,
+        audit,
+        search,
+    } = input;
     let pools = [Some(writer), reader, audit, Some(search)];
     for (role, stats) in buzz_db::DbPoolRole::ALL.into_iter().zip(pools) {
         let role = role.as_str();
@@ -424,20 +437,20 @@ mod contract_tests {
         let (recorder, handle) = super::readiness_test_recorder();
         metrics::with_local_recorder(&recorder, || {
             super::describe_db_pool_metrics();
-            super::record_db_pool_metrics(
-                buzz_db::DbPoolStats {
+            super::record_db_pool_metrics(super::DbPoolMetricsInput {
+                writer: buzz_db::DbPoolStats {
                     size: 12,
                     idle: 5,
                     max: 20,
                 },
-                None,
-                None,
-                buzz_db::DbPoolStats {
+                reader: None,
+                audit: None,
+                search: buzz_db::DbPoolStats {
                     size: 4,
                     idle: 1,
                     max: 10,
                 },
-            );
+            });
         });
 
         let scrape = handle.render();
@@ -505,24 +518,24 @@ mod contract_tests {
     fn production_pool_sampler_reports_configured_reader_and_legacy_reader_family() {
         let (recorder, handle) = super::readiness_test_recorder();
         metrics::with_local_recorder(&recorder, || {
-            super::record_db_pool_metrics(
-                buzz_db::DbPoolStats {
+            super::record_db_pool_metrics(super::DbPoolMetricsInput {
+                writer: buzz_db::DbPoolStats {
                     size: 1,
                     idle: 1,
                     max: 50,
                 },
-                Some(buzz_db::DbPoolStats {
+                reader: Some(buzz_db::DbPoolStats {
                     size: 9,
                     idle: 2,
                     max: 15,
                 }),
-                None,
-                buzz_db::DbPoolStats {
+                audit: None,
+                search: buzz_db::DbPoolStats {
                     size: 1,
                     idle: 1,
                     max: 10,
                 },
-            );
+            });
         });
 
         let scrape = handle.render();
@@ -538,6 +551,50 @@ mod contract_tests {
         assert_eq!(sample_value(&scrape, "buzz_db_read_pool_idle ", &[]), "2");
         assert_eq!(sample_value(&scrape, "buzz_db_read_pool_active ", &[]), "7");
         assert_eq!(sample_value(&scrape, "buzz_db_read_pool_max ", &[]), "15");
+    }
+
+    #[tokio::test]
+    async fn production_pool_sampler_preserves_audit_and_search_pool_provenance() {
+        let audit_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy("postgres://localhost/buzz")
+            .expect("construct lazy audit pool");
+        let search_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(10)
+            .connect_lazy("postgres://localhost/buzz")
+            .expect("construct lazy search pool");
+        let (recorder, handle) = super::readiness_test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            super::record_db_pool_metrics(super::DbPoolMetricsInput {
+                writer: buzz_db::DbPoolStats {
+                    size: 1,
+                    idle: 1,
+                    max: 50,
+                },
+                reader: None,
+                audit: Some(buzz_db::DbPoolStats::from_pool(&audit_pool)),
+                search: buzz_db::DbPoolStats::from_pool(&search_pool),
+            });
+        });
+
+        let scrape = handle.render();
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_connections{",
+                &[("pool_role", "audit"), ("state", "max")]
+            ),
+            "5"
+        );
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_connections{",
+                &[("pool_role", "search"), ("state", "max")]
+            ),
+            "10"
+        );
     }
 
     #[test]
