@@ -126,9 +126,10 @@ impl WorkflowEngine {
 
     /// Load and verify the exact owner-signed definition bound to a run.
     ///
-    /// The mutable `workflows` row supplies only immutable identity/channel
-    /// binding. Definition content always comes from the run's signed event;
-    /// legacy runs without a revision fail closed.
+    /// The mutable `workflows` row supplies identity/channel binding and the
+    /// current revision pointer. Content always comes from the run's signed event;
+    /// legacy runs without a revision fail closed. Replaced or explicitly deleted
+    /// definitions cannot authorize pending execution or continuation.
     pub async fn load_run_definition(
         &self,
         community_id: CommunityId,
@@ -141,9 +142,14 @@ impl WorkflowEngine {
             )
         })?;
         let workflow = self.db.get_workflow(community_id, run.workflow_id).await?;
+        if workflow.definition_event_id.as_deref() != Some(revision) {
+            return Err(WorkflowError::InvalidDefinition(
+                "workflow run definition revision is no longer current".into(),
+            ));
+        }
         let stored = self
             .db
-            .get_workflow_revision(community_id, revision)
+            .get_event_by_id(community_id, revision)
             .await?
             .ok_or_else(|| {
                 WorkflowError::InvalidDefinition(

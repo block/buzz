@@ -26,7 +26,14 @@ async fn assert_search(f: &Fixture, filter: Value, expected: &[&str]) {
 
     let (conn, mut frames) = f.connection();
     let filters = serde_json::from_slice(&body).expect("filters");
-    crate::handlers::req::handle_req("search".into(), filters, conn.clone(), f.state.clone()).await;
+    crate::handlers::req::handle_req(
+        "search".into(),
+        filters,
+        vec![None],
+        conn.clone(),
+        f.state.clone(),
+    )
+    .await;
     let mut ws_ids = Vec::new();
     loop {
         let frame = next_frame(&mut frames);
@@ -163,6 +170,7 @@ async fn indexed_wakes_are_filtered_by_actual_http_and_ws_search_boundaries() {
     crate::handlers::req::handle_req(
         "denied".into(),
         serde_json::from_slice(&unauthorized).expect("filters"),
+        vec![None],
         conn.clone(),
         f.state.clone(),
     )

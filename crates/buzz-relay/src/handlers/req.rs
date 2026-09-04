@@ -2528,7 +2528,7 @@ mod tests {
     }
 
     #[test]
-    fn p_gate_allows_kindless_search_because_p_gated_rows_are_unsearchable() {
+    fn p_gate_allows_kindless_search_with_per_event_authorization() {
         let (agent, _, _) = three_pubkeys();
         let f = Filter::new().search("ordinary-channel-search");
         assert!(p_gated_filters_authorized(&[f], &agent));

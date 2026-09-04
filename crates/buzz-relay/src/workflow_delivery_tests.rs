@@ -166,7 +166,12 @@ impl Fixture {
         ])
         .sign_with_keys(&self.owner)
         .expect("definition");
-        let mut tx = self.state.db.begin_transaction().await.expect("tx");
+        let mut tx = self
+            .state
+            .db
+            .begin_event_write_transaction()
+            .await
+            .expect("tx");
         self.state
             .db
             .replace_parameterized_event_in_transaction(
@@ -226,7 +231,17 @@ fn next_frame(
 
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
-async fn captured_revision_survives_replacement_but_not_revocation() {
+async fn captured_revision_replacement_revokes_pending_wake() {
+    assert_pending_revision_revoked(true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn captured_revision_deletion_revokes_pending_wake() {
+    assert_pending_revision_revoked(false).await;
+}
+
+async fn assert_pending_revision_revoked(replace: bool) {
     let f = Fixture::new().await;
     let a = f.revision(Timestamp::now().as_secs()).await;
     let run = f
@@ -251,19 +266,62 @@ async fn captured_revision_survives_replacement_but_not_revocation() {
         )
         .await
         .expect("message");
-    f.revision(a.created_at.as_secs() + 1).await;
-    assert!(f
-        .state
-        .db
-        .get_event_by_id(f.community, a.id.as_bytes())
-        .await
-        .expect("live read")
-        .is_none());
-    let authority = f
-        .authority(run, &message)
-        .await
-        .expect("captured authority");
+    // Unchanged exact authority remains usable; neither an edit nor deletion
+    // may substitute new definition content into this bundle.
+    let authority = f.authority(run, &message).await.expect("live authority");
     assert_eq!(authority.0["definition"]["id"], a.id.to_hex());
+    f.state
+        .workflow_engine
+        .load_run_definition(f.community, run)
+        .await
+        .expect("unchanged continuation");
+    if replace {
+        let b = f
+            .revision_with_text(a.created_at.as_secs() + 1, "@Worker new work")
+            .await;
+        assert_eq!(
+            f.authority(run, &message).await.expect_err("replaced").0,
+            StatusCode::NOT_FOUND
+        );
+        assert!(f
+            .state
+            .workflow_engine
+            .load_run_definition(f.community, run)
+            .await
+            .is_err());
+        let new_run = f
+            .state
+            .db
+            .create_workflow_run(f.community, f.workflow, Some(b.id.as_bytes()), None, None)
+            .await
+            .expect("new run");
+        let new_message = RelayActionSink::new(&f.state)
+            .send_message(
+                WorkflowMessageContext {
+                    community_id: f.community,
+                    run_id: new_run,
+                    step_id: "notify".into(),
+                    definition_event_id: Some(b.id.as_bytes().to_vec()),
+                },
+                &f.channel.to_string(),
+                "@Worker new work",
+                "@Worker new work",
+                &f.owner.public_key().to_hex(),
+                None,
+            )
+            .await
+            .expect("new message");
+        assert_eq!(
+            f.authority(new_run, &new_message)
+                .await
+                .expect("fresh wake")
+                .0["definition"]["id"],
+            b.id.to_hex()
+        );
+        // Even fresh authority cannot resurrect the old captured wake.
+        assert!(f.authority(run, &message).await.is_err());
+        return;
+    }
     let deletion = EventBuilder::new(Kind::EventDeletion, "revoke captured revision")
         .tags([Tag::event(a.id)])
         .sign_with_keys(&f.owner)
@@ -286,6 +344,12 @@ async fn captured_revision_survives_replacement_but_not_revocation() {
         f.authority(run, &message).await.expect_err("revoked").0,
         StatusCode::NOT_FOUND
     );
+    assert!(f
+        .state
+        .workflow_engine
+        .load_run_definition(f.community, run)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -331,6 +395,7 @@ async fn removed_open_channel_member_cannot_read_or_count_wakes() {
     crate::handlers::req::handle_req(
         "wakes".into(),
         filters.clone(),
+        vec![None; filters.len()],
         conn.clone(),
         f.state.clone(),
     )
@@ -391,6 +456,7 @@ async fn removed_open_channel_member_cannot_read_or_count_wakes() {
     crate::handlers::req::handle_req(
         "wakes".into(),
         filters.clone(),
+        vec![None; filters.len()],
         conn.clone(),
         f.state.clone(),
     )
@@ -466,7 +532,12 @@ async fn notification_failure_rolls_back_message_mentions_and_thread_metadata() 
         .await
         .expect("metadata rollback")
         .is_none());
-    let mut tx = f.state.db.begin_transaction().await.expect("read mentions");
+    let mut tx = f
+        .state
+        .db
+        .begin_event_write_transaction()
+        .await
+        .expect("read mentions");
     let mentions: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
     )
@@ -516,7 +587,12 @@ async fn notification_failure_rolls_back_message_mentions_and_thread_metadata() 
 async fn storage_timeout_is_retryable_but_missing_authority_is_terminal() {
     use crate::api::workflows::wake_lookup_error;
     let f = Fixture::new().await;
-    let mut tx = f.state.db.begin_transaction().await.expect("transaction");
+    let mut tx = f
+        .state
+        .db
+        .begin_event_write_transaction()
+        .await
+        .expect("transaction");
     sqlx::query("SET LOCAL statement_timeout = '10ms'")
         .execute(&mut *tx)
         .await
@@ -597,7 +673,7 @@ async fn rendered_trigger_mentions_never_create_durable_wakes_or_authority() {
         let mut tx = f
             .state
             .db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("read transaction");
         let count: i64 =
@@ -625,3 +701,116 @@ async fn rendered_trigger_mentions_never_create_durable_wakes_or_authority() {
 
 #[path = "workflow_search_tests.rs"]
 mod workflow_search_postgres_tests;
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn host_lookup_timeout_is_retryable_without_revoking_unchanged_wake() {
+    use axum::{body::Body, http::Request};
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    let mut f = Fixture::new().await;
+    let revision = f.revision(Timestamp::now().as_secs()).await;
+    let run = f
+        .state
+        .db
+        .create_workflow_run(
+            f.community,
+            f.workflow,
+            Some(revision.id.as_bytes()),
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+    let message = RelayActionSink::new(&f.state)
+        .send_message(
+            WorkflowMessageContext {
+                community_id: f.community,
+                run_id: run,
+                step_id: "notify".into(),
+                definition_event_id: Some(revision.id.as_bytes().to_vec()),
+            },
+            &f.channel.to_string(),
+            "@Worker work",
+            "@Worker work",
+            &f.owner.public_key().to_hex(),
+            None,
+        )
+        .await
+        .expect("message and wake");
+    let other_host = format!("other-{}.example", Uuid::new_v4().simple());
+    f.state
+        .db
+        .create_community_with_owner(&other_host, &f.owner.public_key().to_hex())
+        .await
+        .expect("other tenant");
+
+    // Exhaust only this endpoint's writer pool, not the shared database. The
+    // first real read is Db::lookup_community_by_host inside bind_community;
+    // no middleware or mock chooses the HTTP failure code for the test.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(50))
+        .connect(&f.state.config.database_url)
+        .await
+        .expect("isolated writer pool");
+    Arc::make_mut(&mut f.state).db = buzz_db::Db::from_pool(pool.clone());
+    let app = crate::router::build_router(f.state.clone());
+    let request = |host: &str, run: Uuid| {
+        Request::builder()
+            .uri(format!("/workflow-wakes/{run}/{message}"))
+            .header("host", host)
+            .header("x-pubkey", f.agent.public_key().to_hex())
+            .body(Body::empty())
+            .expect("request")
+    };
+    let held = pool.acquire().await.expect("hold sole connection");
+    let unavailable = app
+        .clone()
+        .oneshot(request(&f.host, run))
+        .await
+        .expect("response");
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(unavailable.into_body(), 4096)
+        .await
+        .expect("body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("JSON"),
+        serde_json::json!({"error": "workflow wake authority unavailable"})
+    );
+    drop(held);
+
+    // Releasing the connection repairs the dependency, not the wake or host.
+    // Exactly the same run/message can now fetch its unchanged signed bundle.
+    let recovered = app
+        .clone()
+        .oneshot(request(&f.host, run))
+        .await
+        .expect("response");
+    assert_eq!(recovered.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(recovered.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let authority: serde_json::Value = serde_json::from_slice(&body).expect("authority");
+    assert_eq!(authority["definition"]["id"], revision.id.to_hex());
+    assert_eq!(authority["message"]["id"], message);
+
+    // Missing/unknown host, a mapped but wrong tenant, and a genuinely missing
+    // run remain terminal. In particular, no host can fall back to f.community.
+    let unknown_host = format!("unknown-{}.example", Uuid::new_v4().simple());
+    for (host, requested_run) in [
+        ("", run),
+        (unknown_host.as_str(), run),
+        (other_host.as_str(), run),
+        (f.host.as_str(), Uuid::new_v4()),
+    ] {
+        let denied = app
+            .clone()
+            .oneshot(request(host, requested_run))
+            .await
+            .expect("response");
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND, "host={host}");
+    }
+    pool.close().await;
+}

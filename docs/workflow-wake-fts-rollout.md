@@ -36,8 +36,8 @@ with the underlying signed events; raw SQL access is not a tenant API.
 
 ## Migrations assessed separately
 
-- **0043 workflow revision binding: retained, validation changed.** Nullable
-  `definition_event_id` on workflows and runs is necessary to bind new runs to
+- **0045 workflow revision binding: retained, validation scan avoided.** Nullable
+  `definition_event_id` on workflows and runs binds new runs to
   their exact signed definition, not a guessed current/historical revision.
   Adding the columns without defaults is metadata-only. Length-32 CHECKs are
   added `NOT VALID` to avoid historical validation scans under ACCESS EXCLUSIVE.
@@ -52,29 +52,24 @@ with the underlying signed events; raw SQL access is not a tenant API.
 - **Former 0044 wake FTS: removed.** No whole-events-tree inspection, lock,
   generated-expression rewrite, or history/index rebuild for search policy.
   Unknown custom FTS expressions need no wake-specific normalization.
-- **Former 0045 superseded authority: retained as 0044.** A boolean with
-  `NOT NULL DEFAULT false` uses PostgreSQL's fast-default metadata addition.
-  `deleted_at` alone cannot distinguish replacement from explicit revocation.
-  Positive replacement marks the bit; explicit deletion clears it, including
-  on previously superseded rows. `get_workflow_revision` accepts live or
-  positively superseded definitions, never unknown historical deletions.
-  No historical provenance inference is introduced. This small metadata change
-  still acquires ACCESS EXCLUSIVE locks on the events parent/partitions, but
-  does not rewrite their heaps or indexes.
+- **Supersession bookkeeping removed.** No events-column addition or events
+  migration remains for this feature. Replacement and explicit deletion both
+  revoke a captured definition for pending wake admission and continuation.
+  Signed revision IDs are retained for exact association; historical deleted
+  content is not an alternative source of authority.
 
-The PRs were open and unmerged at reassessment, with main ending at 0042. These
-migration files have not been shipped by this stack. Disposable databases that
-ran the superseded draft migration sequence must be recreated, not silently
-reused with different SQLx checksums. If an operator has applied a draft outside
-that recorded state, stop and reconcile its migration ledger explicitly before
-upgrading. There are no down migrations.
+Main already owns 0043 (push gateway profile) and 0044 (NIP-FI ledger removal).
+Revision binding follows them as 0045. These PRs are unmerged. Disposable
+fixtures which applied earlier draft migration numbers/checksums must not be
+reused as an upgrade source. If an operator applied a draft elsewhere, reconcile
+that ledger explicitly before upgrading. There are no down migrations.
 
 ## Operational cost and rollout
 
 Runtime migration remains opt-in via `BUZZ_AUTO_MIGRATE`. The runner sets
 `lock_timeout = 0` and `statement_timeout = 0` before taking its session-scoped
 schema/destruction advisory lock; SQLx applies each migration file transactionally.
-Neither retained migration supplies its own timeout. Thus both advisory and
+The revision migration supplies no timeout. Thus both advisory and
 relation-lock waits are unbounded in normal auto-migrate startup. Metadata-only
 is **not lock-free or guaranteed low latency**: a long-running transaction can
 block DDL, whose queued lock can delay subsequent reads/writes. Operators should
@@ -84,11 +79,33 @@ No production duration estimate or live database operation is claimed.
 
 PostgreSQL 17 remains the documented VISION/architecture/docker-compose contract,
 so CI still uses 17; this feature no longer needs `SET EXPRESSION` support.
-Deploy schema before new binaries. Mixed older binaries may clear provenance or
-fail closed on replacements they cannot positively identify, not invent legacy
-revision authority. Signed wake persistence, captured-definition validation,
-endpoint authorization, ACP verification/admission and identity/retry lifecycles
-are unchanged by this database redesign.
+Deploy schema before new binaries. Mixed older writers clear projection
+provenance, including equal-value semantic updates. NULL is unknown provenance,
+not permission to infer a historical signature. Ordinary legacy execution is
+not retroactively disabled, but signed continuation/wake reads fail closed.
+Older readers do not implement the new 44620 recipient gate: introducing wake
+producers into a mixed-reader deployment requires rollout coordination; unchanged
+search indexing does not supply that authorization.
+
+## Pending authority, not running-work cancellation
+
+A wake retains its exact run/definition/message IDs. The authenticated authority
+read requires that captured revision still match the workflow projection and
+that its signed event be live. Edit or explicit deletion rejects old pending
+wakes; it never rerenders their visible message with a new definition. A fresh
+run/wake under the new revision works. Manual captured-definition loading and
+stored approval resumes use the same current/live rule. The ordinary engine
+still reports `approval_not_supported`; this is not a new approval product.
+
+Transient authority fetch failures retry/replay the original wake and perform a
+fresh authority lookup; 403/404 and invalid bundles remain terminal. The
+admission decision uses the relay's current-pointer and live-event reads. These
+are separate datastore reads, not a serializable snapshot or an atomic fence
+through network delivery, local queuing, or arbitrary subsequent agent actions.
+An edit/delete after the relevant read cannot retract the bundle already read by
+that request or cancel running work. Signature verification alone proves
+provenance, not perpetual freshness. No universal revocation/cancellation
+guarantee is made.
 
 ## Regression evidence
 
@@ -99,6 +116,14 @@ are unchanged by this database redesign.
   malformed wakes, shared FTS candidates, actual HTTP/WS search responses,
   positive/NOT-only queries, explicit normal kinds, known-ID bypass attempts,
   recipient denial and revoked membership while a public control still returns.
-- Existing unrelated FTS privacy tests and deletion-aware wake/count/approval
-  tests remain in place. Previous ACP/sink/combined execution evidence applies
-  to unchanged authority code, not as a claim of testing the new migration DDL.
+- Existing unrelated FTS privacy and wake/count tests remain in place.
+  Captured authority regressions reject both replacement and explicit deletion;
+  the approval continuation regression rejects stale A rather than executing B.
+- A bounded external runtime experiment drives the actual outer `buzz-acp` with
+  signed sink-persisted wakes, a real HTTP/WS router and database, and a recording
+  ACP child: unchanged revision returns 200/one prompt; edit or signed deletion
+  before authority reads returns 404/zero prompts; 503 followed by deletion
+  before the retry's authority read returns 404/zero prompts. The quiet window
+  is five seconds. This starts at run/sink persistence, not manual-trigger UI,
+  and proves neither indefinite exactly-once delivery nor cancellation after
+  a returned bundle. Migration evidence is separate from this runtime proof.

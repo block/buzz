@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 44);
+        assert_eq!(migrations.len(), 45);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1192,16 +1192,6 @@ mod postgres_tests {
                 .matches("octet_length(definition_event_id) = 32")
                 .count(),
             2
-        );
-
-        // Supersession metadata is additive; there is no wake FTS migration.
-        assert_eq!(migrations[43].version, 44);
-        let workflow_supersession = migrations[43].sql.as_str();
-        assert!(workflow_supersession
-            .contains("workflow_revision_superseded BOOLEAN NOT NULL DEFAULT false"));
-        assert!(!workflow_supersession.contains("UPDATE events"));
-        assert!(
-            desired_schema.contains("workflow_revision_superseded BOOLEAN NOT NULL DEFAULT false")
         );
 
         // pgschema intentionally reconciles DDL, not seed DML or table storage

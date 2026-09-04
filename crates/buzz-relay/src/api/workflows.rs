@@ -287,6 +287,11 @@ pub(crate) fn wake_lookup_error(error: buzz_db::DbError) -> (StatusCode, Json<Va
 }
 
 /// `GET /workflow-wakes/{run_id}/{message_id}` — exact authority bundle for one wake.
+///
+/// Admission checks the current workflow pointer and live captured event through
+/// separate datastore reads. It is not a lock or lease across the returned
+/// response, local agent queue, or subsequent execution; later edits/deletions
+/// cannot retract a bundle already read by this request.
 pub async fn workflow_wake_authority(
     State(state): State<Arc<AppState>>,
     Path((run_id, message_id)): Path<(Uuid, String)>,
@@ -299,7 +304,14 @@ pub async fn workflow_wake_authority(
         .unwrap_or("");
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
-        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+        .map_err(|error| match error {
+            crate::tenant::BindError::UnmappedHost => {
+                api_error(StatusCode::NOT_FOUND, "workflow wake not found")
+            }
+            // Host resolution is an authority read too: unavailable storage
+            // must not masquerade as revocation and strand ACP's pending wake.
+            crate::tenant::BindError::Lookup(error) => wake_lookup_error(error),
+        })?;
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path);
     let bridge::VerifiedBridgeAuth {
         pubkey: recipient,
@@ -324,11 +336,14 @@ pub async fn workflow_wake_authority(
         .as_deref()
         .filter(|id| id.len() == 32)
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    if workflow.definition_event_id.as_deref() != Some(definition_id) {
+        return Err(api_error(StatusCode::NOT_FOUND, "workflow wake not found"));
+    }
     let message_id = nostr::EventId::from_hex(&message_id)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid message id"))?;
     let definition = state
         .db
-        .get_workflow_revision(tenant.community(), definition_id)
+        .get_event_by_id(tenant.community(), definition_id)
         .await
         .map_err(wake_lookup_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;

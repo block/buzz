@@ -219,7 +219,7 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0033 + 0036).
+    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0033).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
         CASE WHEN kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
@@ -229,7 +229,6 @@ CREATE TABLE events (
     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     channel_id  UUID,
     deleted_at  TIMESTAMPTZ,
-    workflow_revision_superseded BOOLEAN NOT NULL DEFAULT false,
     d_tag       TEXT,
     not_before  BIGINT,
     delivered_at BIGINT,

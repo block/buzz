@@ -1,4 +1,4 @@
-//! Atomic workflow output persistence and captured-revision reads.
+//! Atomic workflow output persistence.
 use crate::{event, insert_mentions_in_transaction, Db, Result};
 use buzz_core::{tenant::CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
@@ -17,7 +17,7 @@ impl Db {
         thread_meta: Option<event::ThreadMetadataParams<'_>>,
         notifications: &[nostr::Event],
     ) -> Result<Vec<(StoredEvent, bool)>> {
-        let mut tx = self.begin_transaction().await?;
+        let mut tx = self.begin_event_write_transaction().await?;
         self.deletion_store()
             .guard_transaction(&mut tx, community_id)
             .await?;
@@ -46,15 +46,5 @@ impl Db {
         }
         tx.commit().await?;
         Ok(stored)
-    }
-
-    /// Read a captured workflow definition without reviving explicitly deleted revisions.
-    #[datastore_span(name = "get_workflow_revision", system = "postgresql")]
-    pub async fn get_workflow_revision(
-        &self,
-        community_id: CommunityId,
-        id_bytes: &[u8],
-    ) -> Result<Option<StoredEvent>> {
-        event::get_workflow_revision(&self.pool, community_id, id_bytes).await
     }
 }

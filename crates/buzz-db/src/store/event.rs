@@ -926,13 +926,13 @@ pub async fn soft_delete_event(
     )
     .await?;
     let result = sqlx::query(
-        "UPDATE events SET deleted_at = COALESCE(deleted_at, NOW()), workflow_revision_superseded = false \
-         WHERE community_id = $1 AND id = $2 AND (deleted_at IS NULL OR workflow_revision_superseded)",
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
-            .bind(community_id.as_uuid())
-            .bind(event_id)
-            .execute(&mut *connection)
-            .await?;
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .execute(&mut *connection)
+    .await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -1017,8 +1017,8 @@ pub async fn soft_delete_event_and_update_thread(
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     let result = sqlx::query(
-        "UPDATE events SET deleted_at = COALESCE(deleted_at, NOW()), workflow_revision_superseded = false \
-         WHERE community_id = $1 AND id = $2 AND (deleted_at IS NULL OR workflow_revision_superseded)",
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
     .bind(community_id.as_uuid())
     .bind(event_id)
@@ -1162,30 +1162,6 @@ pub(crate) async fn get_event_by_id_with_operation(
 
     match row {
         Some(r) => row_to_stored_event(r),
-        None => Ok(None),
-    }
-}
-
-/// Fetch a captured workflow revision, including positively identified supersession.
-/// Explicit deletion and legacy rows with unknown deletion reasons remain revoked.
-/// This does not authorize access; callers must verify the run and current membership.
-pub async fn get_workflow_revision(
-    pool: &PgPool,
-    community_id: CommunityId,
-    id_bytes: &[u8],
-) -> Result<Option<StoredEvent>> {
-    let row = sqlx::query(
-        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 AND kind = $3 \
-         AND (deleted_at IS NULL OR workflow_revision_superseded) ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(community_id.as_uuid())
-    .bind(id_bytes)
-    .bind(buzz_core::kind::KIND_WORKFLOW_DEF as i32)
-    .fetch_optional(pool)
-    .await?;
-    match row {
-        Some(row) => row_to_stored_event(row),
         None => Ok(None),
     }
 }
