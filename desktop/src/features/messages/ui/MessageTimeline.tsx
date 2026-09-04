@@ -875,7 +875,9 @@ const MessageTimelineBase = React.forwardRef<
           )}
         </div>
 
-        {!isAtBottom ? (
+        {/* The frozen tail can physically reach bottom while newer rows are
+            still buffered. Keep the catch-up action reachable in that state. */}
+        {!isAtBottom || bufferedTimeline.pendingCount > 0 ? (
           <div
             className={cn(
               "pointer-events-none absolute inset-x-0 bottom-4 z-50 flex justify-center px-4",
