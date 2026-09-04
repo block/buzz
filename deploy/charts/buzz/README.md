@@ -110,10 +110,11 @@ SigV4 signing, so do not put the bucket into `s3.endpoint`; pass Railway's base
 
 Object storage is contacted during relay startup only when
 `BUZZ_GIT_CONFORMANCE_PROBE` is enabled (the relay default). A probe failure is
-startup-fatal, so Kubernetes readiness never opens. If an operator explicitly
-disables that probe through `relay.extraEnv`, `/_readiness` does not test object
-storage; configuration is still parsed strictly, but reachability and addressing
-errors surface on the first storage operation.
+startup-fatal, so the process exits and Kubernetes readiness never opens. If an
+operator explicitly disables that probe through `relay.extraEnv`, configuration
+is still parsed strictly, but reachability and addressing errors surface on the
+first storage operation. `/_readiness` tests no external dependency in either
+case — see the readiness contract below.
 
 ### Early-startup telemetry contract
 
@@ -125,26 +126,56 @@ These phases intentionally do not emit metrics. Most run before the Prometheus
 exporter exists, and one uniform log-only contract preserves every phase's real
 event time and failure without assigning an eventual scrape time to earlier work.
 
+### Readiness contract
+
+**`/_readiness` reports local process lifecycle only.** It performs no
+Postgres, Redis, or deletion-catalog I/O: `shutting_down` returns 503, and any
+other state returns 200. Shared dependencies are shared by every replica, so
+gating the probe on them removed the whole deployment from the load balancer at
+once and left a reconnect burst with nowhere to land. There is no separate
+"starting" state — the health listener does not bind until the database,
+migrations, Redis, and pub/sub are up, so a process that can answer has booted.
+
+Shared-dependency health moved to **`/_status`** on the same private health
+listener, under a `dependencies` object carrying the `postgres`, `redis`,
+`deletion_catalog`, and aggregate `reason` fields the readiness body used to
+return. Do not wire `/_status` to a Kubernetes probe; it is the only endpoint
+that touches the shared pools.
+
 ### Readiness telemetry contract
 
 Only requests served by the private health listener (`BUZZ_HEALTH_PORT`) emit
-rollout readiness telemetry. The compatibility `/_readiness` route on the public
-app listener returns health but does not change these metrics.
+rollout telemetry. The compatibility `/_readiness` route on the public app
+listener returns the same lifecycle answer but does not change these metrics.
+
+| Metric | Type | Labels | Source |
+|--------|------|--------|--------|
+| `buzz_readiness_checks_total` | counter | `reason` ∈ {`ready`, `shutting_down`} | `/_readiness` |
+| `buzz_readiness_state` | gauge | `check="overall"`; 1 ready, 0 shutting down | `/_readiness`, shutdown |
+| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | `/_status` |
+| `buzz_readiness_check_duration_seconds` | histogram | `check` only | `/_status` |
+
+The two dependency families keep their `buzz_readiness_*` names for dashboard
+continuity; their trigger moved from the 5s probe to `/_status`, so they now
+sample only when an operator or a scheduled scrape requests that endpoint.
+
+The schema has a ceiling of 86 raw Prometheus series per pod: 2 probe reasons,
+11 valid dependency/outcome pairs, 72 histogram series, and 1 gauge. Do not add
+pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
+community, pubkey, header, query, or other request-controlled labels. A
+readiness probe records no dependency attempt or latency sample at all.
+
+### Community admission telemetry
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `buzz_readiness_checks_total` | counter | `reason` from the closed readiness-reason set |
-| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` |
-| `buzz_readiness_check_duration_seconds` | histogram | `check` only |
-| `buzz_readiness_state` | gauge | `check` only; latest publishable generation |
+| `buzz_community_admission_checks_total` | counter | `outcome` ∈ {`active`, `inactive`, `check_error`} |
 
-The schema has a ceiling of 99 raw Prometheus series per pod: 12 overall
-reasons, 11 valid dependency/outcome pairs, 72 histogram series, and 4 gauges.
-Do not add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant,
-user, community, pubkey, header, query, or other request-controlled labels.
-Shutdown without dependency evaluation increments only
-`buzz_readiness_checks_total{reason="shutting_down"}` and sets the overall
-state to zero; it does not fabricate dependency failures or latency samples.
+Counts the durable community-active check run when a socket is admitted.
+`inactive` is a confirmed answer and cancels the socket; `check_error` is a
+lookup failure and admits it, leaving eviction to the periodic lifecycle
+revalidator. `outcome` is the only dimension — community and error text are
+request-controlled and must never become labels.
 
 ### Operation-aware database pool acquisition contract
 
