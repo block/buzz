@@ -1591,22 +1591,29 @@ test("playback speed persists across videos and reloads", async ({ page }) => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await waitForMockLiveSubscription(page, "general");
-    await emitMockMessage(page, "general", `![video](${url})`, {
-      extraTags: [
-        [
-          "imeta",
-          `url ${url}`,
-          "m video/mp4",
-          `x ${sha}`,
-          "size 987654",
-          "dim 160x80",
-          "duration 12.5",
-          `image ${POSTER_DATA_URL}`,
-          `filename ${filename}`,
+    const emitted = (await emitMockMessage(
+      page,
+      "general",
+      `![video](${url})`,
+      {
+        extraTags: [
+          [
+            "imeta",
+            `url ${url}`,
+            "m video/mp4",
+            `x ${sha}`,
+            "size 987654",
+            "dim 160x80",
+            "duration 12.5",
+            `image ${POSTER_DATA_URL}`,
+            `filename ${filename}`,
+          ],
         ],
-      ],
-    });
-    const player = page.getByTestId("video-player").last();
+      },
+    )) as { id: string };
+    const player = page
+      .locator(`[data-message-id="${emitted.id}"]`)
+      .getByTestId("video-player");
     await expect(player).toBeVisible();
     await player.getByRole("button", { name: "Play video" }).click();
     return player;

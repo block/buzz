@@ -58,9 +58,20 @@ test("notifies subscribers when the speed changes", () => {
   assert.equal(notifications, 1);
 });
 
-test("adopts a speed changed in another window", () => {
+test("notifies mounted consumers when another window changes the speed", () => {
   preference.setVideoPlaybackSpeed(1);
+  let notifications = 0;
+  const unsubscribe = preference.subscribeToVideoPlaybackSpeed(() => {
+    notifications += 1;
+  });
+
   values.set("buzz.media.videoPlaybackSpeed", "0.5");
   windowListeners.get("storage")({ key: "buzz.media.videoPlaybackSpeed" });
   assert.equal(preference.getVideoPlaybackSpeed(), 0.5);
+  assert.equal(notifications, 1);
+
+  // A redundant storage event must not needlessly re-render every player.
+  windowListeners.get("storage")({ key: "buzz.media.videoPlaybackSpeed" });
+  assert.equal(notifications, 1);
+  unsubscribe();
 });

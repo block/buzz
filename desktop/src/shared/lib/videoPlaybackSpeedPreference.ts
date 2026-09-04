@@ -12,6 +12,7 @@ export const VIDEO_PLAYBACK_SPEEDS = [
   2, 1.75, 1.5, 1.25, 1, 0.75, 0.5, 0.25,
 ] as const;
 
+/** Playback speed used when no valid saved preference exists. */
 export const DEFAULT_VIDEO_PLAYBACK_SPEED = 1;
 
 const listeners = new Set<() => void>();
@@ -23,6 +24,7 @@ export function isVideoPlaybackSpeed(speed: number): boolean {
   return VIDEO_PLAYBACK_SPEEDS.some((option) => option === speed);
 }
 
+/** Parse a stored value, falling back when it is missing or unsupported. */
 export function parseVideoPlaybackSpeed(
   value: string | null | undefined,
 ): number {
@@ -75,6 +77,7 @@ export function subscribeToVideoPlaybackSpeed(
   };
 }
 
+/** Return the current device-level playback-speed preference. */
 export function getVideoPlaybackSpeed(): number {
   listenForStorageChanges();
   if (videoPlaybackSpeed === null) {
