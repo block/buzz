@@ -517,59 +517,65 @@ void main() {
     },
   );
 
-  test('retry() re-subscribes with the same filter after an onClosed error', () async {
-    final userKeychain = nostr.Keys.generate();
-    final agentKeychain = nostr.Keys.generate();
-    final relaySession = _RecordingRelaySession();
-    final container = ProviderContainer(
-      overrides: [
-        relaySessionProvider.overrideWith(() => relaySession),
-        relayConfigProvider.overrideWith(
-          () => _FakeRelayConfigNotifier(nsec: userKeychain.nsec),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
+  test(
+    'retry() re-subscribes with the same filter after an onClosed error',
+    () async {
+      final userKeychain = nostr.Keys.generate();
+      final agentKeychain = nostr.Keys.generate();
+      final relaySession = _RecordingRelaySession();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relaySession),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(nsec: userKeychain.nsec),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
 
-    final key = (channelId: 'test-channel', agentPubkey: agentKeychain.public);
-    container.read(observerSubscriptionProvider(key));
-    await Future<void>.delayed(Duration.zero);
+      final key = (
+        channelId: 'test-channel',
+        agentPubkey: agentKeychain.public,
+      );
+      container.read(observerSubscriptionProvider(key));
+      await Future<void>.delayed(Duration.zero);
 
-    // Terminal error while the session stays connected.
-    relaySession.closeAll('restricted: p-gated events require #p');
-    expect(
-      container.read(observerSubscriptionProvider(key)).connection,
-      ObserverConnectionState.error,
-    );
+      // Terminal error while the session stays connected.
+      relaySession.closeAll('restricted: p-gated events require #p');
+      expect(
+        container.read(observerSubscriptionProvider(key)).connection,
+        ObserverConnectionState.error,
+      );
 
-    // Retry emits connecting and re-enters subscribe.
-    final retryFuture = container
-        .read(observerRelayProvider.notifier)
-        .retry();
-    expect(
-      container.read(observerSubscriptionProvider(key)).connection,
-      ObserverConnectionState.connecting,
-    );
+      // Retry emits connecting and re-enters subscribe.
+      final retryFuture = container
+          .read(observerRelayProvider.notifier)
+          .retry();
+      expect(
+        container.read(observerSubscriptionProvider(key)).connection,
+        ObserverConnectionState.connecting,
+      );
 
-    await retryFuture;
-    await Future<void>.delayed(Duration.zero);
+      await retryFuture;
+      await Future<void>.delayed(Duration.zero);
 
-    // closeAll cleared the recorded filters; the retried subscribe is the only
-    // live entry, and it must repeat the exact filter shape.
-    expect(relaySession.filters, hasLength(1));
-    final retriedFilter = relaySession.filters.last;
-    expect(retriedFilter.kinds, [EventKind.agentObserverFrame]);
-    expect(retriedFilter.limit, 0);
-    expect(retriedFilter.tags['#p'], contains(userKeychain.public));
-    expect(
-      container.read(observerSubscriptionProvider(key)).connection,
-      ObserverConnectionState.open,
-    );
-    expect(
-      container.read(observerSubscriptionProvider(key)).errorMessage,
-      isNull,
-    );
-  });
+      // closeAll cleared the recorded filters; the retried subscribe is the only
+      // live entry, and it must repeat the exact filter shape.
+      expect(relaySession.filters, hasLength(1));
+      final retriedFilter = relaySession.filters.last;
+      expect(retriedFilter.kinds, [EventKind.agentObserverFrame]);
+      expect(retriedFilter.limit, 0);
+      expect(retriedFilter.tags['#p'], contains(userKeychain.public));
+      expect(
+        container.read(observerSubscriptionProvider(key)).connection,
+        ObserverConnectionState.open,
+      );
+      expect(
+        container.read(observerSubscriptionProvider(key)).errorMessage,
+        isNull,
+      );
+    },
+  );
 
   test('retry() is repeatable and idempotent while subscribed', () async {
     final userKeychain = nostr.Keys.generate();

@@ -124,8 +124,7 @@ class AgentActivitySheet extends HookConsumerWidget {
                       child: _EmptyState(
                         connection: connection,
                         errorMessage: observerState.errorMessage,
-                        onRetry:
-                            connection == ObserverConnectionState.error
+                        onRetry: connection == ObserverConnectionState.error
                             ? () => ref
                                   .read(observerRelayProvider.notifier)
                                   .retry()
@@ -158,7 +157,11 @@ class _EmptyState extends StatelessWidget {
   final String? errorMessage;
   final VoidCallback? onRetry;
 
-  const _EmptyState({required this.connection, this.errorMessage, this.onRetry});
+  const _EmptyState({
+    required this.connection,
+    this.errorMessage,
+    this.onRetry,
+  });
 
   @override
   Widget build(BuildContext context) {
