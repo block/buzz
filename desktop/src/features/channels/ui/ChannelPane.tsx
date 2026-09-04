@@ -30,6 +30,7 @@ import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThre
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { IdleAuxiliaryPanel } from "@/features/channels/ui/IdleAuxiliaryPanel";
 import { MarkdownDocAuxiliaryPanel } from "@/features/channels/ui/MarkdownDocAuxiliaryPanel";
+import { ChannelMarkdownDocSurfaces } from "@/features/channels/ui/ChannelMarkdownDocSurfaces";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { createChannelPaneAuxiliaryLayout } from "@/features/channels/ui/channelPaneAuxiliaryLayout";
 import {
@@ -43,6 +44,7 @@ import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout"
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
+import { AUXILIARY_PANEL_MIN_WIDTH_PX } from "@/shared/layout/AuxiliaryPanel";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
@@ -85,6 +87,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onAutoSendComplete = null,
   botTypingEntries,
   channelManagementOpen = false,
+  channelContentWidthPx,
   currentPubkey,
   editTarget = null,
   fetchOlder,
@@ -437,10 +440,15 @@ export const ChannelPane = React.memo(function ChannelPane({
     priorityIdleAuxiliary,
     replaceThreadWithIdleAuxiliary,
     showIdleAuxiliaryOverThread,
+    showMarkdownBesideThread,
     useFocusIdleDrawer,
     useFocusThreadDrawer,
+    useStackedMarkdownPanel,
     useSplitAuxiliaryPane,
   } = createChannelPaneAuxiliaryLayout({
+    canFitThirdPanel:
+      channelContentWidthPx >=
+      threadPanelWidthPx * 2 + AUXILIARY_PANEL_MIN_WIDTH_PX,
     channelManagementOpen,
     hasAgentSession: Boolean(activeChannel && selectedAgent),
     hasIdleAuxiliaryPanel: Boolean(idleAuxiliaryPanel),
@@ -456,14 +464,16 @@ export const ChannelPane = React.memo(function ChannelPane({
   });
   const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(
     useFocusThreadDrawer || useFocusIdleDrawer,
-    priorityIdleAuxiliary
-      ? (onCloseIdleAuxiliaryPanel ?? onCloseThread)
-      : useFocusThreadDrawer
-        ? onCloseThread
-        : (onCloseIdleAuxiliaryPanel ?? onCloseThread),
+    useStackedMarkdownPanel && onCloseMarkdownDoc
+      ? onCloseMarkdownDoc
+      : priorityIdleAuxiliary
+        ? (onCloseIdleAuxiliaryPanel ?? onCloseThread)
+        : useFocusThreadDrawer
+          ? onCloseThread
+          : (onCloseIdleAuxiliaryPanel ?? onCloseThread),
   );
   const threadSurface = useThreadPanelSurface(
-    showIdleAuxiliaryOverThread,
+    showIdleAuxiliaryOverThread || useStackedMarkdownPanel,
     markExitComplete,
   );
   const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
@@ -989,9 +999,8 @@ export const ChannelPane = React.memo(function ChannelPane({
           idleAuxiliarySurface
         )}
       </AnimatePresence>
-      <AnimatePresence onExitComplete={threadSurface.markExitComplete}>
-        {showIdleAuxiliaryOverThread ? idleAuxiliarySurface : null}
-      </AnimatePresence>
+      {/* biome-ignore format: line-count ratchet in this legacy component */}
+      <ChannelMarkdownDocSurfaces {...{ openMarkdownDoc, onCloseMarkdownDoc, threadSurface, canResetThreadPanelWidth, onResetThreadPanelWidth, onThreadPanelResizeStart, showMarkdownBesideThread, useStackedMarkdownPanel, showIdleAuxiliaryOverThread, idleAuxiliarySurface, threadPanelWidthPx }} />
     </div>
   );
 });

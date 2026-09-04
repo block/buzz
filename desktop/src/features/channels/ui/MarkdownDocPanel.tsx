@@ -14,6 +14,7 @@ import {
 } from "@/features/channels/ui/markdownDocFocus";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
+import { cn } from "@/shared/lib/cn";
 import {
   AuxiliaryPanel,
   AuxiliaryPanelBody,
@@ -37,6 +38,8 @@ type MarkdownDocPanelProps = {
   url: string;
   /** Human-readable filename from the imeta `filename` field. */
   filename: string;
+  /** Fill a parent focus drawer and center the document reading column. */
+  isFocusMode?: boolean;
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
   onClose: () => void;
@@ -68,6 +71,7 @@ function decodeErrorMessage(kind: "too-large" | "binary"): string {
 export function MarkdownDocPanel({
   url,
   filename,
+  isFocusMode = false,
   isSinglePanelView = false,
   layout = "standalone",
   onClose,
@@ -125,7 +129,8 @@ export function MarkdownDocPanel({
 
   return (
     <AuxiliaryPanel
-      isSinglePanelView={isSinglePanelView}
+      className={isFocusMode ? "w-full" : undefined}
+      isSinglePanelView={isFocusMode || isSinglePanelView}
       layout={layout}
       onClose={onClose}
       testId="markdown-doc-panel"
@@ -155,13 +160,21 @@ export function MarkdownDocPanel({
         </AuxiliaryPanelHeader>
       }
     >
-      <AuxiliaryPanelBody className="flex min-h-0 flex-col" panelPadding>
+      <AuxiliaryPanelBody
+        className="flex min-h-0 flex-col"
+        panelPadding={!isFocusMode}
+      >
         {/* The view picker gets its own pinned row below the title: sharing
             the title row squeezed the filename out, and the header chrome
             band overlays anything placed directly after it in the header
             slot — so the row lives inside the chrome-padded body instead. */}
         {decoded?.kind === "ok" ? (
-          <div className="flex shrink-0 items-center px-4 pb-2">
+          <div
+            className={cn(
+              "flex w-full shrink-0 items-center px-4 pb-2",
+              isFocusMode && "mx-auto max-w-[55rem]",
+            )}
+          >
             <SegmentedControl
               legend="Document view"
               onValueChange={setView}
@@ -174,43 +187,45 @@ export function MarkdownDocPanel({
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6">
-          {docQuery.isPending ? (
-            <div
-              className="flex items-center justify-center py-12"
-              data-testid="markdown-doc-loading"
-            >
-              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/70" />
-            </div>
-          ) : errorMessage !== null ? (
-            <div className="flex flex-col items-center gap-3 py-12 text-center">
-              <p className="text-sm text-muted-foreground">{errorMessage}</p>
-              <Button onClick={handleDownload} size="sm" variant="secondary">
-                <Download className="mr-1.5 h-4 w-4" />
-                Download file
-              </Button>
-            </div>
-          ) : decoded?.kind === "ok" ? (
-            view === "preview" ? (
-              <Markdown
-                blockCode
-                className="pt-3 text-sm"
-                content={decoded.text}
-                hardLineBreaks={false}
-              />
-            ) : (
-              <pre
-                className="overflow-x-auto pt-3 text-xs leading-relaxed"
-                data-testid="markdown-doc-code"
+          <div className={cn("w-full", isFocusMode && "mx-auto max-w-[55rem]")}>
+            {docQuery.isPending ? (
+              <div
+                className="flex items-center justify-center py-12"
+                data-testid="markdown-doc-loading"
               >
-                {/* Shiki's synchronous-tokenization guard caps highlighting at
-                  150 lines; longer documents render as plain text here. */}
-                <SyntaxHighlightedCode
-                  code={decoded.text}
-                  language="markdown"
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/70" />
+              </div>
+            ) : errorMessage !== null ? (
+              <div className="flex flex-col items-center gap-3 py-12 text-center">
+                <p className="text-sm text-muted-foreground">{errorMessage}</p>
+                <Button onClick={handleDownload} size="sm" variant="secondary">
+                  <Download className="mr-1.5 h-4 w-4" />
+                  Download file
+                </Button>
+              </div>
+            ) : decoded?.kind === "ok" ? (
+              view === "preview" ? (
+                <Markdown
+                  blockCode
+                  className="pt-3 text-sm"
+                  content={decoded.text}
+                  hardLineBreaks={false}
                 />
-              </pre>
-            )
-          ) : null}
+              ) : (
+                <pre
+                  className="overflow-x-auto pt-3 text-xs leading-relaxed"
+                  data-testid="markdown-doc-code"
+                >
+                  {/* Shiki's synchronous-tokenization guard caps highlighting at
+                  150 lines; longer documents render as plain text here. */}
+                  <SyntaxHighlightedCode
+                    code={decoded.text}
+                    language="markdown"
+                  />
+                </pre>
+              )
+            ) : null}
+          </div>
         </div>
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>

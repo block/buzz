@@ -84,6 +84,36 @@ async function attachAndSendMarkdown(page: Page) {
   await expect(page.getByText("Sending")).toHaveCount(0);
 }
 
+test("markdown attachment sent as a thread reply keeps the viewer action", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.locator('[data-testid^="reply-message-"]').first().click({
+    force: true,
+  });
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    threadPanel.getByRole("button", { name: "Attach file" }).click(),
+  ]);
+  await chooser.setFiles({
+    buffer: Buffer.from(DOC_MARKDOWN),
+    mimeType: "text/markdown",
+    name: "release-notes.md",
+  });
+  await threadPanel.getByTestId("send-message").click();
+  await expect(threadPanel.getByText("Sending")).toHaveCount(0);
+
+  const card = threadPanel.getByTestId("file-card").last();
+  await expect(card).toContainText("release-notes.md");
+  await expect(card).toHaveAttribute("aria-label", "Open release-notes.md");
+});
+
 test("markdown attachment opens the in-app viewer with Preview/Code toggle", async ({
   page,
 }) => {
@@ -207,6 +237,12 @@ test("open document survives reload and back/forward navigation", async ({
   // restores it — the advertised back/forward contract.
   await page.goBack();
   await expect(page.getByTestId("markdown-doc-panel")).toHaveCount(0);
+  // Rehydrating the channel must not downgrade a known markdown attachment to
+  // Download while relay-origin discovery catches up.
+  await expect(page.getByTestId("file-card").last()).toHaveAttribute(
+    "aria-label",
+    "Open release-notes.md",
+  );
   await page.goForward();
   await expect(
     panel().getByRole("heading", { name: "Release Notes" }),

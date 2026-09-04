@@ -4,6 +4,7 @@ import {
 } from "./ChannelPane.helpers";
 
 type ChannelPaneAuxiliaryLayoutOptions = {
+  canFitThirdPanel: boolean;
   channelManagementOpen: boolean;
   hasAgentSession: boolean;
   hasIdleAuxiliaryPanel: boolean;
@@ -19,6 +20,7 @@ type ChannelPaneAuxiliaryLayoutOptions = {
 };
 
 export function createChannelPaneAuxiliaryLayout({
+  canFitThirdPanel,
   channelManagementOpen,
   hasAgentSession,
   hasIdleAuxiliaryPanel,
@@ -61,6 +63,18 @@ export function createChannelPaneAuxiliaryLayout({
   });
 
   const displayedMarkdownDoc = priorityIdleAuxiliary ? null : openMarkdownDoc;
+  const showMarkdownBesideThread = Boolean(
+    displayedMarkdownDoc &&
+      hasThreadSurface &&
+      useSplitAuxiliaryPane &&
+      canFitThirdPanel,
+  );
+  const useStackedMarkdownPanel = Boolean(
+    displayedMarkdownDoc &&
+      hasThreadSurface &&
+      useSplitAuxiliaryPane &&
+      !showMarkdownBesideThread,
+  );
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
     (channelManagementOpen ||
@@ -75,8 +89,10 @@ export function createChannelPaneAuxiliaryLayout({
     replaceThreadWithIdleAuxiliary,
     showIdleAuxiliaryOverThread:
       overlayIdleAuxiliaryOverThread && useFocusIdleDrawer,
+    showMarkdownBesideThread,
     useFocusIdleDrawer,
     useFocusThreadDrawer,
+    useStackedMarkdownPanel,
     useSplitAuxiliaryPane,
   };
 }

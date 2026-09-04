@@ -50,6 +50,10 @@ import type { Channel, UserProfileSummary } from "@/shared/api/types";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import {
+  type MarkdownDocTarget,
+  MarkdownDocViewerProvider,
+} from "@/shared/ui/markdown/markdownDocViewerContext";
 import { VideoReviewNavigationProvider } from "@/shared/ui/VideoReviewNavigation";
 import {
   DropdownMenu,
@@ -125,6 +129,7 @@ type InboxDetailPaneProps = {
     messageId: string,
     threadRootId?: string | null,
   ) => void;
+  onOpenMarkdownDoc: (doc: MarkdownDocTarget) => void;
   /** True while the selected hidden DM is being reopened on the relay. */
   reopenPending?: boolean;
   /** True when the last reopen of the selected hidden DM failed. */
@@ -157,7 +162,9 @@ export function InboxDetailPane(props: InboxDetailPaneProps) {
 
   return (
     <VideoReviewNavigationProvider>
-      <InboxMessageDetailPane {...props} />
+      <MarkdownDocViewerProvider value={props.onOpenMarkdownDoc}>
+        <InboxMessageDetailPane {...props} />
+      </MarkdownDocViewerProvider>
     </VideoReviewNavigationProvider>
   );
 }

@@ -3,6 +3,8 @@ import type { MarkdownDocTarget } from "@/shared/ui/markdown/markdownDocViewerCo
 
 type MarkdownDocAuxiliaryPanelProps = {
   doc: MarkdownDocTarget;
+  /** Render chrome for the full focus drawer rather than a narrow pane. */
+  isFocusDrawer?: boolean;
   isSinglePanelView: boolean;
   onClose: () => void;
   useSplitAuxiliaryPane: boolean;
@@ -21,6 +23,7 @@ type MarkdownDocAuxiliaryPanelProps = {
  */
 export function MarkdownDocAuxiliaryPanel({
   doc,
+  isFocusDrawer = false,
   isSinglePanelView,
   onClose,
   useSplitAuxiliaryPane,
@@ -32,10 +35,13 @@ export function MarkdownDocAuxiliaryPanel({
     <MarkdownDocPanel
       key={doc.url}
       filename={doc.filename}
-      isSinglePanelView={useSplitAuxiliaryPane ? false : isSinglePanelView}
-      layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+      isFocusMode={isFocusDrawer}
+      isSinglePanelView={
+        isFocusDrawer || useSplitAuxiliaryPane ? false : isSinglePanelView
+      }
+      layout={useSplitAuxiliaryPane && !isFocusDrawer ? "split" : "standalone"}
       onClose={onClose}
-      transparentChrome={useSplitAuxiliaryPane}
+      transparentChrome={useSplitAuxiliaryPane && !isFocusDrawer}
       url={doc.url}
       widthPx={widthPx}
     />

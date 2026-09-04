@@ -833,6 +833,7 @@ export function ChannelScreen({
                   <GuardedChannelPane
                   onOpenMarkdownDoc={handleOpenMarkdownDoc}
                   activeChannel={activeChannel}
+                  channelContentWidthPx={channelContentWidthPx}
                   activityAgents={channelAgentSessionAgents}
                   agentPubkeys={agentPubkeys}
                   agentPubkeysPending={agentPubkeysPending}

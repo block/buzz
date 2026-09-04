@@ -80,22 +80,37 @@ export function useChannelPaneOpeners({
 
   const handleOpenMarkdownDoc = React.useCallback(
     (doc: MarkdownDocTarget) => {
-      // Opening a doc closes the thread pane, so an in-progress thread edit
-      // must be resolved first — same contract as the sibling pane openers.
-      if (!requireThreadEditResolution()) return;
-      // Capture the invoking card's identity before the panel swap unmounts
-      // it, so close can restore focus to this card and not merely the first
-      // card sharing the document URL.
+      // Capture the invoking card's identity before a narrow-layout panel swap
+      // can unmount it. In wide layouts an open thread remains mounted beneath
+      // the document focus drawer, preserving its scroll and reply state.
       recordMarkdownDocOpener(doc.url, doc.opener ?? null);
-      clearCompetingPanes();
+      // A document opened from the center timeline takes the ordinary right
+      // pane, replacing any open thread. A thread card (or URL-restored Inbox
+      // context, which has no live opener element) preserves that thread so
+      // ChannelPane can choose side-by-side vs stacked responsively.
+      if (
+        doc.opener &&
+        !doc.opener.closest('[data-testid="message-thread-panel"]')
+      ) {
+        setOpenThreadHeadId(null);
+        setExpandedThreadReplyIds(new Set());
+        setThreadScrollTargetId(null);
+        setThreadReplyTargetId(null);
+      }
+      closeAgentSession();
+      setProfilePanelPubkey(null);
       setChannelManagementOpen(false);
       openMarkdownDoc(doc.url, doc.filename);
     },
     [
-      clearCompetingPanes,
+      closeAgentSession,
       openMarkdownDoc,
-      requireThreadEditResolution,
       setChannelManagementOpen,
+      setExpandedThreadReplyIds,
+      setOpenThreadHeadId,
+      setProfilePanelPubkey,
+      setThreadReplyTargetId,
+      setThreadScrollTargetId,
     ],
   );
 

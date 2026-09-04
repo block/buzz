@@ -36,6 +36,8 @@ export type ChannelPaneProps = {
   onAutoSendComplete?: (() => void) | null;
   botTypingEntries: TypingIndicatorEntry[];
   channelManagementOpen?: boolean;
+  /** Width of the channel content container, used for responsive pane topology. */
+  channelContentWidthPx: number;
   currentPubkey?: string;
   editTarget?: MessageComposerEditTarget | null;
   fetchOlder?: () => Promise<void>;
