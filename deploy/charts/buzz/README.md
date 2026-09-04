@@ -289,6 +289,29 @@ adapter (for example Prometheus Adapter) configured to expose the relay's
 install or configure a cluster-wide metrics adapter. Scale-down is gradual by
 default so long-lived WebSocket connections have time to drain.
 
+### Topology-aware routing
+
+`service.trafficDistribution` (and `pairingRelay.service.trafficDistribution`) set
+the Service `spec.trafficDistribution` field, which biases routing toward
+endpoints near the client instead of spreading evenly across all ready endpoints:
+
+```yaml
+service:
+  trafficDistribution: PreferClose
+```
+
+| Value | Effect | Requires |
+|---|---|---|
+| `""` (default) | Field omitted — cluster default, even spread | — |
+| `PreferClose` | Prefer topologically close endpoints (same zone) | Kubernetes 1.31+ (beta, on by default in 1.32+) |
+| `PreferSameZone` | Same-zone preference; explicit alias of `PreferClose` | Kubernetes 1.33+ |
+| `PreferSameNode` | Prefer endpoints on the same node | Kubernetes 1.33+ |
+
+Preference only: when no near endpoint is ready, traffic falls back to the rest,
+so this is a cross-zone egress optimization, not a locality guarantee. An
+unsupported value is rejected by the API server at apply time — set only what
+your cluster version supports.
+
 ## Upgrades
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
