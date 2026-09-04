@@ -588,24 +588,37 @@ class MediaUploadService {
     }
 
     final sha256 = _sha256Hex(bytes);
-    var response = await _sendUploadRequest(
+    Future<http.Response> uploadTo(String path) => _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
       sha256: sha256,
-      path: _mediaUploadPath,
+      path: path,
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
-    if (response.statusCode == HttpStatus.notFound ||
-        response.statusCode == HttpStatus.methodNotAllowed) {
-      response = await _sendUploadRequest(
-        bytes: bytes,
-        mimeType: mimeType,
-        sha256: sha256,
-        path: _legacyMediaUploadPath,
-        onProgress: onProgress,
-        cancellationToken: cancellationToken,
-      );
+
+    late http.Response response;
+    var usedLegacyRoute = false;
+    try {
+      response = await uploadTo(_mediaUploadPath);
+    } on http.ClientException {
+      _throwIfCancelled(cancellationToken);
+      // Older self-hosted relays can reject /upload before consuming the
+      // streamed request body. Dart then reports the half-closed stream as a
+      // connection reset instead of exposing the 404/405 response. Blossom
+      // uploads are SHA-256 idempotent, so retrying the legacy alias is safe
+      // even if the first response was lost after the server stored the blob.
+      usedLegacyRoute = true;
+      response = await uploadTo(_legacyMediaUploadPath);
+    } on SocketException {
+      _throwIfCancelled(cancellationToken);
+      usedLegacyRoute = true;
+      response = await uploadTo(_legacyMediaUploadPath);
+    }
+    if (!usedLegacyRoute &&
+        (response.statusCode == HttpStatus.notFound ||
+            response.statusCode == HttpStatus.methodNotAllowed)) {
+      response = await uploadTo(_legacyMediaUploadPath);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       if (_allowedImageMimeTypes.contains(mimeType) &&
