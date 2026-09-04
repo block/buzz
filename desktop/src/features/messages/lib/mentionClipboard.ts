@@ -1,3 +1,4 @@
+import { formatMentionDisplayLabel } from "@/shared/lib/mentionDisplay";
 import { truncateInlineChipLabel } from "@/shared/ui/mentionChip";
 
 import { getMentionOffsets } from "./hasMention";
@@ -77,6 +78,7 @@ export function matchChipTextToLabel(
   text: string,
   label: string,
   sigil: "@" | "#",
+  pubkey?: string,
 ): ChipTextMatch {
   const body = canonicalMentionLabel(text);
   const matches = (form: string) => body === form || body === `${sigil}${form}`;
@@ -85,6 +87,13 @@ export function matchChipTextToLabel(
   // cannot drift from what a fully selected capped chip actually carries.
   const truncated = truncateInlineChipLabel(label);
   if (truncated !== label && matches(canonicalMentionLabel(truncated))) {
+    return "truncated";
+  }
+  // Read-only mentions abbreviate a bound key, never the identity carried by
+  // the clipboard. Restore the full literal label only for the whole display.
+  const compact =
+    sigil === "@" ? formatMentionDisplayLabel(label, pubkey) : label;
+  if (compact !== label && matches(canonicalMentionLabel(compact))) {
     return "truncated";
   }
   return "fragment";

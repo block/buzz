@@ -187,3 +187,18 @@ test("copy inlines a blockified chip but preserves its block ancestor", () => {
     else delete prototype.innerText;
   }
 });
+
+test("copy expands compact key text but preserves the exact label and identity", () => {
+  const label = `Scout (${JOHN_SMITH_PUBKEY}) 2`;
+  const flavors = copyRenderedBody(
+    `<span data-mention="" data-mention-pubkey="${JOHN_SMITH_PUBKEY}" ` +
+      `data-mention-label="${label}" class="mention-chip">` +
+      '<span class="inline-chip-leading-fragment">Scout</span> (7c7c7c7c…7c7c) 2</span>',
+  );
+  assert.ok(flavors);
+  assert.ok(flavors.html.includes(`@${label}`));
+  assert.ok(
+    flavors.html.includes(`data-mention-pubkey="${JOHN_SMITH_PUBKEY}"`),
+  );
+  assert.ok(!flavors.html.includes("…"));
+});

@@ -2,6 +2,7 @@ import type * as React from "react";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
+import { formatMentionDisplayLabel } from "@/shared/lib/mentionDisplay";
 import {
   inlineChipIconClasses,
   inlineChipLeadingEnd,
@@ -32,8 +33,9 @@ export function createMarkdownMention(interactive: boolean) {
       pubkey !== undefined &&
       agentMentionPubkeysByName?.[mentionName] === pubkey;
     const mentionLabel = mentionText.replace(/^@/, "");
+    const displayLabel = formatMentionDisplayLabel(mentionLabel, pubkey);
     const icon = isAgentMention ? "agent" : "human";
-    const leadingEnd = inlineChipLeadingEnd(mentionLabel);
+    const leadingEnd = inlineChipLeadingEnd(displayLabel);
     // Only chips that actually open a profile get the clickable affordance.
     // A mention whose pubkey didn't resolve stays a plain chip — a pointer
     // cursor there promises a click that does nothing.
@@ -62,9 +64,9 @@ export function createMarkdownMention(interactive: boolean) {
             inlineChipIconClasses(icon),
           )}
         >
-          {mentionLabel.slice(0, leadingEnd)}
+          {displayLabel.slice(0, leadingEnd)}
         </span>
-        {mentionLabel.slice(leadingEnd)}
+        {displayLabel.slice(leadingEnd)}
         {isAgentMention ? <AgentManagementMarker pubkey={pubkey} /> : null}
       </InlineChip>
     );

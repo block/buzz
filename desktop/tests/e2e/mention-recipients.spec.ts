@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { truncatePubkey } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -564,6 +565,13 @@ for (const { kind, scale } of [
       .filter({ hasText: "layout journey" })
       .last();
     await assertFits(markdown, "sent");
+    const qualifiedChip = row.locator("[data-mention]").last();
+    await expect(qualifiedChip).toHaveText(`Scout (${truncatePubkey(SECOND)})`);
+    await expect(qualifiedChip).toHaveAttribute(
+      "data-mention-label",
+      `Scout (${SECOND})`,
+    );
+    await expect(qualifiedChip).toHaveAttribute("title", `Scout (${SECOND})`);
     await expect(row.locator("[data-mention]").last()).toHaveAttribute(
       "aria-label",
       `Scout (${SECOND})`,
@@ -865,7 +873,7 @@ for (const mismatchedKey of [false, true]) {
       .getByTestId("message-row")
       .filter({ hasText: "qualified clipboard roundtrip" })
       .locator(`[data-mention-pubkey="${SECOND}"]`);
-    await expect(chip).toHaveText(`Scout (${SECOND})`);
+    await expect(chip).toHaveText(`Scout (${truncatePubkey(SECOND)})`);
     const flavors = await chip.evaluate((element) => {
       const range = document.createRange();
       range.selectNode(element);
@@ -918,5 +926,120 @@ for (const mismatchedKey of [false, true]) {
     await expect
       .poll(() => recipients(page, flavors.text.trim()))
       .toEqual([mismatchedKey ? [] : [SECOND]]);
+  });
+}
+
+for (const partial of [false, true]) {
+  test(`matching abbreviated keys ${partial ? "do not bind a partial copy" : "retain separate exact recipients through copy and paste"}`, async ({
+    page,
+  }) => {
+    const keys = ["a", "b"].map((middle) => `150b20bd${middle.repeat(52)}15dc`);
+    await installMockBridge(page, {
+      searchProfiles: keys.map((pubkey) => ({ pubkey, displayName: "Scout" })),
+    });
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    await page.waitForFunction(() =>
+      window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+        channelName: "general",
+      }),
+    );
+    await page.evaluate((keys) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `@Scout (${keys[0]}) and @Scout (${keys[1]}) compact collision`,
+        mentionPubkeys: keys,
+      });
+    }, keys);
+    const row = page
+      .getByTestId("message-row")
+      .filter({ hasText: "compact collision" });
+    for (const key of keys) {
+      const chip = row.locator(`[data-mention-pubkey="${key}"]`);
+      await expect(chip).toHaveText(`Scout (${truncatePubkey(key)})`);
+      await expect(chip).toHaveAttribute("title", `Scout (${key})`);
+      const flavors = await chip.evaluate((element, partial) => {
+        const range = document.createRange();
+        range.selectNode(element);
+        if (partial) {
+          const leadingText = document
+            .createTreeWalker(element, NodeFilter.SHOW_TEXT)
+            .nextNode();
+          if (!leadingText) throw new Error("Missing mention text");
+          range.setStart(leadingText, 0);
+          range.setEnd(leadingText, 5);
+        }
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        const clipboardData = new DataTransfer();
+        const event = new ClipboardEvent("copy", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        });
+        element.dispatchEvent(event);
+        // Model the browser's default HTML serialization if our handler declines.
+        const fallback = document.createElement("div");
+        fallback.append(range.cloneContents());
+        return {
+          handled: event.defaultPrevented,
+          text: event.defaultPrevented
+            ? clipboardData.getData("text/plain")
+            : (selection?.toString() ?? ""),
+          html: event.defaultPrevented
+            ? clipboardData.getData("text/html")
+            : fallback.innerHTML,
+        };
+      }, partial);
+      expect(flavors.handled).toBe(!partial);
+      expect(flavors.text.trim()).toBe(partial ? "Scout" : `@Scout (${key})`);
+      const input = page.getByTestId("message-input");
+      await input.focus();
+      await input.evaluate((element, flavors) => {
+        const clipboardData = new DataTransfer();
+        clipboardData.setData("text/plain", flavors.text);
+        clipboardData.setData("text/html", flavors.html);
+        element.dispatchEvent(
+          new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData,
+          }),
+        );
+      }, flavors);
+      const marker = ` copied-${keys.indexOf(key)}`;
+      await page.keyboard.type(marker);
+      const content = `${flavors.text}${marker}`;
+      await expect(input).toHaveText(content);
+      await page.getByTestId("send-message").click();
+      if (!partial) {
+        await page
+          .getByRole("alertdialog")
+          .getByRole("button", { name: "Invite", exact: true })
+          .click();
+      }
+      // Chromium can preserve the typed separator as NBSP after a rich paste.
+      // Assert the full literal body and exact tags, tolerating only that space.
+      await expect
+        .poll(() =>
+          page.evaluate(
+            (marker) =>
+              (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
+                .filter(
+                  (event) =>
+                    event.kind === 9 && event.content.endsWith(marker.trim()),
+                )
+                .map((event) => ({
+                  content: event.content.replace(/\u00a0/g, " ").trim(),
+                  keys: event.tags
+                    .filter((tag) => tag[0] === "p")
+                    .map((tag) => tag[1]),
+                })),
+            marker,
+          ),
+        )
+        .toEqual([{ content: content.trim(), keys: partial ? [] : [key] }]);
+    }
   });
 }
