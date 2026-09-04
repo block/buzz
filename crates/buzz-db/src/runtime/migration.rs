@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 46);
+        assert_eq!(migrations.len(), 47);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -911,7 +911,7 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
         assert!(include_str!("../../../../schema/schema.sql").contains(
-            "kind IN (1059, 30179, 30180, 30181, 30300, 30350, 30622, 44100, 44101, 44200)"
+            "kind IN (1059, 30179, 30180, 30181, 30182, 30300, 30350, 30622, 44100, 44101, 44200)"
         ));
 
         // Public push-gateway authority is intentionally deployment-global and
@@ -2393,6 +2393,7 @@ mod postgres_tests {
             (3_u8, 30_179_i32),
             (4_u8, 30_180_i32),
             (5_u8, 30_181_i32),
+            (6_u8, 30_182_i32),
         ] {
             sqlx::query(
                 "INSERT INTO events \
@@ -2427,6 +2428,7 @@ mod postgres_tests {
                 (30_179, true),
                 (30_180, true),
                 (30_181, true),
+                (30_182, true),
                 (30_350, true)
             ]
         );
@@ -2451,6 +2453,7 @@ mod postgres_tests {
                 (30_179, Some(true)),
                 (30_180, Some(true)),
                 (30_181, Some(true)),
+                (30_182, Some(true)),
                 (30_350, None)
             ]
         );
@@ -2479,6 +2482,17 @@ mod postgres_tests {
             "0046 must change brownfield observation FTS"
         );
 
+        run_migrations_through(&pool, 46).await.unwrap();
+        let capability_indexed: bool =
+            sqlx::query_scalar("SELECT search_tsv IS NOT NULL FROM events WHERE kind = 30182")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            capability_indexed,
+            "0047 must change brownfield capability FTS"
+        );
+
         run_migrations(&pool)
             .await
             .expect("apply remaining migrations to populated database");
@@ -2496,6 +2510,7 @@ mod postgres_tests {
                 (30_179, None),
                 (30_180, None),
                 (30_181, None),
+                (30_182, None),
                 (30_350, None)
             ]
         );

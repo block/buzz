@@ -12,7 +12,15 @@ import {
   type DesktopObservation,
 } from "../desktopObservations";
 
+import {
+  useDesktopCapabilities,
+  type DesktopCapabilities,
+} from "../desktopCapabilities";
+import { DesktopCapabilityDetails } from "./DesktopCapabilityDetails";
+
 type View = {
+  capabilities?: DesktopCapabilities[];
+  capabilityWarning?: string;
   list: DesktopList | null;
   error: boolean;
   loading: boolean;
@@ -54,25 +62,29 @@ function useDesktopList() {
 export function DesktopListStartup() {
   const { refetch } = useDesktopList();
   const { refetch: pulse } = useDesktopObservations(useDesktopScope());
+  const { refetch: report } = useDesktopCapabilities(useDesktopScope());
   useEffect(() => {
     const timer = setInterval(() => {
       void pulse();
+      void report();
     }, DESKTOP_PULSE_MS);
     const unsubscribe = relayClient.subscribeToReconnects(() => {
       void refetch();
       void pulse();
+      void report();
     });
     return () => {
       clearInterval(timer);
       unsubscribe();
     };
-  }, [refetch, pulse]);
+  }, [refetch, pulse, report]);
   return null;
 }
 
 export function KnownDesktops() {
   const query = useDesktopList();
   const observations = useDesktopObservations(useDesktopScope());
+  const capabilities = useDesktopCapabilities(useDesktopScope());
   const [now, setNow] = useState(() => Date.now() / 1000);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now() / 1000), 30_000);
@@ -80,6 +92,14 @@ export function KnownDesktops() {
   }, []);
   return (
     <DesktopListView
+      capabilities={capabilities.data?.rows}
+      capabilityWarning={
+        capabilities.isError
+          ? "Capability refresh unavailable. Previous reports are retained."
+          : capabilities.data?.partial
+            ? "Partial capability reports; missing facts are unknown."
+            : capabilities.data?.warning
+      }
       list={query.data ?? null}
       observations={observations.data?.rows}
       now={Math.max(now, Date.now() / 1000)}
@@ -95,6 +115,7 @@ export function KnownDesktops() {
       refresh={() => {
         void query.refetch();
         void observations.refetch();
+        void capabilities.refetch();
       }}
     />
   );
@@ -107,6 +128,8 @@ export function DesktopListView({
   refresh,
   observations,
   observationWarning,
+  capabilities,
+  capabilityWarning,
   now = Date.now() / 1000,
 }: View) {
   return (
@@ -136,6 +159,7 @@ export function DesktopListView({
           Desktop profiles unavailable. Previously loaded profiles are retained.
         </p>
       )}
+      {capabilityWarning && <p role="status">{capabilityWarning}</p>}
       {observationWarning && <p role="status">{observationWarning}</p>}
       {list?.warning && <p role="status">{list.warning}</p>}
       {list?.partial && (
@@ -160,6 +184,10 @@ export function DesktopListView({
                 now,
               )}
             </div>
+            <DesktopCapabilityDetails
+              report={capabilities?.find((item) => item.id === row.id)}
+              now={now}
+            />
           </li>
         ))}
       </ul>
