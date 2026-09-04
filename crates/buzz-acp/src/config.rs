@@ -525,6 +525,39 @@ pub struct CliArgs {
     /// ignored (the watermark stays at startup time).
     #[arg(long, env = "BUZZ_ACP_REPLAY_FLOOR")]
     pub replay_floor: Option<u64>,
+
+    /// Agent subprocesses started eagerly. The rest of `--agents` are
+    /// on-demand: spawned when every started agent is busy and channels are
+    /// waiting, and shut down again after `--session-idle-close` of holding
+    /// no session. Defaults to `--agents` (everything eager).
+    #[arg(long, env = "BUZZ_ACP_MIN_AGENTS",
+          value_parser = clap::value_parser!(u32).range(1..=32))]
+    pub min_agents: Option<u32>,
+
+    /// Host-wide cap on live ACP sessions, shared by every harness using the
+    /// same `--fleet-slot-dir`. One slot per live session, held as a file
+    /// lock so the kernel releases it if the harness dies. Work that finds
+    /// every slot held waits in the queue. 0 = no cap.
+    #[arg(long, env = "BUZZ_ACP_FLEET_SLOTS", default_value_t = 0)]
+    pub fleet_slots: u32,
+
+    /// Directory of fleet slot lock files. Defaults to
+    /// `$XDG_RUNTIME_DIR/buzz-acp/fleet`, else `<tmp>/buzz-acp-fleet`.
+    #[arg(long, env = "BUZZ_ACP_FLEET_SLOT_DIR")]
+    pub fleet_slot_dir: Option<PathBuf>,
+
+    /// Close a channel session — releasing its fleet slot — after this many
+    /// seconds without a turn; on-demand agents holding no session are shut
+    /// down on the same bound. The next event in that channel starts a fresh
+    /// session. 0 = never.
+    #[arg(long, env = "BUZZ_ACP_SESSION_IDLE_CLOSE", default_value_t = 0)]
+    pub session_idle_close: u64,
+
+    /// In DM channels, when a turn ends without the agent having published a
+    /// message, post the agent's trailing reply text as a top-level channel
+    /// message so the human never gets silence. Channels are unaffected.
+    #[arg(long, env = "BUZZ_ACP_DM_AUTOPUBLISH", default_value_t = false, action = clap::ArgAction::Set)]
+    pub dm_autopublish: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -620,6 +653,16 @@ pub struct Config {
     /// triggering message. Clamped where consumed — see
     /// `startup_watermark_with_floor`.
     pub replay_floor_unix: Option<u64>,
+    /// Agent slots spawned eagerly (`<= agents`); the rest are on-demand.
+    pub min_agents: u32,
+    /// Host-wide live-session cap shared through `fleet_slot_dir`. 0 = off.
+    pub fleet_slots: u32,
+    /// Directory of the fleet slot lock files.
+    pub fleet_slot_dir: PathBuf,
+    /// Seconds a session may sit without a turn before it is closed. 0 = never.
+    pub session_idle_close_secs: u64,
+    /// Auto-post trailing reply text in DMs when the agent published nothing.
+    pub dm_autopublish: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1201,6 +1244,11 @@ impl Config {
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
             replay_floor_unix: args.replay_floor,
+            min_agents: resolve_min_agents(args.min_agents, args.agents),
+            fleet_slots: args.fleet_slots,
+            fleet_slot_dir: args.fleet_slot_dir.unwrap_or_else(default_fleet_slot_dir),
+            session_idle_close_secs: args.session_idle_close,
+            dm_autopublish: args.dm_autopublish,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1225,7 +1273,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{} min_agents={} fleet_slots={} fleet_slot_dir={} session_idle_close={}s dm_autopublish={}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1249,7 +1297,26 @@ impl Config {
             self.permission_mode,
             respond_to_detail,
             allowed_respond_to_detail,
+            self.min_agents,
+            self.fleet_slots,
+            self.fleet_slot_dir.display(),
+            self.session_idle_close_secs,
+            self.dm_autopublish,
         )
+    }
+}
+
+/// `--min-agents` defaults to `--agents` and can never exceed it.
+pub(crate) fn resolve_min_agents(min_agents: Option<u32>, agents: u32) -> u32 {
+    min_agents.unwrap_or(agents).clamp(1, agents.max(1))
+}
+
+/// `$XDG_RUNTIME_DIR/buzz-acp/fleet` when the runtime dir is set (per-user
+/// tmpfs shared by every harness the user runs), else the system temp dir.
+pub(crate) fn default_fleet_slot_dir() -> PathBuf {
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("buzz-acp").join("fleet"),
+        _ => std::env::temp_dir().join("buzz-acp-fleet"),
     }
 }
 
@@ -1577,6 +1644,11 @@ mod tests {
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
             replay_floor_unix: None,
+            min_agents: 1,
+            fleet_slots: 0,
+            fleet_slot_dir: PathBuf::new(),
+            session_idle_close_secs: 0,
+            dm_autopublish: true,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2311,6 +2383,51 @@ channels = "ALL"
             "300",
         ]);
         assert_eq!(configured.idle_pool_sleep, 300);
+    }
+
+    #[test]
+    fn session_pool_flags_default_off_and_accept_cli_values() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.min_agents, None);
+        assert_eq!(default.fleet_slots, 0);
+        assert_eq!(default.fleet_slot_dir, None);
+        assert_eq!(default.session_idle_close, 0);
+        assert!(!default.dm_autopublish);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--agents",
+            "8",
+            "--min-agents",
+            "2",
+            "--fleet-slots",
+            "20",
+            "--fleet-slot-dir",
+            "/tmp/fleet",
+            "--session-idle-close",
+            "600",
+            "--dm-autopublish",
+            "true",
+        ]);
+        assert_eq!(configured.min_agents, Some(2));
+        assert_eq!(configured.fleet_slots, 20);
+        assert_eq!(
+            configured.fleet_slot_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/fleet"))
+        );
+        assert_eq!(configured.session_idle_close, 600);
+        assert!(configured.dm_autopublish);
+    }
+
+    #[test]
+    fn min_agents_defaults_to_agents_and_is_capped_by_it() {
+        assert_eq!(resolve_min_agents(None, 4), 4);
+        assert_eq!(resolve_min_agents(Some(2), 8), 2);
+        assert_eq!(resolve_min_agents(Some(9), 8), 8);
+        assert_eq!(resolve_min_agents(Some(0), 3), 1);
     }
 
     #[test]

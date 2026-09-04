@@ -125,6 +125,11 @@ All configuration is via environment variables (or CLI flags — every env var h
 |------|---------|---------|-------------|
 | `--agents` | `BUZZ_ACP_AGENTS` | `1` | Number of agent subprocesses (1–32). |
 | `--lazy-pool` | `BUZZ_ACP_LAZY_POOL` | `false` | Connect, subscribe, and queue accepted work before starting ACP/LLM subprocesses. The first accepted event wakes one pool initialization task; failures retry with bounded exponential backoff while work remains. |
+| `--min-agents` | `BUZZ_ACP_MIN_AGENTS` | `--agents` | Agent subprocesses started eagerly. The rest of `--agents` are on-demand: spawned when every started agent is busy and channels are waiting, shut down again after `--session-idle-close` of holding no session. |
+| `--fleet-slots` | `BUZZ_ACP_FLEET_SLOTS` | `0` | Host-wide cap on live ACP sessions, shared by every harness using the same `--fleet-slot-dir`. One `flock`ed file per slot, so the kernel releases a dead harness's slots. Work that finds every slot held waits in the queue. `0` = no cap. |
+| `--fleet-slot-dir` | `BUZZ_ACP_FLEET_SLOT_DIR` | `$XDG_RUNTIME_DIR/buzz-acp/fleet` | Directory of fleet slot lock files (falls back to `<tmp>/buzz-acp-fleet`). |
+| `--session-idle-close` | `BUZZ_ACP_SESSION_IDLE_CLOSE` | `0` | Close a channel session — releasing its fleet slot — after this many seconds without a turn; the next event in that channel starts a fresh session. `0` = never. |
+| `--dm-autopublish` | `BUZZ_ACP_DM_AUTOPUBLISH` | `false` | In DM channels, when a turn ends without the agent having published a message, post the agent's trailing reply text as a top-level message so the human never gets silence. Skipped when the agent already posted in that turn; channels are unaffected. |
 | `--heartbeat-interval` | `BUZZ_ACP_HEARTBEAT_INTERVAL` | `0` | Seconds between heartbeat prompts. `0` = disabled. Must be `0` or ≥10 when enabled. |
 | `--heartbeat-prompt` | `BUZZ_ACP_HEARTBEAT_PROMPT` | (built-in) | Custom heartbeat prompt text. Conflicts with `--heartbeat-prompt-file`. |
 | `--heartbeat-prompt-file` | `BUZZ_ACP_HEARTBEAT_PROMPT_FILE` | — | Read heartbeat prompt from a file. Conflicts with `--heartbeat-prompt`. |
@@ -216,6 +221,8 @@ buzz-acp --agents 2 --heartbeat-interval 300 \
 ```
 
 ### Shared Identity
+
+**Session pool (many harnesses on one host):** each live ACP session is a worker process (for `claude-agent-acp`, a `claude` process plus its MCP servers), so memory scales with live sessions rather than harnesses. `--fleet-slots` caps live sessions host-wide the way a connection pool caps connections, `--session-idle-close` returns idle sessions to the pool, and `--min-agents` keeps per-harness subprocess count low until work actually arrives. A typical fleet of 25 harnesses on a 32 GB host runs `--agents 8 --min-agents 1 --fleet-slots 20 --session-idle-close 600`.
 
 All N agents authenticate as the **same Nostr bot identity** — users see one bot regardless of how many agents are running. The same channel is never processed by two agents simultaneously (the queue enforces this). Cross-channel message ordering is not guaranteed when N>1.
 

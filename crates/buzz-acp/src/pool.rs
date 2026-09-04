@@ -35,6 +35,7 @@ use crate::acp::{
     ModelSwitchMethod, StopReason, SystemPromptTransport,
 };
 use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
+use crate::fleet::FleetSlot;
 use crate::observer;
 use crate::prompt_project::{pick_authoritative_project_home, PromptProjectInfo};
 use crate::queue::{
@@ -141,6 +142,27 @@ pub struct SessionState {
     /// Per-scope successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
     pub deliveries: HashMap<SessionScope, ChannelDeliveryState>,
+    /// session scope → fleet slot held for the live session (`--fleet-slots`).
+    /// Absent when the fleet cap is off.
+    pub session_slots: HashMap<SessionScope, FleetSlot>,
+    /// Fleet slot held for the heartbeat session.
+    pub heartbeat_slot: Option<FleetSlot>,
+    /// Fleet slot the dispatcher acquired for a session this turn is about
+    /// to create. Moved into `session_slots` / `heartbeat_slot` on creation;
+    /// released by `AgentPool::return_agent` if the turn never created one.
+    pub pending_slot: Option<FleetSlot>,
+    /// Sessions invalidated while their adapter stayed alive, still awaiting
+    /// `session/close`. The fleet slot rides along so it is released only
+    /// once the adapter has actually torn the session's worker down.
+    pub pending_close: Vec<(String, Option<FleetSlot>)>,
+    /// session scope → when the session last finished a turn (idle clock for
+    /// `--session-idle-close`).
+    pub last_used: HashMap<SessionScope, tokio::time::Instant>,
+    /// Idle clock for the heartbeat session.
+    pub heartbeat_last_used: Option<tokio::time::Instant>,
+    /// When this agent was last returned to the pool. Drives the release of
+    /// surplus on-demand adapters that hold no session.
+    pub idle_since: Option<tokio::time::Instant>,
 }
 
 impl SessionState {
@@ -151,26 +173,51 @@ impl SessionState {
                 self.invalidate_scope(scope);
             }
             PromptSource::Heartbeat => {
-                self.heartbeat_session = None;
+                if let Some(session_id) = self.heartbeat_session.take() {
+                    let slot = self.heartbeat_slot.take();
+                    self.pending_close.push((session_id, slot));
+                }
                 self.heartbeat_turn_count = 0;
                 self.heartbeat_standing_context_sent = false;
+                self.heartbeat_last_used = None;
             }
         }
     }
 
     /// Invalidate a single session scope's session and turn counter.
     /// Returns `true` if the scope had an active session.
+    ///
+    /// The session is queued for `session/close` (see
+    /// `OwnedAgent::flush_pending_close`) so its worker — and fleet slot — are
+    /// reclaimed while the adapter lives on.
     pub fn invalidate_scope(&mut self, scope: &SessionScope) -> bool {
+        match self.forget_scope(scope) {
+            Some((session_id, slot)) => {
+                self.pending_close.push((session_id, slot));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop every record of `scope`'s session without scheduling a
+    /// `session/close`. Returns the session id and its fleet slot so the
+    /// caller can close the session itself and release the slot afterwards.
+    pub fn forget_scope(&mut self, scope: &SessionScope) -> Option<(String, Option<FleetSlot>)> {
         self.turn_counts.remove(scope);
         self.core_sections.remove(scope);
         self.canvas_sections.remove(scope);
         self.deliveries.remove(scope);
-        self.sessions.remove(scope).is_some()
+        self.last_used.remove(scope);
+        let session_id = self.sessions.remove(scope)?;
+        Some((session_id, self.session_slots.remove(scope)))
     }
 
     /// Invalidate every session scope belonging to `channel_id` (channel-wide
     /// cleanup, e.g. when the agent is removed from a channel). Returns the
-    /// number of scopes that had an active session.
+    /// number of scopes that had an active session. Each closed session is
+    /// queued for `session/close` via `invalidate_scope`, so its worker and
+    /// fleet slot are reclaimed once `flush_pending_close` runs.
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> usize {
         let scopes: Vec<SessionScope> = self
             .sessions
@@ -193,6 +240,19 @@ impl SessionState {
         count
     }
 
+    /// Record that `source`'s live session just finished a turn.
+    pub fn touch(&mut self, source: &PromptSource, now: tokio::time::Instant) {
+        match source {
+            PromptSource::Channel(scope) if self.sessions.contains_key(scope) => {
+                self.last_used.insert(scope.clone(), now);
+            }
+            PromptSource::Heartbeat if self.heartbeat_session.is_some() => {
+                self.heartbeat_last_used = Some(now);
+            }
+            _ => {}
+        }
+    }
+
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
     pub fn invalidate_all(&mut self) {
         self.sessions.clear();
@@ -203,6 +263,14 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.deliveries.clear();
+        // The adapter is gone, so every worker is already dead: release the
+        // slots outright and forget the closes that can no longer be sent.
+        self.session_slots.clear();
+        self.heartbeat_slot = None;
+        self.pending_slot = None;
+        self.pending_close.clear();
+        self.last_used.clear();
+        self.heartbeat_last_used = None;
     }
 
     pub(crate) fn mark_scope_delivery_success(
@@ -309,7 +377,65 @@ fn session_new_system_prompt<'a>(
     }
 }
 
+/// What `session/close` did for one session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseOutcome {
+    Closed,
+    /// Adapter has no `session/close`; bookkeeping dropped, worker lives
+    /// until the adapter itself is torn down (pre-existing behavior).
+    Unsupported,
+    Failed,
+    AgentExited,
+}
+
+/// Send `session/close` for `session_id`, mapping the result to a
+/// [`CloseOutcome`]. Never fails the caller — a session we cannot close is
+/// still one we stop using.
+pub(crate) async fn close_session_quietly(acp: &mut AcpClient, session_id: &str) -> CloseOutcome {
+    match acp.session_close(session_id).await {
+        Ok(()) => {
+            tracing::info!(target: "pool::session", "closed session {session_id}");
+            CloseOutcome::Closed
+        }
+        Err(AcpError::AgentExited) => {
+            tracing::warn!(
+                target: "pool::session",
+                "agent exited while closing session {session_id}"
+            );
+            CloseOutcome::AgentExited
+        }
+        Err(AcpError::AgentError { code: -32601, .. }) => {
+            tracing::debug!(
+                target: "pool::session",
+                "adapter has no session/close — dropping session {session_id} bookkeeping only"
+            );
+            CloseOutcome::Unsupported
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::session",
+                "session/close failed for {session_id}: {error}"
+            );
+            CloseOutcome::Failed
+        }
+    }
+}
+
 impl OwnedAgent {
+    /// Send `session/close` for every session this agent invalidated while
+    /// its adapter stayed alive, releasing each fleet slot afterwards. Must
+    /// only run on an idle agent (nothing else may be reading its stdout).
+    pub(crate) async fn flush_pending_close(&mut self) {
+        while let Some((session_id, slot)) = self.state.pending_close.pop() {
+            let outcome = close_session_quietly(&mut self.acp, &session_id).await;
+            drop(slot);
+            if outcome == CloseOutcome::AgentExited {
+                self.state.invalidate_all();
+                return;
+            }
+        }
+    }
+
     pub(crate) fn has_system_prompt_support(&self) -> bool {
         has_system_prompt_support(
             self.protocol_version,
@@ -783,6 +909,8 @@ pub struct PromptContext {
     pub channel_info: ChannelInfoResolver,
     /// Max messages to include in thread/DM context. 0 = disabled.
     pub context_message_limit: u32,
+    /// Post trailing reply text in DMs when the agent published nothing.
+    pub dm_autopublish: bool,
     /// Max turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
@@ -880,8 +1008,12 @@ impl AgentPool {
     }
 
     /// Return an agent to its slot after a task completes.
-    pub fn return_agent(&mut self, agent: OwnedAgent) {
+    pub fn return_agent(&mut self, mut agent: OwnedAgent) {
         let idx = agent.index;
+        // A slot handed out for a session the turn never created goes back to
+        // the fleet here; a created session moved it into `session_slots`.
+        agent.state.pending_slot = None;
+        agent.state.idle_since = Some(tokio::time::Instant::now());
         if self.agents[idx].is_some() {
             // This is a bug: two tasks returned the same agent index. Log it
             // loudly so it shows up in production logs, then overwrite — the
@@ -2305,6 +2437,13 @@ pub async fn run_prompt_task(
                             .state
                             .deliveries
                             .insert(scope.clone(), ChannelDeliveryState::default());
+                        if let Some(slot) = agent.state.pending_slot.take() {
+                            agent.state.session_slots.insert(scope.clone(), slot);
+                        }
+                        agent
+                            .state
+                            .last_used
+                            .insert(scope.clone(), tokio::time::Instant::now());
                         // Seed a zero usage baseline: buzz-acp spawned this session
                         // so prior usage is zero by definition — first turn is reliable.
                         agent.acp.notify_session_spawned(&sid);
@@ -2367,6 +2506,8 @@ pub async fn run_prompt_task(
                             agent.index
                         );
                         agent.state.heartbeat_session = Some(sid.clone());
+                        agent.state.heartbeat_slot = agent.state.pending_slot.take();
+                        agent.state.heartbeat_last_used = Some(tokio::time::Instant::now());
                         // Seed a zero usage baseline: buzz-acp spawned this session.
                         agent.acp.notify_session_spawned(&sid);
                         (sid, true)
@@ -2774,6 +2915,22 @@ pub async fn run_prompt_task(
         "turn starting for {}",
         prompt_label(&source)
     );
+    // DM auto-publish inputs: a confirmed DM only (unknown type ⇒ no post),
+    // and the turn's start so the self-post lookup can bound its window.
+    // Self-authored batches (e.g. `[wake-at]` self-mentions) never auto-publish:
+    // the human asked nothing, so trailing text is bookkeeping, not a reply.
+    let self_pk = ctx.agent_keys.public_key();
+    let batch_has_foreign_author = batch
+        .as_ref()
+        .is_some_and(|b| b.events.iter().any(|e| e.event.pubkey != self_pk));
+    let turn_is_dm = batch_has_foreign_author
+        && resolved_channel_info
+            .as_ref()
+            .is_some_and(|ci| ci.channel_type == "dm");
+    let turn_started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
@@ -2920,6 +3077,16 @@ pub async fn run_prompt_task(
                         }
                         log_stop_reason(&source, &StopReason::EndTurn);
                         if let PromptSource::Channel(scope) = &source {
+                            maybe_autopublish_dm_reply(
+                                &ctx,
+                                &mut agent.acp,
+                                scope.channel_id(),
+                                turn_is_dm,
+                                turn_started_at,
+                            )
+                            .await;
+                        }
+                        if let PromptSource::Channel(scope) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
                             record_scope_delivery_success(
                                 &mut agent,
@@ -2961,6 +3128,16 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+            if let PromptSource::Channel(scope) = &source {
+                maybe_autopublish_dm_reply(
+                    &ctx,
+                    &mut agent.acp,
+                    scope.channel_id(),
+                    turn_is_dm,
+                    turn_started_at,
+                )
+                .await;
+            }
 
             if let PromptSource::Channel(scope) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
@@ -5015,6 +5192,82 @@ pub(crate) async fn post_failure_notice(
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+    }
+}
+
+/// DM turns must end with a message to the human. When the agent produced
+/// trailing reply text but never ran `buzz messages send` — and the relay
+/// shows nothing authored by us in the channel since the turn started — post
+/// that text as a top-level channel message. Channels are never touched.
+pub(crate) async fn maybe_autopublish_dm_reply(
+    ctx: &PromptContext,
+    acp: &mut crate::acp::AcpClient,
+    channel_id: Uuid,
+    is_dm: bool,
+    turn_started_at: u64,
+) {
+    let (text, saw_send) = acp.take_turn_reply();
+    if !dm_autopublish_wanted(ctx.dm_autopublish, is_dm, saw_send, &text) {
+        return;
+    }
+    if self_posted_since(&ctx.rest_client, channel_id, turn_started_at).await {
+        tracing::debug!(
+            target: "pool::dm",
+            channel = %channel_id,
+            "dm autopublish skipped: agent already posted this turn"
+        );
+        return;
+    }
+    tracing::info!(
+        target: "pool::dm",
+        channel = %channel_id,
+        chars = text.chars().count(),
+        "dm autopublish: turn ended without a publish — posting trailing reply text"
+    );
+    post_failure_notice(&ctx.rest_client, channel_id, &ThreadTags::default(), &text).await;
+}
+
+/// Pure decision: only in DMs, only when enabled, only when the agent did not
+/// already run `buzz messages send`, and only when there is text to post.
+pub(crate) fn dm_autopublish_wanted(
+    enabled: bool,
+    is_dm: bool,
+    saw_send: bool,
+    text: &str,
+) -> bool {
+    enabled && is_dm && !saw_send && !text.trim().is_empty()
+}
+
+/// Whether the relay holds a message authored by us in `channel_id` at or
+/// after `since` (unix seconds, 2s slack). Fails closed (`true`) on error so
+/// a lookup outage never double-posts.
+async fn self_posted_since(rest: &RestClient, channel_id: Uuid, since: u64) -> bool {
+    use nostr::{Alphabet, SingleLetterTag};
+    let ch = channel_id.to_string();
+    let filter = nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .author(rest.keys.public_key())
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [ch.as_str()])
+        .since(nostr::Timestamp::from(since.saturating_sub(2)))
+        .limit(1);
+    match timeout(
+        CONTEXT_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(json)) => json.as_array().is_some_and(|a| !a.is_empty()),
+        Ok(Err(e)) => {
+            tracing::warn!(channel = %channel_id, "dm autopublish: self-post lookup failed: {e} — skipping");
+            true
+        }
+        Err(_) => {
+            tracing::warn!(channel = %channel_id, "dm autopublish: self-post lookup timed out — skipping");
+            true
+        }
     }
 }
 
@@ -7595,6 +7848,231 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         }
     }
 
+    // ── fleet slots & session idle bookkeeping ───────────────────────────────
+
+    fn fleet_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "buzz-acp-pool-fleet-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ))
+    }
+
+    async fn inert_agent(index: usize) -> OwnedAgent {
+        OwnedAgent {
+            index,
+            acp: AcpClient::spawn("cat", &[], &[], false)
+                .await
+                .expect("spawn cat as inert agent"),
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        }
+    }
+
+    fn queued_event(channel_id: Uuid) -> crate::queue::QueuedEvent {
+        crate::queue::QueuedEvent {
+            channel_id,
+            scope: crate::scope::SessionScope::Conversation { channel_id },
+            event: EventBuilder::new(Kind::Custom(9), "test")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidating_a_channel_holds_its_slot_until_the_close_is_flushed() {
+        let dir = fleet_dir("invalidate");
+        let mut fleet = crate::fleet::FleetPool::new(&dir, 1).expect("fleet dir");
+        let mut state = SessionState::default();
+        let cid = Uuid::new_v4();
+        let scope = crate::scope::SessionScope::Conversation { channel_id: cid };
+        state.sessions.insert(scope.clone(), "sess-1".into());
+        state
+            .session_slots
+            .insert(scope.clone(), fleet.try_acquire().expect("slot"));
+        state
+            .last_used
+            .insert(scope.clone(), tokio::time::Instant::now());
+
+        assert_eq!(state.invalidate_channel(&cid), 1);
+        assert!(!state.sessions.contains_key(&scope));
+        assert!(!state.last_used.contains_key(&scope));
+        assert_eq!(state.pending_close.len(), 1);
+        assert_eq!(state.pending_close[0].0, "sess-1");
+        assert!(
+            fleet.try_acquire().is_none(),
+            "slot must ride along with the pending close, not be released early"
+        );
+
+        state.pending_close.clear();
+        assert!(
+            fleet.try_acquire().is_some(),
+            "slot released with the close entry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn invalidate_all_releases_every_slot_and_forgets_pending_closes() {
+        let dir = fleet_dir("all");
+        let mut fleet = crate::fleet::FleetPool::new(&dir, 3).expect("fleet dir");
+        let mut state = SessionState::default();
+        let scope = crate::scope::SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        state.sessions.insert(scope.clone(), "sess-1".into());
+        state
+            .session_slots
+            .insert(scope.clone(), fleet.try_acquire().unwrap());
+        state.heartbeat_session = Some("hb".into());
+        state.heartbeat_slot = fleet.try_acquire();
+        state.pending_slot = fleet.try_acquire();
+        assert!(fleet.try_acquire().is_none());
+
+        state.invalidate_all();
+        assert!(
+            state.pending_close.is_empty(),
+            "a dead adapter has nothing to close"
+        );
+        assert!(state.session_slots.is_empty() && state.heartbeat_slot.is_none());
+        assert!(state.pending_slot.is_none());
+        let reclaimed = (0..3).filter_map(|_| fleet.try_acquire()).count();
+        assert_eq!(reclaimed, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn touch_stamps_only_live_sessions() {
+        let mut state = SessionState::default();
+        let live = crate::scope::SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let dead = crate::scope::SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let now = tokio::time::Instant::now();
+        state.sessions.insert(live.clone(), "sess-live".into());
+        state.touch(&PromptSource::Channel(live.clone()), now);
+        state.touch(&PromptSource::Channel(dead.clone()), now);
+        state.touch(&PromptSource::Heartbeat, now);
+        assert_eq!(state.last_used.get(&live), Some(&now));
+        assert!(!state.last_used.contains_key(&dead));
+        assert!(state.heartbeat_last_used.is_none());
+        state.heartbeat_session = Some("hb".into());
+        state.touch(&PromptSource::Heartbeat, now);
+        assert_eq!(state.heartbeat_last_used, Some(now));
+    }
+
+    #[tokio::test]
+    async fn return_agent_releases_an_unused_pending_slot() {
+        let dir = fleet_dir("return");
+        let mut fleet = crate::fleet::FleetPool::new(&dir, 1).expect("fleet dir");
+        let mut agent = inert_agent(0).await;
+        agent.state.pending_slot = fleet.try_acquire();
+        assert!(fleet.try_acquire().is_none());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        pool.return_agent(agent);
+        // Retry briefly: a sibling test mid-spawn can hold a duplicate of the
+        // just-dropped lock descriptor until its exec.
+        let mut reclaimed = fleet.try_acquire();
+        for _ in 0..50 {
+            if reclaimed.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            reclaimed = fleet.try_acquire();
+        }
+        assert!(reclaimed.is_some(), "returned agent gave the slot back");
+        assert!(pool.agents_mut()[0]
+            .as_ref()
+            .unwrap()
+            .state
+            .idle_since
+            .is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_parks_channels_needing_a_session_when_the_fleet_is_full() {
+        let dir = fleet_dir("dispatch");
+        let mut fleet = Some(crate::fleet::FleetPool::new(&dir, 1).expect("fleet dir"));
+        let ctx = Arc::new(make_prompt_context_no_owner());
+        let mut pool =
+            AgentPool::from_slots(vec![Some(inert_agent(0).await), Some(inert_agent(1).await)]);
+        let mut queue = crate::queue::EventQueue::new(DedupMode::Queue);
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        assert!(queue.push(queued_event(first)));
+        assert!(queue.push(queued_event(second)));
+        let mut last_activity = tokio::time::Instant::now();
+
+        let dispatched =
+            crate::dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet);
+        assert_eq!(dispatched.len(), 1, "one slot, one new session");
+        let started = dispatched[0].0.clone();
+        let parked = if started.channel_id() == first {
+            second
+        } else {
+            first
+        };
+        assert!(queue.is_scope_in_flight(&started));
+        assert!(
+            !queue.is_scope_in_flight(parked),
+            "parked channel is released back to the queue, not left in flight"
+        );
+        assert_eq!(
+            queue.queued_event_count(parked),
+            1,
+            "parked event is not lost"
+        );
+        assert!(
+            pool.any_idle(),
+            "no slot means no agent is claimed for the parked channel"
+        );
+        assert!(fleet.as_ref().unwrap().is_waiting());
+
+        // A channel that already holds a session on the idle agent needs no
+        // slot and dispatches even while the fleet is full.
+        let affinity = Uuid::new_v4();
+        {
+            let idle = pool
+                .agents_mut()
+                .iter_mut()
+                .flatten()
+                .next()
+                .expect("an idle agent");
+            idle.state.sessions.insert(
+                crate::scope::SessionScope::Conversation {
+                    channel_id: affinity,
+                },
+                "sess-affinity".into(),
+            );
+        }
+        assert!(queue.push(queued_event(affinity)));
+        let dispatched =
+            crate::dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, &mut fleet);
+        assert_eq!(dispatched.len(), 1);
+        assert_eq!(dispatched[0].0.channel_id(), affinity);
+        assert_eq!(
+            queue.queued_event_count(parked),
+            1,
+            "still parked, still intact"
+        );
+
+        pool.join_set.abort_all();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_requeue_cancelled_batch_maps_control_signal_to_cancel_reason() {
         let cases = [
@@ -8641,6 +9119,15 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         );
     }
 
+    #[test]
+    fn dm_autopublish_wanted_only_in_dm_without_send() {
+        assert!(dm_autopublish_wanted(true, true, false, "hi"));
+        assert!(!dm_autopublish_wanted(false, true, false, "hi"));
+        assert!(!dm_autopublish_wanted(true, false, false, "hi"));
+        assert!(!dm_autopublish_wanted(true, true, true, "hi"));
+        assert!(!dm_autopublish_wanted(true, true, false, "  \n"));
+    }
+
     pub(super) fn make_prompt_context_no_owner() -> PromptContext {
         let agent_keys = nostr::Keys::generate();
         make_prompt_context_impl(&agent_keys, None)
@@ -8687,6 +9174,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 },
             ),
             context_message_limit: 0,
+            dm_autopublish: false,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
             agent_keys: agent_keys.clone(),

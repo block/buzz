@@ -214,6 +214,12 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Trailing assistant text of the in-flight turn — every
+    /// `agent_message_chunk` since the last `tool_call`. Consumed by
+    /// [`take_turn_reply`](Self::take_turn_reply) for DM auto-publish.
+    turn_reply_text: String,
+    /// Whether a `tool_call` in this turn carried `buzz messages send`.
+    turn_saw_buzz_send: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +569,8 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            turn_reply_text: String::new(),
+            turn_saw_buzz_send: false,
         })
     }
 
@@ -790,6 +798,8 @@ impl AcpClient {
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
         self.standard_usage.begin_turn(session_id);
+        self.turn_reply_text.clear();
+        self.turn_saw_buzz_send = false;
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -853,6 +863,19 @@ impl AcpClient {
         self.send_notification("session/cancel", params).await
     }
 
+    /// Send `session/close` and wait for the adapter to tear the session's
+    /// worker down. Bounded by [`CLOSE_TIMEOUT`](Self::CLOSE_TIMEOUT) rather
+    /// than the 60s request default because callers run this inline on an
+    /// idle agent from the main loop.
+    pub async fn session_close(&mut self, session_id: &str) -> Result<(), AcpError> {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+        });
+        self.send_request_with_timeout("session/close", params, Self::CLOSE_TIMEOUT)
+            .await
+            .map(|_| ())
+    }
+
     /// Returns `true` if a `session/prompt` request is currently in flight.
     pub fn has_in_flight_prompt(&self) -> bool {
         self.last_prompt_id.is_some()
@@ -888,6 +911,14 @@ impl AcpClient {
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
         goose_usage.or(standard_usage)
+    }
+
+    /// Consume the turn's trailing reply text and whether the agent ran
+    /// `buzz messages send`. Resets both. See `pool::maybe_autopublish_dm_reply`.
+    pub fn take_turn_reply(&mut self) -> (String, bool) {
+        let text = std::mem::take(&mut self.turn_reply_text);
+        let saw = std::mem::replace(&mut self.turn_saw_buzz_send, false);
+        (text.trim().to_string(), saw)
     }
 
     /// Notify the usage tracker that buzz-acp just spawned a new session.
@@ -1084,6 +1115,9 @@ impl AcpClient {
     /// Default timeout for non-prompt RPCs (initialize, session/new, etc.).
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+    /// Timeout for `session/close`, which only has to kill a worker process.
+    const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     /// Send a JSON-RPC request and wait for the matching response.
     ///
     /// Assigns the next available id, writes the NDJSON line to stdin,
@@ -1097,6 +1131,17 @@ impl AcpClient {
         &mut self,
         method: &str,
         params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_with_timeout(method, params, Self::REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// [`send_request`](Self::send_request) with an explicit per-phase timeout.
+    async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
     ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
@@ -1113,7 +1158,6 @@ impl AcpClient {
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
         // inside timeout(), so we sequence them with early-return on timeout.
-        let timeout = Self::REQUEST_TIMEOUT;
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
             Ok(result) => result?,
             Err(_) => return Err(AcpError::Timeout(timeout)),
@@ -1756,6 +1800,7 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    self.turn_reply_text.push_str(text);
                 }
                 false
             }
@@ -1769,6 +1814,11 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                // Only text AFTER the last tool call is the reply to the human.
+                self.turn_reply_text.clear();
+                if !self.turn_saw_buzz_send && update.to_string().contains("buzz messages send") {
+                    self.turn_saw_buzz_send = true;
+                }
                 true
             }
             "tool_call_update" => {
@@ -3126,6 +3176,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_close_sends_a_request_with_the_session_id() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-close-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let script = format!(
+            r#"IFS= read -r line; printf '%s\n' "$line" > '{}'; printf '{{"jsonrpc":"2.0","id":0,"result":{{}}}}\n'"#,
+            capture.display()
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .session_close("sess-42")
+            .await
+            .expect("empty result is a successful close");
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&capture).expect("captured request"))
+                .expect("captured request is JSON");
+        assert_eq!(sent["method"], "session/close");
+        assert_eq!(sent["params"]["sessionId"], "sess-42");
+        assert!(
+            sent.get("id").is_some(),
+            "close is a request, not a notification"
+        );
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn session_close_surfaces_method_not_found_as_agent_error() {
+        let mut client = spawn_script(
+            r#"IFS= read -r line; printf '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}}
+'"#,
+        )
+        .await;
+        let result = client.session_close("sess-1").await;
+        assert!(
+            matches!(result, Err(AcpError::AgentError { code: -32601, .. })),
+            "expected -32601 AgentError, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn idle_timeout_fires_on_silent_process() {
         let mut client = spawn_script("sleep 10").await;
         let max_dur = std::time::Duration::from_secs(30);
@@ -3143,6 +3235,28 @@ mod tests {
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "expected IdleTimeout, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn turn_reply_keeps_text_after_last_tool_call_and_flags_buzz_send() {
+        let mut client = spawn_script("cat").await;
+        let chunk = |t: &str| serde_json::json!({"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":t}}}});
+        let tool = |cmd: &str| serde_json::json!({"params":{"update":{"sessionUpdate":"tool_call","title":"Bash","kind":"execute","rawInput":{"command":cmd}}}});
+        let _ = client.handle_session_update(&chunk("thinking out loud"));
+        let _ = client.handle_session_update(&tool("ls -la"));
+        let _ = client.handle_session_update(&chunk("final "));
+        let _ = client.handle_session_update(&chunk("answer\n"));
+        assert_eq!(
+            client.take_turn_reply(),
+            ("final answer".to_string(), false)
+        );
+        // take() resets both the text and the flag.
+        assert_eq!(client.take_turn_reply(), (String::new(), false));
+        let _ = client.handle_session_update(&tool(
+            "printf 'x' | buzz messages send --channel abc --content -",
+        ));
+        let _ = client.handle_session_update(&chunk("done"));
+        assert_eq!(client.take_turn_reply(), ("done".to_string(), true));
     }
 
     #[tokio::test]
