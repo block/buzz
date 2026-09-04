@@ -2,7 +2,7 @@
 use super::postgres_tests::bridge_handler_test_state;
 use super::*;
 use axum::{body::Body, http::Request};
-use buzz_core::kind::KIND_DESKTOP_PROFILE;
+use buzz_core::kind::{KIND_DESKTOP_OBSERVATION, KIND_DESKTOP_PROFILE};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde_json::json;
 use tower::ServiceExt;
@@ -67,6 +67,16 @@ fn drain(rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>) -> Ve
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn desktop_profile_authenticated_owner_query_and_private_storage() {
+    assert_private_desktop(KIND_DESKTOP_PROFILE).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn desktop_observation_authenticated_owner_query_and_private_storage() {
+    assert_private_desktop(KIND_DESKTOP_OBSERVATION).await;
+}
+
+async fn assert_private_desktop(kind: u32) {
     let mut state = bridge_handler_test_state()
         .await
         .expect("test infrastructure");
@@ -86,13 +96,21 @@ async fn desktop_profile_authenticated_owner_query_and_private_storage() {
         uuid::Uuid::new_v4().simple().to_string(),
     )
     .unwrap();
-    let event = profile.sign(&owner).unwrap();
+    let id = profile.id.clone();
+    let event = if kind == KIND_DESKTOP_PROFILE {
+        profile.sign(&owner).unwrap()
+    } else {
+        buzz_core::desktop_observation::DesktopObservation::new(profile)
+            .sign(&owner)
+            .unwrap()
+    };
     let (status, result) = post(&state, &host, "/events", &owner, json!(event), true).await;
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!(result["accepted"], true, "{result}");
     // Match Desktop's actual bounded owner+kind inventory and exact-coordinate probe.
-    let own = json!([{"kinds":[KIND_DESKTOP_PROFILE], "authors":[owner.public_key().to_hex()], "limit":100}]);
-    let exact = json!([{"kinds":[KIND_DESKTOP_PROFILE], "authors":[owner.public_key().to_hex()], "#d":[profile.id], "limit":1}]);
+    let own = json!([{"kinds":[kind], "authors":[owner.public_key().to_hex()], "limit":100}]);
+    let exact =
+        json!([{"kinds":[kind], "authors":[owner.public_key().to_hex()], "#d":[id], "limit":1}]);
     for filters in [&own, &exact] {
         let (status, rows) = post(&state, &host, "/query", &owner, filters.clone(), true).await;
         assert_eq!(status, StatusCode::OK, "{rows}");
@@ -105,7 +123,7 @@ async fn desktop_profile_authenticated_owner_query_and_private_storage() {
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{result}");
     }
     // Known IDs cannot grant an authenticated outsider read access either.
-    let known = json!([{"ids":[event.id.to_hex()], "kinds":[KIND_DESKTOP_PROFILE,1]}]);
+    let known = json!([{"ids":[event.id.to_hex()], "kinds":[kind,1]}]);
     let (status, rows) = post(&state, &host, "/query", &outsider, known, true).await;
     assert_eq!(status, StatusCode::OK, "{rows}");
     assert_eq!(rows, json!([]));

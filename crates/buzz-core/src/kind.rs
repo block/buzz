@@ -120,6 +120,9 @@ pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
 /// Owner-private encrypted Desktop identity/name, keyed by installation coordinate.
 pub const KIND_DESKTOP_PROFILE: u32 = 30180;
 
+/// Owner-private, per-Desktop last-heard observation; not online or readiness.
+pub const KIND_DESKTOP_OBSERVATION: u32 = 30181;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,
@@ -134,6 +137,7 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_PUSH_LEASE,
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_DESKTOP_PROFILE,
+    KIND_DESKTOP_OBSERVATION,
 ];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
@@ -664,6 +668,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_DESKTOP_PROFILE,
+    KIND_DESKTOP_OBSERVATION,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,

@@ -1,25 +1,40 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { relayClient } from "@/shared/api/relayClient";
 import { Button } from "@/shared/ui/button";
 import { refreshDesktopList, type DesktopList } from "../desktopList";
+import {
+  DESKTOP_PULSE_MS,
+  desktopFreshness,
+  useDesktopObservations,
+  type DesktopObservation,
+} from "../desktopObservations";
 
 type View = {
   list: DesktopList | null;
   error: boolean;
   loading: boolean;
   refresh: () => void;
+  observations?: DesktopObservation[];
+  observationWarning?: string;
+  now?: number;
 };
 
-function useDesktopList() {
+function useDesktopScope() {
   const owner = useIdentityQuery().data?.pubkey;
   const { activeCommunity } = useCommunities();
   const community = activeCommunity?.relayUrl
     .trim()
     .replace(/^http/, "ws")
     .replace(/\/+$/, "");
+  return owner && community ? { owner, community } : null;
+}
+
+function useDesktopList() {
+  const scope = useDesktopScope();
+  const { owner, community } = scope ?? {};
   return useQuery({
     queryKey: ["desktop-profiles", owner, community],
     enabled: !!owner && !!community,
@@ -38,31 +53,62 @@ function useDesktopList() {
 /** Startup and Agents share the existing owner/community query cache. */
 export function DesktopListStartup() {
   const { refetch } = useDesktopList();
-  useEffect(
-    () =>
-      relayClient.subscribeToReconnects(() => {
-        void refetch();
-      }),
-    [refetch],
-  );
+  const { refetch: pulse } = useDesktopObservations(useDesktopScope());
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void pulse();
+    }, DESKTOP_PULSE_MS);
+    const unsubscribe = relayClient.subscribeToReconnects(() => {
+      void refetch();
+      void pulse();
+    });
+    return () => {
+      clearInterval(timer);
+      unsubscribe();
+    };
+  }, [refetch, pulse]);
   return null;
 }
 
 export function KnownDesktops() {
   const query = useDesktopList();
+  const observations = useDesktopObservations(useDesktopScope());
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now() / 1000), 30_000);
+    return () => clearInterval(timer);
+  }, []);
   return (
     <DesktopListView
       list={query.data ?? null}
+      observations={observations.data?.rows}
+      now={Math.max(now, Date.now() / 1000)}
+      observationWarning={
+        observations.isError
+          ? "Last-heard refresh unavailable. Previous observations are retained."
+          : observations.data?.partial
+            ? "Partial last-heard observations; missing times are unknown."
+            : observations.data?.warning
+      }
       loading={query.isFetching}
       error={query.isError}
       refresh={() => {
         void query.refetch();
+        void observations.refetch();
       }}
     />
   );
 }
 
-export function DesktopListView({ list, loading, error, refresh }: View) {
+export function DesktopListView({
+  list,
+  loading,
+  error,
+  refresh,
+  observations,
+  observationWarning,
+  now = Date.now() / 1000,
+}: View) {
   return (
     <section
       aria-label="Known Desktops"
@@ -81,7 +127,8 @@ export function DesktopListView({ list, loading, error, refresh }: View) {
       </div>
       <p className="text-xs text-muted-foreground">
         Private to you. Saved profiles do not indicate whether a Desktop is
-        online or ready to run agents.
+        online or ready to run agents. Last heard is a Desktop observation, not
+        proof that its agents are running or stopped.
       </p>
       {loading && <p role="status">Loading Desktop profiles…</p>}
       {error && (
@@ -89,6 +136,7 @@ export function DesktopListView({ list, loading, error, refresh }: View) {
           Desktop profiles unavailable. Previously loaded profiles are retained.
         </p>
       )}
+      {observationWarning && <p role="status">{observationWarning}</p>}
       {list?.warning && <p role="status">{list.warning}</p>}
       {list?.partial && (
         <p role="status">Partial list: showing up to 100 profiles.</p>
@@ -104,6 +152,13 @@ export function DesktopListView({ list, loading, error, refresh }: View) {
               <time dateTime={new Date(row.updated * 1000).toISOString()}>
                 {new Date(row.updated * 1000).toLocaleString()}
               </time>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Last heard:{" "}
+              {desktopFreshness(
+                observations?.find((item) => item.id === row.id)?.heard,
+                now,
+              )}
             </div>
           </li>
         ))}

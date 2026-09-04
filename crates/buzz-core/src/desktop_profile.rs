@@ -20,8 +20,15 @@ pub struct DesktopProfile {
 
 /// Validate the public envelope without decrypting private content.
 pub fn validate_envelope(event: &Event) -> Result<(), &'static str> {
+    validate_private_desktop_envelope(event, KIND_DESKTOP_PROFILE)
+}
+
+pub(crate) fn validate_private_desktop_envelope(
+    event: &Event,
+    kind: u32,
+) -> Result<(), &'static str> {
     let tags: Vec<_> = event.tags.iter().map(|tag| tag.as_slice()).collect();
-    if event.kind.as_u16() as u32 != KIND_DESKTOP_PROFILE
+    if event.kind.as_u16() as u32 != kind
         || event.created_at.as_secs() > 253_402_300_799
         || !(132..=2048).contains(&event.content.len())
         || tags.len() != 1

@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 45);
+        assert_eq!(migrations.len(), 46);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -910,8 +910,9 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("kind = 30179"));
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
-        assert!(include_str!("../../../../schema/schema.sql")
-            .contains("kind IN (1059, 30179, 30180, 30300, 30350, 30622, 44100, 44101, 44200)"));
+        assert!(include_str!("../../../../schema/schema.sql").contains(
+            "kind IN (1059, 30179, 30180, 30181, 30300, 30350, 30622, 44100, 44101, 44200)"
+        ));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -2391,6 +2392,7 @@ mod postgres_tests {
             (2_u8, 30_350_i32),
             (3_u8, 30_179_i32),
             (4_u8, 30_180_i32),
+            (5_u8, 30_181_i32),
         ] {
             sqlx::query(
                 "INSERT INTO events \
@@ -2420,7 +2422,13 @@ mod postgres_tests {
         .expect("read pre-push search behavior");
         assert_eq!(
             before,
-            vec![(1, true), (30_179, true), (30_180, true), (30_350, true)]
+            vec![
+                (1, true),
+                (30_179, true),
+                (30_180, true),
+                (30_181, true),
+                (30_350, true)
+            ]
         );
 
         // 0014 fixes 30350 only. A brownfield database that stopped here still
@@ -2442,6 +2450,7 @@ mod postgres_tests {
                 (1, Some(true)),
                 (30_179, Some(true)),
                 (30_180, Some(true)),
+                (30_181, Some(true)),
                 (30_350, None)
             ]
         );
@@ -2457,6 +2466,18 @@ mod postgres_tests {
         .await
         .expect("read pre-0045 Desktop search behavior");
         assert!(desktop_indexed, "upgrade fixture must exercise legacy FTS");
+        run_migrations_through(&pool, 45)
+            .await
+            .expect("apply through 45");
+        let observation_indexed: bool =
+            sqlx::query_scalar("SELECT search_tsv IS NOT NULL FROM events WHERE kind = 30181")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            observation_indexed,
+            "0046 must change brownfield observation FTS"
+        );
 
         run_migrations(&pool)
             .await
@@ -2474,6 +2495,7 @@ mod postgres_tests {
                 (1, Some(true)),
                 (30_179, None),
                 (30_180, None),
+                (30_181, None),
                 (30_350, None)
             ]
         );

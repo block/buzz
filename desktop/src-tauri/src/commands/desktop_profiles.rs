@@ -1,5 +1,5 @@
 //! Durable read-only Desktop profiles, separate from persona publication queues.
-use buzz_core_pkg::desktop_profile::DesktopProfile;
+use buzz_core_pkg::{desktop_observation::DesktopObservation, desktop_profile::DesktopProfile};
 use nostr::{Event, JsonUtil};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
@@ -97,6 +97,50 @@ pub fn read_desktop_profiles(
     Ok(json!(rows?))
 }
 
+/// Sign a fresh pulse for the persisted local profile, never an arbitrary host ID.
+#[tauri::command]
+pub fn prepare_desktop_observation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    owner: String,
+    community: String,
+) -> Result<Value, String> {
+    let scope = scope(&app, &state, &owner, &community)?;
+    Ok(json!({ "event": prepare_observation(&mut open_retention_db(&scope.db_path)?, &scope)? }))
+}
+
+fn prepare_observation(conn: &mut Connection, scope: &RetentionScope) -> Result<Event, String> {
+    let saved = prepare(conn, scope)?;
+    let event: Event = serde_json::from_value(saved["event"].clone()).map_err(|e| e.to_string())?;
+    let profile = DesktopProfile::read(
+        &event,
+        &scope.owner_keys,
+        scope.relay_url.trim_end_matches('/'),
+    )?;
+    DesktopObservation::new(profile).sign(&scope.owner_keys)
+}
+
+/// Verify bounded owner-private observations; the UI treats their timestamps as advisory.
+#[tauri::command]
+pub fn read_desktop_observations(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    owner: String,
+    community: String,
+    events: Vec<Event>,
+) -> Result<Value, String> {
+    let scope = scope(&app, &state, &owner, &community)?;
+    if events.len() > 100 {
+        return Err("too many Desktop observations".into());
+    }
+    let mut rows = Vec::with_capacity(events.len());
+    for event in &events {
+        let observation = DesktopObservation::read(event, &scope.owner_keys, &community)?;
+        rows.push(json!({ "id": observation.id, "heard": event.created_at.as_secs() }));
+    }
+    Ok(json!(rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +163,16 @@ mod tests {
         let accepted = prepare(&mut reopened, &scope).unwrap();
         assert_eq!(accepted, first);
         assert_eq!(reopened.total_changes(), 0, "no repeated native writes");
+        let pulse = prepare_observation(&mut reopened, &scope).unwrap();
+        let observation =
+            DesktopObservation::read(&pulse, &scope.owner_keys, &scope.relay_url).unwrap();
+        assert_eq!(first["event"]["tags"][0][1], observation.id);
+        assert_eq!(
+            prepare(&mut reopened, &scope).unwrap(),
+            first,
+            "pulses never rewrite profiles"
+        );
+        assert_eq!(reopened.total_changes(), 0);
         let other = RetentionScope {
             db_path: dir.path().join("two.db"),
             relay_url: scope.relay_url.clone(),
