@@ -294,6 +294,40 @@ impl MediaStorage {
         Ok(())
     }
 
+    /// Atomically store a small object only when its key is absent.
+    pub(crate) async fn put_if_absent(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<bool, MediaError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_NONE_MATCH, HeaderValue::from_static("*"));
+        let bucket = self.bucket.clone();
+        let key = key.to_string();
+        let bytes = bytes.to_vec();
+        let content_type = content_type.to_string();
+        retry_conditional_put(move || {
+            let bucket = bucket.clone();
+            let key = key.clone();
+            let bytes = bytes.clone();
+            let content_type = content_type.clone();
+            let headers = headers.clone();
+            async move {
+                bucket
+                    .put_object_with_content_type_and_headers(
+                        key,
+                        &bytes,
+                        &content_type,
+                        Some(headers),
+                    )
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .await
+    }
+
     /// Stream a file from disk into S3 without loading it into RAM.
     ///
     /// Uses rust-s3's `put_object_stream_with_content_type` which reads from
@@ -565,28 +599,8 @@ impl MediaStorage {
         meta: &BlobMeta,
     ) -> Result<bool, MediaError> {
         let meta_json = serde_json::to_vec(meta)?;
-        let mut headers = HeaderMap::new();
-        headers.insert(IF_NONE_MATCH, HeaderValue::from_static("*"));
-
-        let bucket = self.bucket.clone();
-        retry_conditional_put(move || {
-            let bucket = bucket.clone();
-            let key = key.clone();
-            let meta_json = meta_json.clone();
-            let headers = headers.clone();
-            async move {
-                bucket
-                    .put_object_with_content_type_and_headers(
-                        key,
-                        &meta_json,
-                        "application/json",
-                        Some(headers),
-                    )
-                    .await
-                    .map(|_| ())
-            }
-        })
-        .await
+        self.put_if_absent(&key, &meta_json, "application/json")
+            .await
     }
 
     /// Convenience: read just the MIME type from the community sidecar.

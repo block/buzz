@@ -30,7 +30,9 @@ pub use upload::{
     FileUploadHints,
 };
 pub use upload_record::{
-    parse_port, parse_public_ip, upload_record_key, UploadAttribution, UploadNetworkInfo,
-    UploadRecord, UPLOAD_RECORD_VERSION,
+    parse_port, parse_public_ip, process_upload_record_repair_page, upload_record_key,
+    UploadAttribution, UploadNetworkInfo, UploadRecord, UploadRecordRepairFuture,
+    UploadRecordRepairOutcome, UploadRecordRepairPage, UploadRecordRepairProtector,
+    UPLOAD_RECORD_REPAIR_PREFIX, UPLOAD_RECORD_VERSION,
 };
 pub use validation::{looks_like_iso_bmff, serve_inline, validate_video_file, VideoMeta};

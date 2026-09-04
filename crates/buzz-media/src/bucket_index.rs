@@ -8,7 +8,7 @@
 //! [`crate::storage::MediaStorage::list_page`] closure at the call site (see
 //! `buzz-relay`'s storage sweep task).
 //!
-//! Six key classes (thumb matched first, everything unrecognized is
+//! Seven key classes (thumb matched first, everything unrecognized is
 //! `Unknown` — never silently folded into another class):
 //!
 //! | Class | Shape |
@@ -18,6 +18,7 @@
 //! | sidecar | `_meta/{community-uuid}/{sha256}.json` |
 //! | classification claim | `_meta/{community-uuid}/claims/{sha256}.json` |
 //! | auxiliary | `_uploads/{community-uuid}/{sha256}/{ulid}.json` |
+//! | upload-record repair | `_upload_record_repairs/{community-uuid}/{sha256}/{ulid}.json` |
 //! | unknown | everything else |
 
 use std::collections::HashMap;
@@ -47,6 +48,12 @@ pub enum KeyClass {
         sha256: String,
         event_id: String,
     },
+    /// Durable repair journal for one upload moderation record.
+    UploadRecordRepair {
+        community: Uuid,
+        sha256: String,
+        event_id: String,
+    },
     /// Anything that doesn't match one of the strict shapes above.
     Unknown,
 }
@@ -70,6 +77,13 @@ pub fn classify_key(key: &str) -> KeyClass {
     }
     if let Some((community, sha256, event_id)) = parse_auxiliary_key(key) {
         return KeyClass::Auxiliary {
+            community,
+            sha256,
+            event_id,
+        };
+    }
+    if let Some((community, sha256, event_id)) = parse_upload_record_repair_key(key) {
+        return KeyClass::UploadRecordRepair {
             community,
             sha256,
             event_id,
@@ -222,6 +236,30 @@ fn parse_auxiliary_key(key: &str) -> Option<(Uuid, String, String)> {
     Some((community, sha256.to_string(), event_id.to_string()))
 }
 
+/// `_upload_record_repairs/{community}/{sha256}/{event_id}.json`.
+fn parse_upload_record_repair_key(key: &str) -> Option<(Uuid, String, String)> {
+    let mut segments = key.split('/');
+    if segments.next()? != "_upload_record_repairs" {
+        return None;
+    }
+    let community = parse_canonical_uuid(segments.next()?)?;
+    let sha256 = segments.next()?;
+    if !is_sha256(sha256) {
+        return None;
+    }
+    let last = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    let mut last_parts = last.split('.');
+    let event_id = last_parts.next()?;
+    let json = last_parts.next()?;
+    if last_parts.next().is_some() || json != "json" || !is_ulid_charset(event_id) {
+        return None;
+    }
+    Some((community, sha256.to_string(), event_id.to_string()))
+}
+
 /// Per-community logical storage: bytes and object count of bound shas.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommunityStorage {
@@ -293,7 +331,9 @@ impl BucketAggregate {
             KeyClass::Sidecar { community, sha256 } => {
                 self.sidecar_bindings.insert((community, sha256), size);
             }
-            KeyClass::Auxiliary { .. } | KeyClass::ClassificationClaim { .. } => {
+            KeyClass::Auxiliary { .. }
+            | KeyClass::UploadRecordRepair { .. }
+            | KeyClass::ClassificationClaim { .. } => {
                 // Fleet physical only — never enters logical/orphan math (F4).
             }
             KeyClass::Unknown => {
@@ -523,6 +563,21 @@ mod tests {
         assert_eq!(
             classify_key(&format!("_uploads/{c}/{s}/{ulid}.json")),
             KeyClass::Auxiliary {
+                community: c,
+                sha256: s,
+                event_id: ulid.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_upload_record_repair_key() {
+        let s = sha(0xef);
+        let c = community(2);
+        let ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        assert_eq!(
+            classify_key(&format!("_upload_record_repairs/{c}/{s}/{ulid}.json")),
+            KeyClass::UploadRecordRepair {
                 community: c,
                 sha256: s,
                 event_id: ulid.to_string(),
@@ -798,13 +853,15 @@ mod tests {
 }
 
 /// The exact community-scoped listing prefixes owned by one tenant, in
-/// ascending key order: media sidecars, upload records, and Git repository
-/// pointers. Every tenant-owned binding lives under one of these; shared
+/// ascending key order: media sidecars, upload-record repairs, upload records,
+/// and Git repository pointers. Every tenant-owned binding lives under one of
+/// these; shared
 /// immutable CAS/thumb/probe data is deliberately outside them (fleet-wide
 /// physical GC is a separate retention phase).
-pub fn tenant_prefixes(community: Uuid) -> [String; 3] {
+pub fn tenant_prefixes(community: Uuid) -> [String; 4] {
     [
         format!("_meta/{community}/"),
+        format!("_upload_record_repairs/{community}/"),
         format!("_uploads/{community}/"),
         format!("repos/{community}/"),
     ]
@@ -823,6 +880,9 @@ pub fn is_tenant_owned_key(community: Uuid, key: &str) -> bool {
             community: owner, ..
         }
         | KeyClass::Auxiliary {
+            community: owner, ..
+        }
+        | KeyClass::UploadRecordRepair {
             community: owner, ..
         } => owner == community,
         KeyClass::Unknown => git_pointer_community(key) == Some(community),
@@ -956,6 +1016,10 @@ mod deletion_taxonomy_tests {
         ));
         assert!(is_tenant_owned_key(
             target,
+            &format!("_upload_record_repairs/{target}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json")
+        ));
+        assert!(is_tenant_owned_key(
+            target,
             &format!("repos/{target}/{}/repo/pointer", "b".repeat(64))
         ));
         // Another tenant's bindings and shared CAS are never owned.
@@ -984,6 +1048,7 @@ mod deletion_taxonomy_tests {
         for key in [
             format!("_meta/{community}/{sha}.json"),
             format!("_meta/{community}/claims/{sha}.json"),
+            format!("_upload_record_repairs/{community}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json"),
             format!("_uploads/{community}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json"),
             format!("repos/{community}/{}/repo/pointer", "d".repeat(64)),
         ] {
@@ -1006,6 +1071,10 @@ mod deletion_taxonomy_tests {
             (format!("{sha}.thumb.jpg"), 1),
             (format!("_meta/{community}/{sha}.json"), 1),
             (format!("_meta/{community}/claims/{sha}.json"), 1),
+            (
+                format!("_upload_record_repairs/{community}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json"),
+                1,
+            ),
             (format!("packs/{sha}"), 1),
             (
                 format!("repos/{community}/{}/repo/pointer", "b".repeat(64)),
@@ -1039,7 +1108,7 @@ mod deletion_taxonomy_tests {
         })
         .await
         .expect("sweep synthetic listing");
-        assert_eq!(outcome.listed_objects, 10);
+        assert_eq!(outcome.listed_objects, 11);
         assert_eq!(outcome.unknown_object_count, 3);
         assert_eq!(
             outcome.unknown_key_sample,

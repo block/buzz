@@ -13,11 +13,16 @@
 //!
 //! ```text
 //! _uploads/{community}/{sha256}/{event_id}.json
+//! _upload_record_repairs/{community}/{sha256}/{event_id}.json
 //! ```
 //!
 //! `event_id` is a time-sortable ULID derived from the signed Blossom upload
 //! authorization event. Reusing that authorization for an idempotent request
 //! retry therefore repairs the same record instead of appending a duplicate.
+//! Fresh uploads first write the second key as a durable repair obligation.
+//! It is removed only after the sidecar classification and moderation record
+//! agree, so a relay restart or exhausted in-request correction cannot strand
+//! an authoritative sidecar next to an incorrect record.
 //! Records are unreachable through the media serve path by construction
 //! (`validate_media_path` requires a bare 64-hex first segment), and the bucket
 //! is only accessible via the relay's IAM role.
@@ -48,12 +53,22 @@
 //!   breaking changes to existing fields.
 
 use std::net::IpAddr;
+use std::pin::Pin;
 
 use buzz_core::tenant::TenantContext;
 use serde::{Deserialize, Serialize};
 
 /// Current record schema version. Additive fields do not bump this.
 pub const UPLOAD_RECORD_VERSION: u32 = 1;
+
+/// Root prefix scanned by the relay's bounded upload-record repair worker.
+pub const UPLOAD_RECORD_REPAIR_PREFIX: &str = "_upload_record_repairs/";
+
+const MAX_UPLOAD_RECORD_REPAIR_JSON_BYTES: usize = 64 * 1024;
+const UPLOAD_RECORD_REPAIR_JOURNAL_VERSION: u32 = 1;
+const UPLOAD_RECORD_INITIAL_WRITE_LEASE_SECS: i64 = 120;
+const UPLOAD_RECORD_REPAIR_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const UPLOAD_RECORD_REPAIR_ITEM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// One accepted upload event. See module docs for the consumer contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,29 +149,78 @@ pub struct UploadEventFacts<'a> {
     pub uploaded_at: i64,
 }
 
-/// Build and store the per-event record for one accepted upload.
-///
-/// Called after blob and derived-artifact durability but before the sidecar
-/// publish gate on fresh uploads; called on the existing published state for
-/// idempotent re-uploads. A write failure propagates and fails the upload. The
-/// record's `ObjectCreated` event is the moderation pipeline's only scan
-/// trigger, so no newly published media may exist without a record.
-pub async fn record_upload_event(
-    storage: &crate::storage::MediaStorage,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UploadRecordRepairJournal {
+    version: u32,
+    record: UploadRecord,
+    canonical_meta: crate::storage::BlobMeta,
+    recover_missing_record_after: i64,
+}
+
+/// Durable repair obligation armed before a fresh upload record is written.
+#[derive(Clone)]
+pub(crate) struct PendingUploadRecordRepair {
+    repair_key: String,
+    record_key: String,
+    record: UploadRecord,
+}
+
+impl PendingUploadRecordRepair {
+    #[cfg(test)]
+    pub(crate) fn repair_key(&self) -> &str {
+        &self.repair_key
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_key(&self) -> &str {
+        &self.record_key
+    }
+}
+
+/// Result of one bounded page processed by the independent repair worker.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UploadRecordRepairPage {
+    /// Obligations whose moderation record was made canonical and then cleared.
+    pub repaired: usize,
+    /// Obligations waiting for a sidecar to be published.
+    pub waiting_for_sidecar: usize,
+    /// Obligations whose bounded initial record write may still be in flight.
+    pub waiting_for_record: usize,
+    /// Malformed or transiently failed obligations left durable for a later pass.
+    pub failed: usize,
+    /// Continuation token for the next bounded page.
+    pub next_continuation_token: Option<String>,
+    /// Whether more obligations existed when this page was listed.
+    pub is_truncated: bool,
+}
+
+fn validated_repair_continuation_token(
+    is_truncated: bool,
+    continuation_token: Option<String>,
+) -> Result<Option<String>, crate::error::MediaError> {
+    if is_truncated && continuation_token.is_none() {
+        return Err(crate::error::MediaError::StorageError(
+            "truncated upload-record repair page has no continuation token".to_string(),
+        ));
+    }
+    Ok(continuation_token)
+}
+
+fn build_upload_record(
     ctx: &TenantContext,
     auth_event: &nostr::Event,
     attribution: &UploadAttribution,
     facts: UploadEventFacts<'_>,
-) -> Result<(), crate::error::MediaError> {
+) -> Result<UploadRecord, crate::error::MediaError> {
     use nostr::ToBech32;
 
     let event_id = upload_event_id(auth_event);
     // Ports are only meaningful next to the address they were observed with.
     let ip = attribution.net.ip;
     let port = ip.and(attribution.net.port);
-    let record = UploadRecord {
+    Ok(UploadRecord {
         version: UPLOAD_RECORD_VERSION,
-        event_id: event_id.clone(),
+        event_id,
         sha256: facts.sha256.to_string(),
         ext: facts.ext.to_string(),
         mime_type: facts.mime.to_string(),
@@ -172,10 +236,364 @@ pub async fn record_upload_event(
         uploader_name: attribution.uploader_name.clone(),
         ip: ip.map(|addr| addr.to_string()),
         port,
-    };
-    let key = upload_record_key(ctx, facts.sha256, &event_id);
+    })
+}
+
+/// Build and store the per-event record for one accepted upload.
+///
+/// Called after blob and derived-artifact durability but before the sidecar
+/// publish gate on fresh uploads; called on the existing published state for
+/// idempotent re-uploads. A write failure propagates and fails the upload. The
+/// record's `ObjectCreated` event is the moderation pipeline's only scan
+/// trigger, so no newly published media may exist without a record.
+pub async fn record_upload_event(
+    storage: &crate::storage::MediaStorage,
+    ctx: &TenantContext,
+    auth_event: &nostr::Event,
+    attribution: &UploadAttribution,
+    facts: UploadEventFacts<'_>,
+) -> Result<(), crate::error::MediaError> {
+    let record = build_upload_record(ctx, auth_event, attribution, facts)?;
+    let key = upload_record_key(ctx, facts.sha256, &record.event_id);
     let json = serde_json::to_vec(&record)?;
     storage.put(&key, &json, "application/json").await
+}
+
+/// Persist a repair obligation before writing a fresh moderation record.
+pub(crate) async fn arm_upload_record_repair(
+    storage: &crate::storage::MediaStorage,
+    ctx: &TenantContext,
+    auth_event: &nostr::Event,
+    attribution: &UploadAttribution,
+    facts: UploadEventFacts<'_>,
+    canonical_meta: &crate::storage::BlobMeta,
+) -> Result<PendingUploadRecordRepair, crate::error::MediaError> {
+    let record = build_upload_record(ctx, auth_event, attribution, facts)?;
+    let record_key = upload_record_key(ctx, facts.sha256, &record.event_id);
+    let repair_key = upload_record_repair_key(ctx, facts.sha256, &record.event_id);
+    let journal = serde_json::to_vec(&UploadRecordRepairJournal {
+        version: UPLOAD_RECORD_REPAIR_JOURNAL_VERSION,
+        record: record.clone(),
+        canonical_meta: canonical_meta.clone(),
+        recover_missing_record_after: chrono::Utc::now()
+            .timestamp()
+            .saturating_add(UPLOAD_RECORD_INITIAL_WRITE_LEASE_SECS),
+    })?;
+    if !storage
+        .put_if_absent(&repair_key, &journal, "application/json")
+        .await?
+    {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair already in progress for this authorization".to_string(),
+        ));
+    }
+    Ok(PendingUploadRecordRepair {
+        repair_key,
+        record_key,
+        record,
+    })
+}
+
+/// Write one version of the moderation record while retaining its durable journal.
+pub(crate) async fn write_upload_record_facts(
+    storage: &crate::storage::MediaStorage,
+    repair: &PendingUploadRecordRepair,
+    meta: &crate::storage::BlobMeta,
+) -> Result<(), crate::error::MediaError> {
+    let mut record = repair.record.clone();
+    record.ext.clone_from(&meta.ext);
+    record.mime_type.clone_from(&meta.mime_type);
+    let json = serde_json::to_vec(&record)?;
+    storage
+        .put(&repair.record_key, &json, "application/json")
+        .await
+}
+
+/// Clear a repair obligation only after the record and sidecar facts converge.
+pub(crate) async fn clear_upload_record_repair(
+    storage: &crate::storage::MediaStorage,
+    repair: &PendingUploadRecordRepair,
+) -> Result<(), crate::error::MediaError> {
+    storage.delete(&repair.repair_key).await
+}
+
+fn upload_record_repair_key(ctx: &TenantContext, sha256: &str, event_id: &str) -> String {
+    format!(
+        "{UPLOAD_RECORD_REPAIR_PREFIX}{}/{sha256}/{event_id}.json",
+        ctx.community()
+    )
+}
+
+fn record_keys_from_journal(
+    journal: &UploadRecordRepairJournal,
+) -> Result<(String, String), crate::error::MediaError> {
+    let record = &journal.record;
+    let community = uuid::Uuid::parse_str(&record.community_id).map_err(|_| {
+        crate::error::MediaError::StorageError(
+            "upload-record repair has invalid community id".to_string(),
+        )
+    })?;
+    if community.to_string() != record.community_id
+        || record.sha256.len() != 64
+        || !record
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !matches!(
+            ulid::Ulid::from_string(&record.event_id),
+            Ok(event_id) if event_id.to_string() == record.event_id
+        )
+    {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair has invalid canonical identity".to_string(),
+        ));
+    }
+    Ok((
+        format!(
+            "_uploads/{}/{}/{}.json",
+            record.community_id, record.sha256, record.event_id
+        ),
+        format!("_meta/{}/{}.json", record.community_id, record.sha256),
+    ))
+}
+
+/// Outcome of one independently fenced upload-record repair attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadRecordRepairOutcome {
+    /// Record and sidecar facts converged and the journal was cleared.
+    Repaired,
+    /// The initial request still owns its bounded record-write window.
+    WaitingForRecord,
+    /// No authoritative sidecar exists yet.
+    WaitingForSidecar,
+}
+
+/// Boxed operation passed through the relay's deletion-fence protector.
+pub type UploadRecordRepairFuture<'a> = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<UploadRecordRepairOutcome, crate::error::MediaError>,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Holds the community serving-write fence around one repair's object mutations.
+pub trait UploadRecordRepairProtector: Send + Sync {
+    /// Protect `operation` against the whole-community deletion fence.
+    fn protect<'a>(
+        &'a self,
+        community: buzz_core::tenant::CommunityId,
+        operation: UploadRecordRepairFuture<'a>,
+    ) -> UploadRecordRepairFuture<'a>;
+}
+
+async fn process_upload_record_repair(
+    storage: &crate::storage::MediaStorage,
+    repair_key: &str,
+) -> Result<UploadRecordRepairOutcome, crate::error::MediaError> {
+    let bytes = get_bounded_repair_json(storage, repair_key).await?;
+    let mut journal: UploadRecordRepairJournal = serde_json::from_slice(&bytes)?;
+    validate_repair_versions(journal.version, journal.record.version)?;
+    let (record_key, sidecar_key) = record_keys_from_journal(&journal)?;
+    let expected_repair_key = format!(
+        "{UPLOAD_RECORD_REPAIR_PREFIX}{}/{}/{}.json",
+        journal.record.community_id, journal.record.sha256, journal.record.event_id
+    );
+    if repair_key != expected_repair_key {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair key does not match its payload".to_string(),
+        ));
+    }
+    validate_repair_meta(&journal.record, &journal.canonical_meta)?;
+    let record_exists = match get_bounded_repair_json(storage, &record_key).await {
+        Ok(_) => true,
+        Err(crate::error::MediaError::NotFound) => false,
+        Err(error) => return Err(error),
+    };
+    if !record_exists && chrono::Utc::now().timestamp() < journal.recover_missing_record_after {
+        return Ok(UploadRecordRepairOutcome::WaitingForRecord);
+    }
+
+    let canonical_blob_key = format!("{}.{}", journal.record.sha256, journal.canonical_meta.ext);
+    if !storage.head(&canonical_blob_key).await? {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair canonical metadata references a missing blob".to_string(),
+        ));
+    }
+    if !record_exists {
+        storage
+            .put(
+                &record_key,
+                &serde_json::to_vec(&journal.record)?,
+                "application/json",
+            )
+            .await?;
+    }
+
+    let canonical_sidecar = serde_json::to_vec(&journal.canonical_meta)?;
+    let sidecar = if storage
+        .put_if_absent(&sidecar_key, &canonical_sidecar, "application/json")
+        .await?
+    {
+        journal.canonical_meta
+    } else {
+        match get_bounded_repair_json(storage, &sidecar_key).await {
+            Ok(bytes) => serde_json::from_slice::<crate::storage::BlobMeta>(&bytes)?,
+            Err(crate::error::MediaError::NotFound) => {
+                return Ok(UploadRecordRepairOutcome::WaitingForSidecar);
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    validate_sidecar_classification(&sidecar)?;
+    let published_blob_key = format!("{}.{}", journal.record.sha256, sidecar.ext);
+    if !storage.head(&published_blob_key).await? {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair sidecar references a missing blob".to_string(),
+        ));
+    }
+    journal.record.ext = sidecar.ext;
+    journal.record.mime_type = sidecar.mime_type;
+    storage
+        .put(
+            &record_key,
+            &serde_json::to_vec(&journal.record)?,
+            "application/json",
+        )
+        .await?;
+    storage.delete(repair_key).await?;
+    Ok(UploadRecordRepairOutcome::Repaired)
+}
+
+fn validate_repair_versions(
+    journal_version: u32,
+    record_version: u32,
+) -> Result<(), crate::error::MediaError> {
+    if journal_version != UPLOAD_RECORD_REPAIR_JOURNAL_VERSION
+        || record_version != UPLOAD_RECORD_VERSION
+    {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair has an unsupported schema version".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_repair_meta(
+    record: &UploadRecord,
+    meta: &crate::storage::BlobMeta,
+) -> Result<(), crate::error::MediaError> {
+    validate_sidecar_classification(meta)?;
+    if meta.ext != record.ext || meta.mime_type != record.mime_type || meta.size != record.size {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair canonical metadata does not match its record".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sidecar_classification(
+    sidecar: &crate::storage::BlobMeta,
+) -> Result<(), crate::error::MediaError> {
+    if sidecar.ext.is_empty()
+        || sidecar.ext.len() > 8
+        || !sidecar.ext.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        || sidecar.mime_type.is_empty()
+    {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair sidecar has invalid classification".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn get_bounded_repair_json(
+    storage: &crate::storage::MediaStorage,
+    key: &str,
+) -> Result<Vec<u8>, crate::error::MediaError> {
+    let bytes = storage
+        .get_range(key, 0, MAX_UPLOAD_RECORD_REPAIR_JSON_BYTES as u64)
+        .await?;
+    if bytes.len() > MAX_UPLOAD_RECORD_REPAIR_JSON_BYTES {
+        return Err(crate::error::MediaError::StorageError(
+            "upload-record repair JSON exceeds 64 KiB".to_string(),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Process one durable upload-record repair while preserving an S3 cursor.
+///
+/// Listing failure propagates because the relay cannot recover without list
+/// access. Individual obligations remain durable and are counted as failures so
+/// one malformed or transiently unavailable item cannot starve later entries.
+pub async fn process_upload_record_repair_page(
+    storage: &crate::storage::MediaStorage,
+    protector: &impl UploadRecordRepairProtector,
+    continuation_token: Option<String>,
+) -> Result<UploadRecordRepairPage, crate::error::MediaError> {
+    let page = tokio::time::timeout(
+        UPLOAD_RECORD_REPAIR_LIST_TIMEOUT,
+        storage.list_prefix_page(UPLOAD_RECORD_REPAIR_PREFIX, continuation_token, 1),
+    )
+    .await
+    .map_err(|_| {
+        crate::error::MediaError::StorageError(
+            "upload-record repair listing exceeded its deadline".to_string(),
+        )
+    })??;
+    let next_continuation_token =
+        validated_repair_continuation_token(page.is_truncated, page.next_continuation_token)?;
+    let mut outcome = UploadRecordRepairPage {
+        next_continuation_token,
+        is_truncated: page.is_truncated,
+        ..UploadRecordRepairPage::default()
+    };
+    for (repair_key, _) in page.objects {
+        let community = match crate::bucket_index::classify_key(&repair_key) {
+            crate::bucket_index::KeyClass::UploadRecordRepair { community, .. } => {
+                buzz_core::tenant::CommunityId::from_uuid(community)
+            }
+            _ => {
+                outcome.failed += 1;
+                tracing::warn!(
+                    repair_key,
+                    "malformed upload-record repair key remains pending"
+                );
+                continue;
+            }
+        };
+        let repair = protector.protect(
+            community,
+            Box::pin(process_upload_record_repair(storage, &repair_key)),
+        );
+        match tokio::time::timeout(UPLOAD_RECORD_REPAIR_ITEM_TIMEOUT, repair).await {
+            Err(_) => {
+                outcome.failed += 1;
+                tracing::warn!(
+                    repair_key,
+                    "upload-record repair timed out and remains pending"
+                );
+            }
+            Ok(Ok(UploadRecordRepairOutcome::Repaired)) => outcome.repaired += 1,
+            Ok(Ok(UploadRecordRepairOutcome::WaitingForRecord)) => {
+                outcome.waiting_for_record += 1;
+            }
+            Ok(Ok(UploadRecordRepairOutcome::WaitingForSidecar)) => {
+                outcome.waiting_for_sidecar += 1;
+            }
+            Ok(Err(error)) => {
+                outcome.failed += 1;
+                tracing::warn!(
+                    repair_key,
+                    error = %error,
+                    "upload-record repair remains pending"
+                );
+            }
+        }
+    }
+    Ok(outcome)
 }
 
 fn upload_event_id(auth_event: &nostr::Event) -> String {
@@ -296,6 +714,22 @@ mod tests {
                 ctx.community()
             )
         );
+    }
+
+    #[test]
+    fn truncated_repair_page_without_cursor_fails_closed() {
+        assert!(validated_repair_continuation_token(true, None).is_err());
+        assert_eq!(
+            validated_repair_continuation_token(true, Some("next".to_string())).unwrap(),
+            Some("next".to_string())
+        );
+    }
+
+    #[test]
+    fn repair_journal_rejects_unknown_schema_versions() {
+        assert!(validate_repair_versions(1, UPLOAD_RECORD_VERSION).is_ok());
+        assert!(validate_repair_versions(2, UPLOAD_RECORD_VERSION).is_err());
+        assert!(validate_repair_versions(1, UPLOAD_RECORD_VERSION + 1).is_err());
     }
 
     #[test]

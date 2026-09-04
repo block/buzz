@@ -11,7 +11,10 @@ use crate::error::MediaError;
 use crate::storage::{BlobMeta, MediaStorage};
 use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
-use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
+use crate::upload_record::{
+    arm_upload_record_repair, clear_upload_record_repair, record_upload_event,
+    write_upload_record_facts, UploadAttribution, UploadEventFacts,
+};
 use crate::validation::{
     looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content_with_hints,
     validate_video_file,
@@ -52,6 +55,7 @@ struct BufferedUploadInput<'a> {
 }
 
 const UPLOAD_RECORD_CORRECTION_MAX_ATTEMPTS: usize = 3;
+const UPLOAD_RECORD_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn publish_sidecar_after_record<W, WFut, P, PFut, G, GFut>(
     canonical_meta: BlobMeta,
@@ -67,7 +71,12 @@ where
     G: FnOnce() -> GFut,
     GFut: std::future::Future<Output = Result<BlobMeta, MediaError>>,
 {
-    write_record(canonical_meta.clone()).await?;
+    tokio::time::timeout(
+        UPLOAD_RECORD_WRITE_TIMEOUT,
+        write_record(canonical_meta.clone()),
+    )
+    .await
+    .map_err(|_| MediaError::StorageError("initial upload record write timed out".to_string()))??;
     if publish_sidecar(canonical_meta.clone()).await? {
         return Ok(canonical_meta);
     }
@@ -79,10 +88,18 @@ where
 
     // A legacy writer won after our pre-record sidecar check. Repair the same
     // auth-event-derived record key, retrying transient object-store failures.
-    // If all attempts fail, a client retry uses that same key and the now-known
-    // sidecar facts, so it repairs rather than appending a second record.
+    // The caller armed a durable obligation before the initial record write, so
+    // exhausting these attempts leaves independently recoverable work.
     for attempt in 0..UPLOAD_RECORD_CORRECTION_MAX_ATTEMPTS {
-        match write_record(published.clone()).await {
+        let write_result =
+            tokio::time::timeout(UPLOAD_RECORD_WRITE_TIMEOUT, write_record(published.clone()))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(MediaError::StorageError(
+                        "upload record correction write timed out".to_string(),
+                    ))
+                });
+        match write_result {
             Ok(()) => return Ok(published),
             Err(error) if attempt + 1 == UPLOAD_RECORD_CORRECTION_MAX_ATTEMPTS => {
                 return Err(error);
@@ -240,31 +257,39 @@ where
         ));
     }
 
-    // The moderation record precedes the sidecar publish gate. If this write
-    // fails, the blob and any thumbnail remain orphaned but the media cannot be
-    // served. Conversely, record existence still implies those objects exist.
+    // Arm the durable repair before writing the moderation record. It remains
+    // until the record and sidecar classifications converge, including across
+    // process death or exhausted in-request correction attempts.
     let attribution = attribution.as_ref();
     let body_size = body.len() as u64;
+    let record_repair = if let Some(attribution) = attribution {
+        Some(
+            arm_upload_record_repair(
+                storage,
+                ctx,
+                auth_event,
+                attribution,
+                UploadEventFacts {
+                    sha256: &sha256,
+                    ext: &canonical_meta.ext,
+                    mime: &canonical_meta.mime_type,
+                    size: body_size,
+                    uploaded_at,
+                },
+                &canonical_meta,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let published_meta = publish_sidecar_after_record(
         canonical_meta,
         |record_meta| {
-            let sha256 = sha256.as_str();
+            let record_repair = record_repair.clone();
             async move {
-                if let Some(attribution) = attribution {
-                    record_upload_event(
-                        storage,
-                        ctx,
-                        auth_event,
-                        attribution,
-                        UploadEventFacts {
-                            sha256,
-                            ext: &record_meta.ext,
-                            mime: &record_meta.mime_type,
-                            size: body_size,
-                            uploaded_at,
-                        },
-                    )
-                    .await
+                if let Some(repair) = &record_repair {
+                    write_upload_record_facts(storage, repair, &record_meta).await
                 } else {
                     Ok(())
                 }
@@ -285,6 +310,9 @@ where
         return Err(MediaError::StorageError(
             "canonical sidecar blob is missing after concurrent upload".to_string(),
         ));
+    }
+    if let Some(repair) = &record_repair {
+        clear_upload_record_repair(storage, repair).await?;
     }
 
     Ok(build_descriptor(
@@ -657,28 +685,36 @@ pub async fn process_video_upload(
         ));
     }
 
-    // Record before publishing the sidecar serve gate. See the buffered path.
+    // Arm durable recovery before the record/sidecar sequence. See the buffered path.
     let attribution = attribution.as_ref();
+    let record_repair = if let Some(attribution) = attribution {
+        Some(
+            arm_upload_record_repair(
+                storage,
+                ctx,
+                auth_event,
+                attribution,
+                UploadEventFacts {
+                    sha256: &sha256_hex,
+                    ext: &canonical_meta.ext,
+                    mime: &canonical_meta.mime_type,
+                    size: file_size,
+                    uploaded_at,
+                },
+                &canonical_meta,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let published_meta = publish_sidecar_after_record(
         canonical_meta,
         |record_meta| {
-            let sha256 = sha256_hex.as_str();
+            let record_repair = record_repair.clone();
             async move {
-                if let Some(attribution) = attribution {
-                    record_upload_event(
-                        storage,
-                        ctx,
-                        auth_event,
-                        attribution,
-                        UploadEventFacts {
-                            sha256,
-                            ext: &record_meta.ext,
-                            mime: &record_meta.mime_type,
-                            size: file_size,
-                            uploaded_at,
-                        },
-                    )
-                    .await
+                if let Some(repair) = &record_repair {
+                    write_upload_record_facts(storage, repair, &record_meta).await
                 } else {
                     Ok(())
                 }
@@ -699,6 +735,9 @@ pub async fn process_video_upload(
         return Err(MediaError::StorageError(
             "canonical sidecar blob is missing after concurrent upload".to_string(),
         ));
+    }
+    if let Some(repair) = &record_repair {
+        clear_upload_record_repair(storage, repair).await?;
     }
 
     Ok(build_descriptor(
@@ -766,6 +805,18 @@ fn build_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestRepairProtector;
+
+    impl crate::upload_record::UploadRecordRepairProtector for TestRepairProtector {
+        fn protect<'a>(
+            &'a self,
+            _community: buzz_core::tenant::CommunityId,
+            operation: crate::upload_record::UploadRecordRepairFuture<'a>,
+        ) -> crate::upload_record::UploadRecordRepairFuture<'a> {
+            operation
+        }
+    }
 
     fn test_config() -> MediaConfig {
         MediaConfig {
@@ -990,5 +1041,253 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records["same-auth-event"].ext, published.ext);
         assert_eq!(records["same-auth-event"].mime_type, published.mime_type);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_upload_record_write_has_a_hard_deadline() {
+        let result = publish_sidecar_after_record(
+            BlobMeta::default(),
+            |_| std::future::pending::<Result<(), MediaError>>(),
+            |_| async { Ok(true) },
+            || async { Ok(BlobMeta::default()) },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(MediaError::StorageError(message))
+                if message == "initial upload record write timed out"
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_record_correction_attempts_have_hard_deadlines() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let writes = AtomicUsize::new(0);
+        let canonical = BlobMeta {
+            ext: "ics".to_string(),
+            mime_type: "text/calendar".to_string(),
+            ..BlobMeta::default()
+        };
+        let published = BlobMeta {
+            ext: "bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            ..BlobMeta::default()
+        };
+        let result = publish_sidecar_after_record(
+            canonical,
+            |_| {
+                let attempt = writes.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        Ok(())
+                    } else {
+                        std::future::pending::<Result<(), MediaError>>().await
+                    }
+                }
+            },
+            |_| async { Ok(false) },
+            || async { Ok(published) },
+        )
+        .await;
+
+        assert!(matches!(result, Err(MediaError::StorageError(_))));
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            1 + UPLOAD_RECORD_CORRECTION_MAX_ATTEMPTS
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live MinIO (docker compose up -d minio minio-init)"]
+    async fn exhausted_record_correction_is_repaired_without_client_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use buzz_core::tenant::CommunityId;
+        use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+        use crate::upload_record::{
+            arm_upload_record_repair, clear_upload_record_repair,
+            process_upload_record_repair_page, write_upload_record_facts,
+        };
+
+        let mut config = test_config();
+        config.s3_endpoint = std::env::var("BUZZ_S3_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:9000".to_string());
+        config.s3_access_key =
+            std::env::var("BUZZ_S3_ACCESS_KEY").unwrap_or_else(|_| "buzz_dev".to_string());
+        config.s3_secret_key =
+            std::env::var("BUZZ_S3_SECRET_KEY").unwrap_or_else(|_| "buzz_dev_secret".to_string());
+        config.s3_bucket =
+            std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string());
+        config.s3_region =
+            std::env::var("BUZZ_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+        config.s3_addressing_style = std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+            .unwrap_or_else(|_| "path".to_string())
+            .parse()
+            .expect("BUZZ_S3_ADDRESSING_STYLE must be path or virtual");
+        let storage = MediaStorage::new(&config).expect("live MinIO storage client");
+        let ctx = TenantContext::resolved(
+            CommunityId::from_uuid(uuid::Uuid::new_v4()),
+            "media.example.com",
+        );
+        let sha256 = hex::encode(Sha256::digest(uuid::Uuid::new_v4().as_bytes()));
+        let auth_event = EventBuilder::new(Kind::from(24242), "Upload")
+            .custom_created_at(Timestamp::now())
+            .sign_with_keys(&Keys::generate())
+            .expect("sign upload authorization");
+        let claimed = BlobMeta {
+            ext: "ics".to_string(),
+            mime_type: "text/calendar".to_string(),
+            size: 64,
+            uploaded_at: 1_700_000_000,
+            ..BlobMeta::default()
+        };
+        let published = BlobMeta {
+            ext: "bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            ..claimed.clone()
+        };
+        let claimed_key = format!("{sha256}.{}", claimed.ext);
+        let published_key = format!("{sha256}.{}", published.ext);
+        storage
+            .put(&claimed_key, b"calendar", &claimed.mime_type)
+            .await
+            .expect("seed claimed blob");
+        storage
+            .put(&published_key, b"calendar", &published.mime_type)
+            .await
+            .expect("seed published blob");
+        storage
+            .put_sidecar(&ctx, &sha256, &published)
+            .await
+            .expect("seed conflicting legacy sidecar");
+
+        let repair = arm_upload_record_repair(
+            &storage,
+            &ctx,
+            &auth_event,
+            &UploadAttribution::default(),
+            UploadEventFacts {
+                sha256: &sha256,
+                ext: &claimed.ext,
+                mime: &claimed.mime_type,
+                size: claimed.size,
+                uploaded_at: claimed.uploaded_at,
+            },
+            &claimed,
+        )
+        .await
+        .expect("durably arm repair before the moderation record");
+        let duplicate_arm = arm_upload_record_repair(
+            &storage,
+            &ctx,
+            &auth_event,
+            &UploadAttribution::default(),
+            UploadEventFacts {
+                sha256: &sha256,
+                ext: &claimed.ext,
+                mime: &claimed.mime_type,
+                size: claimed.size,
+                uploaded_at: claimed.uploaded_at,
+            },
+            &claimed,
+        )
+        .await;
+        assert!(
+            duplicate_arm.is_err(),
+            "a concurrent request must not overwrite the active repair fence"
+        );
+        process_upload_record_repair_page(&storage, &TestRepairProtector, None)
+            .await
+            .expect("early worker pass");
+        assert!(
+            storage
+                .head(repair.repair_key())
+                .await
+                .expect("head active repair obligation"),
+            "the worker must not retire an obligation before its initial record write"
+        );
+        assert!(
+            !storage
+                .head(repair.record_key())
+                .await
+                .expect("head unwritten moderation record"),
+            "the worker must not race the active uploader's initial record write"
+        );
+        let writes = AtomicUsize::new(0);
+        let result = publish_sidecar_after_record(
+            claimed.clone(),
+            |meta| {
+                let repair = &repair;
+                let storage = &storage;
+                let attempt = writes.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt > 0 {
+                        return Err(MediaError::StorageError(
+                            "injected terminal correction failure".to_string(),
+                        ));
+                    }
+                    write_upload_record_facts(storage, repair, &meta).await
+                }
+            },
+            |meta| {
+                let storage = &storage;
+                let ctx = &ctx;
+                let sha256 = &sha256;
+                async move { storage.put_sidecar_if_absent(ctx, sha256, &meta).await }
+            },
+            || async { storage.get_sidecar(&ctx, &sha256).await },
+        )
+        .await;
+
+        assert!(result.is_err(), "all correction attempts must be exhausted");
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            1 + UPLOAD_RECORD_CORRECTION_MAX_ATTEMPTS
+        );
+        assert!(storage
+            .head(repair.repair_key())
+            .await
+            .expect("head durable repair obligation"));
+        let wrong_record: crate::UploadRecord = serde_json::from_slice(
+            &storage
+                .get(repair.record_key())
+                .await
+                .expect("read pre-repair moderation record"),
+        )
+        .expect("parse pre-repair moderation record");
+        assert_eq!(wrong_record.ext, claimed.ext);
+
+        let page = process_upload_record_repair_page(&storage, &TestRepairProtector, None)
+            .await
+            .expect("independent repair worker page");
+        assert!(page.repaired > 0);
+        assert!(!storage
+            .head(repair.repair_key())
+            .await
+            .expect("head cleared repair obligation"));
+        let repaired_record: crate::UploadRecord = serde_json::from_slice(
+            &storage
+                .get(repair.record_key())
+                .await
+                .expect("read repaired moderation record"),
+        )
+        .expect("parse repaired moderation record");
+        assert_eq!(repaired_record.ext, published.ext);
+        assert_eq!(repaired_record.mime_type, published.mime_type);
+
+        for key in [
+            repair.record_key(),
+            &MediaStorage::ctx_sidecar_key(&ctx, &sha256),
+            &claimed_key,
+            &published_key,
+        ] {
+            storage.delete(key).await.expect("clean MinIO fixture");
+        }
+        clear_upload_record_repair(&storage, &repair)
+            .await
+            .expect("cleanup remains idempotent");
     }
 }
