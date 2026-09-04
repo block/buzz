@@ -5,10 +5,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, current_instance_id, find_managed_agent_mut, load_global_agent_config,
     load_managed_agents, load_personas, managed_agent_runtime_log_path, process_is_running,
-    record_agent_command, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
-    terminate_process, terminate_untracked_pair_runtime, write_agent_runtime_receipt,
-    AgentReadiness, BackendKind, ManagedAgentPairRuntime, ManagedAgentRuntimeKey,
-    ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
+    record_agent_command, resolve_effective_agent_env, save_managed_agents, terminate_process,
+    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -261,6 +261,28 @@ fn start_pair(
         .managed_agent_runtime_transition
         .lock()
         .map_err(|e| e.to_string())?;
+    start_pair_locked(
+        pubkey,
+        relay_url,
+        lazy,
+        expected_updated_at,
+        explicit_start,
+        None,
+        app.clone(),
+    )
+}
+
+// Caller owns the transition lock across admission, effect, receipt and result.
+pub(crate) fn start_pair_locked(
+    pubkey: String,
+    relay_url: String,
+    lazy: bool,
+    expected_updated_at: Option<&str>,
+    explicit_start: bool,
+    broker: Option<&super::broker_launch::BrokerSession>,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    let state = app.state::<AppState>();
     if state.shutdown_started.load(Ordering::Acquire) {
         return Err("desktop shutdown has started".into());
     }
@@ -305,7 +327,7 @@ fn start_pair(
     } else {
         None
     };
-    let mut process = spawn_agent_child(
+    let mut process = super::spawn_agent_child_with_broker(
         &app,
         record,
         &key.relay_url,
@@ -313,6 +335,7 @@ fn start_pair(
         owner.as_deref(),
         None,
         resume.as_ref(),
+        broker,
     )?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
