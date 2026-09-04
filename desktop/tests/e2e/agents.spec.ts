@@ -2652,6 +2652,8 @@ test("start pill morphs into the running dot without remounting the avatar", asy
 
   const card = page.getByTestId(`persona-agent-row-${personaId}`);
   const startButton = page.getByTestId(`agent-runtime-start-${pubkey}`);
+  const avatarMask = card.getByTestId("agent-runtime-avatar-mask");
+  await expect(avatarMask).toHaveCSS("clip-path", "none");
   const badge = startButton.locator("xpath=../..");
   const initialAvatar = await card
     .getByAltText("Motion Auditor avatar")
@@ -2686,6 +2688,7 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   await expect(
     page.getByTestId(`agent-runtime-active-${pubkey}`),
   ).toBeVisible();
+  await expect(avatarMask).toHaveCSS("clip-path", /polygon\(/);
   const samples = await samplesPromise;
   const finalAvatar = await card
     .getByAltText("Motion Auditor avatar")
