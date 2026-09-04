@@ -433,10 +433,11 @@ export function useManagedAgentActions() {
     stopMutation.isPending ||
     startOnLaunchMutation.isPending ||
     deleteMutation.isPending;
-  const startingAgentPubkey =
-    startMutation.isPending && typeof startMutation.variables === "string"
+  const startingAgentPubkey = startMutation.isPending
+    ? typeof startMutation.variables === "string"
       ? startMutation.variables
-      : null;
+      : (startMutation.variables?.pubkey ?? null)
+    : null;
 
   return {
     relayAgentsQuery,

@@ -8,7 +8,10 @@ type DeleteManagedAgentInput = {
   forceRemoteDelete?: boolean;
 };
 
-type StartManagedAgent = (pubkey: string) => Promise<unknown>;
+export type ManagedAgentStartInput =
+  | string
+  | { pubkey: string; explicitStart: true };
+type StartManagedAgent = (input: ManagedAgentStartInput) => Promise<unknown>;
 type StopManagedAgent = (pubkey: string) => Promise<unknown>;
 type DeleteManagedAgent = (input: DeleteManagedAgentInput) => Promise<unknown>;
 
@@ -82,7 +85,7 @@ export async function startManagedAgentWithRules({
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
-  await startManagedAgent(agent.pubkey);
+  await startManagedAgent({ pubkey: agent.pubkey, explicitStart: true });
 }
 
 export async function respawnManagedAgentWithRules({

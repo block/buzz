@@ -32,6 +32,7 @@ mod process_lifecycle;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
 mod relay_mesh;
+pub(crate) mod remote_stop;
 mod repos;
 mod restore;
 pub mod retention;

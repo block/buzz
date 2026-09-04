@@ -176,6 +176,7 @@ export function useMembersSidebarActions({
           action,
           pubkey: agent.pubkey,
           relayUrl,
+          explicitStart: action === "start",
         });
         setActionNoticeMessage(
           action === "stop"

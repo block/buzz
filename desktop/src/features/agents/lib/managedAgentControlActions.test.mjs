@@ -56,7 +56,10 @@ test("relay-mesh agents delegate start to the backend preflight", async () => {
       calledWith = pubkey;
     },
   });
-  assert.equal(calledWith, meshAgent.pubkey);
+  assert.deepEqual(calledWith, {
+    pubkey: meshAgent.pubkey,
+    explicitStart: true,
+  });
 
   // Backend preflight failures (e.g. no live serve target) propagate as-is.
   await assert.rejects(
@@ -78,7 +81,10 @@ test("ordinary local agents still start normally", async () => {
       calledWith = pubkey;
     },
   });
-  assert.equal(calledWith, "deadbeef".repeat(8));
+  assert.deepEqual(calledWith, {
+    pubkey: "deadbeef".repeat(8),
+    explicitStart: true,
+  });
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------
