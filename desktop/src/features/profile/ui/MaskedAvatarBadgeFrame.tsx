@@ -55,7 +55,7 @@ type MaskedAvatarBadgeFrameProps = {
   curve?: AvatarBadgeCurve;
   cutout?: AvatarBadgeCircle;
   cutoutWidth?: number;
-  maskMode?: "clip-path" | "radial" | "shape";
+  maskMode?: "clip-path" | "none" | "radial" | "shape";
   maskTransition?: React.ComponentProps<typeof motion.path>["transition"];
   shape?: "circle" | "squircle";
   cutoutShape?: "circle" | "squircle";
@@ -765,31 +765,33 @@ export function MaskedAvatarBadgeFrame({
   shape = "circle",
   size,
 }: MaskedAvatarBadgeFrameProps) {
-  const shouldMask = Boolean(
+  const shouldRenderFrame = Boolean(
     cutout &&
       (maskMode === "radial" || maskMode === "shape" || (badge && badgeBox)),
   );
+  const shouldMask = maskMode !== "none" && shouldRenderFrame;
   const stabilizeOuterBoundary = Boolean(maskTransition);
-  const maskPolygon = cutout
-    ? shape === "squircle"
-      ? getSquircleMaskPolygon(size, cutout)
-      : cornerRadius === undefined
-        ? cutoutWidth && cutoutWidth > cutout.r * 2
-          ? getRoundedAvatarCapsuleMaskPolygon(
-              size,
-              cutout,
-              cutoutWidth,
-              curve,
-              stabilizeOuterBoundary,
-            )
-          : getRoundedAvatarMaskPolygon(
-              size,
-              cutout,
-              curve,
-              stabilizeOuterBoundary,
-            )
-        : getRoundedSquareMaskPolygon(size, cornerRadius, cutout, curve)
-    : undefined;
+  const maskPolygon =
+    shouldMask && cutout
+      ? shape === "squircle"
+        ? getSquircleMaskPolygon(size, cutout)
+        : cornerRadius === undefined
+          ? cutoutWidth && cutoutWidth > cutout.r * 2
+            ? getRoundedAvatarCapsuleMaskPolygon(
+                size,
+                cutout,
+                cutoutWidth,
+                curve,
+                stabilizeOuterBoundary,
+              )
+            : getRoundedAvatarMaskPolygon(
+                size,
+                cutout,
+                curve,
+                stabilizeOuterBoundary,
+              )
+          : getRoundedSquareMaskPolygon(size, cornerRadius, cutout, curve)
+      : undefined;
   const radialMask =
     maskMode === "radial" && cutout
       ? `radial-gradient(circle ${toRem(cutout.r)} at ${toRem(
@@ -812,7 +814,7 @@ export function MaskedAvatarBadgeFrame({
     ? getBadgeStyle(badgeMotionTarget)
     : undefined;
 
-  if (!shouldMask) {
+  if (!shouldRenderFrame) {
     return (
       <div className={cn("relative shrink-0", className)} style={sizeStyle}>
         {children}
