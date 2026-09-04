@@ -453,9 +453,38 @@ pub fn spawn_agent_child(
     replay_floor_unix: Option<u64>,
     resume: Option<&super::remote_stop::ResumeTicket>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    spawn_agent_child_with_broker(
+        app,
+        record,
+        relay_url,
+        lazy,
+        owner_hex,
+        replay_floor_unix,
+        resume,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_agent_child_with_broker(
+    app: &AppHandle,
+    record: &ManagedAgentRecord,
+    relay_url: &str,
+    lazy: bool,
+    owner_hex: Option<&str>,
+    replay_floor_unix: Option<u64>,
+    resume: Option<&super::remote_stop::ResumeTicket>,
+    broker: Option<&super::broker_launch::BrokerSession>,
+) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
     super::remote_stop::check_launch(app, &key, owner_hex, resume)?;
-    if let Some(error) = spawn_key_refusal(record) {
+    if let Some(session) = broker {
+        session.validate(super::broker_launch::LaunchScope {
+            owner: owner_hex.ok_or("Desktop owner unavailable")?,
+            community: relay_url,
+            agent: &record.pubkey,
+        })?;
+    } else if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
@@ -830,6 +859,16 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    if let Some(session) = broker {
+        session.apply(
+            &mut command,
+            super::broker_launch::LaunchScope {
+                owner: owner_hex.ok_or("Desktop owner unavailable")?,
+                community: relay_url,
+                agent: &record.pubkey,
+            },
+        )?;
+    }
     let child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",

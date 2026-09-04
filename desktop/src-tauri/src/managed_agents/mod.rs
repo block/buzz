@@ -12,6 +12,7 @@ mod agent_description;
 pub(crate) use agent_description::{effective_agent_description, record_effective_description};
 mod backend;
 pub(crate) mod bestie_assignment;
+pub(crate) mod broker_launch;
 pub(crate) mod claude_config;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
