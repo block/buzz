@@ -563,3 +563,100 @@ test("agents without trustworthy provenance omit management provenance", () => {
     false,
   );
 });
+
+test("disabled current members expose retry and preserve collision ownership without notifying", async () => {
+  const React = await import("react");
+  const { fireEvent, render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  let selected = 0,
+    retries = 0;
+  const view = render(
+    React.createElement(MentionAutocomplete, {
+      composerOwnsFocus: true,
+      selectedIndex: 0,
+      onSelect: () => selected++,
+      suggestions: [
+        {
+          pubkey: "a".repeat(64),
+          displayName: "Scout",
+          isAgent: true,
+          agentProvenance: "managed-elsewhere",
+          ownerLabel: "You",
+          hasNameCollision: true,
+          action: "unavailable",
+          unavailableReason: "Could not verify access",
+          presence: "unknown",
+          onRetry: () => retries++,
+        },
+      ],
+    }),
+  );
+  const button = view.getByRole("button", { name: /^Unavailable Scout/ });
+  assert.equal(button.disabled, true);
+  fireEvent.mouseDown(button);
+  fireEvent.click(button);
+  assert.equal(view.queryByRole("button", { name: /Always mention/ }), null);
+  assert.equal(selected, 0);
+  assert.ok(view.getByText("managed by You"));
+  assert.ok(view.getByText("Presence unknown"));
+  assert.ok(
+    view.getByTestId("mention-collision-npub").title.startsWith("npub1"),
+  );
+  fireEvent.click(
+    view.getByRole("button", { name: "Retry access check for Scout" }),
+  );
+  assert.equal(retries, 1);
+});
+
+test("evidence times out, retries explicitly, and forgets classification on scope change", async (t) => {
+  const { renderHook, act } = await import("@testing-library/react");
+  const { useMentionEvidence } = await import("../lib/useMentionEvidence.ts");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 10000 });
+  let retries = 0;
+  const view = renderHook((props) => useMentionEvidence(props), {
+    initialProps: {
+      scope: "viewer:room",
+      request: {},
+      agentKeys: new Set(["a"]),
+      directoryUpdatedAt: 10000,
+      directoryError: false,
+      retry: () => retries++,
+    },
+  });
+  assert.equal(view.result.current.verificationFailed, false);
+  act(() => t.mock.timers.tick(5000));
+  assert.equal(view.result.current.verificationFailed, true);
+  view.rerender({
+    scope: "viewer:room",
+    request: {},
+    agentKeys: new Set(["a"]),
+    directoryUpdatedAt: 10000,
+    directoryError: false,
+    retry: () => retries++,
+  });
+  assert.equal(
+    view.result.current.verificationFailed,
+    false,
+    "new completion gets a fresh verification window",
+  );
+  act(() => t.mock.timers.tick(4999));
+  assert.equal(view.result.current.verificationFailed, false);
+  act(() => t.mock.timers.tick(1));
+  assert.equal(view.result.current.verificationFailed, true);
+  act(() => view.result.current.retryVerification());
+  assert.equal(retries, 1);
+  assert.equal(view.result.current.verificationFailed, false);
+  view.rerender({
+    scope: "viewer:other",
+    request: {},
+    agentKeys: new Set(),
+    directoryUpdatedAt: 10000,
+    directoryError: false,
+    retry: () => retries++,
+  });
+  assert.equal(view.result.current.knownAgentPubkeys.size, 0);
+  act(() => t.mock.timers.tick(180000));
+  assert.equal(view.result.current.presenceFresh, false);
+  view.unmount();
+  t.mock.timers.reset();
+});

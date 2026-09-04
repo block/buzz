@@ -11,6 +11,7 @@ export function getMentionMemberPubkeys(
   const pubkeys = new Set(
     members ? channelMemberPubkeySet(members) : undefined,
   );
+  if (members !== undefined) return pubkeys;
   const activeChannel = channels?.find((channel) => channel.id === channelId);
   for (const pubkey of activeChannel?.memberPubkeys ?? []) {
     pubkeys.add(normalizePubkey(pubkey));

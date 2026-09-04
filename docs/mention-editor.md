@@ -86,3 +86,8 @@ This is display stability, not cached permission. Selection checks current
 exact-key access and team recipients; publication still revalidates authority.
 Recipient-label binding and highlight settlement remain independent of the
 picker's request lifecycle.
+
+Availability labels may resolve from Checking to Mention or Unavailable in place;
+this never replaces an identity, label, order or selected index. Retry starts a
+fresh request. Live access is checked again at selection, including for rows
+whose display snapshot originally permitted mentioning.

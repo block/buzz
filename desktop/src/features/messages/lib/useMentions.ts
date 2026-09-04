@@ -2,6 +2,7 @@ import {
   isMentionActionable,
   markMentionCollisions,
 } from "./mentionPresentation";
+import { useMentionEvidence } from "./useMentionEvidence";
 import * as React from "react";
 import {
   useManagedAgentsQuery,
@@ -222,10 +223,6 @@ export function useMentions(
     }
     return lookup;
   }, [managedAgentsQuery.data, personasQuery.data]);
-  const knownAgentPubkeys = React.useMemo(
-    () => new Set([...mentionableAgentPubkeys, ...managedAgentPubkeys]),
-    [managedAgentPubkeys, mentionableAgentPubkeys],
-  );
   const activePersonas = React.useMemo(
     () => (personasQuery.data ?? []).filter((persona) => persona.isActive),
     [personasQuery.data],
@@ -252,10 +249,40 @@ export function useMentions(
       }),
     [managedAgentPubkeys, members, profiles, relayAgentsQuery.data],
   );
+  const retryDirectory = React.useCallback(() => {
+    void relayAgentsQuery.refetch();
+    void managedAgentsQuery.refetch();
+    void membersQuery.refetch();
+  }, [
+    relayAgentsQuery.refetch,
+    managedAgentsQuery.refetch,
+    membersQuery.refetch,
+  ]);
+  const {
+    knownAgentPubkeys,
+    verificationFailed,
+    presenceFresh,
+    retryVerification,
+  } = useMentionEvidence({
+    scope: `${currentPubkey}:${channelId}`,
+    request: query.request,
+    agentKeys: new Set([
+      ...agentIdentityPubkeys,
+      ...userSearchResults
+        .filter((user) => user.isAgent)
+        .map((user) => normalizePubkey(user.pubkey)),
+    ]),
+    directoryUpdatedAt: relayAgentsQuery.dataUpdatedAt,
+    directoryError: !!relayAgentsQuery.error || !!managedAgentsQuery.error,
+    retry: retryDirectory,
+  });
   const mentionCandidates = React.useMemo<MentionCandidate[]>(
     () =>
       buildMentionCandidates({
         activeAgentPubkeys,
+        knownAgentPubkeys,
+        verificationFailed,
+        presenceFresh,
         activePersonaById,
         activePersonas,
         canSearchGlobalUsers,
@@ -279,6 +306,9 @@ export function useMentions(
       }),
     [
       activePersonaById,
+      knownAgentPubkeys,
+      verificationFailed,
+      presenceFresh,
       activeAgentPubkeys,
       activePersonas,
       userSearchResults,
@@ -359,6 +389,10 @@ export function useMentions(
     [searchableNames],
   );
   searchableNamesLowerRef.current = searchableNamesLower;
+  const retryMention = React.useCallback(() => {
+    retryVerification();
+    query.refresh();
+  }, [retryVerification, query.refresh]);
   const matchingSuggestions = React.useMemo<MentionSuggestion[]>(() => {
     if (mentionQuery === null) {
       return [];
@@ -369,8 +403,8 @@ export function useMentions(
       activePersonaIds,
     )
       .slice(0, MENTION_SUGGESTION_LIMIT)
-      .map(({ candidate, label }) =>
-        mapMentionCandidateToSuggestion({
+      .map(({ candidate, label }) => ({
+        ...mapMentionCandidateToSuggestion({
           agentProvenanceReady: agentDirectoriesReady,
           candidate,
           label,
@@ -379,10 +413,12 @@ export function useMentions(
           ownerProfiles: ownerProfilesQuery.data?.profiles,
           profiles,
         }),
-      );
+        onRetry: candidate.action === "unavailable" ? retryMention : undefined,
+      }));
   }, [
     activePersonaIds,
     agentDirectoriesReady,
+    retryMention,
     currentPubkey,
     mentionCandidatesWithTeams,
     mentionQuery,
@@ -403,30 +439,60 @@ export function useMentions(
   const getDefaultAgentSuggestion = defaultAgentSuggestion;
   // Search hooks are keyed by the requested text. Wait for that request's
   // first page and initial directories, then keep exactly one displayed set.
+  const searchReady =
+    !canSearchGlobalUsers ||
+    (!userSearchQuery.isPending && !userSearchQuery.isFetching);
   const resultsReady =
-    (channelId === null ||
-      !!externalMembers ||
-      (!membersQuery.isPending && !membersQuery.isFetching)) &&
-    !managedAgentsQuery.isPending &&
-    !managedAgentsQuery.isFetching &&
-    !relayAgentsQuery.isPending &&
-    !relayAgentsQuery.isFetching &&
-    !personasQuery.isPending &&
-    !personasQuery.isFetching &&
-    !teamsQuery.isPending &&
-    !teamsQuery.isFetching &&
-    (!canSearchGlobalUsers ||
-      (!userSearchQuery.isPending && !userSearchQuery.isFetching));
+    searchReady &&
+    (verificationFailed ||
+      ((channelId === null ||
+        !!externalMembers ||
+        (!membersQuery.isPending && !membersQuery.isFetching)) &&
+        !managedAgentsQuery.isPending &&
+        !managedAgentsQuery.isFetching &&
+        !relayAgentsQuery.isPending &&
+        !relayAgentsQuery.isFetching &&
+        !personasQuery.isPending &&
+        !personasQuery.isFetching &&
+        !teamsQuery.isPending &&
+        !teamsQuery.isFetching &&
+        searchReady));
   const mentionSelection = useMentionSelection(
     query.request,
     matchingSuggestions,
     resultsReady,
   );
   const {
-    suggestions,
+    suggestions: snapshotSuggestions,
     mentionSelectedIndex,
     isLoading: isMentionLoading,
   } = mentionSelection;
+  // Identity, label and order stay frozen. Availability is live evidence,
+  // not part of that snapshot's authority; a checking row can finish or retry
+  // without moving anyone's highlighted recipient.
+  const suggestions = React.useMemo<MentionSuggestion[]>(
+    () =>
+      snapshotSuggestions.map((row) => {
+        const live = mentionCandidatesWithTeams.find((candidate) =>
+          row.pubkey
+            ? candidate.pubkey === row.pubkey
+            : row.teamId
+              ? candidate.teamId === row.teamId
+              : candidate.personaId === row.personaId,
+        );
+        return {
+          ...row,
+          action: live ? live.action : "unavailable",
+          presence: live?.presence ?? "unknown",
+          unavailableReason:
+            live?.unavailableReason ??
+            (live ? undefined : "Access no longer available"),
+          onRetry:
+            live?.action === "unavailable" || !live ? retryMention : undefined,
+        };
+      }),
+    [snapshotSuggestions, mentionCandidatesWithTeams, retryMention],
+  );
   const isMentionOpen = mentionQuery !== null;
   // Recheck against this render's exact-key evidence even if a child retained
   // an older row/callback. A rejected selection must not establish draft intent.
@@ -679,7 +745,7 @@ export function useMentions(
     () => selectedAgentMentionPubkeysRef.current,
   ).current;
   const revalidateMentionPubkeys = useAgentMentionRevalidation({
-    agentPubkeys: agentIdentityPubkeys,
+    agentPubkeys: knownAgentPubkeys,
     getSelectedAgentPubkeys,
     currentPubkey,
     eligibilityScope: mentionChannelId
