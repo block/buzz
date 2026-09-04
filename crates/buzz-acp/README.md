@@ -270,6 +270,10 @@ Forum event kinds:
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
+   If the inbound queue overflows, the harness attempts replay for affected
+   subscriptions when capacity and relay quota permit, with at least five seconds
+   between attempts. Recovery depends on available relay history and the consumer
+   making progress; complete delivery is not guaranteed.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
 
@@ -351,41 +355,3 @@ See the [root TESTING.md](../../TESTING.md) for the full integration testing gui
 ## License
 
 Apache-2.0
-
-### Transport overflow recovery
-
-The bounded event queue can overflow if the consumer falls behind. The socket
-owner records the oldest dropped timestamp per channel (and for membership
-notifications), removes dropped IDs from transport dedup, and coalesces recovery.
-It attempts **one affected subscription at most every five seconds**, only when
-at least half the consumer queue is free and the shared relay quota gate permits
-it. Least-recently-attempted selection prevents a busy channel from monopolizing
-recovery. Healthy subscriptions are not swept. A failed write retains the pending
-cursor and is paced as well; there is no retry-count cutoff that abandons loss.
-Actual connection loss still uses the existing reconnect/restore path.
-
-The five-second cooldown starts at the **end of an actual attempt**, including a
-failed write, not at an unsuccessful capacity check. Once cooldown and quota
-permit work, the socket owner's select waits on the consumer channel's capacity
-notification. It does not poll headroom on a timer. The first eligible attempt
-has no extra timer delay; draining between old timer ticks can trigger recovery.
-The select-local capacity reservation is released before any frame or command is
-handled, so it cannot take space away from live delivery. No capacity waiter or
-recovery timer runs without eligible pending loss.
-
-IDs, filters, five-second timestamp overlap and replay-attempt semantics are
-unchanged: a successful REQ write retires the pending drop cursor, **not because
-it proves delivery**. A new overflow records another cursor. EOSE is not a
-consumer receipt, and overlapping stable-ID requests cannot certify exact replay
-completion. Missing history/EOSE, loss after a successful write followed by a
-disconnect, relay history limits, additive proxy watch replay and downstream
-agent processing retain their existing limitations. No exactly-once or durable
-catch-up guarantee is introduced here.
-
-Progress requires recurring consumer headroom and available relay history. A
-permanently stalled consumer cannot recover; pending attempts wait rather than
-amplifying its backlog. An individual WebSocket write can still occupy the socket
-owner up to the existing ten-second send timeout; recovery no longer performs a
-paced all-subscription loop between socket reads. This bound covers overflow
-recovery, not initial subscriptions, genuine reconnects, CLOSED recovery, or HTTP
-request retries.
