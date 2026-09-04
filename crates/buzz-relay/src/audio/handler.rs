@@ -3770,16 +3770,19 @@ mod tests {
 
     /// Create an AppState backed by the real local DB.
     ///
-    /// Returns `None` if the DB at 127.0.0.1:5432 is not reachable.
+    /// Reads `BUZZ_TEST_DATABASE_URL`; falls back to the local development URL.
+    /// Returns `None` if the resolved database is not reachable.
     async fn audio_test_state_real_db() -> Option<std::sync::Arc<crate::state::AppState>> {
         use std::sync::Arc;
-        let db_url = "postgres://buzz:buzz_dev@127.0.0.1:5432/buzz";
-        if sqlx::PgPool::connect(db_url).await.is_err() {
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string() // sadscan:disable np.postgres.1 -- local test-only credentials
+        });
+        if sqlx::PgPool::connect(&db_url).await.is_err() {
             return None;
         }
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
-        config.database_url = db_url.to_string();
+        config.database_url = db_url.clone();
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
@@ -3886,7 +3889,7 @@ mod tests {
         let state = match audio_test_state_real_db().await {
             Some(s) => s,
             None => {
-                eprintln!("W9: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
+                eprintln!("W9: skipping — local DB not available (set BUZZ_TEST_DATABASE_URL or start local postgres)");
                 return;
             }
         };
@@ -4014,7 +4017,7 @@ mod tests {
         let state = match audio_test_state_real_db().await {
             Some(s) => s,
             None => {
-                eprintln!("W10: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
+                eprintln!("W10: skipping — local DB not available (set BUZZ_TEST_DATABASE_URL or start local postgres)");
                 return;
             }
         };
@@ -4174,7 +4177,7 @@ mod tests {
         let state = match audio_test_state_real_db().await {
             Some(s) => s,
             None => {
-                eprintln!("W10-reaffirm: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
+                eprintln!("W10-reaffirm: skipping — local DB not available (set BUZZ_TEST_DATABASE_URL or start local postgres)");
                 return;
             }
         };
@@ -4329,7 +4332,7 @@ mod tests {
         let state = match audio_test_state_real_db().await {
             Some(s) => s,
             None => {
-                eprintln!("CW5: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
+                eprintln!("CW5: skipping — local DB not available (set BUZZ_TEST_DATABASE_URL or start local postgres)");
                 return;
             }
         };
@@ -4583,7 +4586,7 @@ mod tests {
         let state = match audio_test_state_real_db().await {
             Some(s) => s,
             None => {
-                eprintln!("CW5-variant: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
+                eprintln!("CW5-variant: skipping — local DB not available (set BUZZ_TEST_DATABASE_URL or start local postgres)");
                 return;
             }
         };
@@ -4988,7 +4991,7 @@ mod tests {
         let state = match audio_test_state_real_db().await {
             Some(s) => s,
             None => {
-                eprintln!("CW8: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
+                eprintln!("CW8: skipping — local DB not available (set BUZZ_TEST_DATABASE_URL or start local postgres)");
                 return;
             }
         };
@@ -5196,7 +5199,7 @@ mod tests {
         let state = match audio_test_state_real_db().await {
             Some(s) => s,
             None => {
-                eprintln!("CW10: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
+                eprintln!("CW10: skipping — local DB not available (set BUZZ_TEST_DATABASE_URL or start local postgres)");
                 return;
             }
         };
@@ -5375,7 +5378,7 @@ mod tests {
         let state = match audio_test_state_real_db().await {
             Some(s) => s,
             None => {
-                eprintln!("CW10-full: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
+                eprintln!("CW10-full: skipping — local DB not available (set BUZZ_TEST_DATABASE_URL or start local postgres)");
                 return;
             }
         };
@@ -5895,8 +5898,7 @@ mod tests {
 
             let state = audio_test_state_real_db()
                 .await
-                .expect("F2a: PostgreSQL must be available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz — \
-                         is the local DB running?");
+                .expect("F2a: PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres");
             let pool = state.db.pool().clone();
             let (tenant, channel_id, member_key) = seed_audio_fixture(&pool).await;
             let community_id = tenant.community();
@@ -6003,8 +6005,7 @@ mod tests {
 
             let state = audio_test_state_real_db()
                 .await
-                .expect("F2b: PostgreSQL must be available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz — \
-                         is the local DB running?");
+                .expect("F2b: PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres");
             let pool = state.db.pool().clone();
             let (tenant, channel_id, member_key) = seed_audio_fixture(&pool).await;
             let community_id = tenant.community();
@@ -6129,8 +6130,7 @@ mod tests {
 
             let state = audio_test_state_real_db()
                 .await
-                .expect("F2c: PostgreSQL must be available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz — \
-                         is the local DB running?");
+                .expect("F2c: PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres");
             let pool = state.db.pool().clone();
 
             // ── Two-channel AutoAddRequired fixture ───────────────────────────
