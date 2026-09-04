@@ -597,11 +597,13 @@ fn inbound_team_add_binds_unbound_instance_through_wiring() {
             persona_ids: Some(vec!["p-existing".to_string(), "p-added".to_string()]),
         },
         |_| Ok(()),
+        |_| Ok(()),
         || Ok(existing.clone()),
         |records| {
             *saved.borrow_mut() = Some(records.to_vec());
             Ok(())
         },
+        || Ok(()),
     )
     .expect("inbound add succeeds");
 
@@ -641,11 +643,13 @@ fn inbound_team_removal_detaches_instance_through_wiring() {
             persona_ids: Some(vec![]),
         },
         |_| Ok(()),
+        |_| Ok(()),
         || Ok(existing.clone()),
         |records| {
             *saved.borrow_mut() = Some(records.to_vec());
             Ok(())
         },
+        || Ok(()),
     )
     .expect("inbound removal succeeds");
 
@@ -674,11 +678,13 @@ fn inbound_team_omitted_roster_leaves_bindings_untouched() {
         TEAM_ID.to_string(),
         team_content_omitting_optional_fields("Renamed"),
         |_| Ok(()),
+        |_| Ok(()),
         || Ok(existing.clone()),
         |records| {
             *saved.borrow_mut() = Some(records.to_vec());
             Ok(())
         },
+        || Ok(()),
     )
     .expect("inbound metadata-only edit succeeds");
 
@@ -688,15 +694,24 @@ fn inbound_team_omitted_roster_leaves_bindings_untouched() {
     );
 }
 
-/// A failing agent-store write after the authoritative `save_teams` is
-/// swallowed: the inbound reconcile still succeeds (boot repair is the retry),
-/// so a secondary-store hiccup never aborts an inbound event whose team write
-/// already landed.
+/// An inbound add persists a recovery stage before the team write. A failed
+/// agent write leaves that stage available to bind a shared persona on restart.
+/// The error stops `commit_inbound_with_store`, so the retention head does not
+/// advance until the binding becomes durable.
 #[test]
-fn inbound_team_swallows_agent_store_failure() {
-    let mut teams = vec![local_team()];
+fn inbound_team_failure_keeps_a_durable_shared_persona_replay_delta() {
+    let pending_file = tempfile::NamedTempFile::new().expect("temporary stage");
+    std::fs::write(pending_file.path(), "null").expect("initialize stage");
+    let mut teams = vec![local_team(), {
+        let mut other = local_team();
+        other.id = "other-team".to_string();
+        other.persona_ids = vec!["p-added".to_string()];
+        other
+    }];
     teams[0].persona_ids = vec![];
-    commit_inbound_team(
+    let agents = RefCell::new(vec![team_instance('a', "p-added", None)]);
+
+    let error = commit_inbound_team(
         &mut teams,
         TEAM_ID.to_string(),
         TeamEventContent {
@@ -705,11 +720,45 @@ fn inbound_team_swallows_agent_store_failure() {
             instructions: None,
             persona_ids: Some(vec!["p-added".to_string()]),
         },
+        |pending| {
+            crate::commands::teams::save_pending_team_membership_at(
+                pending_file.path(),
+                Some(pending),
+            )
+        },
         |_| Ok(()),
-        || Err("agent store unreadable".to_string()),
-        |_| Ok(()),
+        || Ok(agents.borrow().clone()),
+        |_| Err("agent store unwritable".to_string()),
+        || crate::commands::teams::save_pending_team_membership_at(pending_file.path(), None),
     )
-    .expect("inbound reconcile swallows secondary-store failure");
+    .expect_err("inbound reconcile must report a lost membership binding");
+    assert!(
+        error.contains("could not update inbound team agents"),
+        "{error}"
+    );
+    assert_eq!(
+        teams[0].persona_ids,
+        vec!["p-added"],
+        "the team write landed"
+    );
+
+    let pending = crate::commands::teams::load_pending_team_membership_at(pending_file.path())
+        .expect("read staged delta")
+        .expect("the failed inbound add keeps its stage");
+    crate::commands::teams::propagate_membership(
+        &pending.team_id,
+        &pending.previous_persona_ids,
+        &pending.current_persona_ids,
+        || Ok(agents.borrow().clone()),
+        |records| {
+            *agents.borrow_mut() = records.to_vec();
+            Ok(())
+        },
+    )
+    .expect("a restart replay binds the explicit inbound add");
+    crate::commands::teams::save_pending_team_membership_at(pending_file.path(), None)
+        .expect("clear replayed stage");
+    assert_eq!(agents.borrow()[0].team_id.as_deref(), Some(TEAM_ID));
 }
 
 /// A `persist_teams` error propagates — the authoritative team write failing is
@@ -721,9 +770,11 @@ fn inbound_team_propagates_persist_teams_error() {
         &mut teams,
         TEAM_ID.to_string(),
         team_content("Team"),
+        |_| Ok(()),
         |_| Err("disk full".to_string()),
         || Ok(vec![]),
         |_| Ok(()),
+        || Ok(()),
     )
     .expect_err("a failed team persist must propagate");
     assert_eq!(err, "disk full");

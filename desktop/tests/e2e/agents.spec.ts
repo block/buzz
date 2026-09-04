@@ -2797,3 +2797,104 @@ test("duplicate instances move from the agents gallery into the agent profile", 
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
   ).toHaveCount(0);
 });
+
+// You must be able to empty a team and then delete it. Before, the submit
+// button needed one member or more, so neither step was possible.
+//
+// The team here has a bound managed agent, so the test also crosses the native
+// delete guard: the delete must fail while the agent carries the team id, and it
+// must succeed after the save clears the binding.
+test("a team can be emptied and then deleted", async ({ page }) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:deadlock-a",
+        displayName: "Deadlock A",
+        systemPrompt: "First member of the team under test.",
+      },
+      {
+        id: "custom:deadlock-b",
+        displayName: "Deadlock B",
+        systemPrompt: "Second member of the team under test.",
+      },
+    ],
+    teams: [
+      {
+        id: "team-deadlock",
+        name: "Deadlock Team",
+        personaIds: ["custom:deadlock-a", "custom:deadlock-b"],
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: "de".repeat(32),
+        name: "Deadlock Instance",
+        personaId: "custom:deadlock-a",
+        teamId: "team-deadlock",
+        status: "stopped",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const teamCard = page.getByTestId("team-card-team-deadlock");
+  await expect(teamCard).toBeVisible();
+
+  // The starting state: the agent is bound, so the delete guard refuses.
+  const blocked = await invokeTauriExpectError(page, "delete_team", {
+    id: "team-deadlock",
+  });
+  expect(blocked).toContain("still reference it (Deadlock Instance)");
+
+  // Empty the roster via the edit dialog.
+  await page.getByLabel("Deadlock Team team actions").click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+
+  const roster = page.getByRole("listbox", { name: "Agents" });
+  await roster.getByRole("option", { name: /Deadlock A/ }).click();
+  await roster.getByRole("option", { name: /Deadlock B/ }).click();
+
+  // This is the corrected behavior. No member is selected, and the save
+  // button must be enabled.
+  const save = page.getByRole("button", { name: "Save changes" });
+  await expect(save).toBeEnabled();
+  await save.click();
+
+  // The app asks what to do with the agents of the removed members. Keep them.
+  await page.getByRole("button", { name: "Keep agents" }).click();
+
+  // The team is still present, it has no members, and the card shows this.
+  await expect(teamCard).toContainText("This team has no agents");
+  const teams = await invokeTauri<Array<{ id: string; persona_ids: string[] }>>(
+    page,
+    "list_teams",
+  );
+  expect(
+    teams.find((team) => team.id === "team-deadlock")?.persona_ids,
+  ).toEqual([]);
+
+  // The save also cleared the binding. This is what the delete guard reads, and
+  // it is the state that the save must guarantee before it reports success.
+  const agents = await invokeTauri<
+    Array<{ pubkey: string; team_id: string | null }>
+  >(page, "list_managed_agents");
+  expect(
+    agents.find((agent) => agent.pubkey === "de".repeat(32))?.team_id,
+  ).toBe(null);
+
+  // No agent points to the team now. Thus you can delete the team.
+  await page.getByLabel("Deadlock Team team actions").click();
+  await page.getByRole("menuitem", { name: "Delete" }).click();
+  await page
+    .getByRole("button", { name: "Delete", exact: true })
+    .last()
+    .click();
+
+  await expect(teamCard).toHaveCount(0);
+  const remaining = await invokeTauri<Array<{ id: string }>>(
+    page,
+    "list_teams",
+  );
+  expect(remaining.some((team) => team.id === "team-deadlock")).toBe(false);
+});

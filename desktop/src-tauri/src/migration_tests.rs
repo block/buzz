@@ -84,6 +84,11 @@ fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     )
     .unwrap();
     std::fs::write(canonical.join("agents/teams.json"), r#"[{"id":"team-1"}]"#).unwrap();
+    std::fs::write(
+        canonical.join("agents/pending-team-membership.json"),
+        r#"{"team_id":"team-1","previous_persona_ids":[],"current_persona_ids":[]}"#,
+    )
+    .unwrap();
 
     // Teams installed from `.main` — canonical has no teams dir.
     let team_dir = main_instance.join("agents/teams/com.example.test-pack");
@@ -216,7 +221,7 @@ fn sync_files(canonical: &Path, worktree: &Path) -> u32 {
 fn sync_creates_symlinks_to_fresh_worktree() {
     let (_parent, canonical, worktree) = setup_sync_layout();
     let synced = sync_files(&canonical, &worktree);
-    assert_eq!(synced, 4);
+    assert_eq!(synced, 5);
     for rel in SHARED_AGENT_FILES {
         let dst = worktree.join(rel);
         assert!(dst.is_symlink(), "{rel} should be a symlink");
@@ -244,7 +249,7 @@ fn sync_replaces_existing_files_with_symlinks() {
 
     let synced = sync_files(&canonical, &worktree);
 
-    assert_eq!(synced, 4);
+    assert_eq!(synced, 5);
     for rel in SHARED_AGENT_FILES {
         let dst = worktree.join(rel);
         assert!(
@@ -263,7 +268,7 @@ fn sync_replaces_existing_files_with_symlinks() {
 #[test]
 fn sync_preserves_correct_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
-    assert_eq!(sync_files(&canonical, &worktree), 4);
+    assert_eq!(sync_files(&canonical, &worktree), 5);
     assert_eq!(sync_files(&canonical, &worktree), 0);
     for rel in SHARED_AGENT_FILES {
         let dst = worktree.join(rel);
@@ -282,7 +287,7 @@ fn sync_replaces_wrong_symlinks() {
         std::os::unix::fs::symlink(&wrong_target, worktree.join(rel)).unwrap();
     }
     let synced = sync_files(&canonical, &worktree);
-    assert_eq!(synced, 4);
+    assert_eq!(synced, 5);
     for rel in SHARED_AGENT_FILES {
         assert_eq!(
             std::fs::read_link(worktree.join(rel)).unwrap(),
@@ -301,7 +306,7 @@ fn sync_handles_broken_symlinks() {
         std::os::unix::fs::symlink(&broken_target, worktree.join(rel)).unwrap();
     }
     let synced = sync_files(&canonical, &worktree);
-    assert_eq!(synced, 4);
+    assert_eq!(synced, 5);
     for rel in SHARED_AGENT_FILES {
         let dst = worktree.join(rel);
         assert!(dst.is_symlink());

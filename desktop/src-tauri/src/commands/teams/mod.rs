@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use uuid::Uuid;
 
@@ -26,22 +29,218 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     })
 }
 
-/// Propagate a team's membership *change* to its members' already-running
-/// instances, best-effort. Loads the agent store, applies the roster delta via
-/// [`apply_team_membership_delta`], and re-saves only when something changed;
-/// any load/save error is logged and swallowed. Called after the authoritative
-/// `save_teams` succeeds — the team already exists on disk and boot repair is
-/// the designed retry for a stale/unset binding, so a secondary-store hiccup
-/// must not fail a command whose team write already landed (a UI retry would
-/// then mint a duplicate team).
+/// A staged team membership change. The record persists before the team and
+/// agent stores change so a later save or launch can replay the original delta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::commands) struct PendingTeamMembershipUpdate {
+    pub(in crate::commands) team_id: String,
+    pub(in crate::commands) previous_persona_ids: Vec<String>,
+    pub(in crate::commands) current_persona_ids: Vec<String>,
+}
+
+fn pending_team_membership_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    Ok(crate::managed_agents::managed_agents_base_dir(app)?.join("pending-team-membership.json"))
+}
+
+pub(in crate::commands) fn save_pending_team_membership_at(
+    path: &std::path::Path,
+    pending: Option<&PendingTeamMembershipUpdate>,
+) -> Result<(), String> {
+    let payload = serde_json::to_vec_pretty(&pending)
+        .map_err(|error| format!("failed to serialize pending team update: {error}"))?;
+    crate::managed_agents::storage::atomic_write_json(path, &payload)
+}
+
+pub(in crate::commands) fn load_pending_team_membership_at(
+    path: &std::path::Path,
+) -> Result<Option<PendingTeamMembershipUpdate>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let payload = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read pending team update: {error}"))?;
+    serde_json::from_str(&payload)
+        .map_err(|error| format!("failed to parse pending team update: {error}"))
+}
+
+pub(in crate::commands) fn save_pending_team_membership<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pending: &PendingTeamMembershipUpdate,
+) -> Result<(), String> {
+    save_pending_team_membership_at(&pending_team_membership_path(app)?, Some(pending))
+}
+
+fn load_pending_team_membership<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<PendingTeamMembershipUpdate>, String> {
+    load_pending_team_membership_at(&pending_team_membership_path(app)?)
+}
+
+pub(in crate::commands) fn clear_pending_team_membership<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    // Write `null` through the link instead of unlinking it. The pending file
+    // is shared by dev worktrees, and `atomic_write_json` preserves the link.
+    save_pending_team_membership_at(&pending_team_membership_path(app)?, None)
+}
+
+/// The part of a staged delta that still agrees with the current team roster.
 ///
-/// `load_agents`/`save_agents` are injected so the command wiring (prior-roster
-/// capture, delta direction, and this best-effort policy) is unit-testable
-/// without an `AppHandle`; the commands pass the real store IO.
+/// An inbound event can extend or reorder the roster while a local agent-store
+/// write is pending. It does not erase the local add or removal evidence that
+/// still holds. An inbound reversal does erase that evidence, so the replay
+/// leaves that membership direction alone.
+fn pending_replay_delta(
+    pending: &PendingTeamMembershipUpdate,
+    current_persona_ids: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let removed = pending
+        .previous_persona_ids
+        .iter()
+        .filter(|id| {
+            !pending.current_persona_ids.contains(*id) && !current_persona_ids.contains(*id)
+        })
+        .cloned()
+        .collect();
+    let added = pending
+        .current_persona_ids
+        .iter()
+        .filter(|id| {
+            !pending.previous_persona_ids.contains(*id) && current_persona_ids.contains(*id)
+        })
+        .cloned()
+        .collect();
+    (removed, added)
+}
+
+/// Replay a staged membership delta. Callers hold `managed_agents_store_lock`.
+pub(crate) fn replay_pending_team_membership<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    let Some(pending) = load_pending_team_membership(app)? else {
+        return Ok(());
+    };
+    let teams = load_teams(app)?;
+    let Some(team) = teams.iter().find(|team| team.id == pending.team_id) else {
+        eprintln!(
+            "buzz-desktop: pending-team-membership: discarding staged update for missing team {:?}",
+            pending.team_id
+        );
+        return clear_pending_team_membership(app);
+    };
+    let (previous_persona_ids, current_persona_ids) =
+        pending_replay_delta(&pending, &team.persona_ids);
+    propagate_membership_with_roster(
+        &pending.team_id,
+        &previous_persona_ids,
+        &current_persona_ids,
+        &team.persona_ids,
+        || load_managed_agents(app),
+        |records| save_managed_agents(app, records),
+    )
+    .map_err(|error| format!("could not replay pending team update: {error}"))?;
+    clear_pending_team_membership(app)
+}
+
+/// Clear `team_id` on every instance that is bound to `team_id` but whose
+/// persona is absent from `current_persona_ids` or unset. Reports whether
+/// anything changed.
 ///
-/// Shared with the inbound reconcile path (`commands::personas::inbound`): a
-/// 30176 team edit arriving from another device must bind/detach instances the
-/// same way a local edit does, so both call this one wrapper.
+/// This reads the current roster, not a delta. That is what makes a failed
+/// detach recoverable: after a failed agent-store write the team is already
+/// saved with the new roster, so the prior→current delta is empty on the next
+/// save and a delta-only pass would do nothing. The invariant here is
+/// state-based — an instance bound to a team must have its persona on that
+/// team's roster — so a second save still repairs the binding.
+///
+/// Bindings to other teams are untouched, and an unbound instance is left to
+/// the delta's backfill branch.
+fn detach_agents_outside_roster(
+    records: &mut [crate::managed_agents::ManagedAgentRecord],
+    team_id: &str,
+    current_persona_ids: &[String],
+) -> bool {
+    let mut changed = false;
+    for record in records.iter_mut() {
+        if record.pubkey.is_empty() || record.team_id.as_deref() != Some(team_id) {
+            continue;
+        }
+        if !current_persona_ids
+            .iter()
+            .any(|id| record.persona_id.as_deref() == Some(id))
+        {
+            record.team_id = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Reports a membership propagation failure.
+#[derive(Debug)]
+pub(in crate::commands) enum MembershipPropagationError {
+    Load(String),
+    Save(String),
+}
+
+impl std::fmt::Display for MembershipPropagationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Load(error) | Self::Save(error) => formatter.write_str(error),
+        }
+    }
+}
+
+/// Propagate a team's membership to its members' already-running instances.
+/// Loads the agent store, applies the roster delta via
+/// [`apply_team_membership_delta`], reconciles stale bindings via
+/// [`detach_agents_outside_roster`], and re-saves only when something changed.
+/// Reports the failure type so the caller can choose its error policy.
+pub(in crate::commands) fn propagate_membership(
+    team_id: &str,
+    previous_persona_ids: &[String],
+    current_persona_ids: &[String],
+    load_agents: impl FnOnce() -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String>,
+    save_agents: impl FnOnce(&[crate::managed_agents::ManagedAgentRecord]) -> Result<(), String>,
+) -> Result<(), MembershipPropagationError> {
+    propagate_membership_with_roster(
+        team_id,
+        previous_persona_ids,
+        current_persona_ids,
+        current_persona_ids,
+        load_agents,
+        save_agents,
+    )
+}
+
+/// Apply a membership delta, then reconcile bindings with the authoritative
+/// roster. Replay uses a smaller delta when an inbound edit has changed the
+/// roster after staging, while the reconciliation always uses that latest roster.
+fn propagate_membership_with_roster(
+    team_id: &str,
+    previous_persona_ids: &[String],
+    current_persona_ids: &[String],
+    authoritative_persona_ids: &[String],
+    load_agents: impl FnOnce() -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String>,
+    save_agents: impl FnOnce(&[crate::managed_agents::ManagedAgentRecord]) -> Result<(), String>,
+) -> Result<(), MembershipPropagationError> {
+    let mut records = load_agents().map_err(MembershipPropagationError::Load)?;
+    let delta_changed = apply_team_membership_delta(
+        &mut records,
+        team_id,
+        previous_persona_ids,
+        current_persona_ids,
+    );
+    let detached = detach_agents_outside_roster(&mut records, team_id, authoritative_persona_ids);
+    if delta_changed || detached {
+        save_agents(&records).map_err(MembershipPropagationError::Save)?;
+    }
+    Ok(())
+}
+
+/// Apply a membership change without failing a metadata-only producer. The
+/// caller must use [`propagate_membership`] when a roster change needs durable
+/// recovery.
 pub(in crate::commands) fn propagate_membership_best_effort(
     team_id: &str,
     previous_persona_ids: &[String],
@@ -49,48 +248,63 @@ pub(in crate::commands) fn propagate_membership_best_effort(
     load_agents: impl FnOnce() -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String>,
     save_agents: impl FnOnce(&[crate::managed_agents::ManagedAgentRecord]) -> Result<(), String>,
 ) {
-    let result = (|| -> Result<(), String> {
-        let mut records = load_agents()?;
-        if apply_team_membership_delta(
-            &mut records,
-            team_id,
-            previous_persona_ids,
-            current_persona_ids,
-        ) {
-            save_agents(&records)?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: team-membership-propagate: {e}");
+    if let Err(error) = propagate_membership(
+        team_id,
+        previous_persona_ids,
+        current_persona_ids,
+        load_agents,
+        save_agents,
+    ) {
+        eprintln!("buzz-desktop: team-membership-propagate: {error}");
     }
 }
 
-/// In-memory core of [`create_team`]: push the built team, persist teams
-/// authoritatively, then propagate its whole roster (no prior members ⇒ the
-/// whole roster is the added delta) to live instances best-effort. Decoupled
-/// from the `AppHandle` shell via injected persistence so the create wiring is
-/// unit-testable. A `persist_teams` error propagates; agent IO is best-effort.
+/// In-memory core of [`create_team`]: stage, persist, and bind the new team's
+/// full roster to already-running instances. The function clears the stage
+/// only after both stores succeed. A failure returns an error because a success
+/// response must mean the membership binding is durable.
 fn commit_team_create(
     teams: &mut Vec<TeamRecord>,
     team: TeamRecord,
+    save_pending: impl FnOnce(&PendingTeamMembershipUpdate) -> Result<(), String>,
     persist_teams: impl FnOnce(&[TeamRecord]) -> Result<(), String>,
     load_agents: impl FnOnce() -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String>,
     save_agents: impl FnOnce(&[crate::managed_agents::ManagedAgentRecord]) -> Result<(), String>,
+    clear_pending: impl FnOnce() -> Result<(), String>,
 ) -> Result<TeamRecord, String> {
+    let membership_changed = !team.persona_ids.is_empty();
+    if membership_changed {
+        save_pending(&PendingTeamMembershipUpdate {
+            team_id: team.id.clone(),
+            previous_persona_ids: Vec::new(),
+            current_persona_ids: team.persona_ids.clone(),
+        })?;
+    }
     teams.push(team.clone());
     persist_teams(teams)?;
-    propagate_membership_best_effort(&team.id, &[], &team.persona_ids, load_agents, save_agents);
+    if membership_changed {
+        propagate_membership(&team.id, &[], &team.persona_ids, load_agents, save_agents)
+            .map_err(|error| format!("could not update the new team's agents: {error}"))?;
+        clear_pending()?;
+    }
     Ok(team)
 }
 
 /// In-memory core of [`update_team`]: mutate the matching team, capturing its
 /// roster *before* the edit, persist teams authoritatively, then propagate the
-/// prior→current delta to live instances best-effort. The prior-roster capture
+/// prior→current delta to live instances. The prior-roster capture
 /// and its use as the delta baseline live here — not at a command call site —
 /// so a miswire to the wrong baseline is caught by a test. Injected persistence
-/// keeps it `AppHandle`-free; a `persist_teams` error propagates, agent IO is
-/// best-effort. Returns the updated team.
+/// keeps it `AppHandle`-free; a `persist_teams` error propagates. Returns the
+/// updated team.
+///
+/// Keeps the team roster and instance bindings recoverable across two stores.
+/// It stages the prior→current delta before it writes either store. A failed
+/// agent write leaves the stage file in place. The next update or launch replays
+/// that original delta before it accepts another team edit.
+///
+/// A create also stages its full roster before it writes the team. A retry
+/// replays that stage, so the command never reports a lost member binding.
 #[allow(clippy::too_many_arguments)]
 fn commit_team_update(
     teams: &mut [TeamRecord],
@@ -119,14 +333,22 @@ fn commit_team_update(
     team.updated_at = now;
 
     let updated = team.clone();
+    let membership_changed = previous_persona_ids != updated.persona_ids;
     persist_teams(teams)?;
-    propagate_membership_best_effort(
+    if let Err(error) = propagate_membership(
         &updated.id,
         &previous_persona_ids,
         &updated.persona_ids,
         load_agents,
         save_agents,
-    );
+    ) {
+        if membership_changed || matches!(error, MembershipPropagationError::Save(_)) {
+            return Err(format!(
+                "Saved the team, but could not update its agents: {error}. Save the team again."
+            ));
+        }
+        eprintln!("buzz-desktop: team-membership-propagate: {error}");
+    }
     Ok(updated)
 }
 
@@ -431,6 +653,7 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        replay_pending_team_membership(&app)?;
         let personas = load_personas(&app)?;
         ensure_persona_ids_are_active(&personas, &input.persona_ids)?;
         let mut teams = load_teams(&app)?;
@@ -455,11 +678,14 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
         let team = commit_team_create(
             &mut teams,
             team,
+            |pending| save_pending_team_membership(&app, pending),
             |teams| save_teams(&app, teams),
             || load_managed_agents(&app),
             |records| save_managed_agents(&app, records),
+            || clear_pending_team_membership(&app),
         )?;
-        // Created teams are always non-builtin; publish to the relay.
+        // Created teams are always non-builtin. Retain only after the agent
+        // binding is durable, so a remote device cannot consume lost intent.
         retain_team_pending(&app, &state, &team);
         Ok(team)
     })
@@ -480,9 +706,27 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        replay_pending_team_membership(&app)?;
         let personas = load_personas(&app)?;
         ensure_persona_ids_are_active(&personas, &input.persona_ids)?;
         let mut teams = load_teams(&app)?;
+        let previous_persona_ids = teams
+            .iter()
+            .find(|team| team.id == input.id)
+            .ok_or_else(|| format!("team {} not found", input.id))?
+            .persona_ids
+            .clone();
+        let membership_changed = previous_persona_ids != input.persona_ids;
+        if membership_changed {
+            save_pending_team_membership(
+                &app,
+                &PendingTeamMembershipUpdate {
+                    team_id: input.id.clone(),
+                    previous_persona_ids,
+                    current_persona_ids: input.persona_ids.clone(),
+                },
+            )?;
+        }
         pending::project_active_team_sharing(&app, &state, &mut teams);
         let updated = commit_team_update(
             &mut teams,
@@ -496,6 +740,9 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
             || load_managed_agents(&app),
             |records| save_managed_agents(&app, records),
         )?;
+        if membership_changed {
+            clear_pending_team_membership(&app)?;
+        }
         // Built-in teams are not owner-authored — never publish them.
         if !updated.is_builtin {
             retain_team_pending(&app, &state, &updated);
@@ -521,6 +768,7 @@ pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        replay_pending_team_membership(&app)?;
         let cascaded_persona_d_tags = delete_team_with_cascade(&app, &id)?;
         // delete_team_with_cascade rejects built-in teams via validate_team_deletion,
         // so reaching here means this team was owner-published — tombstone it. The

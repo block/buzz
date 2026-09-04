@@ -269,6 +269,33 @@ fn agents_referencing_team_empty_when_no_matches() {
     assert!(agents_referencing_team(&agents, &t).is_empty());
 }
 
+/// A detached agent must not stop the deletion of a team.
+///
+/// To delete a team, you must first remove each member. That clears `team_id`
+/// on the agent. This test pins the result: the guard then finds no agents.
+#[test]
+fn detached_agents_no_longer_reference_the_team() {
+    let t = team("json-team-3", "Emptied Team");
+
+    let mut bound = managed_agent("Bound Agent");
+    bound.team_id = Some("json-team-3".to_string());
+    assert_eq!(
+        agents_referencing_team(std::slice::from_ref(&bound), &t),
+        vec!["Bound Agent"],
+        "a bound agent blocks team deletion"
+    );
+
+    // What emptying the roster does: clear the binding, keep the agent.
+    let detached = ManagedAgentRecord {
+        team_id: None,
+        ..bound
+    };
+    assert!(
+        agents_referencing_team(std::slice::from_ref(&detached), &t).is_empty(),
+        "a detached agent must not block team deletion"
+    );
+}
+
 // Migration pins — exercise the real merge_teams wrapper (with production consts).
 
 #[test]

@@ -285,15 +285,27 @@ pub fn ensure_persona_ids_are_active(
     Ok(())
 }
 
+pub(crate) fn source_team_exists(
+    persona: &AgentDefinition,
+    teams: &[crate::managed_agents::TeamRecord],
+) -> bool {
+    persona.source_team.as_deref().is_some_and(|source_team| {
+        teams
+            .iter()
+            .any(|team| crate::managed_agents::team_persona_key(team) == source_team)
+    })
+}
+
 pub fn validate_persona_deletion(
     persona: &AgentDefinition,
     referenced_by_team: bool,
+    source_team_exists: bool,
 ) -> Result<(), String> {
     if persona.is_builtin {
         return Err("Built-in agents cannot be deleted.".to_string());
     }
 
-    if persona.source_team.is_some() {
+    if source_team_exists {
         return Err(format!(
             "{} belongs to a team. Delete the team to remove all team agents together.",
             persona.display_name

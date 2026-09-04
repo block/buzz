@@ -1,10 +1,12 @@
 use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
-    merge_personas, migrate_retired_personas, validate_persona_activation_change,
-    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    merge_personas, migrate_retired_personas, source_team_exists,
+    validate_persona_activation_change, validate_persona_deletion, BUILT_IN_PERSONAS,
+    RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
-use crate::managed_agents::AgentDefinition;
+use crate::managed_agents::{AgentDefinition, TeamRecord};
+use std::path::PathBuf;
 
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
@@ -31,6 +33,49 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
         created_at: "2026-03-19T00:00:00Z".to_string(),
         updated_at: "2026-03-19T00:00:00Z".to_string(),
     }
+}
+
+fn team(id: &str, source_dir: Option<&str>) -> TeamRecord {
+    TeamRecord {
+        id: id.to_string(),
+        name: id.to_string(),
+        description: None,
+        instructions: None,
+        persona_ids: Vec::new(),
+        is_builtin: false,
+        shared: false,
+        catalog_source: None,
+        source_dir: source_dir.map(PathBuf::from),
+        is_symlink: false,
+        symlink_target: None,
+        version: None,
+        created_at: "2026-03-19T00:00:00Z".to_string(),
+        updated_at: "2026-03-19T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn source_team_exists_uses_the_team_persona_key() {
+    let mut persona = custom_persona("custom:alpha", "Alpha");
+    persona.source_team = Some("com.example.alpha".to_string());
+    let teams = vec![team(
+        "legacy-team-uuid",
+        Some("/managed-teams/com.example.alpha"),
+    )];
+
+    assert!(source_team_exists(&persona, &teams));
+}
+
+#[test]
+fn source_team_exists_rejects_a_missing_team() {
+    let mut persona = custom_persona("custom:alpha", "Alpha");
+    persona.source_team = Some("com.example.deleted".to_string());
+    let teams = vec![team(
+        "legacy-team-uuid",
+        Some("/managed-teams/com.example.alpha"),
+    )];
+
+    assert!(!source_team_exists(&persona, &teams));
 }
 
 #[test]
@@ -244,7 +289,7 @@ fn validate_persona_deletion_rejects_builtins() {
     let mut persona = custom_persona("builtin:fizz", "Fizz");
     persona.is_builtin = true;
 
-    let err = validate_persona_deletion(&persona, false).unwrap_err();
+    let err = validate_persona_deletion(&persona, false, false).unwrap_err();
 
     assert_eq!(err, "Built-in agents cannot be deleted.");
 }
@@ -253,7 +298,7 @@ fn validate_persona_deletion_rejects_builtins() {
 fn validate_persona_deletion_rejects_team_references() {
     let persona = custom_persona("custom:alpha", "Alpha");
 
-    let err = validate_persona_deletion(&persona, true).unwrap_err();
+    let err = validate_persona_deletion(&persona, true, false).unwrap_err();
 
     assert_eq!(
         err,
@@ -265,7 +310,28 @@ fn validate_persona_deletion_rejects_team_references() {
 fn validate_persona_deletion_allows_safe_custom_personas() {
     let persona = custom_persona("custom:alpha", "Alpha");
 
-    assert!(validate_persona_deletion(&persona, false).is_ok());
+    assert!(validate_persona_deletion(&persona, false, false).is_ok());
+}
+
+#[test]
+fn validate_persona_deletion_rejects_existing_source_team() {
+    let mut persona = custom_persona("custom:alpha", "Alpha");
+    persona.source_team = Some("team:alpha".to_string());
+
+    let err = validate_persona_deletion(&persona, false, true).unwrap_err();
+
+    assert_eq!(
+        err,
+        "Alpha belongs to a team. Delete the team to remove all team agents together."
+    );
+}
+
+#[test]
+fn validate_persona_deletion_allows_missing_source_team() {
+    let mut persona = custom_persona("custom:alpha", "Alpha");
+    persona.source_team = Some("team:deleted".to_string());
+
+    assert!(validate_persona_deletion(&persona, false, false).is_ok());
 }
 
 // ── migrate_retired_personas ──────────────────────────────────────────────────

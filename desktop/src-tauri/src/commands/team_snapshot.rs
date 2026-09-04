@@ -33,6 +33,10 @@ const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
 const ZIP_MAGIC_PREFIX: [u8; 2] = [0x50, 0x4b];
 const LEGACY_TEAM_ERROR: &str =
     "Legacy team files are no longer supported. Export a buzz-team-snapshot v1 .team.json or .team.png instead.";
+/// Refusal for an export of a team that has no members. The importer rejects
+/// such a snapshot, so the producer must not write one.
+pub(crate) const EMPTY_TEAM_EXPORT_ERROR: &str =
+    "This team has no agents. Add at least one agent before you share or export it.";
 
 /// Decode a canonical team snapshot, rejecting retired flat team JSON and
 /// persona-pack ZIP files with a migration-oriented error.
@@ -272,6 +276,13 @@ struct MintedMember {
     effective_avatar: Option<String>,
 }
 
+/// Builds the snapshot for an export.
+///
+/// A team with no members must not become a snapshot. The importer rejects such
+/// an artifact, because `validate_team_snapshot` needs one member or more. Both
+/// export commands come through this function, so the rejection belongs here.
+/// A disabled menu item is not sufficient: the commands stay callable, and a
+/// share dialog can submit after the roster becomes empty.
 fn build_team_export_snapshot(
     team: &TeamRecord,
     personas: &[AgentDefinition],
@@ -279,6 +290,10 @@ fn build_team_export_snapshot(
     memory_level: MemoryLevel,
     memory_entries_by_persona: &std::collections::HashMap<String, Vec<AgentSnapshotMemoryEntry>>,
 ) -> Result<TeamSnapshot, String> {
+    if team.persona_ids.is_empty() {
+        return Err(EMPTY_TEAM_EXPORT_ERROR.to_string());
+    }
+
     let members = team
         .persona_ids
         .iter()
