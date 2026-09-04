@@ -112,7 +112,7 @@ test("channel replay lookback stays coupled to relay and DB source constants", a
   assert.match(
     ingest,
     new RegExp(
-      `MAX_TIMESTAMP_DRIFT_SECS: i64 = ${RELAY_INGEST_FUTURE_TOLERANCE_SECS}`,
+      `MAX_TIMESTAMP_DRIFT_SECS: u64 = ${RELAY_INGEST_FUTURE_TOLERANCE_SECS}`,
     ),
   );
   assert.match(
