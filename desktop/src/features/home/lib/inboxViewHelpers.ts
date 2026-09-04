@@ -29,6 +29,46 @@ export function filterInboxItems(items: InboxItem[]) {
   return items.filter((item) => item.item.kind !== KIND_REMINDER);
 }
 
+/**
+ * Unread-only keeps a done row only when the user explicitly selected it
+ * (`?item=`). Auto-select must not pin a conversation after it becomes done,
+ * or Inbox boot leaves one stale row until the view remounts.
+ */
+export function matchesUnreadOnlyVisibility(
+  item: { conversationId: string; id: string },
+  options: {
+    doneSet: ReadonlySet<string>;
+    selectedConversationId: string | null;
+    unreadOnly: boolean;
+    urlSelectedItemId: string | null;
+  },
+): boolean {
+  if (!options.unreadOnly) return true;
+  if (!options.doneSet.has(item.id)) return true;
+  return (
+    Boolean(options.urlSelectedItemId) &&
+    item.conversationId === options.selectedConversationId
+  );
+}
+
+export function filterVisibleInboxItems(
+  items: InboxItem[],
+  options: {
+    doneSet: ReadonlySet<string>;
+    filter: InboxFilter;
+    ownedAgentPubkeys?: ReadonlySet<string>;
+    selectedConversationId: string | null;
+    unreadOnly: boolean;
+    urlSelectedItemId: string | null;
+  },
+): InboxItem[] {
+  return items.filter(
+    (item) =>
+      matchesInboxFilter(item, options.filter, options.ownedAgentPubkeys) &&
+      matchesUnreadOnlyVisibility(item, options),
+  );
+}
+
 export function hasInboxThreadContext(
   item: Pick<InboxItem, "groupItems" | "item">,
   contextMessages: readonly Pick<InboxContextMessage, "tags">[] = [],
