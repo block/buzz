@@ -926,12 +926,13 @@ pub async fn soft_delete_event(
     )
     .await?;
     let result = sqlx::query(
-        "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
-            .bind(community_id.as_uuid())
-            .bind(event_id)
-            .execute(&mut *connection)
-            .await?;
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .execute(&mut *connection)
+    .await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -1016,7 +1017,8 @@ pub async fn soft_delete_event_and_update_thread(
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     let result = sqlx::query(
-        "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
     .bind(community_id.as_uuid())
     .bind(event_id)

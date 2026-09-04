@@ -42,6 +42,8 @@ pub mod relay;
 pub mod tenant;
 /// Schnorr signature and event ID verification.
 pub mod verification;
+/// Identifier-only workflow mention wake hints.
+pub mod workflow_wake;
 
 pub use error::VerificationError;
 pub use event::StoredEvent;

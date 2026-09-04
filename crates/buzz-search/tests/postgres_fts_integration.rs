@@ -32,6 +32,10 @@ const MIGRATION_0033_SQL: &str =
     include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
 
 async fn setup() -> (PgPool, String) {
+    setup_with_search_policy(true).await
+}
+
+async fn setup_with_search_policy(apply_fresh_allowlist: bool) -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
     let schema = format!("fts_test_{}", Uuid::new_v4().simple());
     // Connect to the default schema first to create the test schema.
@@ -54,8 +58,8 @@ async fn setup() -> (PgPool, String) {
         .connect(&url_with_search_path)
         .await
         .expect("connect with search_path");
-    // Apply the full migration chain in order so the test schema exactly matches
-    // production. Future FTS-affecting migrations must be added here.
+    // Apply the selected FTS-affecting chain, not the full production schema.
+    // Preserve both existing fresh allowlist and brownfield skip-set policies.
     pool.execute(MIGRATION_0001_SQL)
         .await
         .expect("apply 0001 migration");
@@ -77,9 +81,11 @@ async fn setup() -> (PgPool, String) {
     pool.execute(MIGRATION_0007_SQL)
         .await
         .expect("apply 0007 migration");
-    pool.execute(MIGRATION_0008_SQL)
-        .await
-        .expect("apply 0008 migration");
+    if apply_fresh_allowlist {
+        pool.execute(MIGRATION_0008_SQL)
+            .await
+            .expect("apply 0008 migration");
+    }
     pool.execute(MIGRATION_0014_SQL)
         .await
         .expect("apply 0014 migration");
@@ -1405,30 +1411,26 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
     teardown(pool, &schema).await;
 }
 
-/// Tripwire: every Rust-side `P_GATED_KINDS` entry that is *persistent* (not
-/// in the ephemeral 20000–29999 range) MUST be excluded from `search_tsv` at
-/// the storage layer.
-///
-/// L2 (the filter-level `#p` gate in `p_gated_filters_authorized`) prevents
-/// reachable leaks today, but it is Rust logic — a future bug or new exempt
-/// search entry point could surface tokenized content from these kinds. The
-/// L1 NULL tsvector is the unbreakable backstop: `@@` mathematically cannot
-/// match NULL. This test catches the drift where someone adds a persistent
-/// kind to `P_GATED_KINDS` without the matching `schema/schema.sql` +
-/// `migrations/0001_initial_schema.sql` skip-set update.
-///
-/// Ephemeral kinds (20000–29999) are skipped: they are never stored, so the
-/// storage-layer defense does not apply to them regardless of the schema
-/// CASE. `p_gated_filters_authorized` remains their sole defense by design.
-///
-/// Companion to `author_only_kinds_are_storage_level_unsearchable`: that test
-/// covers `AUTHOR_ONLY_KINDS` drift; this one covers `P_GATED_KINDS`
-/// persistent-subset drift. Together they tripwire both Rust-side privacy
-/// constants against the schema literal.
+/// Preserve the existing storage exclusions for private event families.
+/// Wake authorization is instead enforced at the relay's read/count boundary;
+/// index membership does not grant visibility. See workflow_search_tests.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
-    let (pool, schema) = setup().await;
+    // Exercise the brownfield negative skip-set. The fresh-install positive
+    // allowlist would make every unknown kind unsearchable and let a missing
+    // per-kind migration pass vacuously.
+    assert_p_gated_storage_null(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fresh_p_gated_persistent_kinds_have_storage_null_tsvector() {
+    assert_p_gated_storage_null(true).await;
+}
+
+async fn assert_p_gated_storage_null(apply_fresh_allowlist: bool) {
+    let (pool, schema) = setup_with_search_policy(apply_fresh_allowlist).await;
 
     let c = mk_community(&pool, "p-gated-tripwire.example").await;
     let token = "pgated_tripwire_marker_qwerty";
@@ -1448,7 +1450,9 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
     let persistent: Vec<u32> = P_GATED_KINDS
         .iter()
         .copied()
-        .filter(|&k| !buzz_core::kind::is_ephemeral(k))
+        .filter(|&k| {
+            !buzz_core::kind::is_ephemeral(k) && k != buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE
+        })
         .collect();
     assert!(
         !persistent.is_empty(),
@@ -1468,7 +1472,45 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
             1_700_000_100 + i as i64,
         )
         .await;
+        // Preserve NULL rather than empty vectors for these existing exclusions.
+        // An empty vector can match a NOT-only query.
+        insert_event(
+            &pool,
+            c,
+            rand_bytes32(),
+            rand_bytes32(),
+            kind as i32,
+            "",
+            None,
+            1_700_000_200 + i as i64,
+        )
+        .await;
     }
+
+    let persistent_kinds: Vec<i32> = persistent.iter().map(|&kind| kind as i32).collect();
+    let nonnull: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE community_id = $1 AND kind = ANY($2) \
+         AND search_tsv IS NOT NULL",
+    )
+    .bind(c.as_uuid())
+    .bind(&persistent_kinds)
+    .fetch_one(&pool)
+    .await
+    .expect("read raw vectors");
+    assert_eq!(nonnull, 0, "private vectors must be SQL NULL, not empty");
+
+    // Deliberately bypass SearchService: a query-layer exclusion must not make
+    // this storage-contract test pass. The public control proves the negative
+    // query itself is capable of matching rows in this fixture.
+    let negative_kinds: Vec<i32> = sqlx::query_scalar(
+        "SELECT kind FROM events WHERE community_id = $1 \
+         AND search_tsv @@ websearch_to_tsquery('simple', '-neverpresentqzx')",
+    )
+    .bind(c.as_uuid())
+    .fetch_all(&pool)
+    .await
+    .expect("NOT-only raw FTS query");
+    assert_eq!(negative_kinds, vec![9], "only the public control may match");
 
     let svc = SearchService::new(pool.clone());
     let result = svc

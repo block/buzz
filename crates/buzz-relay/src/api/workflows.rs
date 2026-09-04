@@ -40,6 +40,33 @@ fn request_path(path: &str, raw_query: Option<&str>) -> String {
     }
 }
 
+fn ensure_channel_access(
+    accessible: &[Uuid],
+    channel_id: Uuid,
+    error: &'static str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if accessible.contains(&channel_id) {
+        Ok(())
+    } else {
+        Err(api_error(StatusCode::FORBIDDEN, error))
+    }
+}
+
+async fn enforce_current_channel_read(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    pubkey: &nostr::PublicKey,
+    channel_id: Uuid,
+    error: &'static str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let pubkey_bytes = pubkey.to_bytes().to_vec();
+    let accessible = state
+        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+        .await
+        .map_err(|error| internal_error(&format!("workflow channel access lookup: {error}")))?;
+    ensure_channel_access(&accessible, channel_id, error)
+}
+
 async fn authorize_workflow_read(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -94,16 +121,14 @@ async fn authorize_workflow_read(
     let channel_id = workflow
         .channel_id
         .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "workflow is not channel-scoped"))?;
-    let accessible = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
-        .await
-        .map_err(|error| internal_error(&format!("workflow channel access lookup: {error}")))?;
-    if !accessible.contains(&channel_id) {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "workflow is not accessible",
-        ));
-    }
+    enforce_current_channel_read(
+        state,
+        &tenant,
+        &pubkey,
+        channel_id,
+        "workflow is not accessible",
+    )
+    .await?;
 
     Ok(tenant)
 }
@@ -228,6 +253,183 @@ fn approval_json(approval: &buzz_db::workflow::ApprovalRecord) -> Value {
     })
 }
 
+// A missing/revoked authority is terminal; unavailable storage is not. Keep
+// this distinction at the endpoint so ACP's bounded transport retries can work.
+pub(crate) fn wake_lookup_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
+    use buzz_db::DbError;
+    let status = match &error {
+        DbError::NotFound(_) => StatusCode::NOT_FOUND,
+        DbError::Sqlx(sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        DbError::Sqlx(sqlx::Error::Database(error))
+            if error.code().is_some_and(|code| {
+                code.starts_with("08")
+                    || matches!(
+                        code.as_ref(),
+                        "40001"
+                            | "40P01"
+                            | "53300"
+                            | "55P03"
+                            | "57014"
+                            | "57P01"
+                            | "57P02"
+                            | "57P03"
+                    )
+            }) =>
+        {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    tracing::warn!(%error, %status, "workflow wake authority lookup failed");
+    api_error(status, "workflow wake authority unavailable")
+}
+
+/// `GET /workflow-wakes/{run_id}/{message_id}` — exact authority bundle for one wake.
+///
+/// Admission checks the current workflow pointer and live captured event through
+/// separate datastore reads. It is not a lock or lease across the returned
+/// response, local agent queue, or subsequent execution; later edits/deletions
+/// cannot retract a bundle already read by this request.
+pub async fn workflow_wake_authority(
+    State(state): State<Arc<AppState>>,
+    Path((run_id, message_id)): Path<(Uuid, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = format!("/workflow-wakes/{run_id}/{message_id}");
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|error| match error {
+            crate::tenant::BindError::UnmappedHost => {
+                api_error(StatusCode::NOT_FOUND, "workflow wake not found")
+            }
+            // Host resolution is an authority read too: unavailable storage
+            // must not masquerade as revocation and strand ACP's pending wake.
+            crate::tenant::BindError::Lookup(error) => wake_lookup_error(error),
+        })?;
+    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path);
+    let bridge::VerifiedBridgeAuth {
+        pubkey: recipient,
+        event_id_bytes: auth_event_id,
+        signed_created_at,
+    } = bridge::verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
+    bridge::enforce_http_admission(&state, &tenant, &recipient).await?;
+    bridge::check_nip98_replay(&state, &tenant, auth_event_id).await?;
+
+    let run = state
+        .db
+        .get_workflow_run(tenant.community(), run_id)
+        .await
+        .map_err(wake_lookup_error)?;
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), run.workflow_id)
+        .await
+        .map_err(wake_lookup_error)?;
+    let definition_id = run
+        .definition_event_id
+        .as_deref()
+        .filter(|id| id.len() == 32)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    if workflow.definition_event_id.as_deref() != Some(definition_id) {
+        return Err(api_error(StatusCode::NOT_FOUND, "workflow wake not found"));
+    }
+    let message_id = nostr::EventId::from_hex(&message_id)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid message id"))?;
+    let definition = state
+        .db
+        .get_event_by_id(tenant.community(), definition_id)
+        .await
+        .map_err(wake_lookup_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    let message = state
+        .db
+        .get_event_by_id(tenant.community(), message_id.as_bytes())
+        .await
+        .map_err(wake_lookup_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+
+    let recipient_hex = recipient.to_hex();
+    let exact_tag = |event: &nostr::Event, name: &str, value: &str| {
+        event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.len() == 2 && values[0] == name && values[1].eq_ignore_ascii_case(value)
+        })
+    };
+    let message_channel = message
+        .channel_id
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    let auth_tag = super::relay_members::extract_auth_tag_header(&headers);
+    super::relay_members::enforce_relay_membership(
+        &state,
+        tenant.community(),
+        &recipient.to_bytes(),
+        auth_tag,
+        signed_created_at,
+    )
+    .await
+    .map_err(|(status, body)| {
+        // This shared boundary exposes database lookup failures as 500, while
+        // explicit roster/authentication denials retain their terminal status.
+        let status = if status == StatusCode::INTERNAL_SERVER_ERROR {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            status
+        };
+        (status, body)
+    })?;
+    if !state
+        .db
+        .is_member(tenant.community(), message_channel, &recipient.to_bytes())
+        .await
+        .map_err(wake_lookup_error)?
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "workflow wake not accessible",
+        ));
+    }
+    if workflow.owner_pubkey != definition.event.pubkey.to_bytes()
+        || workflow.channel_id != Some(message_channel)
+        || !exact_tag(&definition.event, "h", &message_channel.to_string())
+        || !exact_tag(&definition.event, "d", &run.workflow_id.to_string())
+        || !exact_tag(&message.event, "h", &message_channel.to_string())
+        || !message.event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.len() == 2 && values[0] == "p" && values[1].eq_ignore_ascii_case(&recipient_hex)
+        })
+        || !exact_tag(&message.event, "buzz:workflow-mention", &recipient_hex)
+        || !exact_tag(
+            &message.event,
+            "buzz:workflow-owner",
+            &definition.event.pubkey.to_hex(),
+        )
+        || !exact_tag(&message.event, "workflow-run", &run_id.to_string())
+        || !exact_tag(
+            &message.event,
+            "workflow-definition",
+            &definition.event.id.to_hex(),
+        )
+    {
+        return Err(api_error(StatusCode::NOT_FOUND, "workflow wake not found"));
+    }
+
+    Ok(Json(serde_json::json!({
+        "run_id": run.id,
+        "channel_id": message_channel,
+        "workflow_id": run.workflow_id,
+        "definition_event_id": definition.event.id.to_hex(),
+        "workflow_owner": hex::encode(&workflow.owner_pubkey),
+        "definition": definition.event,
+        "message": message.event,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +444,43 @@ mod tests {
             request_path("/workflows/id/runs", None),
             "/workflows/id/runs"
         );
+    }
+
+    #[test]
+    fn wake_lookup_failure_is_not_authority_revocation() {
+        use buzz_db::DbError;
+        for error in [
+            sqlx::Error::PoolClosed,
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert_eq!(
+                wake_lookup_error(DbError::Sqlx(error)).0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+        assert_eq!(
+            wake_lookup_error(DbError::NotFound("run".into())).0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            wake_lookup_error(DbError::InvalidData("bad row".into())).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            wake_lookup_error(DbError::Sqlx(sqlx::Error::ColumnNotFound("bad".into()))).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn channel_access_is_required_at_authority_read_time() {
+        let channel = Uuid::new_v4();
+        assert!(ensure_channel_access(&[channel], channel, "revoked").is_ok());
+
+        let (status, _) = ensure_channel_access(&[], channel, "revoked")
+            .expect_err("removed member must not retain authority read access");
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[test]

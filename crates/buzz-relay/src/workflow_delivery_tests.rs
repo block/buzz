@@ -1,0 +1,816 @@
+//! Real-storage regressions for workflow wake lifecycle boundaries.
+use super::postgres_tests::test_state_with_redis;
+use super::*;
+use axum::{
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+};
+use buzz_core::{
+    channel::{ChannelType, ChannelVisibility, MemberRole},
+    tenant::CommunityId,
+};
+use buzz_db::CreateCommunityWithOwnerResult;
+use nostr::{Event, Keys, Timestamp};
+
+struct Fixture {
+    state: Arc<AppState>,
+    community: CommunityId,
+    host: String,
+    channel: Uuid,
+    owner: Keys,
+    agent: Keys,
+    workflow: Uuid,
+}
+impl Fixture {
+    async fn new() -> Self {
+        let state = test_state_with_redis(
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into()),
+        )
+        .await;
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let host = format!("wake-{}.example", Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner.public_key().to_hex())
+            .await
+            .expect("community")
+        {
+            CreateCommunityWithOwnerResult::Created(record) => record.id,
+            other => panic!("unexpected {other:?}"),
+        };
+        state
+            .db
+            .ensure_user(community, &owner.public_key().to_bytes())
+            .await
+            .expect("owner user");
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wake",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("channel")
+            .id;
+        state
+            .db
+            .ensure_user(community, &agent.public_key().to_bytes())
+            .await
+            .expect("agent");
+        state
+            .db
+            .update_user_profile(
+                community,
+                &agent.public_key().to_bytes(),
+                Some("Worker"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("name");
+        state
+            .db
+            .add_member(
+                community,
+                channel,
+                &agent.public_key().to_bytes(),
+                MemberRole::Bot,
+                Some(&owner.public_key().to_bytes()),
+            )
+            .await
+            .expect("member");
+        Self {
+            state,
+            community,
+            host,
+            channel,
+            owner,
+            agent,
+            workflow: Uuid::new_v4(),
+        }
+    }
+    fn connection(
+        &self,
+    ) -> (
+        Arc<crate::connection::ConnectionState>,
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
+        use crate::connection::{AuthState, ConnectionState};
+        use std::{collections::HashMap, sync::atomic::AtomicU8};
+        use tokio::sync::{mpsc, Mutex, RwLock};
+        let (send_tx, rx) = mpsc::channel(16);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(4);
+        let conn = Arc::new(ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::TenantContext::resolved(self.community, &self.host),
+            remote_addr: "127.0.0.1:1234".parse().expect("address"),
+            auth_state: RwLock::new(AuthState::Authenticated(buzz_auth::AuthContext {
+                pubkey: self.agent.public_key(),
+                scopes: vec![],
+                channel_ids: None,
+                auth_method: buzz_auth::AuthMethod::Nip42,
+                agent_owner_pubkey: None,
+            })),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        self.state.conn_manager.register(
+            conn.conn_id,
+            conn.send_tx.clone(),
+            conn.ctrl_tx.clone(),
+            None,
+            conn.cancel.clone(),
+            self.community,
+            conn.backpressure_count.clone(),
+            conn.subscriptions.clone(),
+            conn.grace_limit,
+        );
+        self.state
+            .conn_manager
+            .set_authenticated_pubkey(conn.conn_id, self.agent.public_key().to_bytes().to_vec());
+        (conn, rx)
+    }
+    fn headers(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", self.host.parse().expect("host"));
+        headers.insert(
+            "x-pubkey",
+            self.agent.public_key().to_hex().parse().expect("pubkey"),
+        );
+        headers
+    }
+    async fn revision(&self, timestamp: u64) -> Event {
+        self.revision_with_text(timestamp, "@Worker work").await
+    }
+    async fn revision_with_text(&self, timestamp: u64, text: &str) -> Event {
+        let definition = format!("name: wake\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify\n    action: send_message\n    text: '{text}'\n");
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORKFLOW_DEF as u16),
+            definition,
+        )
+        .custom_created_at(Timestamp::from(timestamp))
+        .tags([
+            Tag::parse(["d", &self.workflow.to_string()]).expect("d"),
+            Tag::parse(["h", &self.channel.to_string()]).expect("h"),
+        ])
+        .sign_with_keys(&self.owner)
+        .expect("definition");
+        let mut tx = self
+            .state
+            .db
+            .begin_event_write_transaction()
+            .await
+            .expect("tx");
+        self.state
+            .db
+            .replace_parameterized_event_in_transaction(
+                &mut tx,
+                self.community,
+                &event,
+                &self.workflow.to_string(),
+                Some(self.channel),
+                buzz_db::replaceable::ParameterizedReplacePrecondition::Unconditional,
+            )
+            .await
+            .expect("replace");
+        self.state
+            .db
+            .upsert_workflow(
+                &mut tx,
+                self.community,
+                self.workflow,
+                Some(self.channel),
+                &self.owner.public_key().to_bytes(),
+                "wake",
+                &serde_json::to_string(
+                    &serde_yaml::from_str::<buzz_workflow::WorkflowDef>(&event.content)
+                        .expect("definition"),
+                )
+                .expect("serialize definition"),
+                &[0; 32],
+                event.id.as_bytes(),
+            )
+            .await
+            .expect("materialize");
+        tx.commit().await.expect("commit");
+        event
+    }
+    async fn authority(
+        &self,
+        run: Uuid,
+        message: &str,
+    ) -> Result<axum::Json<serde_json::Value>, (StatusCode, axum::Json<serde_json::Value>)> {
+        crate::api::workflows::workflow_wake_authority(
+            State(self.state.clone()),
+            Path((run, message.to_owned())),
+            self.headers(),
+        )
+        .await
+    }
+}
+
+fn next_frame(
+    rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+) -> serde_json::Value {
+    let axum::extract::ws::Message::Text(text) = rx.try_recv().expect("frame") else {
+        panic!("expected text frame");
+    };
+    serde_json::from_str(&text).expect("frame JSON")
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn captured_revision_replacement_revokes_pending_wake() {
+    assert_pending_revision_revoked(true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn captured_revision_deletion_revokes_pending_wake() {
+    assert_pending_revision_revoked(false).await;
+}
+
+async fn assert_pending_revision_revoked(replace: bool) {
+    let f = Fixture::new().await;
+    let a = f.revision(Timestamp::now().as_secs()).await;
+    let run = f
+        .state
+        .db
+        .create_workflow_run(f.community, f.workflow, Some(a.id.as_bytes()), None, None)
+        .await
+        .expect("run");
+    let message = RelayActionSink::new(&f.state)
+        .send_message(
+            WorkflowMessageContext {
+                community_id: f.community,
+                run_id: run,
+                step_id: "notify".into(),
+                definition_event_id: Some(a.id.as_bytes().to_vec()),
+            },
+            &f.channel.to_string(),
+            "@Worker work",
+            "@Worker work",
+            &f.owner.public_key().to_hex(),
+            None,
+        )
+        .await
+        .expect("message");
+    // Unchanged exact authority remains usable; neither an edit nor deletion
+    // may substitute new definition content into this bundle.
+    let authority = f.authority(run, &message).await.expect("live authority");
+    assert_eq!(authority.0["definition"]["id"], a.id.to_hex());
+    f.state
+        .workflow_engine
+        .load_run_definition(f.community, run)
+        .await
+        .expect("unchanged continuation");
+    if replace {
+        let b = f
+            .revision_with_text(a.created_at.as_secs() + 1, "@Worker new work")
+            .await;
+        assert_eq!(
+            f.authority(run, &message).await.expect_err("replaced").0,
+            StatusCode::NOT_FOUND
+        );
+        assert!(f
+            .state
+            .workflow_engine
+            .load_run_definition(f.community, run)
+            .await
+            .is_err());
+        let new_run = f
+            .state
+            .db
+            .create_workflow_run(f.community, f.workflow, Some(b.id.as_bytes()), None, None)
+            .await
+            .expect("new run");
+        let new_message = RelayActionSink::new(&f.state)
+            .send_message(
+                WorkflowMessageContext {
+                    community_id: f.community,
+                    run_id: new_run,
+                    step_id: "notify".into(),
+                    definition_event_id: Some(b.id.as_bytes().to_vec()),
+                },
+                &f.channel.to_string(),
+                "@Worker new work",
+                "@Worker new work",
+                &f.owner.public_key().to_hex(),
+                None,
+            )
+            .await
+            .expect("new message");
+        assert_eq!(
+            f.authority(new_run, &new_message)
+                .await
+                .expect("fresh wake")
+                .0["definition"]["id"],
+            b.id.to_hex()
+        );
+        // Even fresh authority cannot resurrect the old captured wake.
+        assert!(f.authority(run, &message).await.is_err());
+        return;
+    }
+    let deletion = EventBuilder::new(Kind::EventDeletion, "revoke captured revision")
+        .tags([Tag::event(a.id)])
+        .sign_with_keys(&f.owner)
+        .expect("signed deletion");
+    let result = crate::handlers::ingest::ingest_event(
+        &f.state,
+        &buzz_core::TenantContext::resolved(f.community, &f.host),
+        deletion,
+        crate::handlers::ingest::IngestAuth::Nip42 {
+            pubkey: f.owner.public_key(),
+            scopes: vec![buzz_auth::Scope::MessagesWrite],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        },
+    )
+    .await
+    .expect("explicit revocation through authenticated deletion ingress");
+    assert!(result.accepted);
+    assert_eq!(
+        f.authority(run, &message).await.expect_err("revoked").0,
+        StatusCode::NOT_FOUND
+    );
+    assert!(f
+        .state
+        .workflow_engine
+        .load_run_definition(f.community, run)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn removed_open_channel_member_cannot_read_or_count_wakes() {
+    let f = Fixture::new().await;
+    let a = f.revision(Timestamp::now().as_secs()).await;
+    let run = f
+        .state
+        .db
+        .create_workflow_run(f.community, f.workflow, Some(a.id.as_bytes()), None, None)
+        .await
+        .expect("run");
+    let message = RelayActionSink::new(&f.state)
+        .send_message(
+            WorkflowMessageContext {
+                community_id: f.community,
+                run_id: run,
+                step_id: "notify".into(),
+                definition_event_id: Some(a.id.as_bytes().to_vec()),
+            },
+            &f.channel.to_string(),
+            "@Worker work",
+            "@Worker work",
+            &f.owner.public_key().to_hex(),
+            None,
+        )
+        .await
+        .expect("message");
+    let _ = f.authority(run, &message).await.expect("member authority");
+    let filter = serde_json::json!({"kinds":[buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE], "#p":[f.agent.public_key().to_hex()], "#h":[f.channel.to_string()]});
+    let body =
+        axum::body::Bytes::from(serde_json::to_vec(&serde_json::json!([filter])).expect("body"));
+    let before =
+        crate::api::bridge::query_events(State(f.state.clone()), f.headers(), body.clone())
+            .await
+            .expect("query");
+    assert_eq!(before.0.as_array().expect("events").len(), 1);
+    // Exercise the actual WS handlers and live send path, retaining the same
+    // connection/subscription across removal to expose stale access state.
+    let (conn, mut frames) = f.connection();
+    let filters: Vec<nostr::Filter> = serde_json::from_slice(&body).expect("filters");
+    crate::handlers::req::handle_req(
+        "wakes".into(),
+        filters.clone(),
+        vec![None; filters.len()],
+        conn.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut frames)[0], "EVENT");
+    assert_eq!(next_frame(&mut frames)[0], "EOSE");
+    crate::handlers::count::handle_count(
+        "count".into(),
+        filters.clone(),
+        conn.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut frames)[2]["count"], 1);
+    let wake: Event = serde_json::from_value(before.0[0].clone()).expect("wake");
+    let stored = buzz_core::StoredEvent::new(wake, Some(f.channel));
+    crate::handlers::event::fan_out_event_to_local_subscribers(&f.state, f.community, &stored)
+        .await;
+    assert_eq!(next_frame(&mut frames)[0], "EVENT");
+    f.state
+        .db
+        .remove_member(
+            f.community,
+            f.channel,
+            &f.agent.public_key().to_bytes(),
+            &f.owner.public_key().to_bytes(),
+        )
+        .await
+        .expect("remove");
+    assert!(f
+        .state
+        .db
+        .get_accessible_channel_ids(f.community, &f.agent.public_key().to_bytes())
+        .await
+        .expect("open readability")
+        .contains(&f.channel));
+    assert_eq!(
+        f.authority(run, &message)
+            .await
+            .expect_err("not membership")
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let after = crate::api::bridge::query_events(State(f.state.clone()), f.headers(), body.clone())
+        .await
+        .expect("query after removal");
+    assert!(after.0.as_array().expect("events").is_empty());
+    let count = crate::api::bridge::count_events(State(f.state.clone()), f.headers(), body)
+        .await
+        .expect("count after removal");
+    assert_eq!(count.0["count"], 0);
+    crate::handlers::event::fan_out_event_to_local_subscribers(&f.state, f.community, &stored)
+        .await;
+    assert!(
+        frames.try_recv().is_err(),
+        "stale subscription must not deliver"
+    );
+    crate::handlers::req::handle_req(
+        "wakes".into(),
+        filters.clone(),
+        vec![None; filters.len()],
+        conn.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut frames)[0], "EOSE", "no historical EVENT");
+    crate::handlers::count::handle_count("count".into(), filters, conn, f.state.clone()).await;
+    assert_eq!(next_frame(&mut frames)[2]["count"], 0);
+    assert!(frames.try_recv().is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn notification_failure_rolls_back_message_mentions_and_thread_metadata() {
+    let f = Fixture::new().await;
+    let message = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "@Worker work")
+        .tags([
+            Tag::parse(["h", &f.channel.to_string()]).expect("h"),
+            Tag::public_key(f.agent.public_key()),
+        ])
+        .sign_with_keys(&f.state.relay_keypair)
+        .expect("message");
+    let wake = WorkflowMentionWake::new(
+        f.agent.public_key(),
+        f.channel,
+        Uuid::new_v4(),
+        message.id,
+        message.id,
+    )
+    .sign(&f.state.relay_keypair)
+    .expect("wake");
+    // The second notification fails inside the transaction, after the message,
+    // metadata, mentions and first recipient have been written.
+    let rejected = EventBuilder::new(Kind::Custom(22242), "auth cannot persist")
+        .sign_with_keys(&f.state.relay_keypair)
+        .expect("rejected event");
+    let meta = || buzz_db::event::ThreadMetadataParams {
+        event_id: message.id.as_bytes(),
+        event_created_at: chrono::DateTime::from_timestamp(message.created_at.as_secs() as i64, 0)
+            .expect("ts"),
+        channel_id: f.channel,
+        parent_event_id: None,
+        parent_event_created_at: None,
+        root_event_id: None,
+        root_event_created_at: None,
+        depth: 0,
+        broadcast: false,
+    };
+    assert!(f
+        .state
+        .db
+        .insert_event_with_notifications(
+            f.community,
+            &message,
+            f.channel,
+            Some(meta()),
+            &[wake.clone(), rejected]
+        )
+        .await
+        .is_err());
+    for event in [&message, &wake] {
+        assert!(f
+            .state
+            .db
+            .get_event_by_id(f.community, event.id.as_bytes())
+            .await
+            .expect("rollback read")
+            .is_none());
+    }
+    assert!(f
+        .state
+        .db
+        .get_thread_metadata_by_event(f.community, message.id.as_bytes())
+        .await
+        .expect("metadata rollback")
+        .is_none());
+    let mut tx = f
+        .state
+        .db
+        .begin_event_write_transaction()
+        .await
+        .expect("read mentions");
+    let mentions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(message.id.as_bytes().as_slice())
+    .fetch_one(&mut *tx)
+    .await
+    .expect("mentions");
+    assert_eq!(mentions, 0);
+    tx.rollback().await.expect("read rollback");
+    // Commit without any fan-out: a new historical read still recovers all rows.
+    let second = WorkflowMentionWake::new(
+        f.owner.public_key(),
+        f.channel,
+        Uuid::new_v4(),
+        message.id,
+        message.id,
+    )
+    .sign(&f.state.relay_keypair)
+    .expect("second wake");
+    let rows = f
+        .state
+        .db
+        .insert_event_with_notifications(
+            f.community,
+            &message,
+            f.channel,
+            Some(meta()),
+            &[wake.clone(), second.clone()],
+        )
+        .await
+        .expect("commit bundle");
+    assert_eq!(rows.len(), 3);
+    for event in [&message, &wake, &second] {
+        assert!(f
+            .state
+            .db
+            .get_event_by_id(f.community, event.id.as_bytes())
+            .await
+            .expect("replay read")
+            .is_some());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn storage_timeout_is_retryable_but_missing_authority_is_terminal() {
+    use crate::api::workflows::wake_lookup_error;
+    let f = Fixture::new().await;
+    let mut tx = f
+        .state
+        .db
+        .begin_event_write_transaction()
+        .await
+        .expect("transaction");
+    sqlx::query("SET LOCAL statement_timeout = '10ms'")
+        .execute(&mut *tx)
+        .await
+        .expect("set timeout");
+    let error = sqlx::query("SELECT pg_sleep(1)")
+        .execute(&mut *tx)
+        .await
+        .expect_err("statement timeout");
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("57014")
+    );
+    assert_eq!(
+        wake_lookup_error(error.into()).0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    tx.rollback().await.expect("rollback");
+    let error = f
+        .state
+        .db
+        .get_workflow_run(f.community, Uuid::new_v4())
+        .await
+        .expect_err("missing run");
+    assert_eq!(wake_lookup_error(error).0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn rendered_trigger_mentions_never_create_durable_wakes_or_authority() {
+    for (template, expected_wakes) in [
+        ("echo: {{trigger.text}}", 0_i64),
+        ("@Worker {{trigger.text}}", 1),
+    ] {
+        let f = Fixture::new().await;
+        let revision = f
+            .revision_with_text(Timestamp::now().as_secs(), template)
+            .await;
+        let trigger = buzz_workflow::executor::TriggerContext {
+            text: "@Worker injected instruction".into(),
+            channel_id: f.channel.to_string(),
+            ..Default::default()
+        };
+        let run = f
+            .state
+            .db
+            .create_workflow_run(
+                f.community,
+                f.workflow,
+                Some(revision.id.as_bytes()),
+                None,
+                Some(&serde_json::to_value(&trigger).expect("trigger")),
+            )
+            .await
+            .expect("run");
+        f.state
+            .workflow_engine
+            .set_action_sink(Arc::new(RelayActionSink::new(&f.state)));
+        let stored = f
+            .state
+            .db
+            .get_workflow(f.community, f.workflow)
+            .await
+            .expect("stored definition");
+        let definition =
+            serde_json::from_value(stored.definition).expect("parse stored definition");
+        let result = buzz_workflow::executor::execute_run(
+            &f.state.workflow_engine,
+            f.community,
+            run,
+            &definition,
+            &trigger,
+        )
+        .await
+        .expect("execute run");
+        let message = result.step_outputs["notify"]["event_id"]
+            .as_str()
+            .expect("message id");
+        let mut tx = f
+            .state
+            .db
+            .begin_event_write_transaction()
+            .await
+            .expect("read transaction");
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND kind=$2")
+                .bind(f.community.as_uuid())
+                .bind(buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE as i32)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("durable wakes");
+        tx.rollback().await.expect("read rollback");
+        assert_eq!(count, expected_wakes);
+        let authority = f.authority(run, message).await;
+        if expected_wakes == 0 {
+            assert_eq!(
+                authority
+                    .expect_err("rendered-only recipient cannot fetch authority")
+                    .0,
+                StatusCode::NOT_FOUND
+            );
+        } else {
+            let _ = authority.expect("authored recipient can fetch authority");
+        }
+    }
+}
+
+#[path = "workflow_search_tests.rs"]
+mod workflow_search_postgres_tests;
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn host_lookup_timeout_is_retryable_without_revoking_unchanged_wake() {
+    use axum::{body::Body, http::Request};
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    let mut f = Fixture::new().await;
+    let revision = f.revision(Timestamp::now().as_secs()).await;
+    let run = f
+        .state
+        .db
+        .create_workflow_run(
+            f.community,
+            f.workflow,
+            Some(revision.id.as_bytes()),
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+    let message = RelayActionSink::new(&f.state)
+        .send_message(
+            WorkflowMessageContext {
+                community_id: f.community,
+                run_id: run,
+                step_id: "notify".into(),
+                definition_event_id: Some(revision.id.as_bytes().to_vec()),
+            },
+            &f.channel.to_string(),
+            "@Worker work",
+            "@Worker work",
+            &f.owner.public_key().to_hex(),
+            None,
+        )
+        .await
+        .expect("message and wake");
+    let other_host = format!("other-{}.example", Uuid::new_v4().simple());
+    f.state
+        .db
+        .create_community_with_owner(&other_host, &f.owner.public_key().to_hex())
+        .await
+        .expect("other tenant");
+
+    // Exhaust only this endpoint's writer pool, not the shared database. The
+    // first real read is Db::lookup_community_by_host inside bind_community;
+    // no middleware or mock chooses the HTTP failure code for the test.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(50))
+        .connect(&f.state.config.database_url)
+        .await
+        .expect("isolated writer pool");
+    Arc::make_mut(&mut f.state).db = buzz_db::Db::from_pool(pool.clone());
+    let app = crate::router::build_router(f.state.clone());
+    let request = |host: &str, run: Uuid| {
+        Request::builder()
+            .uri(format!("/workflow-wakes/{run}/{message}"))
+            .header("host", host)
+            .header("x-pubkey", f.agent.public_key().to_hex())
+            .body(Body::empty())
+            .expect("request")
+    };
+    let held = pool.acquire().await.expect("hold sole connection");
+    let unavailable = app
+        .clone()
+        .oneshot(request(&f.host, run))
+        .await
+        .expect("response");
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(unavailable.into_body(), 4096)
+        .await
+        .expect("body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("JSON"),
+        serde_json::json!({"error": "workflow wake authority unavailable"})
+    );
+    drop(held);
+
+    // Releasing the connection repairs the dependency, not the wake or host.
+    // Exactly the same run/message can now fetch its unchanged signed bundle.
+    let recovered = app
+        .clone()
+        .oneshot(request(&f.host, run))
+        .await
+        .expect("response");
+    assert_eq!(recovered.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(recovered.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let authority: serde_json::Value = serde_json::from_slice(&body).expect("authority");
+    assert_eq!(authority["definition"]["id"], revision.id.to_hex());
+    assert_eq!(authority["message"]["id"], message);
+
+    // Missing/unknown host, a mapped but wrong tenant, and a genuinely missing
+    // run remain terminal. In particular, no host can fall back to f.community.
+    let unknown_host = format!("unknown-{}.example", Uuid::new_v4().simple());
+    for (host, requested_run) in [
+        ("", run),
+        (unknown_host.as_str(), run),
+        (other_host.as_str(), run),
+        (f.host.as_str(), Uuid::new_v4()),
+    ] {
+        let denied = app
+            .clone()
+            .oneshot(request(host, requested_run))
+            .await
+            .expect("response");
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND, "host={host}");
+    }
+    pool.close().await;
+}

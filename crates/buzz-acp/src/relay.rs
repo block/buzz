@@ -428,7 +428,7 @@ impl RestClient {
                 Ok(resp) if is_retriable_status(resp.status()) => {
                     let status = resp.status();
                     tracing::warn!("{method} {path} returned retriable HTTP {status}");
-                    last_err = Some(RelayError::Http(format!(
+                    last_err = Some(RelayError::TransientHttp(format!(
                         "{method} {path} returned HTTP {status}"
                     )));
                 }
@@ -441,14 +441,15 @@ impl RestClient {
                 }
                 Err(e) if e.is_timeout() || e.is_connect() => {
                     tracing::warn!("{method} {path} network error: {e}");
-                    last_err = Some(RelayError::Http(e.to_string()));
+                    last_err = Some(RelayError::TransientHttp(e.to_string()));
                 }
                 Err(e) => return Err(RelayError::Http(e.to_string())),
             }
         }
 
-        Err(last_err
-            .unwrap_or_else(|| RelayError::Http(format!("{method} {path} failed after retries"))))
+        Err(last_err.unwrap_or_else(|| {
+            RelayError::TransientHttp(format!("{method} {path} failed after retries"))
+        }))
     }
 
     /// POST with NIP-98 auth and retry. Re-signs on each attempt.
@@ -477,6 +478,44 @@ impl RestClient {
             req.body(body_owned.clone()).send()
         })
         .await
+    }
+
+    async fn bridge_get(&self, path: &str) -> Result<reqwest::Response, RelayError> {
+        let url = format!("{}{}", self.base_url, path);
+        let auth_tag_header = self.auth_tag_json.clone();
+        self.request_with_retry("GET", path, || {
+            let auth = self.nip98_header("GET", &url, None).unwrap_or_default();
+            let mut request = self.http.get(&url).header("Authorization", auth);
+            if let Some(ref tag) = auth_tag_header {
+                request = request.header("x-auth-tag", tag);
+            }
+            request.send()
+        })
+        .await
+    }
+
+    /// Fetch one exact workflow-wake authority bundle.
+    pub async fn workflow_wake_authority(
+        &self,
+        run_id: uuid::Uuid,
+        message_id: &nostr::EventId,
+    ) -> Result<crate::workflow_wake::WorkflowWakeAuthority, RelayError> {
+        let path = format!("/workflow-wakes/{run_id}/{}", message_id.to_hex());
+        // A successful status is not a complete authority response. Read the
+        // body separately so an interrupted transfer remains recoverable while
+        // a complete but malformed authority document stays terminal.
+        let response = self.bridge_get(&path).await?;
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                // Replay retries this read through the normal verification path.
+                // Pace body failures too: headers may have arrived immediately,
+                // bypassing request_with_retry's backoff entirely.
+                tokio::time::sleep(jittered_duration(REST_RETRY_BASE_DELAYS[0])).await;
+                return Err(RelayError::TransientHttp(error.to_string()));
+            }
+        };
+        serde_json::from_slice(&body).map_err(|error| RelayError::Http(error.to_string()))
     }
 
     /// Query events via the HTTP bridge: `POST /query` with NIP-98 auth.
@@ -618,8 +657,22 @@ pub enum RelayError {
     #[error("HTTP error: {0}")]
     Http(String),
 
+    /// A request exhausted its bounded retry budget after only transient
+    /// failures. Callers may safely schedule delayed recovery; all other HTTP
+    /// errors, including 403/404 and malformed bodies, are terminal.
+    #[error("transient HTTP error: {0}")]
+    TransientHttp(String),
+
     #[error("Unexpected message: {0}")]
     UnexpectedMessage(String),
+}
+
+impl RelayError {
+    /// Whether retry exhaustion, rather than an authority denial or malformed
+    /// response, caused this failure.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::TransientHttp(_))
+    }
 }
 
 impl From<nostr::event::builder::Error> for RelayError {
@@ -682,6 +735,15 @@ enum RelayCommand {
     PublishEvent { event: Box<Event> },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
+    /// Re-admit an event which reached the harness but could not be safely
+    /// processed. Removing its transport dedup entry and replaying its channel
+    /// lets a transient harness-side dependency failure recover without
+    /// dispatching an unverified event.
+    ReplayEvent {
+        channel_id: Uuid,
+        event_id: String,
+        created_at: u64,
+    },
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -973,6 +1035,27 @@ impl HarnessRelay {
     pub async fn next_event(&mut self) -> Option<BuzzEvent> {
         // The background task sends `None` to signal connection loss.
         self.event_rx.recv().await.flatten()
+    }
+
+    /// Arrange replay of an event that failed harness-side admission.
+    ///
+    /// This is intentionally narrower than general event retry: it preserves
+    /// the subscription's exact filter and reuses transport dedup/replay rather
+    /// than manufacturing a local event or bypassing verification.
+    pub async fn replay_event(
+        &self,
+        channel_id: Uuid,
+        event_id: String,
+        created_at: u64,
+    ) -> Result<(), RelayError> {
+        self.cmd_tx
+            .send(RelayCommand::ReplayEvent {
+                channel_id,
+                event_id,
+                created_at,
+            })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)
     }
 
     /// Publish a signed event to the relay via the background WebSocket task.
@@ -1294,6 +1377,19 @@ impl BgState {
         }
     }
 
+    /// Undo transport admission for an event whose harness-side verification
+    /// dependency failed. The event was never dispatched, so it must become
+    /// eligible for the existing replay path. The timestamp is retained as a
+    /// replay floor even though `last_seen` already advanced when it arrived.
+    fn replay_event(&mut self, channel_id: Uuid, event_id: String, created_at: u64) {
+        self.seen_ids.remove(&event_id);
+        self.channel_dropped_since
+            .entry(channel_id)
+            .and_modify(|since| *since = (*since).min(created_at))
+            .or_insert(created_at);
+        self.proactive_resubscribe_needed = true;
+    }
+
     /// Clear all per-channel state for a channel that is being unsubscribed.
     /// Prevents stale replay on re-subscribe and avoids unbounded state growth
     /// for channels that are removed and never re-added.
@@ -1478,6 +1574,11 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
                 state.membership_last_seen = Some(ts);
             }
         }
+        RelayCommand::ReplayEvent {
+            channel_id,
+            event_id,
+            created_at,
+        } => state.replay_event(channel_id, event_id, created_at),
         // Observer telemetry frames are durable: park them (bounded, visible
         // overflow) so they are delivered by the post-reconnect drain. Other
         // ephemeral publishes (typing indicators) are meaningless while
@@ -1714,6 +1815,14 @@ async fn execute_connected_command(
                 state.membership_last_seen = Some(ts);
             }
             debug!("startup watermark set to {ts}");
+            true
+        }
+        RelayCommand::ReplayEvent {
+            channel_id,
+            event_id,
+            created_at,
+        } => {
+            state.replay_event(channel_id, event_id, created_at);
             true
         }
         // Control-flow commands — callers handle these before dispatching.
@@ -3384,6 +3493,59 @@ async fn wait_for_reconnect(
 ///   history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
 ///
 /// Returns `true` if the REQ was successfully written to the WebSocket.
+fn build_channel_req(
+    sub_id: &str,
+    channel_id: Uuid,
+    agent_pubkey_hex: &str,
+    since_ts: u64,
+    filter: &ChannelFilter,
+) -> Value {
+    let mut req_filter = serde_json::Map::new();
+
+    // The recipient-gated wake kind always gets its own exact #p filter. This
+    // preserves `--no-mention-filter` for ordinary channel events without
+    // weakening wake recipient gating or causing the relay to reject the mixed
+    // subscription.
+    let wake_kind = buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE;
+    let includes_wake = filter
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains(&wake_kind));
+    let normal_kinds = filter.kinds.as_ref().map(|kinds| {
+        kinds
+            .iter()
+            .copied()
+            .filter(|kind| *kind != wake_kind)
+            .collect::<Vec<_>>()
+    });
+
+    if let Some(kinds) = normal_kinds.as_ref().filter(|kinds| !kinds.is_empty()) {
+        req_filter.insert("kinds".into(), json!(kinds));
+    }
+    req_filter.insert("#h".into(), json!([channel_id.to_string()]));
+    if filter.require_mention {
+        req_filter.insert("#p".into(), json!([agent_pubkey_hex]));
+    }
+    req_filter.insert("since".into(), json!(since_ts));
+
+    let mut req_filters = Vec::new();
+    if normal_kinds.as_ref().is_none_or(|kinds| !kinds.is_empty()) {
+        req_filters.push(Value::Object(req_filter));
+    }
+    if includes_wake {
+        let mut wake_filter = serde_json::Map::new();
+        wake_filter.insert("kinds".into(), json!([wake_kind]));
+        wake_filter.insert("#h".into(), json!([channel_id.to_string()]));
+        wake_filter.insert("#p".into(), json!([agent_pubkey_hex]));
+        wake_filter.insert("since".into(), json!(since_ts));
+        req_filters.push(Value::Object(wake_filter));
+    }
+
+    let mut req = vec![json!("REQ"), json!(sub_id)];
+    req.extend(req_filters);
+    Value::Array(req)
+}
+
 async fn send_subscribe(
     ws: &mut WsStream,
     _state: &BgState,
@@ -3393,24 +3555,6 @@ async fn send_subscribe(
     filter: &ChannelFilter,
 ) -> bool {
     let sub_id = channel_sub_id(channel_id);
-
-    let mut req_filter = serde_json::Map::new();
-
-    // kinds — omit entirely for wildcard subscriptions.
-    if let Some(ref kinds) = filter.kinds {
-        req_filter.insert("kinds".into(), json!(kinds));
-    }
-
-    // #h — always present (channel scope).
-    req_filter.insert("#h".into(), json!([channel_id.to_string()]));
-
-    // #p — only when require_mention is true.
-    if filter.require_mention {
-        req_filter.insert("#p".into(), json!([agent_pubkey_hex]));
-    }
-
-    // since — on first subscribe use current time to skip history; on reconnect
-    // subtract skew buffer to catch events missed during the disconnect window.
     let since_ts = match since {
         Some(ts) => ts.saturating_sub(SINCE_SKEW_SECS),
         None => std::time::SystemTime::now()
@@ -3418,9 +3562,7 @@ async fn send_subscribe(
             .unwrap_or_default()
             .as_secs(),
     };
-    req_filter.insert("since".into(), json!(since_ts));
-
-    let req = json!(["REQ", sub_id, Value::Object(req_filter)]);
+    let req = build_channel_req(&sub_id, channel_id, agent_pubkey_hex, since_ts, filter);
 
     match serde_json::to_string(&req) {
         Ok(text) => {
@@ -3884,6 +4026,7 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 fn is_terminal_connect_error(err: &RelayError) -> bool {
     match err {
         RelayError::Http(_) | RelayError::Json(_) | RelayError::UnexpectedMessage(_) => true,
+        RelayError::TransientHttp(_) => false,
         RelayError::WebSocket(e) => is_terminal_ws_error(e.as_ref()),
         RelayError::AuthFailed(message) => is_terminal_auth_failure(message),
         RelayError::NoAuthChallenge | RelayError::ConnectionClosed | RelayError::Timeout => false,
@@ -4364,6 +4507,104 @@ mod tests {
     }
 
     #[test]
+    fn default_mentions_builds_complete_recipient_gated_subscription_shape() {
+        let channel = Uuid::new_v4();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let req = build_channel_req(
+            "sub",
+            channel,
+            &agent,
+            123,
+            &ChannelFilter {
+                kinds: Some(vec![
+                    buzz_core::kind::KIND_STREAM_MESSAGE,
+                    buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE,
+                    buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    buzz_core::kind::KIND_STREAM_REMINDER,
+                ]),
+                require_mention: true,
+            },
+        );
+        let req = req.as_array().expect("REQ array");
+
+        assert_eq!(req.len(), 4);
+        assert_eq!(
+            req[2]["kinds"],
+            json!([
+                buzz_core::kind::KIND_STREAM_MESSAGE,
+                buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+                buzz_core::kind::KIND_STREAM_REMINDER,
+            ])
+        );
+        assert_eq!(req[2]["#p"], json!([agent]));
+        assert_eq!(req[2]["#h"], json!([channel.to_string()]));
+        assert_eq!(
+            req[3]["kinds"],
+            json!([buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE])
+        );
+        assert_eq!(req[3]["#p"], json!([agent]));
+        assert_eq!(req[3]["#h"], json!([channel.to_string()]));
+    }
+
+    #[test]
+    fn durable_workflow_wake_is_requested_on_reconnect() {
+        let channel = Uuid::new_v4();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let req = build_channel_req(
+            "sub",
+            channel,
+            &agent,
+            456,
+            &ChannelFilter {
+                kinds: Some(vec![buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE]),
+                require_mention: true,
+            },
+        );
+        let req = req.as_array().expect("REQ array");
+
+        assert_eq!(req.len(), 3);
+        assert_eq!(
+            req[2]["kinds"],
+            json!([buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE])
+        );
+        assert_eq!(req[2]["#p"], json!([agent]));
+        assert_eq!(req[2]["#h"], json!([channel.to_string()]));
+        assert_eq!(req[2]["since"], json!(456));
+    }
+
+    #[test]
+    fn workflow_wake_uses_exact_recipient_filter_when_mentions_are_disabled() {
+        let channel = Uuid::new_v4();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let req = build_channel_req(
+            "sub",
+            channel,
+            &agent,
+            123,
+            &ChannelFilter {
+                kinds: Some(vec![
+                    buzz_core::kind::KIND_STREAM_MESSAGE,
+                    buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE,
+                ]),
+                require_mention: false,
+            },
+        );
+        let filters = req.as_array().expect("REQ array");
+        assert_eq!(filters.len(), 4);
+        assert_eq!(
+            filters[2]["kinds"],
+            json!([buzz_core::kind::KIND_STREAM_MESSAGE])
+        );
+        assert!(filters[2].get("#p").is_none());
+        assert_eq!(
+            filters[3]["kinds"],
+            json!([buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE])
+        );
+        assert_eq!(filters[3]["#p"], json!([agent]));
+        assert_eq!(filters[3]["#h"], json!([channel.to_string()]));
+    }
+
+    #[test]
     fn relay_ws_to_http_plain() {
         assert_eq!(
             relay_ws_to_http("ws://localhost:3000"),
@@ -4715,6 +4956,10 @@ mod tests {
         let text = r#"["EOSE"]"#;
         let result = parse_relay_message(text);
         assert!(result.is_err());
+    }
+
+    mod workflow_wake_recovery_tests {
+        include!("workflow_wake_recovery_tests.rs");
     }
 
     #[test]
@@ -5153,6 +5398,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workflow_wake_authority_failure_reopens_transport_dedup_for_replay() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let keys = nostr::Keys::generate();
+        let wake = make_test_event(&keys, 1_000);
+        let event_id = wake.id.to_hex();
+
+        // Normal transport delivery claims the ID and advances its watermark.
+        assert!(state.record_event(channel_id, &wake));
+        assert!(!state.record_event(channel_id, &wake));
+
+        // A failure before authenticated authority verification must not lose
+        // the wake: make its exact ID eligible and replay from its timestamp.
+        state.replay_event(channel_id, event_id.clone(), wake.created_at.as_secs());
+        assert!(!state.seen_ids.contains(&event_id));
+        assert_eq!(
+            state.channel_since(&channel_id),
+            Some(wake.created_at.as_secs())
+        );
+        assert!(state.proactive_resubscribe_needed);
+        assert!(state.record_event(channel_id, &wake));
+
+        // Once replayed, ordinary dedup resumes; this does not admit duplicates.
+        assert!(!state.record_event(channel_id, &wake));
+    }
+
     /// Test 8: channel_dropped_since records the OLDEST dropped timestamp.
     ///
     /// Simulates the backpressure path directly on BgState:
@@ -5491,6 +5763,11 @@ mod tests {
         let cases: Vec<(&str, RelayError, bool)> = vec![
             // ── outer RelayError variants ──
             ("Http: bad URL", RelayError::Http("bad url".into()), true),
+            (
+                "TransientHttp: exhausted retry budget",
+                RelayError::TransientHttp("timeout".into()),
+                false,
+            ),
             (
                 "Json: malformed relay frame",
                 RelayError::Json(serde_json::from_str::<()>("not json").unwrap_err()),

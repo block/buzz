@@ -222,23 +222,20 @@ pub async fn handle_req(
         return;
     }
 
-    // Applied BEFORE the NIP-50 search branch so that an authenticated member
-    // cannot use `{"search":"...","kinds":[30174]}` (or similar for p-gated
-    // kinds) to harvest indexed-but-globally-stored sensitive events. Search
-    // hits are looked up by event id and returned without the per-filter
-    // post-check the historical-delivery branch applies, so the gate must run
-    // here, up front. Only applies to GLOBAL subscriptions (channel_id = None):
-    // channel-scoped subs can never receive globally-stored events because of
-    // the fan_out() invariant in subscription.rs.
+    // Applied BEFORE the NIP-50 search branch so an explicit sensitive-kind
+    // filter cannot harvest indexed private events. Kindless channel filters
+    // remain valid NIP-01 wildcards; every returned event is independently
+    // checked at the shared result gate, and live fan-out uses the same check.
+    let authed_pubkey_hex = hex::encode(&pubkey_bytes);
+    if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "restricted: p-gated events require #p matching your pubkey",
+        ));
+        return;
+    }
+
     if channel_id.is_none() {
-        let authed_pubkey_hex = hex::encode(&pubkey_bytes);
-        if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: p-gated events require #p matching your pubkey",
-            ));
-            return;
-        }
         if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
             conn.send(RelayMessage::closed(
                 &sub_id,
@@ -463,7 +460,14 @@ pub async fn handle_req(
             // Also enforces author-only kinds (30300/30350) and the persona
             // shared-gate (kind:30175 without ["shared","true"]). Single call
             // covers all three gated event classes.
-            if !event_visible_to_reader(&stored.event, &pubkey_bytes) {
+            if !event_visible_to_reader(
+                &state,
+                conn.tenant.community(),
+                &stored.event,
+                &pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
 
@@ -796,7 +800,14 @@ async fn handle_search_req(
                     }
                     // Result-level gate: covers author-only, persona shared-gate,
                     // and result-gated kinds in one call.
-                    if !event_visible_to_reader(&stored.event, reader_pubkey_bytes) {
+                    if !event_visible_to_reader(
+                        state,
+                        tenant.community(),
+                        &stored.event,
+                        reader_pubkey_bytes,
+                    )
+                    .await
+                    {
                         continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
@@ -1319,10 +1330,22 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
-        let can_match_p_gated = filter.kinds.as_ref().is_none_or(|ks| {
-            ks.iter()
-                .any(|kind| P_GATED_KINDS.contains(&(kind.as_u16() as u32)))
-        });
+        // Kindless full-text searches use per-event authorization, and a
+        // kindless channel filter is safe to register: global p-gated events
+        // cannot enter its channel index, while channel-scoped workflow wakes
+        // are removed by the shared per-event recipient gate. Preserve the
+        // stricter rule for global wildcards and explicit p-gated kinds.
+        let has_channel_scope = filter
+            .generic_tags
+            .get(&nostr::SingleLetterTag::lowercase(nostr::Alphabet::H))
+            .is_some_and(|values| !values.is_empty());
+        let can_match_p_gated = filter.kinds.as_ref().map_or_else(
+            || filter.search.is_none() && !has_channel_scope,
+            |ks| {
+                ks.iter()
+                    .any(|kind| P_GATED_KINDS.contains(&(kind.as_u16() as u32)))
+            },
+        );
         if !can_match_p_gated {
             return true;
         }
@@ -1466,6 +1489,14 @@ pub(crate) fn result_gated_count_safe_for_pushdown(
     filter: &Filter,
     authed_pubkey_hex: &str,
 ) -> bool {
+    // Recipient pinning alone cannot prove current channel membership for wakes.
+    if filter.kinds.as_ref().is_none_or(|kinds| {
+        kinds
+            .iter()
+            .any(|kind| u32::from(kind.as_u16()) == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE)
+    }) {
+        return false;
+    }
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filter
         .generic_tags
@@ -1502,7 +1533,27 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
 /// Call this from every read surface — both WS (REQ/COUNT/fan-out) and HTTP
 /// (NIP-98 `/query`, `/count`, FTS search) — instead of inlining the three
 /// individual predicates at each site.
-pub(crate) fn event_visible_to_reader(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
+pub(crate) async fn event_visible_to_reader(
+    state: &AppState,
+    community: buzz_core::tenant::CommunityId,
+    event: &nostr::Event,
+    requester_pubkey_bytes: &[u8],
+) -> bool {
+    if u32::from(event.kind.as_u16()) == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE {
+        let Ok(wake) = buzz_core::workflow_wake::WorkflowMentionWake::parse(event) else {
+            return false;
+        };
+        // Open-channel readability is not wake authority. Read the writer,
+        // not a cached membership snapshot, at every delivery/count boundary.
+        if !state
+            .db
+            .is_member(community, wake.channel_id(), requester_pubkey_bytes)
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
     if is_author_only_event(event, requester_pubkey_bytes) {
         return false;
     }
@@ -2041,6 +2092,20 @@ mod tests {
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
     }
 
+    /// A channel-scoped kindless wildcard remains admissible. P-gated global
+    /// kinds cannot enter the channel subscription index, and the only
+    /// channel-scoped p-gated kind (workflow wake) is result-gated per recipient.
+    #[test]
+    fn channel_wildcard_preserves_all_mode_without_weakening_wakes() {
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let channel = uuid::Uuid::new_v4();
+        assert!(p_gated_filters_authorized(
+            &[filter_with_channel(channel)],
+            authed
+        ));
+        assert!(!p_gated_filters_authorized(&[Filter::new()], authed));
+    }
+
     #[test]
     fn test_search_filter_detection() {
         let search_filter = Filter::new().search("hello world");
@@ -2460,6 +2525,13 @@ mod tests {
             .author(nostr::PublicKey::from_hex(&agent).unwrap())
             .search("foo");
         assert!(engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn p_gate_allows_kindless_search_with_per_event_authorization() {
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new().search("ordinary-channel-search");
+        assert!(p_gated_filters_authorized(&[f], &agent));
     }
 
     #[test]

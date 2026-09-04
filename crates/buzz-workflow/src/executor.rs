@@ -18,6 +18,7 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::action_sink::WorkflowMessageContext;
 use crate::error::WorkflowError;
 use crate::schema::{ActionDef, Step, WorkflowDef};
 use crate::WorkflowEngine;
@@ -636,7 +637,12 @@ pub async fn dispatch_action(
                     let event_id = engine
                         .action_sink()?
                         .send_message(
-                            community_id,
+                            WorkflowMessageContext {
+                                community_id,
+                                run_id,
+                                step_id: step_id.to_owned(),
+                                definition_event_id: wf_run.definition_event_id.clone(),
+                            },
                             &channel_id,
                             text,
                             authored_text,

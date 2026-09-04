@@ -174,6 +174,48 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
+    let owner_only_kind = event_kind_u32(&stored_event.event);
+    // Result-gated delivery (DM visibility, agent metrics, and workflow wakes)
+    // must reach only the exact #p owner/recipient, including kindless channel
+    // wildcard subscriptions.
+    let matches = if buzz_core::kind::RESULT_GATED_KINDS.contains(&owner_only_kind) {
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                state
+                    .conn_manager
+                    .pubkey_for_conn(*conn_id)
+                    .is_some_and(|pk| {
+                        buzz_core::filter::reader_authorized_for_event(
+                            &stored_event.event,
+                            &hex::encode(pk),
+                        )
+                    })
+            })
+            .collect()
+    } else {
+        matches
+    };
+
+    if owner_only_kind == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE {
+        let mut allowed = Vec::with_capacity(matches.len());
+        for (conn_id, sub_id) in matches {
+            let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
+                continue;
+            };
+            if super::req::event_visible_to_reader(
+                state,
+                community_id,
+                &stored_event.event,
+                &pubkey,
+            )
+            .await
+            {
+                allowed.push((conn_id, sub_id));
+            }
+        }
+        return allowed;
+    }
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
@@ -454,40 +496,13 @@ async fn dispatch_persistent_event_inner(
             return 0;
         }
     };
-    // For viewer-private events (kind:30622 DM visibility, kind:44200 agent turn
-    // metrics), live fan-out must reach only the owner — a kindless `ids:[…]`
-    // subscription can otherwise match it. Pull paths (HTTP /query, WS historical)
-    // are gated separately by reader_authorized_for_event.
-    let owner_only_kind = kind_u32 == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind_u32 == buzz_core::kind::KIND_AGENT_TURN_METRIC;
-    let private_event_owner: Option<String> = owner_only_kind
-        .then(|| {
-            let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
-            stored_event
-                .event
-                .tags
-                .filter(nostr::TagKind::SingleLetter(p))
-                .find_map(|t| t.content().map(|s| s.to_string()))
-        })
-        .flatten();
-    // Author-only delivery gating (NIP-ER reminders) is enforced centrally in
-    // filter_fanout_by_access, applied to `matches` above before this loop. The
-    // DM visibility owner gate is an additional delivery fence, so build shared
-    // frames only after applying it to the already access-filtered recipient set.
+    // Result-gated delivery (DM visibility, agent metrics, and workflow wakes)
+    // is enforced centrally in filter_fanout_by_access, applied to `matches`
+    // above before this loop. Build shared frames only after every recipient
+    // has passed that chokepoint.
     let recipients: Vec<_> = matches
         .iter()
-        .filter_map(|(target_conn_id, sub_id)| {
-            if let Some(ref owner_hex) = private_event_owner {
-                let is_owner = state
-                    .conn_manager
-                    .pubkey_for(*target_conn_id)
-                    .is_some_and(|pk| hex::encode(pk) == *owner_hex);
-                if !is_owner {
-                    return None;
-                }
-            }
-            Some((*target_conn_id, sub_id.as_str()))
-        })
+        .map(|(target_conn_id, sub_id)| (*target_conn_id, sub_id.as_str()))
         .collect();
     let frames = fanout_frame_cache(recipients.iter().map(|(_, sub_id)| *sub_id), &event_json);
     let drop_count = send_fanout_frames(state, recipients, &frames);
@@ -1995,6 +2010,7 @@ mod tests {
         use std::sync::atomic::AtomicU8;
         use std::sync::Arc;
 
+        use buzz_core::workflow_wake::WorkflowMentionWake;
         use buzz_core::StoredEvent;
         use nostr::{EventBuilder, Keys, Kind};
         use tokio::sync::{mpsc, Mutex};
@@ -2165,6 +2181,52 @@ mod tests {
             )
             .await;
             assert_eq!(out, matches);
+        }
+
+        #[tokio::test]
+        async fn workflow_wake_fails_closed_when_membership_cannot_be_established() {
+            let state = test_state().await;
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            let channel_id = Uuid::new_v4();
+            state
+                .channel_visibility_cache
+                .insert((community_id, channel_id), "open".to_string());
+
+            let recipient_keys = Keys::generate();
+            let other_keys = Keys::generate();
+            let relay_keys = Keys::generate();
+            let definition = EventBuilder::text_note("definition")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign definition");
+            let message = EventBuilder::text_note("message")
+                .sign_with_keys(&relay_keys)
+                .expect("sign message");
+            let wake = WorkflowMentionWake::new(
+                recipient_keys.public_key(),
+                channel_id,
+                Uuid::new_v4(),
+                definition.id,
+                message.id,
+            )
+            .sign(&relay_keys)
+            .expect("sign wake");
+            let stored = StoredEvent::new(wake, Some(channel_id));
+
+            let recipient = register_conn(
+                &state,
+                Some(recipient_keys.public_key().to_bytes().to_vec()),
+            );
+            let other = register_conn(&state, Some(other_keys.public_key().to_bytes().to_vec()));
+            let unauthed = register_conn(&state, None);
+            let matches = vec![
+                (recipient, "recipient".to_string()),
+                (other, "other".to_string()),
+                (unauthed, "unauthed".to_string()),
+            ];
+
+            let out = filter_fanout_by_access(&state, community_id, &stored, matches, None).await;
+
+            assert!(out.is_empty());
         }
 
         #[tokio::test]

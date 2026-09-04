@@ -139,25 +139,25 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_WORKFLOW_MENTION_WAKE,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
 ///
 /// The relay enforces this at the filter layer (`p_gated_filters_authorized`):
 /// a REQ that can match any kind in this set is closed unless the filter's
-/// `#p` values exactly equal the authenticated reader's pubkey. For stored
-/// (non-ephemeral) kinds in this set, the storage layer additionally writes a
-/// NULL `search_tsv` so the event is unsearchable through NIP-50 FTS
-/// (`schema/schema.sql` and `migrations/0001_initial_schema.sql` — drift
-/// caught by `p_gated_persistent_kinds_have_storage_null_tsvector` in
-/// `crates/buzz-search/tests/fts_integration.rs`).
-///
-/// Ephemeral kinds (20000–29999, e.g. [`KIND_AGENT_OBSERVER_FRAME`]) are
-/// included for filter-layer enforcement but are never stored, so the
-/// storage-layer search defense does not apply to them.
+/// `#p` values exactly equal the authenticated reader's pubkey. Existing
+/// private event families also have storage-level search exclusions. Those
+/// exclusions are not implied by this access-control list: durable workflow
+/// wakes use the result-level recipient and current-membership checks even
+/// when their content has an indexed vector. Ephemeral kinds are never stored.
 pub const P_GATED_KINDS: &[u32] = &[
     KIND_AGENT_OBSERVER_FRAME,
+    KIND_WORKFLOW_MENTION_WAKE,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
@@ -467,6 +467,8 @@ pub const KIND_PAIRING: u32 = 24134;
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// Durable relay-signed identifier-only workflow mention wake.
+pub const KIND_WORKFLOW_MENTION_WAKE: u32 = 44620;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
@@ -700,6 +702,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_BLOSSOM_AUTH,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
+    KIND_WORKFLOW_MENTION_WAKE,
     KIND_HTTP_AUTH,
     KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_V2,
@@ -839,6 +842,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_WORKFLOW_MENTION_WAKE
     )
 }
 
@@ -911,8 +915,9 @@ mod tests {
     }
 
     #[test]
-    fn nip43_membership_snapshot_is_relay_only() {
+    fn relay_generated_kinds_are_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
+        assert!(is_relay_only_kind(KIND_WORKFLOW_MENTION_WAKE));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
     }
 

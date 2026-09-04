@@ -187,7 +187,7 @@ async fn check_nip98_replay_with_guard(
                 "NIP-98 replay guard failed; rejecting request fail-closed"
             );
             Err(api_error(
-                StatusCode::UNAUTHORIZED,
+                StatusCode::SERVICE_UNAVAILABLE,
                 "NIP-98: replay check unavailable",
             ))
         }
@@ -1284,7 +1284,14 @@ async fn query_events_authed(
                 // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
                 // or kind:30622) to a non-owner via the feed path, even though feed SQL
                 // kind allowlists already exclude these kinds.
-                if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+                if !crate::handlers::req::event_visible_to_reader(
+                    state,
+                    tenant.community(),
+                    &se.event,
+                    &pubkey_bytes,
+                )
+                .await
+                {
                     continue;
                 }
                 if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1352,7 +1359,14 @@ async fn query_events_authed(
             // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
             // or kind:30622) to a non-owner via the thread path, even though
             // requires_h_channel_scope already excludes these kinds from thread metadata.
-            if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+            if !crate::handlers::req::event_visible_to_reader(
+                state,
+                tenant.community(),
+                &se.event,
+                &pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
             thread_row_ids.push(se.event.id.to_hex());
@@ -1377,10 +1391,13 @@ async fn query_events_authed(
                 for se in aux_events {
                     if !seen_aux.insert(se.event.id)
                         || !event_in_accessible_channel(&se, &accessible_channels)
-                        || !buzz_core::filter::reader_authorized_for_event(
+                        || !crate::handlers::req::event_visible_to_reader(
+                            state,
+                            tenant.community(),
                             &se.event,
-                            &authed_pubkey_hex,
+                            &pubkey_bytes,
                         )
+                        .await
                     {
                         continue;
                     }
@@ -1497,7 +1514,14 @@ async fn query_events_authed(
                     // Also enforces author-only kinds (30300/30350) and the persona
                     // shared-gate (kind:30175 without ["shared","true"]). Single call
                     // covers all three gated event classes.
-                    if !crate::handlers::req::event_visible_to_reader(&se.event, &pubkey_bytes) {
+                    if !crate::handlers::req::event_visible_to_reader(
+                        state,
+                        tenant.community(),
+                        &se.event,
+                        &pubkey_bytes,
+                    )
+                    .await
+                    {
                         continue;
                     }
                     if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1783,9 +1807,13 @@ async fn count_events_authed(
                                 continue;
                             }
                             if !crate::handlers::req::event_visible_to_reader(
+                                state,
+                                tenant.community(),
                                 &se.event,
                                 &pubkey_bytes,
-                            ) {
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -1853,9 +1881,13 @@ async fn count_events_authed(
                                 continue;
                             }
                             if !crate::handlers::req::event_visible_to_reader(
+                                state,
+                                tenant.community(),
                                 &se.event,
                                 &pubkey_bytes,
-                            ) {
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -2036,7 +2068,14 @@ async fn handle_bridge_search(
             // branch cannot currently return unshared persona content — but the
             // check here ensures that a future FTS allowlist change cannot silently
             // reopen the bypass.
-            if !crate::handlers::req::event_visible_to_reader(&stored.event, pubkey_bytes) {
+            if !crate::handlers::req::event_visible_to_reader(
+                state,
+                tenant.community(),
+                &stored.event,
+                pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
             // Dedup across filters.
@@ -2837,7 +2876,8 @@ mod postgres_tests {
     /// This test does not require Redis — it injects a guard that always
     /// returns `Err`, exercising the `Err =>` arm in
     /// `check_nip98_replay_with_guard` directly. Bites if the arm is changed
-    /// to admit (`Ok(())` / `Ok(true)`) instead of returning 401.
+    /// to admit (`Ok(())` / `Ok(true)`) instead of returning retryable 503.
+    /// A dependency outage is not a replay or invalid-credential verdict.
     #[tokio::test]
     async fn nip98_replay_check_fails_closed_when_guard_errors() {
         use buzz_auth::AuthError;
@@ -2845,23 +2885,29 @@ mod postgres_tests {
         use std::future::Future;
         use std::pin::Pin;
 
-        struct AlwaysErrGuard;
-        impl Nip98ReplayGuard for AlwaysErrGuard {
+        struct TestGuard {
+            unavailable: bool,
+        }
+        impl Nip98ReplayGuard for TestGuard {
             fn try_mark_in_scope<'a>(
                 &'a self,
                 _scope: &'a str,
                 _event_id: &'a EventId,
                 _ttl_secs: u64,
             ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {
-                Box::pin(async {
-                    Err(AuthError::Internal(
-                        "simulated Redis pool acquire failure".into(),
-                    ))
+                Box::pin(async move {
+                    if self.unavailable {
+                        Err(AuthError::Internal(
+                            "simulated Redis pool acquire failure".into(),
+                        ))
+                    } else {
+                        Ok(false)
+                    }
                 })
             }
         }
 
-        let guard = AlwaysErrGuard;
+        let guard = TestGuard { unavailable: true };
         let tenant = fresh_tenant("relay-a.example");
         let event_id_bytes = fresh_nip98_event_id_bytes();
 
@@ -2870,8 +2916,8 @@ mod postgres_tests {
             .expect_err("guard error MUST fail closed, never admit");
         assert_eq!(
             status,
-            StatusCode::UNAUTHORIZED,
-            "fail-closed must return 401"
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fail-closed dependency failure must remain retryable"
         );
         let msg = body
             .get("error")
@@ -2882,6 +2928,14 @@ mod postgres_tests {
             "fail-closed body must carry the unavailable signal so callers can \
              distinguish unavailability from replay; got body = {body:?}"
         );
+        let (status, _) = check_nip98_replay_with_guard(
+            &TestGuard { unavailable: false },
+            &tenant,
+            event_id_bytes,
+        )
+        .await
+        .expect_err("a real replay stays denied");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     /// Build a signed NIP-98 event JSON string for `url` + `method`, mirroring
