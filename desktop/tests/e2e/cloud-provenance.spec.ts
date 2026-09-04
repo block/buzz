@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, openNewMessagePage } from "../helpers/bridge";
+import { expectOpenAvatarBadgeNotch } from "../helpers/css";
 
 const OWNER = "deadbeef".repeat(8);
 const REMOTE = "ed".repeat(32);
@@ -168,6 +169,9 @@ for (const agentListDelayMs of [0, 6_000]) {
     await expect(
       dmNameAdornments.getByTestId(`channel-agent-provenance-${dm.id}`),
     ).toBeVisible();
+    await expectOpenAvatarBadgeNotch(
+      dmRow.getByTestId("channel-presence-clip-DM"),
+    );
     await expect(
       dmRow.locator(
         `:scope > [data-testid="channel-agent-provenance-${dm.id}"]`,

@@ -10,6 +10,11 @@ export type AvatarBadgeCircle = {
   r: number;
 };
 
+type AvatarBadgeCenter = {
+  cx: number;
+  cy: number;
+};
+
 export type AvatarBadgeBox = {
   bottom: number;
   height: number;
@@ -43,6 +48,7 @@ type BadgeMotionTarget = {
 type MaskedAvatarBadgeFrameProps = {
   badge?: React.ReactNode;
   badgeBox?: AvatarBadgeBox;
+  badgeCenter?: AvatarBadgeCenter;
   badgeClassName?: string;
   children: React.ReactNode;
   className?: string;
@@ -159,12 +165,12 @@ function toPercent(value: number) {
 function getBadgeMotionTarget(
   size: number,
   badgeBox: AvatarBadgeBox,
-  cutout: AvatarBadgeCircle,
+  badgeCenter: AvatarBadgeCenter,
 ): BadgeMotionTarget {
   return {
     height: toPercent(badgeBox.height / size),
-    left: toPercent(cutout.cx / size),
-    top: toPercent(cutout.cy / size),
+    left: toPercent(badgeCenter.cx / size),
+    top: toPercent(badgeCenter.cy / size),
     width: toPercent(badgeBox.width / size),
   };
 }
@@ -659,6 +665,7 @@ function getRoundedSquareMaskPolygon(
 export function MaskedAvatarBadgeFrame({
   badge,
   badgeBox,
+  badgeCenter,
   badgeClassName,
   children,
   className,
@@ -702,7 +709,7 @@ export function MaskedAvatarBadgeFrame({
   const sizeStyle = { height: toRem(size), width: toRem(size) };
   const badgeMotionTarget =
     badgeBox && cutout
-      ? getBadgeMotionTarget(size, badgeBox, cutout)
+      ? getBadgeMotionTarget(size, badgeBox, badgeCenter ?? cutout)
       : undefined;
   const badgeStyle = badgeMotionTarget
     ? getBadgeStyle(badgeMotionTarget)

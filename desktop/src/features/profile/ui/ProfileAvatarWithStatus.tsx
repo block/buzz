@@ -25,6 +25,7 @@ type ProfileAvatarWithStatusProps = {
   shape?: "circle" | "squircle";
   size: number;
   status?: PresenceStatus;
+  statusClipTestId?: string;
   statusTestId?: string;
   testId?: string;
 };
@@ -75,27 +76,31 @@ export function ProfileAvatarWithStatus({
   shape = "circle",
   size,
   status,
+  statusClipTestId,
   statusTestId,
   testId,
 }: ProfileAvatarWithStatusProps) {
-  const resolvedGeometry =
+  const badgeGeometry =
     shape === "squircle"
       ? insetProfileAvatarStatusGeometry(geometry, size)
       : geometry;
   const statusLabel = status ? getPresenceLabel(status) : null;
   const cutout = status
     ? {
-        cx: resolvedGeometry.centerX,
-        cy: resolvedGeometry.centerY,
-        r: resolvedGeometry.cutoutSize / 2,
+        // Keep the opening anchored at the avatar edge for both shapes. Only
+        // the squircle's visible dot moves inward; insetting the cutout too
+        // closes the notch and makes the badge look painted over the avatar.
+        cx: geometry.centerX,
+        cy: geometry.centerY,
+        r: geometry.cutoutSize / 2,
       }
     : undefined;
   const badgeBox = status
     ? {
-        bottom: size - resolvedGeometry.centerY - resolvedGeometry.dotSize / 2,
-        height: resolvedGeometry.dotSize,
-        right: size - resolvedGeometry.centerX - resolvedGeometry.dotSize / 2,
-        width: resolvedGeometry.dotSize,
+        bottom: size - badgeGeometry.centerY - badgeGeometry.dotSize / 2,
+        height: badgeGeometry.dotSize,
+        right: size - badgeGeometry.centerX - badgeGeometry.dotSize / 2,
+        width: badgeGeometry.dotSize,
       }
     : undefined;
 
@@ -117,7 +122,9 @@ export function ProfileAvatarWithStatus({
         ) : undefined
       }
       badgeBox={badgeBox}
+      badgeCenter={{ cx: badgeGeometry.centerX, cy: badgeGeometry.centerY }}
       className={cn("inline-flex", className)}
+      clipTestId={statusClipTestId}
       cornerRadius={shape === "squircle" ? size * 0.3 : undefined}
       curve={STATUS_DOT_MASK_CURVE}
       cutout={cutout}

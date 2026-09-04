@@ -203,6 +203,7 @@ function DmChannelIcon({
           shape={primaryParticipant.isAgent ? "squircle" : "circle"}
           size={DM_AVATAR_SIZE}
           status={presenceStatus}
+          statusClipTestId={`channel-presence-clip-${channelName}`}
           statusTestId={`channel-presence-${channelName}`}
         />
       </span>

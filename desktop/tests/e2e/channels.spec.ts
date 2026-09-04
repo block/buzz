@@ -13,6 +13,7 @@ import {
   openCreateChannelDialog,
   openNewMessagePage,
 } from "../helpers/bridge";
+import { expectOpenAvatarBadgeNotch } from "../helpers/css";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
@@ -571,6 +572,9 @@ test("shows presence in sidebar, DM header, and member list", async ({
     "Online",
   );
   await expect(page.getByTestId("channel-presence-alice-tyler")).toBeVisible();
+  await expectOpenAvatarBadgeNotch(
+    page.getByTestId("channel-presence-clip-alice-tyler"),
+  );
 
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
