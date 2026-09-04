@@ -133,6 +133,56 @@ fn emit_runtime_lifecycle(
     }
 }
 
+fn startup_runtime_lifecycle(lazy_pool: bool) -> &'static str {
+    if lazy_pool {
+        "listening"
+    } else {
+        "ready"
+    }
+}
+
+fn emit_startup_runtime_lifecycle(
+    observer: Option<&observer::ObserverHandle>,
+    start_nonce: &str,
+    pubkey: &str,
+    relay_url: &str,
+    lazy_pool: bool,
+) {
+    emit_runtime_lifecycle(
+        observer,
+        start_nonce,
+        pubkey,
+        relay_url,
+        startup_runtime_lifecycle(lazy_pool),
+        None,
+    );
+}
+
+#[cfg(test)]
+mod runtime_lifecycle_tests {
+    use crate::observer::ObserverHandle;
+
+    #[test]
+    fn startup_lifecycle_emits_once_for_each_pool_mode() {
+        for (lazy_pool, expected) in [(false, "ready"), (true, "listening")] {
+            let observer = ObserverHandle::in_process();
+
+            super::emit_startup_runtime_lifecycle(
+                Some(&observer),
+                "nonce",
+                "pubkey",
+                "ws://localhost:3000",
+                lazy_pool,
+            );
+
+            let events = observer.snapshot();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].kind, "managed_agent_runtime_lifecycle");
+            assert_eq!(events[0].payload["lifecycle"], expected);
+        }
+    }
+}
+
 /// Resolve the agent's owner pubkey at startup.
 ///
 /// Priority:
@@ -2747,16 +2797,13 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    if config.lazy_pool {
-        emit_runtime_lifecycle(
-            observer.as_ref(),
-            &runtime_start_nonce,
-            &pubkey_hex,
-            &config.relay_url,
-            "listening",
-            None,
-        );
-    }
+    emit_startup_runtime_lifecycle(
+        observer.as_ref(),
+        &runtime_start_nonce,
+        &pubkey_hex,
+        &config.relay_url,
+        config.lazy_pool,
+    );
 
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
