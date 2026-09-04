@@ -551,6 +551,12 @@ pub(crate) async fn handle_active_audio_connection(
             .await;
         return;
     }
+    // Test hook: fires immediately before the first check_cancel!() so W_FIX1
+    // can hold the handler here while the expiry task fires, then release to
+    // let check_cancel!() drain the terminal channel and emit the policy close.
+    // No-op in production. [nip_fi_test_hooks::audio_before_first_check_cancel_hook]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_first_audio_check_cancel(tenant.community()).await;
     check_cancel!();
 
     // ── Step 3: membership check / auto-add ───────────────────────────────────
@@ -3553,139 +3559,243 @@ mod tests {
         }
     }
 
-    // ── W_FIX1: pre-send-loop drain emits restricted JSON then 1008 close ────
+    // ── W_FIX1: check_cancel!() pre-send-loop path emits restricted JSON then 1008 ──
     //
-    // Directly witnesses the drain-then-close logic added by Fix 1 to every
-    // `check_cancel!()` arm and the `JoinCommitError::Expired` exit.
+    // Drives the REAL `handle_active_audio_connection` through a held admission
+    // boundary so the ACTUAL `check_cancel!()` macro arm (audio/handler.rs:474-488)
+    // executes and client-observable frames are asserted.
     //
-    // Before Fix 1, the drain delivered the terminal denial frame (restricted
-    // JSON) but returned without sending a close frame — clients observed 1005
-    // / 1006. Fix 1 appends `reason.close_message()` after the drain when the
-    // disconnect_reason watch carries `AuthorizationDenied`.
+    // Fix 1 added drain-then-close to every `check_cancel!()` arm and the four
+    // manual expiry exits. Before the fix, `check_cancel!` drained the terminal
+    // channel (denial frame) but returned without a close frame — clients observed
+    // 1005/1006. After the fix the arm also sends `reason.close_message()` when
+    // `disconnect_reason` is `AuthorizationDenied`.
     //
-    // The test simulates the two effects the expiry task produces:
-    //   1. Queuing the denial frame on terminal_ctrl_tx (→ terminal_ctrl_rx).
-    //   2. Setting `AuthorizationDenied` on the disconnect_reason watch.
-    // Then runs the drain-then-close logic inline and asserts exact ordering.
+    // Setup:
+    //   - Key is NOT in the deny map (passes post-registration deny check).
+    //   - Assertion carries a 100 ms NIP-FI deadline → expiry task spawned at that
+    //     deadline, `terminal_ctrl_tx` wired internally.
+    //   - `after_deny_set_check_passed` hook holds the handler AFTER the deny check
+    //     passes but BEFORE `enforce_relay_membership` + the first `check_cancel!`.
+    //   - Expiry task fires naturally (100 ms deadline passes while the hook holds).
+    //     It queues the denial frame on the internal `terminal_ctrl_tx`, publishes
+    //     `AuthorizationDenied` on the real `disconnect_reason` watch, and cancels.
+    //   - Hook is released only after the token is confirmed cancelled, guaranteeing
+    //     the expiry task has committed its effects before the handler resumes.
+    //   - Handler resumes, hits `check_cancel!()` at the real production call site,
+    //     drains the denial frame, sends `reason.close_message()`.
     //
-    // Mutation evidence:
-    //   A) Remove the `if let Some(reason) = *disconnect_reason.borrow()` block
-    //      from check_cancel!/manual exits → sink records only 1 frame →
-    //      `frames.len() == 2` assertion panics.
-    //   B) Replace `reason.close_message()` with `WsMessage::Close(None)` →
-    //      frame 1 is bare close → POLICY code / reason assertions panic.
-    //   C) Swap frame order (close before drain) → restricted JSON is frame 1 →
-    //      `frame 0 is Text` assertion panics.
-    //   D) Leave `send_replace` instead of `send_if_modified` on the watch →
-    //      no correctness change here, but Fix-2 tests catch that regression.
+    // Mutation evidence (production seam, not copies):
+    //   A) Remove the `if let Some(reason) = nip_fi_close_reason` block from the
+    //      plain `check_cancel!()` arm (handler.rs:483-486) → client receives only
+    //      the restricted JSON frame, no close → close assertion times out → panics.
+    //   B) Replace `reason.close_message()` in that arm with `WsMessage::Close(None)`
+    //      → `Close(None)` from client → POLICY code assertion panics.
+    //   C) Move `drain` AFTER `close_message()` in that arm → close arrives before
+    //      the restricted JSON frame → `frame[0] is Text` assertion panics.
+    //   D) Delete `while let Ok(msg) = terminal_ctrl_rx.try_recv()` drain from that
+    //      arm → no restricted JSON frame → client sees only the close → panics.
+    //   NOTE: mutations A–D target handler.rs:474-488 (the no-arg `check_cancel!`
+    //   arm). Deleting those blocks leaves this test red; W7 independently witnesses
+    //   the post-send-loop `send_loop` cancel branch.
 
     #[tokio::test]
-    async fn pre_send_loop_drain_emits_restricted_json_then_policy_close() {
-        use futures_util::SinkExt as _;
-        use std::pin::Pin;
-        use std::task::{Context, Poll};
-        use tokio::sync::{mpsc, watch};
+    async fn pre_send_loop_check_cancel_emits_restricted_json_then_policy_close() {
+        use buzz_auth::VerifiedAssertion;
+        use chrono::{Duration, Utc};
+        use std::sync::Arc;
 
-        struct RecordSink(Vec<WsMessage>);
-        impl futures_util::Sink<WsMessage> for RecordSink {
-            type Error = std::convert::Infallible;
-            fn poll_ready(
-                self: Pin<&mut Self>,
-                _: &mut Context<'_>,
-            ) -> Poll<Result<(), Self::Error>> {
-                Poll::Ready(Ok(()))
-            }
-            fn start_send(self: Pin<&mut Self>, item: WsMessage) -> Result<(), Self::Error> {
-                self.get_mut().0.push(item);
-                Ok(())
-            }
-            fn poll_flush(
-                self: Pin<&mut Self>,
-                _: &mut Context<'_>,
-            ) -> Poll<Result<(), Self::Error>> {
-                Poll::Ready(Ok(()))
-            }
-            fn poll_close(
-                self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<Result<(), Self::Error>> {
-                self.poll_flush(cx)
-            }
-        }
+        // Key absent from deny map → passes deny-set check.
+        let key = nostr::Keys::generate();
+        // 100 ms deadline: expiry task fires quickly while the hook holds.
+        let deadline = Utc::now() + Duration::milliseconds(100);
+        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
 
-        // Simulate the expiry task's two pre-cancel effects:
-        // (1) queue the denial frame on terminal_ctrl_tx.
-        let (terminal_tx, mut terminal_rx) = mpsc::channel::<WsMessage>(1);
-        terminal_tx
-            .try_send(crate::nip_fi_session::authorization_denied_frame(
-                crate::nip_fi_session::NipFiWsRoute::Audio,
-            ))
-            .expect("terminal channel has capacity for one frame");
+        // State with deny map (issuer "test-issuer") but key not denied.
+        let state = audio_deny_state(None).await;
 
-        // (2) set AuthorizationDenied on the disconnect_reason watch.
-        let (reason_tx, reason_rx) =
-            watch::channel::<Option<crate::state::CommunityDisconnectReason>>(None);
-        let _ = reason_tx.send_if_modified(|current| match current {
-            None => {
-                *current = Some(crate::state::CommunityDisconnectReason::AuthorizationDenied);
-                true
-            }
-            Some(_) => false,
+        // Unique community so hook slot does not collide with parallel tests.
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let tenant =
+            buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string());
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let conn_cancel = CancellationToken::new();
+        let cancel_for_assert = conn_cancel.clone();
+
+        // CommunityConnectionControl is Clone: create one for the server closure.
+        let control_for_server = crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+
+        let state_c = Arc::clone(&state);
+        let tenant_c = tenant.clone();
+        let assertion_c = assertion.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("W_FIX1: bind test listener");
+        let addr = listener.local_addr().expect("W_FIX1: test listener addr");
+
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/",
+                get({
+                    let state_i = Arc::clone(&state_c);
+                    let tenant_i = tenant_c.clone();
+                    let assertion_i = assertion_c.clone();
+                    let control_i = control_for_server.clone();
+                    move |ws: WebSocketUpgrade| {
+                        let state_i = Arc::clone(&state_i);
+                        let tenant_i = tenant_i.clone();
+                        let assertion_i = assertion_i.clone();
+                        let control_i = control_i.clone();
+                        let conn_time = chrono::Utc::now();
+                        async move {
+                            ws.on_upgrade(move |socket| async move {
+                                handle_active_audio_connection(
+                                    socket,
+                                    state_i,
+                                    tenant_i,
+                                    uuid::Uuid::new_v4(),
+                                    control_i,
+                                    Some(assertion_i),
+                                    conn_time,
+                                )
+                                .await
+                            })
+                        }
+                    }
+                }),
+            );
+            let _ = ready_tx.send(());
+            axum::serve(listener, app)
+                .await
+                .expect("W_FIX1: test server");
         });
 
-        // Run the drain-then-close logic that is now present at every
-        // check_cancel!() arm and the JoinCommitError::Expired exit. This is
-        // the exact sequence Fix 1 centralised — any refactor that removes or
-        // reorders either step causes a mutation-red here.
-        let mut sink = RecordSink(Vec::new());
-        while let Ok(msg) = terminal_rx.try_recv() {
-            let _ = sink.send(msg).await;
-        }
-        if let Some(reason) = *reason_rx.borrow() {
-            let _ = sink.send(reason.close_message()).await;
-        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), ready_rx)
+            .await
+            .expect("W_FIX1: server ready");
 
-        let frames = sink.0;
-        assert_eq!(
-            frames.len(),
-            2,
-            "expected exactly 2 frames (restricted JSON, then Close); got {frames:?}"
-        );
+        let (mut client, _) = connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("W_FIX1: connect client");
 
-        // Frame 0: canonical restricted JSON denial payload.
+        // Arm `audio_before_first_check_cancel_hook` BEFORE auth so the handler
+        // is captured at the exact `check_cancel!()` seam — after the expiry task
+        // has been spawned (line ~426) but before the first cancel check fires.
+        let (hook_arrived_rx, hook_release) =
+            crate::nip_fi_test_hooks::audio_before_first_check_cancel_hook::arm(community);
+
+        // NIP-42 challenge.
+        let challenge_msg = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+            .await
+            .expect("W_FIX1: challenge timeout")
+            .expect("W_FIX1: challenge item")
+            .expect("W_FIX1: challenge message");
+        let challenge_text = match challenge_msg {
+            tokio_tungstenite::tungstenite::Message::Text(t) => t.to_string(),
+            other => panic!("W_FIX1: expected text challenge; got {other:?}"),
+        };
+        let challenge_json: serde_json::Value =
+            serde_json::from_str(&challenge_text).expect("W_FIX1: challenge JSON");
+        let challenge = challenge_json["challenge"]
+            .as_str()
+            .expect("W_FIX1: challenge field")
+            .to_string();
+
+        let relay_url = "ws://test.local";
+        let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+            .tag(nostr::Tag::parse(["relay", relay_url]).unwrap())
+            .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+            .sign_with_keys(&key)
+            .unwrap();
+        let auth_msg = serde_json::json!({"type": "auth", "event": auth_event}).to_string();
+        client
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                auth_msg.into(),
+            ))
+            .await
+            .expect("W_FIX1: send auth");
+
+        // Wait for handler to reach before_first_audio_check_cancel.
+        // At this point the expiry task has already been spawned with a 100 ms
+        // deadline; we hold here while it fires.
+        tokio::time::timeout(std::time::Duration::from_secs(5), hook_arrived_rx)
+            .await
+            .expect("W_FIX1: handler must reach before_first_audio_check_cancel within 5s")
+            .expect("W_FIX1: hook arrived channel closed");
+
+        // Handler is now held. The expiry task was spawned with a 100 ms deadline;
+        // wait for it to fire (cancel token is set when it does). It will queue the
+        // denial frame on the internal terminal channel, publish AuthorizationDenied
+        // on the disconnect_reason watch, then cancel.
+        let cancel_wait = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if cancel_for_assert.is_cancelled() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        cancel_wait
+            .await
+            .expect("W_FIX1: expiry task must fire and set cancel within 2s");
+
+        // Release the hook. Handler resumes, hits check_cancel!() immediately,
+        // drains terminal_ctrl_rx (denial frame) then sends reason.close_message().
+        hook_release.notify_one();
+
+        // ── Client-observed frame assertions ──────────────────────────────────
+        //
+        // Frame 0: restricted JSON denial payload queued by the expiry task.
+        let frame0 = tokio::time::timeout(std::time::Duration::from_secs(3), client.next())
+            .await
+            .expect("W_FIX1: frame 0 timeout")
+            .expect("W_FIX1: frame 0 item")
+            .expect("W_FIX1: frame 0 message");
         let expected_restricted = serde_json::json!({
             "type": "restricted",
             "message": buzz_auth::DenialClass::AuthorizationDenied.nostr_text()
         })
         .to_string();
-        match &frames[0] {
-            WsMessage::Text(t) => assert_eq!(
+        match &frame0 {
+            tokio_tungstenite::tungstenite::Message::Text(t) => assert_eq!(
                 t.as_str(),
                 expected_restricted.as_str(),
-                "frame 0 must be exact canonical restricted JSON"
+                "W_FIX1: frame 0 must be exact canonical restricted JSON"
             ),
-            other => panic!("frame 0 must be Text(restricted JSON); got {other:?}"),
+            other => panic!("W_FIX1: frame 0 must be Text(restricted JSON); got {other:?}"),
         }
 
-        // Frame 1: 1008 POLICY close with static reason.
-        match &frames[1] {
-            WsMessage::Close(Some(cf)) => {
+        // Frame 1: 1008 POLICY close emitted by check_cancel!()'s close_message() call.
+        let frame1 = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+            .await
+            .expect("W_FIX1: frame 1 timeout")
+            .expect("W_FIX1: frame 1 item")
+            .expect("W_FIX1: frame 1 message");
+        match &frame1 {
+            tokio_tungstenite::tungstenite::Message::Close(Some(cf)) => {
                 assert_eq!(
                     cf.code,
-                    axum::extract::ws::close_code::POLICY,
-                    "frame 1 must be 1008 POLICY close; got code {}",
+                    tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    "W_FIX1: close code must be 1008 POLICY; got {:?}",
                     cf.code
                 );
                 assert_eq!(
                     cf.reason.as_str(),
                     "authorization denied",
-                    "frame 1 close reason must be 'authorization denied'"
+                    "W_FIX1: close reason must be 'authorization denied'"
                 );
             }
             other => {
-                panic!("frame 1 must be Close(Some(1008, 'authorization denied')); got {other:?}")
+                panic!(
+                    "W_FIX1: frame 1 must be Close(Some(1008, 'authorization denied')); got {other:?}"
+                )
             }
         }
+
+        server.abort();
+        let _ = server.await;
     }
 
     // ── W8: barrier at membership check — cancel before first DB read ─────────

@@ -203,6 +203,27 @@ make_hook!(audio_add_peer_hook, after_add_peer);
 //      (b) still catches the deny.
 make_hook!(deny_set_check_hook, before_deny_set_check);
 
+// `before_first_audio_check_cancel`: fires in `handle_active_audio_connection`
+// immediately before the first `check_cancel!()` invocation (after
+// `enforce_relay_membership` returns and before Step 3 membership check).
+// By this point the NIP-FI expiry task has already been spawned (line ~426),
+// so tests can hold the handler here while the expiry task fires naturally,
+// then release to let `check_cancel!()` drain the terminal channel and emit
+// the policy close. Used by W_FIX1.
+//
+// Mutation evidence (W_FIX1):
+//   A) Delete the `if let Some(reason) = nip_fi_close_reason` block from the
+//      plain `check_cancel!()` arm → client receives only restricted JSON, no
+//      close → W_FIX1 close assertion panics.
+//   B) Move this hook to before `spawn_nip_fi_expiry_task` → expiry task fires
+//      AFTER hook releases → cancel not set when check_cancel!() runs →
+//      handler proceeds to membership check instead of returning →
+//      W_FIX1 frame-0 assertion times out → panics.
+make_hook!(
+    audio_before_first_check_cancel_hook,
+    before_first_audio_check_cancel
+);
+
 // `after_deny_set_check_passed`: fires in the audio handler immediately after the
 // deny-set check block completes WITHOUT denying (i.e., the key passed). Used by
 // `w_audio_deny_absent` to prove the absent key reached the post-check/membership
