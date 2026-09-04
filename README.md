@@ -10,6 +10,7 @@
   <a href="VISION_PROJECTS.md">Forge</a> ·
   <a href="VISION_AGENT.md">Agents</a> ·
   <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/plugin-system.md">Plugins</a> ·
   <a href="RELEASING.md">Releasing</a> ·
   <a href="LICENSE">Apache 2.0</a>
 </p>
@@ -218,7 +219,9 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
  └──────────────┘
 ```
 
-A Rust workspace of focused crates. Single source of truth: the relay. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
+A Rust workspace of focused crates. Single source of truth for relay-backed state: the relay. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
+
+The proposed plugin system is Desktop-local, host-rendered, and does not add relay kinds; see [the plugin architecture](docs/plugin-system.md).
 
 <details>
 <summary><strong>Crate map</strong></summary>
@@ -243,6 +246,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 
 - **[VISION.md](VISION.md)** · **[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md)** · **[VISION_PROJECTS.md](VISION_PROJECTS.md)** · **[VISION_AGENT.md](VISION_AGENT.md)** — the four vision docs
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design, kind ranges, subsystem boundaries
+- **[Plugin system](docs/plugin-system.md)** — proposed Desktop plugin architecture and trust model
 - **[TESTING.md](TESTING.md)** — multi-agent E2E test suite
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** · **[SECURITY.md](SECURITY.md)** · **[GOVERNANCE.md](GOVERNANCE.md)**
 
