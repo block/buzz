@@ -3575,8 +3575,8 @@ mod tests {
     //   - Key is NOT in the deny map (passes post-registration deny check).
     //   - Assertion carries a 100 ms NIP-FI deadline → expiry task spawned at that
     //     deadline, `terminal_ctrl_tx` wired internally.
-    //   - `after_deny_set_check_passed` hook holds the handler AFTER the deny check
-    //     passes but BEFORE `enforce_relay_membership` + the first `check_cancel!`.
+    //   - `before_first_audio_check_cancel` hook holds the handler AFTER the expiry
+    //     task is spawned but BEFORE the first `check_cancel!()` invocation.
     //   - Expiry task fires naturally (100 ms deadline passes while the hook holds).
     //     It queues the denial frame on the internal `terminal_ctrl_tx`, publishes
     //     `AuthorizationDenied` on the real `disconnect_reason` watch, and cancels.
