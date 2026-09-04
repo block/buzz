@@ -47,12 +47,23 @@ The relay health listener exposes intrinsic build identity at `/_status`:
     "source_sha": "<40-character-source-sha>",
     "id": "github-actions:<run-id>:<attempt>",
     "url": "https://github.com/block/buzz/actions/runs/<run-id>/attempts/<attempt>"
+  },
+  "dependencies": {
+    "postgres": true,
+    "redis": true,
+    "deletion_catalog": true,
+    "reason": "ready"
   }
 }
 ```
 
 Non-CI builds report stable `unknown` or `local` fallback values instead of
 claiming provenance they do not have.
+
+`dependencies` is a diagnostic snapshot of shared-dependency health, evaluated
+per request with a two-second budget. `/_readiness` does not consult it — see
+[the readiness contract](../deploy/charts/buzz/README.md#readiness-contract) —
+so this endpoint must never be wired to a Kubernetes probe.
 
 ## Helm digest pinning
 
