@@ -6,6 +6,7 @@ import {
   syncActiveAgentTurnsFromObserver,
   getActiveTurnsForAgent,
   getActiveTurnsByChannel,
+  getLastTurnFailureForAgent,
   resetActiveAgentTurnsStore,
   subscribeActiveAgentTurns,
   saveActiveAgentTurnsForCommunity,
@@ -23,7 +24,7 @@ import {
   resetAgentObserverStore,
   _testProcessLiveObserverEvents,
 } from "./observerRelayStore.ts";
-import { formatElapsed } from "./ui/agentSessionUtils.ts";
+import { formatAgo, formatElapsed } from "./ui/agentSessionUtils.ts";
 
 const AGENT =
   "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
@@ -731,6 +732,253 @@ describe("activeAgentTurnsStore", () => {
       syncAgentTurnsFromEvents(AGENT, [panic]);
       unsub();
       assert.equal(notified, 0, "replayed null-channel event must be a no-op");
+    });
+  });
+
+  describe("last turn failure (error_class persistence, #1659)", () => {
+    it("returns null when the agent has no recorded failure", () => {
+      assert.equal(getLastTurnFailureForAgent(AGENT), null);
+    });
+
+    it("persists outcome/error/code/errorClass/failedAt after a turn_error", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:05Z",
+          payload: {
+            outcome: "idle_timeout",
+            error: "Idle timeout — no agent activity for 30s",
+            code: null,
+            error_class: "timeout",
+          },
+        }),
+      ]);
+
+      const failure = getLastTurnFailureForAgent(AGENT);
+      assert.ok(failure, "turn_error must persist a last-failure record");
+      assert.equal(failure.outcome, "idle_timeout");
+      assert.equal(failure.error, "Idle timeout — no agent activity for 30s");
+      assert.equal(failure.code, null);
+      assert.equal(failure.errorClass, "timeout");
+      // `failedAt` is desktop-clock anchored: the agent-host timestamp
+      // translated through the skew offset sampled from these very events.
+      // Both arrive "now" from the desktop's perspective — despite the 2024
+      // host clock — so the failure must land at ~Date.now(), not at the raw
+      // host epoch. That's what makes `now - failedAt` a usable age.
+      const drift = Math.abs(failure.failedAt - Date.now());
+      assert.ok(
+        drift < 1_000,
+        `failedAt must anchor to the desktop clock (off by ${drift}ms)`,
+      );
+    });
+
+    it("persists after an agent_panic with error_class 'panic'", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "agent_panic",
+          turnId: "t1",
+          channelId: "c1",
+          payload: {
+            outcome: "panic",
+            error: "Agent task panicked: boom",
+            error_class: "panic",
+          },
+        }),
+      ]);
+
+      const failure = getLastTurnFailureForAgent(AGENT);
+      assert.ok(failure);
+      assert.equal(failure.outcome, "panic");
+      assert.equal(failure.errorClass, "panic");
+      assert.equal(failure.code, null);
+    });
+
+    it("coerces a numeric code from the payload", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          payload: {
+            outcome: "error",
+            error: "Agent reported error (code -32001): llm auth: denied",
+            code: -32001,
+            error_class: "agent_error",
+          },
+        }),
+      ]);
+
+      assert.equal(getLastTurnFailureForAgent(AGENT).code, -32001);
+    });
+
+    it("clears the failure once the agent completes a subsequent turn successfully", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          payload: {
+            outcome: "error",
+            error: "boom",
+            error_class: "transport",
+          },
+        }),
+      ]);
+      assert.ok(getLastTurnFailureForAgent(AGENT), "failure must be recorded");
+
+      // A fresh turn starting is NOT proof of health — the failure must
+      // survive a mere turn_started.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 3, turnId: "t2", channelId: "c1" }),
+      ]);
+      assert.ok(
+        getLastTurnFailureForAgent(AGENT),
+        "turn_started must not clear a persisted failure",
+      );
+
+      // Only a successful completion clears it.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 4,
+          kind: "turn_completed",
+          turnId: "t2",
+          channelId: "c1",
+        }),
+      ]);
+      assert.equal(
+        getLastTurnFailureForAgent(AGENT),
+        null,
+        "a successful turn_completed must clear the persisted failure",
+      );
+    });
+
+    it("keeps a persisted failure across a cancelled (non-'ok') turn_completed", () => {
+      // Regression (#2240 review): turn_completed fires on EVERY exit path
+      // (TurnCompletionGuard), so a cancelled turn used to clear a prior genuine
+      // failure. It must survive a completion whose outcome is not "ok".
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          payload: {
+            outcome: "error",
+            error: "boom",
+            error_class: "transport",
+          },
+        }),
+      ]);
+      assert.ok(getLastTurnFailureForAgent(AGENT), "failure must be recorded");
+
+      // A later turn starts and is cancelled — its turn_completed reports a
+      // non-success outcome, which must NOT clear the failure.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 3, turnId: "t2", channelId: "c1" }),
+        makeEvent({
+          seq: 4,
+          kind: "turn_completed",
+          turnId: "t2",
+          channelId: "c1",
+          payload: { outcome: "incomplete" },
+        }),
+      ]);
+      assert.ok(
+        getLastTurnFailureForAgent(AGENT),
+        "a cancelled turn_completed must not clear the persisted failure",
+      );
+
+      // Only a genuinely successful completion (outcome: "ok") clears it.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 5, turnId: "t3", channelId: "c1" }),
+        makeEvent({
+          seq: 6,
+          kind: "turn_completed",
+          turnId: "t3",
+          channelId: "c1",
+          payload: { outcome: "ok" },
+        }),
+      ]);
+      assert.equal(
+        getLastTurnFailureForAgent(AGENT),
+        null,
+        "an 'ok' turn_completed must clear the persisted failure",
+      );
+    });
+
+    it("is scoped per agent", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          payload: { outcome: "error", error: "boom" },
+        }),
+      ]);
+      assert.ok(getLastTurnFailureForAgent(AGENT));
+      assert.equal(getLastTurnFailureForAgent(AGENT_2), null);
+    });
+
+    it("a replayed stale turn_error does not overwrite a newer cleared state", () => {
+      // A turn fails, then a later turn completes successfully — clearing it.
+      const buffer = [
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:01Z",
+          payload: { outcome: "error", error: "boom" },
+        }),
+        makeEvent({
+          seq: 3,
+          turnId: "t2",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:02Z",
+        }),
+        makeEvent({
+          seq: 4,
+          kind: "turn_completed",
+          turnId: "t2",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:03Z",
+        }),
+      ];
+      syncAgentTurnsFromEvents(AGENT, buffer);
+      assert.equal(
+        getLastTurnFailureForAgent(AGENT),
+        null,
+        "completed turn clears the earlier failure",
+      );
+
+      // Replaying the identical (now fully stale) buffer must be a no-op —
+      // the watermark gate must block every event, including the turn_error,
+      // from re-running its effects.
+      syncAgentTurnsFromEvents(AGENT, buffer);
+      assert.equal(
+        getLastTurnFailureForAgent(AGENT),
+        null,
+        "replayed stale turn_error must not resurrect a cleared failure",
+      );
     });
   });
 
@@ -1852,6 +2100,35 @@ describe("formatElapsed", () => {
   });
 });
 
+describe("formatAgo", () => {
+  it("renders sub-minute deltas as 'just now'", () => {
+    assert.equal(formatAgo(0), "just now");
+    assert.equal(formatAgo(59_000), "just now");
+  });
+
+  it("rolls into minutes at exactly 60s", () => {
+    assert.equal(formatAgo(60_000), "1m ago");
+    assert.equal(formatAgo(119_000), "1m ago");
+  });
+
+  it("rolls into hours at exactly 60m", () => {
+    assert.equal(formatAgo(3_599_000), "59m ago");
+    assert.equal(formatAgo(3_600_000), "1h ago");
+  });
+
+  it("rolls into days at exactly 24h", () => {
+    assert.equal(formatAgo(86_399_000), "23h ago");
+    assert.equal(formatAgo(86_400_000), "1d ago");
+    assert.equal(formatAgo(200_000_000), "2d ago");
+  });
+
+  it("clamps a negative delta to 'just now' rather than '-1m ago'", () => {
+    // Reachable when a skew correction lands a recorded moment slightly ahead
+    // of the desktop clock.
+    assert.equal(formatAgo(-5_000), "just now");
+  });
+});
+
 describe("community-switch save / restore", () => {
   beforeEach(() => {
     resetActiveAgentTurnsStore();
@@ -2217,6 +2494,31 @@ describe("community-switch save / restore", () => {
       getActiveTurnsForAgent(AGENT_2).map((s) => s.channelId),
     );
     assert.ok(bChannels.has("c2"), "ws-b must restore c2");
+  });
+
+  it("last turn failure survives a save/restore round-trip", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+      makeEvent({
+        seq: 2,
+        kind: "turn_error",
+        turnId: "t1",
+        channelId: "c1",
+        payload: { outcome: "error", error: "boom", error_class: "transport" },
+      }),
+    ]);
+    saveActiveAgentTurnsForCommunity("ws-a");
+    resetActiveAgentTurnsStore();
+    assert.equal(
+      getLastTurnFailureForAgent(AGENT),
+      null,
+      "reset must clear the live failure map",
+    );
+
+    restoreActiveAgentTurnsForCommunity("ws-a");
+    const failure = getLastTurnFailureForAgent(AGENT);
+    assert.ok(failure, "restore must bring back the saved failure");
+    assert.equal(failure.errorClass, "transport");
   });
 
   it("clearSavedCommunitySnapshot discards the snapshot so restore is a no-op", () => {
