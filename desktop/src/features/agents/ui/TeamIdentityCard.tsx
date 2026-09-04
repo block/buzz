@@ -163,7 +163,7 @@ function TeamAvatarItem({
 
   return (
     <div
-      className={`relative h-14 w-14 before:absolute before:-inset-0.5 before:agent-avatar-squircle-border before:bg-card before:content-[''] ${index > 0 ? "-ml-5" : ""}`}
+      className={`relative h-14 w-14 agent-avatar-squircle-border before:absolute before:-inset-0.5 before:bg-card before:content-[''] ${index > 0 ? "-ml-5" : ""}`}
       data-team-member-avatar="avatar"
       style={{
         zIndex: index + 1,
