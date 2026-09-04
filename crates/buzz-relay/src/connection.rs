@@ -200,7 +200,6 @@ pub(crate) fn compute_session_deadline(
     }
 }
 
-///
 /// Acquires a connection semaphore permit, sends the NIP-42 AUTH challenge,
 /// then drives the send, heartbeat, and receive loops until the connection closes.
 pub async fn handle_connection(
@@ -305,11 +304,12 @@ async fn handle_active_connection(
         )
     });
 
-    // Create the NIP-FI session admission gate when in enforce mode.
-    //
-    // The gate is the lifetime authority for this connection: handlers acquire
     // Create the NIP-FI session admission gate. Every WS connection gets
     // exactly one gate — the [one-gate-per-connection] invariant.
+    //
+    // The gate is the lifetime authority for this connection: handlers acquire
+    // an effect permit before any DB write, and the expiry task closes the gate
+    // at the session deadline so no new effects can start after expiry.
     //
     // Enforce mode (assertion + deadline): gate has a deadline; the expiry
     // task calls gate.expire() at the deadline.

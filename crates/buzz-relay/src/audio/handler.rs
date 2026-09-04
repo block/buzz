@@ -2121,8 +2121,11 @@ impl From<buzz_db::DbError> for JoinCommitError {
 /// Ordering (per B1 contract [e5bc0382], corrected for IMPORTANT 4 and 5):
 /// 1. Sign the `48101` event synchronously.
 /// 2. Begin a caller-owned DB transaction.
-/// 3. Under the channel membership lock (AutoAddRequired only):
-///    a. Re-read channel archive state — fail `Archived` if now archived.
+/// 3. Archive re-check (ALL paths): re-read archived_at inside the transaction.
+///    Fail `Archived` if the channel was archived between admission check and now.
+///    Closes the race for both `Existing` and `AutoAddRequired` paths.
+/// 4. Under the channel membership lock (AutoAddRequired only):
+///    a. Re-read channel archive state again — fail `Archived` if still needed.
 ///    (IMPORTANT 4: closes the race between pre-join check and commit.)
 ///    b. Re-read parent membership — fail `ParentMembershipLost` if gone.
 ///    c. Re-read creator-signed huddle_started link — fail `HuddleLinkGone`
@@ -2130,10 +2133,10 @@ impl From<buzz_db::DbError> for JoinCommitError {
 ///    (IMPORTANT 4 residual: third carried fact, alongside archive + parent.)
 ///    d. Re-read child membership — skip auto-add insert if a concurrent
 ///    legitimate add is already present (concurrent-add preservation).
-/// 4. Insert kind `48101` in the same transaction (uncommitted).
-/// 5. Acquire a session effect permit (or rollback + return `Err(Expired)`).
-/// 6. Commit the transaction while holding the permit.
-/// 7. While the same permit is held: mark the event locally, fan out to local
+/// 5. Insert kind `48101` in the same transaction (uncommitted).
+/// 6. Acquire a session effect permit (or rollback + return `Err(Expired)`).
+/// 7. Commit the transaction while holding the permit.
+/// 8. While the same permit is held: mark the event locally, fan out to local
 ///    subscribers, publish to Redis, and broadcast `joined` to all peers
 ///    (including the joiner) via `room.broadcast_control`. (IMPORTANT 5:
 ///    `joined` publication inside the commit-won permit.) Drop permit after.
@@ -2189,7 +2192,32 @@ async fn commit_participant_join(
     // 2. Begin a caller-owned DB transaction.
     let mut tx = state.db.begin_event_write_transaction().await?;
 
-    // 3. Under the channel membership lock: re-validate authority + auto-add if
+    // 3. Archive re-check (ALL paths): re-read archived_at inside the
+    //    transaction before any write. A channel can be archived in the window
+    //    between check_membership_for_admission and now; committing a join into
+    //    an archived channel violates the "no admission after archive" invariant.
+    //    This read is performed unconditionally so both the Existing and
+    //    AutoAddRequired paths are protected. The AutoAddRequired path below
+    //    re-reads archive state again under the advisory lock for its own
+    //    membership-write serialisation; the early check here closes the gap for
+    //    the Existing path where no advisory lock is acquired.
+    let channel_archived_early: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT archived_at FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(tenant.community().as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(buzz_db::DbError::from)?
+    .flatten();
+
+    if channel_archived_early.is_some() {
+        let _ = tx.rollback().await;
+        return Err(JoinCommitError::Archived);
+    }
+
+    // 4. Under the channel membership lock: re-validate authority + auto-add if
     //    still absent. The AutoAddRequired path carries stale authority from
     //    check_membership_for_admission; the lock serialises all membership writes
     //    for this channel so the re-reads observe the most recent committed state.
@@ -2292,7 +2320,7 @@ async fn commit_participant_join(
         // If not still_absent: concurrent add observed — membership preserved.
     }
 
-    // 4. Insert kind `48101` uncommitted.
+    // 5. Insert kind `48101` uncommitted.
     let (stored, was_inserted) = buzz_db::event::insert_event_in_transaction(
         &mut tx,
         tenant.community(),
@@ -2301,7 +2329,7 @@ async fn commit_participant_join(
     )
     .await?;
 
-    // 5. Acquire effect permit or rollback.
+    // 6. Acquire effect permit or rollback.
     //
     // Test hook: fires between the uncommitted 48101 insert and the permit
     // acquisition. A test can arm expiry here to prove that a cancellation
@@ -2319,12 +2347,12 @@ async fn commit_participant_join(
         }
     };
 
-    // 6. Commit while holding the permit.
+    // 7. Commit while holding the permit.
     if let Err(e) = tx.commit().await {
         return Err(JoinCommitError::Db(e.into()));
     }
 
-    // 7. Fan-out while permit is still held — expiry cannot complete between
+    // 8. Fan-out while permit is still held — expiry cannot complete between
     //    row visibility and fan-out.
     if was_inserted {
         state.mark_local_event(tenant.community(), &event.id);
@@ -5789,6 +5817,109 @@ mod tests {
         assert!(
             guard.remote_stream.is_none(),
             "CW7: remote_stream must be cleared after release_before_commit"
+        );
+    }
+
+    // ── F2: archive re-check for Existing path ────────────────────────────────
+    //
+    // `commit_participant_join` must reject an `Existing` join when the channel
+    // is archived between `check_membership_for_admission` and commit. The old
+    // code only performed the archive re-check inside the `AutoAddRequired`
+    // advisory-lock branch, leaving the `Existing` path unprotected.
+    //
+    // ## Mutation oracle
+    //
+    // Remove the "Archive re-check (ALL paths)" block from `commit_participant_join`
+    // (lines 2192-2220 after the fix):
+    //   - This test returns `Ok(JoinCommitOutcome::JoinedSent)` instead of
+    //     `Err(JoinCommitError::Archived)` → `assert!(result.is_err())` panics.
+    //   - An archived 48101 row is inserted → row-count assertion also fails.
+    //
+    // This test requires a local DB (postgres://buzz:buzz_dev@127.0.0.1:5432/buzz).
+    #[tokio::test]
+    async fn f2_archived_channel_rejects_existing_join() {
+        use chrono::{Duration, Utc};
+        use uuid::Uuid;
+
+        let state = match audio_test_state_real_db().await {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "F2: skipping — local DB not available at \
+                     postgres://buzz:buzz_dev@127.0.0.1:5432/buzz"
+                );
+                return;
+            }
+        };
+        let pool = state.db.pool().clone();
+        let (tenant, channel_id, member_key) = seed_audio_fixture(&pool).await;
+        let community_id = tenant.community();
+
+        // Archive the channel — simulating a concurrent archive between admission
+        // check and commit.
+        sqlx::query(
+            "UPDATE channels SET archived_at = NOW() \
+             WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .execute(&pool)
+        .await
+        .expect("F2: archive channel");
+
+        let member_bytes = member_key.public_key().to_bytes().to_vec();
+        let member_hex = member_key.public_key().to_hex();
+        let peer_id = Uuid::new_v4();
+        let roster_revision = 1u64;
+        // Existing path — the old code skipped the archive re-check here.
+        let membership = MembershipAdmission::Existing {
+            parent_channel_id: channel_id,
+        };
+
+        let deadline = Utc::now() + Duration::hours(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel);
+
+        let result = commit_participant_join(
+            &state,
+            &tenant,
+            channel_id,
+            channel_id,
+            &member_hex,
+            &member_bytes,
+            peer_id,
+            roster_revision,
+            &membership,
+            &gate,
+            String::new(),
+            &std::sync::Arc::new(crate::audio::room::Room::new(
+                tenant.community(),
+                channel_id,
+            )),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(JoinCommitError::Archived)),
+            "F2: commit into archived channel via Existing path must fail with \
+             JoinCommitError::Archived; got: {result:?}\n\
+             Mutation oracle: remove the archive re-check block → returns Ok(_) here"
+        );
+
+        // No 48101 row must be committed — transaction was rolled back.
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events \
+             WHERE community_id = $1 AND channel_id = $2 AND kind = 48101",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("F2: row count query");
+
+        assert_eq!(
+            row_count, 0,
+            "F2: no 48101 row must be committed into an archived channel; found {row_count}"
         );
     }
 }

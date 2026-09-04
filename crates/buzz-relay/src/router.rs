@@ -334,27 +334,37 @@ async fn nip11_or_ws_handler(
         return Json(nip11_document(&state, raw_host).await).into_response();
     }
 
-    // NIP-FI assertion check at upgrade — runs BEFORE `bind_community` so that:
-    // (a) a denied upgrade pays zero DB cost [FI-TRACE-TRANSPORT-CLOSED], and
-    // (b) tests that assert 401/503 are not pre-empted by a 404 from an
-    //     unseeded DB — the gate exercises its own seam without coupling to
-    //     host-resolution fixture state.
+    // NIP-FI assertion gate at WebSocket upgrade.
     //
-    // Gated to genuine WebSocket upgrade requests (requests carrying both
-    // `Upgrade: websocket` and a `Connection` header with the `Upgrade` token)
-    // so plain browser GET / and NIP-11 fallback requests are never intercepted
-    // by the enforcement gate.  Requiring both headers matches RFC 6455 §4.1
-    // and avoids intercepting a request that carries only one header and would
-    // be rejected by Axum's WebSocketUpgrade extractor anyway.
+    // Strategy: belt-and-suspenders across both HTTP/1.1 WebSocket and
+    // HTTP/2 extended-CONNECT upgrade shapes.
+    //
+    // HTTP/1.1 path (RFC 6455): detected by the `Upgrade: websocket` +
+    // `Connection: Upgrade` header pair. The gate fires BEFORE
+    // `WebSocketUpgrade::from_request` so denial is returned on the raw HTTP
+    // connection. This also keeps the gate independently testable via tower
+    // `oneshot` (which provides no real hyper `OnUpgrade` extension and would
+    // cause the extractor to return `ConnectionNotUpgradable`).
+    //
+    // HTTP/2 extended-CONNECT path: detected inside the `Ok(ws)` arm below.
+    // These requests carry `method = CONNECT` with no `Upgrade` header pair,
+    // so the pre-extractor block below does not fire; the gate inside
+    // `Ok(ws)` covers them. [F3-H2-GATE]
+    //
+    // Together these two fire-points ensure that every request shape the
+    // extractor accepts is also gated — no hand-rolled predicate can diverge
+    // from the extractor's set of accepted shapes.
+    //
+    // Zero DB cost invariant: both fire-points run before `bind_community`,
+    // so denied upgrades pay zero DB cost [FI-TRACE-TRANSPORT-CLOSED], and
+    // tests that assert 401/503 are not pre-empted by a 404 from an unseeded
+    // DB — the gate exercises its own seam without coupling to host-resolution
+    // fixture state.
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    //
-    // This pre-check runs BEFORE `WebSocketUpgrade::from_request` so that the
-    // denial response is returned on the raw HTTP connection, not inside the
-    // upgrade callback.
     let nip_fi_assertion = {
-        let is_ws_upgrade = headers
+        let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
             .map(|v| v.eq_ignore_ascii_case("websocket"))
@@ -370,7 +380,7 @@ async fn nip11_or_ws_handler(
                         .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
                 })
                 .unwrap_or(false);
-        if is_ws_upgrade {
+        if is_h1_ws_upgrade {
             use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
             let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
@@ -380,6 +390,9 @@ async fn nip11_or_ws_handler(
                 NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
             }
         } else {
+            // Not an HTTP/1.1 WS upgrade — could be an HTTP/2 extended-CONNECT,
+            // a NIP-11 request, or a plain browser GET. Do not gate here; the
+            // `Ok(ws)` arm below gates any extractor-accepted h2 upgrade. [F3-H2-GATE]
             None
         }
     };
@@ -412,6 +425,27 @@ async fn nip11_or_ws_handler(
 
     match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => {
+            // [F3-H2-GATE] HTTP/2 extended-CONNECT upgrades accepted by the
+            // extractor but not detected by the pre-extractor header predicate.
+            // Run the gate here to close the structural gap. For HTTP/1.1
+            // requests, `nip_fi_assertion` was already set above and this block
+            // is unreachable (`check_nip_fi_at_upgrade` would be called twice,
+            // but the pre-extractor `return` prevents this path from executing
+            // for h1 — the h1 denial is already returned before we get here).
+            let nip_fi_assertion = if nip_fi_assertion.is_none() {
+                // Only re-check if the pre-extractor gate did not fire (h2 path).
+                use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+                let mode = state.config.nip_fi.mode;
+                let verifier = state.nip_fi_verifier.as_deref();
+                match check_nip_fi_at_upgrade(&headers, verifier, mode) {
+                    NipFiUpgradeOutcome::NotRequired => None,
+                    NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
+                    NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
+                }
+            } else {
+                nip_fi_assertion
+            };
+
             // Shutting down: refuse new sockets instead of accepting a
             // connection onto a dying pod. Readiness already returns 503, but
             // that only stops K8s routing — direct and in-flight upgrades
@@ -1450,18 +1484,42 @@ mod tests {
     // Drive the REAL built router (via tower `oneshot`) for both the root `/`
     // and the huddle audio `/huddle/{id}/audio` WebSocket ingresses in NIP-FI
     // enforce mode. These tests prove that both gate call sites live in
-    // production: deleting either gate call (at the top of `nip11_or_ws_handler`
-    // in `router.rs` or at the top of `ws_audio_handler` in `audio/handler.rs`)
-    // causes the request to proceed past the pre-101 check and receive a
-    // 404 (tenant not found) instead of the expected denial, turning these
-    // tests red.
+    // production: deleting either gate call (the pre-extractor h1 block in
+    // `nip11_or_ws_handler`, or at the top of `ws_audio_handler` in
+    // `audio/handler.rs`) causes the request to proceed past the pre-101 check
+    // and receive a 404 (tenant not found) instead of the expected denial,
+    // turning these tests red.
+    //
+    // ## F3 structural proof
+    //
+    // The NIP-FI gate uses a belt-and-suspenders approach across both upgrade shapes:
+    //
+    // HTTP/1.1 WebSocket (RFC 6455): the gate fires BEFORE
+    // `WebSocketUpgrade::from_request` using the `Upgrade: websocket` +
+    // `Connection: Upgrade` header predicate. These tests drive this path via
+    // tower `oneshot` — `oneshot` provides no real hyper `OnUpgrade` extension
+    // so the extractor would return `ConnectionNotUpgradable`; the pre-extractor
+    // gate catches the denial first and returns it before the extractor runs.
+    //
+    // HTTP/2 extended-CONNECT: the pre-extractor predicate does not fire (no
+    // `Upgrade: websocket` header in h2 CONNECT), so the gate fires inside the
+    // `Ok(ws)` arm. Annotated [F3-H2-GATE] in the source. A live integration
+    // test for h2 CONNECT is not provided because (a) the workspace Axum
+    // dependency does not enable the `http2` feature and (b) the structural
+    // invariant is directly evident: any h2 CONNECT that the extractor accepts
+    // enters `Ok(ws)` where the gate runs unconditionally when
+    // `nip_fi_assertion.is_none()`.
     //
     // Mutation evidence:
-    //   A) Delete the gate call in `nip11_or_ws_handler` → root request
-    //      returns 404 (no community) instead of 401/503 → assert_eq panics.
-    //   B) Delete the gate call in `ws_audio_handler` → audio request returns
+    //   A) Delete the pre-extractor gate call in `nip11_or_ws_handler` → root
+    //      request returns 404 (no community) instead of 401/503 → assert_eq
+    //      panics.
+    //   B) Delete the [F3-H2-GATE] call in the `Ok(ws)` arm → h2 extended-CONNECT
+    //      upgrades bypass the gate; h1 tests still pass but structural coverage
+    //      is reduced.
+    //   C) Delete the gate call in `ws_audio_handler` → audio request returns
     //      404 (no community) instead of 401/503 → assert_eq panics.
-    //   C) Switch `Enforce` to `Off` in the test state → both ingresses skip
+    //   D) Switch `Enforce` to `Off` in the test state → both ingresses skip
     //      the gate and return 404 (no community) → status assertions panic.
 
     /// Build AppState with NIP-FI enforce mode and no verifier (simulates
@@ -1469,10 +1527,11 @@ mod tests {
     /// `jwks_configs` is empty and `ProductionJwksSource::new` returns `None`
     /// for an empty list; the mode field is set directly so no env is needed.
     ///
-    /// The NIP-FI gate runs before `bind_community`, so these tests exercise
-    /// the gate seam independently of DB / host-resolution state. The lazy
-    /// PG pool is kept so `AppState::new` compiles; it is never queried by
-    /// any of these router tests.
+    /// The NIP-FI gate fires in the pre-extractor h1 block (before
+    /// `bind_community`), so these tests exercise the gate seam independently
+    /// of DB / host-resolution state. The lazy PG pool is kept so
+    /// `AppState::new` compiles; it is never queried by any of these router
+    /// tests.
     async fn nip_fi_enforce_state() -> Arc<AppState> {
         use crate::nip_fi_config::NipFiRelayConfig;
         use buzz_auth::{IssuerRegistry, NipFiMode};
