@@ -26,9 +26,16 @@ async function openCreateWorkflow(
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
   const channelList = page.getByTestId("channel-combobox-list");
-  if (!(await channelList.isVisible())) {
-    await dialog.getByRole("combobox", { name: "Channel" }).click();
-  }
+  // The combobox list auto-opens on dialog mount, but wait for it to stabilize
+  // before deciding whether a manual click is needed: avoids a one-shot
+  // isVisible() read during the mount transition.
+  await expect
+    .poll(async () => {
+      if (await channelList.isVisible()) return true;
+      await dialog.getByRole("combobox", { name: "Channel" }).click();
+      return false;
+    })
+    .toBe(true);
   await channelList
     .getByRole("option", { name: "agents", exact: true })
     .click();
@@ -51,10 +58,18 @@ async function openTriggerInspector(
   dialog: import("@playwright/test").Locator,
 ) {
   const menu = dialog.getByRole("button", { name: "Trigger event" });
-  if (!(await menu.isVisible())) {
-    await dialog.getByRole("button", { name: /^Trigger:/ }).click();
-  }
-  await expect(menu).toBeVisible();
+  // The inspector may already be open (e.g. immediately after openCreateWorkflow)
+  // or collapsed (e.g. after reopenWorkflow). Poll so the DOM stabilizes before
+  // we decide whether a click is needed — avoids a one-shot isVisible() race
+  // during tab-switch or dialog-mount transitions.
+  await expect
+    .poll(async () => {
+      if (await menu.isVisible()) return true;
+      const trigger = dialog.getByRole("button", { name: /^Trigger:/ });
+      if (await trigger.isVisible()) await trigger.click();
+      return false;
+    })
+    .toBe(true);
 }
 
 async function addMessageStep(
@@ -74,9 +89,21 @@ async function createEnabled(
   const confirmation = page.getByRole("alertdialog", {
     name: "This workflow may run often",
   });
-  if (await confirmation.isVisible()) {
-    await confirmation.getByRole("button", { name: "Turn on" }).click();
-  }
+  // Wide triggers (message_posted) always show the activation dialog.
+  // Narrow triggers (schedule, reaction_added, webhook) skip it and close the
+  // create dialog directly. Poll so we wait for whichever state arrives first
+  // rather than reading a one-shot isVisible() during the animation frame.
+  await expect
+    .poll(async () => {
+      if (await confirmation.isVisible()) {
+        await confirmation.getByRole("button", { name: "Turn on" }).click();
+        return true;
+      }
+      return !(await dialog.isVisible());
+    })
+    .toBe(true);
+  // Await dialog closure regardless of path taken.
+  await expect(dialog).not.toBeVisible();
 }
 
 async function reopenWorkflow(
@@ -86,6 +113,10 @@ async function reopenWorkflow(
   const card = page
     .locator('[data-testid^="workflow-card-"]')
     .filter({ hasText: name });
+  // Await the card before addressing its action: createEnabled() returns only
+  // after dialog closure, but the card render is async and may not be in the
+  // DOM yet when execution reaches here.
+  await expect(card).toBeVisible();
   await card.getByRole("button", { name: "Workflow actions" }).click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
   return page.getByRole("dialog", { name: "Edit workflow" });
