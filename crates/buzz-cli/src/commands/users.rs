@@ -370,7 +370,36 @@ pub async fn cmd_set_profile(
     }
 
     // Read-merge-write: fetch current profile, merge in the new fields, then sign.
-    let current = fetch_current_profile(client).await?;
+    let fetched = fetch_current_profile(client).await?;
+    let current = fetched.content;
+
+    // Refuse a republish that would silently strip an existing owner attestation.
+    //
+    // kind:0 is replaceable, so a profile write REPLACES the stored event whole.
+    // Content is merged above, but the NIP-OA `auth` tag is not a content field:
+    // it is re-attached only by sign_event from BUZZ_AUTH_TAG, and sign_event
+    // deliberately forbids callers supplying one (it is a signed attestation, not
+    // a value to copy forward). So running this command without BUZZ_AUTH_TAG
+    // against a profile that HAS the tag destroys it.
+    //
+    // That is not hypothetical: on 2026-08-12 an avatar re-host republished eight
+    // agent profiles this way. The tag vanished, same-owner sibling verification
+    // returned false fleet-wide, and every agent-to-agent message was dropped for
+    // ~23 hours. Nothing failed loudly — the writes succeeded, the agents stayed
+    // healthy, and only the owner could still reach them (matched by pubkey, which
+    // never consults the profile).
+    //
+    // Fail closed instead: the operator either supplies the attestation or is told
+    // exactly what they are about to destroy.
+    if fetched.has_auth_tag && client.auth_tag_owner_hex().is_none() {
+        return Err(CliError::Usage(
+            "refusing to republish: your current profile carries a NIP-OA owner \
+             attestation (auth tag) and BUZZ_AUTH_TAG is not set, so this write \
+             would silently drop it and break same-owner verification. Set \
+             BUZZ_AUTH_TAG to the attestation JSON and retry."
+                .into(),
+        ));
+    }
 
     // Merge: caller-supplied fields win; fall back to current profile values.
     let merged_name = display_name
@@ -422,11 +451,43 @@ pub async fn cmd_set_profile(
     Ok(())
 }
 
-/// Fetch the current user's profile metadata via POST /query (kind:0).
-/// Returns the parsed content JSON object, or an empty object if no profile exists.
-async fn fetch_current_profile(
-    client: &BuzzClient,
-) -> Result<serde_json::Map<String, serde_json::Value>, CliError> {
+/// Does this event carry a NIP-OA `auth` tag (`["auth", owner, cond, sig]`)?
+///
+/// Used to detect a profile republish that would strip an existing owner
+/// attestation. Kept pure and separate from the network fetch so the decision
+/// is testable — an untested guard here is how the 2026-08-12 fleet-wide
+/// mention drop went unnoticed for ~23 hours.
+fn event_has_auth_tag(event: &serde_json::Value) -> bool {
+    event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|t| {
+                t.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    == Some("auth")
+            })
+        })
+}
+
+/// Fetched profile state: the parsed content fields, plus whether the live
+/// event carries a NIP-OA `auth` tag.
+///
+/// The tag matters separately from content because it is a signed owner
+/// attestation, not a profile field — it can only be re-attached by
+/// `sign_event` from `BUZZ_AUTH_TAG`, never copied forward by a caller.
+struct CurrentProfile {
+    content: serde_json::Map<String, serde_json::Value>,
+    has_auth_tag: bool,
+}
+
+/// Fetch the current user's profile via POST /query (kind:0).
+///
+/// Returns the parsed content fields plus whether the stored event carries an
+/// owner attestation. Empty content and `has_auth_tag: false` when no profile
+/// exists yet.
+async fn fetch_current_profile(client: &BuzzClient) -> Result<CurrentProfile, CliError> {
     let my_pk = client.keys().public_key().to_hex();
     let filter = serde_json::json!({
         "kinds": [0],
@@ -438,18 +499,28 @@ async fn fetch_current_profile(
         .map_err(|e| CliError::Other(format!("failed to parse profile query: {e}")))?;
 
     let Some(arr) = events.as_array() else {
-        return Ok(serde_json::Map::new());
+        return Ok(CurrentProfile {
+            content: serde_json::Map::new(),
+            has_auth_tag: false,
+        });
     };
     let Some(event) = arr.first() else {
-        return Ok(serde_json::Map::new());
+        return Ok(CurrentProfile {
+            content: serde_json::Map::new(),
+            has_auth_tag: false,
+        });
     };
+    let has_auth_tag = event_has_auth_tag(event);
     // kind:0 content is a JSON string containing the profile fields
     let content_str = event
         .get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("{}");
     let content: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
-    Ok(content.as_object().cloned().unwrap_or_default())
+    Ok(CurrentProfile {
+        content: content.as_object().cloned().unwrap_or_default(),
+        has_auth_tag,
+    })
 }
 
 /// Get presence status for users — query kind:40902 presence snapshot events.
@@ -761,5 +832,174 @@ mod tests {
     fn presence_subject_falls_back_to_author_for_malformed_p_tag() {
         let event = json!({"pubkey": "user", "tags": [["p"]]});
         assert_eq!(presence_subject(&event), "user");
+    }
+
+    #[test]
+    fn event_has_auth_tag_detects_the_owner_attestation() {
+        let event = json!({"tags": [["auth", "owner-pk", "", "sig"], ["p", "x"]]});
+        assert!(super::event_has_auth_tag(&event));
+    }
+
+    #[test]
+    fn event_has_auth_tag_is_false_when_the_attestation_was_stripped() {
+        // The exact shape ENG-3879 left behind: content preserved, tags emptied.
+        let event = json!({"content": "{\"display_name\":\"Sol-3\"}", "tags": []});
+        assert!(!super::event_has_auth_tag(&event));
+    }
+
+    #[test]
+    fn event_has_auth_tag_ignores_other_tags_and_malformed_entries() {
+        let event = json!({"tags": [["p", "auth"], ["auth"], [], "auth"]});
+        // ["auth"] alone is a real auth tag position — first element matches.
+        assert!(super::event_has_auth_tag(&event));
+        let event = json!({"tags": [["p", "auth"], [], "auth"]});
+        assert!(!super::event_has_auth_tag(&event));
+    }
+
+    #[test]
+    fn event_has_auth_tag_is_false_without_a_tags_field() {
+        assert!(!super::event_has_auth_tag(&json!({"content": "{}"})));
+    }
+}
+
+#[cfg(test)]
+mod set_profile_seam_tests {
+    //! Drive the real `cmd_set_profile` against a fake relay.
+    //!
+    //! `event_has_auth_tag` tests prove the predicate; they cannot prove the
+    //! guard is wired into the write path, that the refusal happens BEFORE any
+    //! event is submitted, or that an attested write still round-trips. Those
+    //! are the properties the 2026-08-12 incident actually needed, so they are
+    //! asserted here against the live query → guard → sign → submit chain, with
+    //! the relay's received events as the evidence.
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::{Keys, Tag};
+    use tokio::net::TcpListener;
+
+    use super::cmd_set_profile;
+    use crate::client::BuzzClient;
+    use crate::error::CliError;
+
+    type Submitted = Arc<Mutex<Vec<serde_json::Value>>>;
+
+    const OWNER: &str = "95b5d50f247a714a2b1ff68798f4cc6a50effd8046638d9e6339a096e6d6b2ad";
+    const SIG: &str = "a4c05492fb3df820037ef55617cc2563233df2e5a07ed27559d5aad23d07d5d9\
+74f385095d15c0af2bff62ded61a8d2030caaa0c8c7edc3c3cf3e47820b87da9";
+
+    /// A stored kind:0 exactly as the relay serves it: content carries the
+    /// profile fields, the attestation lives in `tags`.
+    fn stored_profile(with_auth_tag: bool) -> serde_json::Value {
+        let tags = if with_auth_tag {
+            serde_json::json!([["auth", OWNER, "", SIG]])
+        } else {
+            serde_json::json!([])
+        };
+        serde_json::json!({
+            "kind": 0,
+            "content": r#"{"display_name":"Neo","picture":"https://relay/avatar.png"}"#,
+            "tags": tags,
+        })
+    }
+
+    async fn relay(profile: serde_json::Value) -> (String, Submitted) {
+        let submitted: Submitted = Arc::new(Mutex::new(Vec::new()));
+        let captured = submitted.clone();
+        let app = Router::new()
+            .route(
+                "/query",
+                post(move || {
+                    let profile = profile.clone();
+                    async move { axum::Json(serde_json::json!([profile])) }
+                }),
+            )
+            .route(
+                "/events",
+                post(move |body: String| {
+                    let captured = captured.clone();
+                    async move {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                            captured.lock().unwrap().push(v);
+                        }
+                        axum::Json(serde_json::json!({
+                            "event_id": "0".repeat(64), "accepted": true, "message": ""
+                        }))
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), submitted)
+    }
+
+    fn client(base_url: &str, attested: bool) -> BuzzClient {
+        let auth_tag = attested.then(|| Tag::parse(["auth", OWNER, "", SIG]).unwrap());
+        BuzzClient::new(base_url.to_string(), Keys::generate(), auth_tag, None).unwrap()
+    }
+
+    fn has_auth_tag(event: &serde_json::Value) -> bool {
+        event["tags"]
+            .as_array()
+            .is_some_and(|tags| tags.iter().any(|t| t[0] == "auth"))
+    }
+
+    #[tokio::test]
+    async fn attested_profile_without_configured_attestation_submits_nothing() {
+        // The incident itself: the write succeeded and took the tag with it.
+        // The refusal must land before anything reaches the relay — an error
+        // returned after submitting would still have destroyed the attestation.
+        let (url, submitted) = relay(stored_profile(true)).await;
+        let err = cmd_set_profile(&client(&url, false), Some("Neo"), None, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CliError::Usage(ref m) if m.contains("refusing to republish")),
+            "expected a usage refusal naming the attestation, got {err:?}"
+        );
+        assert!(
+            submitted.lock().unwrap().is_empty(),
+            "guard refused but still wrote to the relay — the attestation is gone anyway"
+        );
+    }
+
+    #[tokio::test]
+    async fn attested_profile_with_attestation_publishes_one_replacement_carrying_the_tag() {
+        let (url, submitted) = relay(stored_profile(true)).await;
+        cmd_set_profile(&client(&url, true), Some("Neo Prime"), None, None, None)
+            .await
+            .expect("attested republish must be allowed");
+
+        let events = submitted.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one replacement write");
+        assert!(
+            has_auth_tag(&events[0]),
+            "replacement lost the owner attestation: {}",
+            events[0]
+        );
+        // kind:0 is replaceable, so unspecified fields must survive the merge —
+        // the incident began as an avatar rewrite that blanked `picture`.
+        let content: serde_json::Value =
+            serde_json::from_str(events[0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["display_name"], "Neo Prime");
+        assert_eq!(content["picture"], "https://relay/avatar.png");
+    }
+
+    #[tokio::test]
+    async fn unattested_profile_remains_editable_without_an_attestation() {
+        // The guard must not become a blanket block: a profile that never had
+        // an attestation has none to lose.
+        let (url, submitted) = relay(stored_profile(false)).await;
+        cmd_set_profile(&client(&url, false), Some("Scout"), None, None, None)
+            .await
+            .expect("unattested profile must stay editable");
+
+        let events = submitted.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected the profile write to go through");
+        assert!(!has_auth_tag(&events[0]));
     }
 }
