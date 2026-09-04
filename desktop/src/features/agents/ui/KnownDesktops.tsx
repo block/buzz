@@ -1,4 +1,8 @@
-import { DesktopStopControl, DesktopStopReceiver } from "./DesktopStopControl";
+import {
+  DesktopLifecycleControl,
+  DesktopLifecycleReceiver,
+} from "./DesktopLifecycleControl";
+import { DesktopStopControl } from "./DesktopStopControl";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -62,6 +66,7 @@ function useDesktopList() {
 
 /** Startup and Agents share the existing owner/community query cache. */
 export function DesktopListStartup() {
+  const [epoch, setEpoch] = useState(0);
   const { refetch } = useDesktopList();
   const { refetch: pulse } = useDesktopObservations(useDesktopScope());
   const { refetch: report } = useDesktopCapabilities(useDesktopScope());
@@ -71,6 +76,7 @@ export function DesktopListStartup() {
       void report();
     }, DESKTOP_PULSE_MS);
     const unsubscribe = relayClient.subscribeToReconnects(() => {
+      setEpoch((n) => n + 1);
       void refetch();
       void pulse();
       void report();
@@ -80,7 +86,8 @@ export function DesktopListStartup() {
       unsubscribe();
     };
   }, [refetch, pulse, report]);
-  return <DesktopStopReceiver scope={useDesktopScope()} />;
+  const scope = useDesktopScope();
+  return <DesktopLifecycleReceiver key={`lifecycle:${epoch}`} scope={scope} />;
 }
 
 export function KnownDesktops() {
@@ -170,6 +177,13 @@ export function DesktopListView({
         <p role="status">Partial list: showing up to 100 profiles.</p>
       )}
       {list && !list.rows.length && !error && <p>No Desktop profiles found.</p>}
+      {scope && list && (
+        <DesktopLifecycleControl
+          key={`${scope.owner}:${scope.community}`}
+          scope={scope}
+          desktops={list.rows}
+        />
+      )}
       <ul className="space-y-2">
         {list?.rows.map((row) => (
           <li key={row.id} className="text-sm">
