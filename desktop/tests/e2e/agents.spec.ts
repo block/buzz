@@ -345,7 +345,15 @@ test("searches agent avatar emoji with focus on open", async ({ page }) => {
   await page.getByTestId("new-agent-card").click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
-  await page.getByLabel("Add avatar").click();
+  const addAvatarButton = page.getByLabel("Add avatar");
+  await expect(addAvatarButton).toHaveCSS("border-top-width", "0px");
+  const emptyOutline = page.getByTestId("agent-avatar-empty-outline");
+  await expect(emptyOutline).toBeVisible();
+  await expect(emptyOutline.locator("path")).toHaveAttribute(
+    "d",
+    "M .5 0 C .93 0 1 .07 1 .5 C 1 .93 .93 1 .5 1 C .07 1 0 .93 0 .5 C 0 .07 .07 0 .5 0 Z",
+  );
+  await addAvatarButton.click();
   await page.getByRole("tab", { name: "Emoji" }).click();
 
   const picker = page.locator("em-emoji-picker");
