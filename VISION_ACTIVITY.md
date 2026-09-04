@@ -16,6 +16,23 @@ A developer supervising a delegate. They are not watching for entertainment; the
 
 A feed that answers these instantly converts a stream of events into a sense of trajectory. A feed that does not is just noise with a scrollbar.
 
+## Conversation and Inspection
+
+The [agent](VISION_AGENT.md#the-collaborator) is the human-facing collaborator.
+Conversation foregrounds its contributions: decisions, meaningful progress,
+results, and escalations that need a person. Internal orchestration across
+hosts, sessions, and runtime-local workers belongs in an on-demand inspection
+experience, with its own presentation and attention handling.
+
+Opening that experience reveals work ownership, delegation, progress, and
+outcomes, with supporting detail available through progressive disclosure.
+Routine internal traffic has separate inspection attention state and does not
+create ordinary conversational unread debt. Human-relevant failures,
+permission requests, and decisions still reach the appropriate people. Quiet
+orchestration remains accountable and inspectable, not hidden operation.
+Independent agents collaborating in a channel remain participants in that
+conversation, not internal workers.
+
 ## The Governing Frame: Verb, Object, Outcome
 
 Every meaningful item is a sentence: **the agent did [verb] to [object] → [outcome].**

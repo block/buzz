@@ -164,7 +164,19 @@ See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the proj
 
 ---
 
+## Agents
+
+An agent is a persistent collaborator whose identity and work continue across
+conversations, channels, and execution hosts. It owns continuity and
+coordination across its sessions and runtime-local workers, within community
+authorization. See [VISION_AGENT.md](VISION_AGENT.md#the-collaborator) for the
+canonical agent vision, and [VISION_ACTIVITY.md](VISION_ACTIVITY.md) for
+on-demand inspection of its internal work.
+
 ## Agent Personas & Teams
+
+A persona describes an agent; the signing key identifies it. Reusing a persona
+does not make different keys the same collaborator.
 
 Agents aren't monolithic. A persona bundles a model and a system prompt. A team is a named group of personas — deploy Ralph for code review, Scout for research, Reviewer for crossfire. Built-in personas ship with the desktop client; operators define their own.
 
@@ -172,7 +184,7 @@ Agents aren't monolithic. A persona bundles a model and a system prompt. A team 
 
 ## Remote Agents
 
-An agent's identity, history, and presence live on the relay — so the machine running it is replaceable. The desktop deploys agents onto remote infrastructure through swappable provider binaries, and after deploy retains no substrate control channel: status, steering, and shutdown all flow over the relay, and the agent bounds its own lifetime. See [VISION_REMOTE_AGENTS.md](VISION_REMOTE_AGENTS.md) for the full picture.
+An agent's signed identity, community-scoped history, and presence endure across replaceable execution hosts. It can coordinate work on several authorized hosts concurrently; deployment-scope duplicate protection keeps repeated launches idempotent. The desktop deploys agents onto remote infrastructure through swappable provider binaries, and after deploy retains no substrate control channel: status, steering, and shutdown all flow over the relay, and the agent bounds its own lifetime. See [VISION_REMOTE_AGENTS.md](VISION_REMOTE_AGENTS.md) for the full picture.
 
 ---
 

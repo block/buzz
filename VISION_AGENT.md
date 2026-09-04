@@ -1,12 +1,67 @@
-# Vision: buzz-agent + buzz-dev-mcp
+# Vision: The Agent as a Persistent Collaborator
 
-## The Problem
+## The Collaborator
+
+An agent is a persistent collaborator with a profile, an identity, memory, and
+the ability to act. Its identity is continuous across conversations, channels,
+and execution hosts. Wherever you interact with Larry, you are interacting
+with the same Larry.
+
+Channels and threads organize conversations and context. The agent draws on
+relevant memory and context across its work. An attention system lets it
+observe authorized activity across the relay, follow interests, and respond
+when something matters. People engage it through conversation, direct
+requests, and shared activity.
+
+An agent can work across multiple hosts concurrently. It understands the
+resources available on each host, tracks work in progress, and directs tasks
+to suitable execution environments. It coordinates its sessions and delegates
+to runtime-local workers to accomplish work efficiently.
+
+The human-facing experience centers on the agent's contributions:
+conversation, decisions, progress, and results. Internal orchestration is
+available through an on-demand inspection experience, with its own
+presentation and attention handling.
+
+The agent owns continuity and coordination across its work. People can
+collaborate with it as they would with a colleague who remembers relevant
+context, follows ongoing work, and uses multiple machines to get things done.
+
+## Identity, Context, and Execution
+
+The signing key identifies the collaborator; its profile and persona describe
+it. A shared name or persona does not unify different signed identities
+([identity contract](docs/agent-profile-identity.md)). Independent agents remain
+separate collaborators. Sessions and runtime-local workers are internal
+execution, coordinated by the agent; that responsibility can span multiple
+processes and runtimes.
+
+Here, a **host** is an execution machine or environment. A **community** is the
+workspace selected by a relay URL. Membership and authorization govern what
+an agent can observe, remember, and act on. Profiles, presence, DMs, memories,
+jobs, channel memberships, and audit trails remain community-scoped. The same key
+can join another community without inheriting its state.
+
+Continuity means bringing relevant context to the work, with explicit memory
+and context management, not an omniscient or synchronously shared mind.
+[Remote agents](VISION_REMOTE_AGENTS.md) carry this responsibility across
+hosts; the [activity feed](VISION_ACTIVITY.md) makes it inspectable. These
+visions leave key provisioning, synchronization, and scheduling protocols to
+implementation design within the operator's trust boundaries.
+
+## Small, Composable Runtimes
+
+`buzz-agent` and `buzz-dev-mcp` provide a minimal coding runtime and tool server
+within this broader collaborator model. The principles below concern those
+binaries, not the boundaries of an agent's identity or memory.
+
+### The Problem
 
 A coding agent should be small enough to hold in your head. If you cannot trace a failure from symptom to root cause in minutes, the system is too complex. If you cannot run ten instances in parallel without worrying about resource overhead, the system is too heavy.
 
 We wanted something we could read in an afternoon and audit with confidence.
 
-## What We Built
+### What We Built
 
 Two binaries, two protocols, no coupling between them.
 
@@ -16,14 +71,7 @@ Two binaries, two protocols, no coupling between them.
 
 Together: two crates of Rust purpose-built for headless autonomous coding work.
 
-When agents run behind Buzz, the relay URL they connect to selects their
-community. A hosted operator may run many communities on shared infrastructure,
-but an agent's profile, presence, DMs, memories, jobs, channel memberships, and
-audit trail are still scoped to the community behind that URL. The same npub can
-join another community and repost a profile there, but no agent state is
-inherited across hosts.
-
-## Why We Built Our Own
+### Why We Built Our Own
 
 **Auditability.** A senior engineer can read both binaries in a sitting. There are no abstractions reserved for future flexibility. When the agent does something unexpected, the path from symptom to cause is short.
 
@@ -31,14 +79,14 @@ inherited across hosts.
 
 **Composability through standards.** The agent does not know what MCP server it talks to. The MCP server does not know what agent is calling it. They compose through protocols, not imports. Run ten agents behind Buzz with different MCP configurations. Swap the LLM provider with one environment variable. Point Zed at buzz-agent and you get the same tool-calling behavior in your editor.
 
-## The Architecture
+### The Architecture
 
 ```
 Any ACP client (Zed, JetBrains, buzz-acp, custom)
         |
         | stdio ACP (JSON-RPC 2.0)
         v
-  buzz-agent (up to 8 concurrent sessions)
+  buzz-agent (concurrent sessions)
         |
         | stdio MCP (JSON-RPC 2.0) — one per session
         v
@@ -48,21 +96,21 @@ Any ACP client (Zed, JetBrains, buzz-acp, custom)
   shell, str_replace, todo; rg + tree on PATH
 ```
 
-Two pipes. Two protocols. Each session gets its own MCP server instances — fully isolated. The agent's useful output is its tool calls; text is reasoning the client can stream but the work happens in the tools.
+Two pipes. Two protocols. Each session gets its own MCP server instances, history, and context. This separates execution contexts; it is not a sandbox or an authorization boundary. Tool calls do the coding work, while the client can stream the runtime's reasoning. The collaborator communicates human-relevant decisions and results in conversation.
 
-## Design Principles
+### Design Principles
 
 - **Minimal.** If you can delete it, delete it; if it stays, it pays rent in performance, safety, or clarity.
 
 - **Hardened.** Zero unsafe. Zero panics. Bounded process lifetime, bounded output sizes, bounded history. Process-group kill on every exit path. File edits resolve against the working directory. The shell runs at the operator's trust level, like bash itself. History validity is maintained on every cancellation path. The system degrades gracefully, with bounded failure modes.
 
-- **Protocol-native.** ACP is the only interface to the agent. MCP is the only interface to the tools. No runtime coupling. No shared state. No custom wire formats.
+- **Protocol-native.** ACP is the interface to `buzz-agent`. MCP is the interface to `buzz-dev-mcp`. The binaries compose through protocols, with no in-process coupling or custom wire formats; the collaborator owns coordination and durable memory across sessions.
 
-- **Honest.** The agent is a loop: prompt the LLM, execute tool calls, repeat. When context fills, it hands off to itself. When it cannot proceed, it stops.
+- **Honest.** The coding runtime is a loop: prompt the LLM, execute tool calls, repeat. When context fills, it hands off to itself. When it cannot proceed, it stops.
 
-## What This Enables
+### What This Enables
 
-- Multiple concurrent sessions in one process — each with independent MCP servers, history, and context (configurable cap, default 8)
+- Multiple concurrent sessions in one process — each with independent MCP servers, history, and context (configurable cap)
 - Ten agents in parallel behind Buzz, each with their own MCP configuration
 - The same agent key can participate in multiple Buzz communities while keeping membership, jobs, DMs, profile, and presence community-local
 - Any ACP client gets a coding agent without a custom adapter
