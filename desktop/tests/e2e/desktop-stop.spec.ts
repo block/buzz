@@ -31,12 +31,20 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
         confirmed: boolean;
         prepared: number;
         sends: string[];
+        lifecyclePrepared: number;
+        lifecycleSends: string[];
       };
       __TAURI_INTERNALS__: {
         invoke: (command: string, payload?: any, options?: any) => Promise<any>;
       };
     };
-    w.__STOP_FIXTURE__ = { confirmed: false, prepared: 0, sends: [] };
+    w.__STOP_FIXTURE__ = {
+      confirmed: false,
+      prepared: 0,
+      sends: [],
+      lifecyclePrepared: 0,
+      lifecycleSends: [],
+    };
     const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
     const now = Math.floor(Date.now() / 1000);
     const local = "11111111-1111-4111-8111-111111111111";
@@ -74,6 +82,19 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
             reported: now,
             runtimes: [],
           }));
+        case "observe_desktop_placement":
+          return;
+        case "read_desktop_placement":
+        case "receive_desktop_lifecycle":
+          return null;
+        case "prepare_desktop_lifecycle":
+          w.__STOP_FIXTURE__.lifecyclePrepared++;
+          return sign(50182, [
+            ["p", payload.owner],
+            ["d", payload.desktop],
+          ]);
+        case "read_desktop_lifecycle_results":
+          return "provisioning_unavailable";
         case "prepare_desktop_stop":
           w.__STOP_FIXTURE__.prepared++;
           return sign(50180, [
@@ -88,6 +109,8 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
           const wire = JSON.parse(payload.message.data);
           if (wire[0] === "EVENT" && wire[1]?.kind === 50180)
             w.__STOP_FIXTURE__.sends.push(JSON.stringify(wire[1]));
+          if (wire[0] === "EVENT" && wire[1]?.kind === 50182)
+            w.__STOP_FIXTURE__.lifecycleSends.push(JSON.stringify(wire[1]));
           break;
         }
       }
@@ -98,7 +121,7 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
   const desktops = page.getByRole("region", { name: "Known Desktops" });
   await desktops.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(
-    desktops.getByText("Lab Desktop", { exact: true }),
+    desktops.getByRole("listitem").getByText("Lab Desktop", { exact: true }),
   ).toBeVisible();
   await desktops
     .getByRole("combobox", { name: "Agent to stop on Lab Desktop" })
@@ -160,4 +183,46 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
   await desktops.screenshot({
     path: "test-results/desktop-stop/04-confirmed.png",
   });
+
+  // The mounted lifecycle selector shares host labels with the Stop rows.
+  // IPC explicitly refuses launch; no native process is created by this fixture.
+  const controls = desktops.getByRole("region", {
+    name: "Agent placement controls",
+  });
+  await controls
+    .getByRole("combobox", { name: "Agent to place" })
+    .selectOption(agent);
+  await controls
+    .getByRole("combobox", { name: "Destination Desktop" })
+    .selectOption("22222222-2222-4222-8222-222222222222");
+  await controls
+    .getByRole("button", { name: "Start on destination", exact: true })
+    .click();
+  await expect(controls.getByRole("status")).toHaveText(
+    "Destination keyless launch provisioning is unavailable. No new process was started.",
+  );
+  await waitForAnimations(page);
+  await desktops.screenshot({
+    path: "test-results/desktop-stop/05-launch-unavailable.png",
+  });
+  await controls
+    .getByRole("button", { name: "Retry same request", exact: true })
+    .click();
+  await expect(controls.getByRole("status")).toHaveText(
+    "Destination keyless launch provisioning is unavailable. No new process was started.",
+  );
+  const lifecycle = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __STOP_FIXTURE__: {
+            lifecyclePrepared: number;
+            lifecycleSends: string[];
+          };
+        }
+      ).__STOP_FIXTURE__,
+  );
+  expect(lifecycle.lifecyclePrepared).toBe(1);
+  expect(lifecycle.lifecycleSends).toHaveLength(2);
+  expect(lifecycle.lifecycleSends[1]).toBe(lifecycle.lifecycleSends[0]);
 });

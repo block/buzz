@@ -86,13 +86,14 @@ pub async fn receive_desktop_stop(
         if managed_agents::placement::desired(&conn, &target.agent)?
             .is_some_and(|(host, _)| host == desktop)
         {
-            return StopResult {
+            let result = StopResult {
                 target,
                 request: event.id.to_hex(),
                 outcome: StopOutcome::Unknown,
             }
-            .sign(&scope.owner_keys)
-            .map(Some);
+            .sign(&scope.owner_keys)?;
+            remote_stop::save_result(&mut conn, &event.id.to_hex(), &result.as_json())?;
+            return Ok(Some(result));
         }
         let owned = owned_local(&app, &state, &owner, &target.agent)?;
         remote_stop::receive(
