@@ -52,10 +52,15 @@ pub fn is_side_effect_kind(kind: u32) -> bool {
 /// the running subscription and the membership cache until natural expiry, which
 /// is exactly the "kick reported success but user still in channel" symptom.
 ///
-/// Failures are logged, not propagated: the kick DB mutation has already
-/// committed and the report is finalized. Best-effort live enforcement matches
-/// the notice-delivery contract: the enforcement is the promise; live revocation
-/// is the courtesy.
+/// # Return value
+///
+/// Returns `Ok(())` on successful convergence — both after effects committed
+/// and after an intentional re-added skip (the kick is still correctly enforced;
+/// the membership was legitimately restored). Returns `Err` when fence
+/// acquisition, the workflow-disable UPDATE, or the transaction commit fail —
+/// the caller must propagate the error rather than finalizing the action as
+/// succeeded, so the `mutation_committed` marker remains recoverable for a later
+/// retry.
 ///
 /// **Fencing:** eviction and workflow-disable are gated behind a
 /// `membership_removal_fence` that acquires the same `pg_advisory_xact_lock` as
@@ -78,66 +83,18 @@ pub(crate) async fn apply_kick_live_side_effects(
     state: &Arc<AppState>,
     channel_id: Uuid,
     target_pubkey: &[u8],
-) {
+) -> Result<(), anyhow::Error> {
     // Cache invalidation is unconditionally safe — drops a stale positive.
     state.invalidate_membership(tenant, channel_id, target_pubkey);
 
     // Acquire the membership advisory lock and check that the member is still
     // removed. The fence guard keeps the lock alive through eviction and
     // workflow-disable so no concurrent add_member can commit in that window.
-    match state
+    let fence = state
         .db
         .membership_removal_fence(tenant.community(), channel_id, target_pubkey)
         .await
-    {
-        Ok(fence) => {
-            if fence.still_removed {
-                // Still removed — fire effects while the lock is held.
-                // Eviction first (no DB write needed), then commit the fence
-                // with the workflow-disable UPDATE on the same connection so no
-                // second pool connection is needed (pool-exhaustion deadlock
-                // prevention — see module doc).
-                evict_live_channel_subscriptions(tenant, state, channel_id, target_pubkey).await;
-                match fence
-                    .commit_disabling_workflows(tenant.community(), channel_id, target_pubkey)
-                    .await
-                {
-                    Ok(0) => {}
-                    Ok(n) => {
-                        tracing::info!(
-                            channel = %channel_id,
-                            owner = %hex::encode(target_pubkey),
-                            disabled = n,
-                            "Disabled departed member's workflows"
-                        );
-                        state
-                            .workflow_engine
-                            .invalidate_channel_workflows(tenant.community(), channel_id);
-                    }
-                    Err(e) => {
-                        warn!(
-                            channel = %channel_id,
-                            owner = %hex::encode(target_pubkey),
-                            error = %e,
-                            "Failed to disable departed member's workflows — \
-                             per-fire authority gate still denies"
-                        );
-                    }
-                }
-            } else {
-                // Member was re-added before this driver acquired the fence;
-                // skip eviction and workflow-disable so the re-add is not undone.
-                tracing::info!(
-                    channel = %channel_id,
-                    target = %hex::encode(target_pubkey),
-                    "kick live effects: member re-added before fence acquired; \
-                     skipping eviction and workflow-disable"
-                );
-            }
-        }
-        Err(e) => {
-            // DB error acquiring the fence. Err on the side of not revoking a
-            // potentially valid membership: skip eviction/disable and log.
+        .map_err(|e| {
             warn!(
                 channel = %channel_id,
                 target = %hex::encode(target_pubkey),
@@ -145,8 +102,56 @@ pub(crate) async fn apply_kick_live_side_effects(
                 "kick live effects: membership_removal_fence failed; \
                  skipping eviction and workflow-disable"
             );
+            e
+        })?;
+
+    if !fence.still_removed {
+        // Member was re-added before this driver acquired the fence.
+        // Skip eviction and workflow-disable so the re-add is not undone.
+        // This is successful convergence: the kick is enforced; membership was
+        // legitimately restored.
+        tracing::info!(
+            channel = %channel_id,
+            target = %hex::encode(target_pubkey),
+            "kick live effects: member re-added before fence acquired; \
+             skipping eviction and workflow-disable"
+        );
+        return Ok(());
+    }
+
+    // Still removed — fire effects while the lock is held.
+    // Eviction first (no DB write needed), then commit the fence with the
+    // workflow-disable UPDATE on the same connection so no second pool
+    // connection is needed (pool-exhaustion deadlock prevention — see module doc).
+    evict_live_channel_subscriptions(tenant, state, channel_id, target_pubkey).await;
+    match fence
+        .commit_disabling_workflows(tenant.community(), channel_id, target_pubkey)
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(
+                channel = %channel_id,
+                owner = %hex::encode(target_pubkey),
+                disabled = n,
+                "Disabled departed member's workflows"
+            );
+            state
+                .workflow_engine
+                .invalidate_channel_workflows(tenant.community(), channel_id);
+        }
+        Err(e) => {
+            warn!(
+                channel = %channel_id,
+                owner = %hex::encode(target_pubkey),
+                error = %e,
+                "Failed to disable departed member's workflows; \
+                 kick live effects returning error so caller can retry"
+            );
+            return Err(e.into());
         }
     }
+    Ok(())
 }
 
 async fn evict_live_channel_subscriptions(

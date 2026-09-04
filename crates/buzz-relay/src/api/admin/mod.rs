@@ -8598,7 +8598,8 @@ mod postgres_tests {
             ),
         )
         .await
-        .expect("apply_kick_live_side_effects must complete without deadlock on pool-size-1");
+        .expect("apply_kick_live_side_effects must complete without deadlock on pool-size-1")
+        .expect("apply_kick_live_side_effects must succeed on pool-size-1");
 
         // Post-condition: workflow is disabled — the UPDATE committed.
         assert!(
@@ -8609,6 +8610,162 @@ mod postgres_tests {
                 .expect("get workflow after effects")
                 .enabled,
             "workflow must be durably disabled after kick live effects"
+        );
+    }
+
+    /// Failure-path regression: when `apply_kick_live_side_effects` fails, the
+    /// action must NOT be finalized as `succeeded`.
+    ///
+    /// Without the error-propagation fix the caller (drive_enforcement) would
+    /// ignore the `Err` and proceed to `finalize_action_success`, falsely
+    /// recording the kick as `succeeded` while the SEC-006 workflow-disable
+    /// never committed.
+    ///
+    /// This test sets `mutation_committed` directly (simulating the state after
+    /// a crash or concurrent re-drive), then calls `drive_enforcement_pub` with
+    /// a pool that has been closed so the fence acquisition fails immediately.
+    /// The expected outcome is `Err(Internal)` and the action remains at
+    /// `mutation_committed` in `enforcing` state — retryable, not succeeded.
+    #[tokio::test]
+    #[ignore = "requires Postgres — live-effects failure must not finalize action as succeeded"]
+    async fn kick_live_effects_failure_does_not_finalize_as_succeeded() {
+        // Use a separate pool to pre-stage the DB rows, then build the state
+        // from a pool that is immediately closed to force the fence to fail.
+        let pool = e2e_pool().await;
+        let (community_id, host) = e2e_community(&pool, "kick-effects-fail").await;
+        let cid = buzz_core::CommunityId::from_uuid(community_id);
+        let target = vec![0xCCu8; 32];
+        let actor = vec![0xDDu8; 32];
+
+        // Seed channel + kicked member.
+        let channel_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
+               VALUES ($1, $2, 'effects-fail-ch', 'stream', 'open', $3)"#,
+        )
+        .bind(channel_id)
+        .bind(community_id)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .expect("create channel");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) VALUES ($1, $2, $3, 'member')",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("add member");
+
+        let report_id = e2e_report_pubkey(&pool, community_id, &target).await;
+
+        // Claim → enforcing → lease → execute kick (commits removal + marker).
+        let action_id = match buzz_db::relay_admin_actions::claim_report(
+            &pool,
+            cid,
+            report_id,
+            uuid::Uuid::new_v4(),
+            &actor,
+            "operator",
+            "kick",
+            None,
+            None,
+            "resolve:kick",
+            "relay_operator",
+            Some(&target),
+            None,
+            Some(channel_id),
+        )
+        .await
+        .expect("claim")
+        {
+            buzz_db::relay_admin_actions::ClaimResult::Claimed(a) => a.id,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let _ = buzz_db::relay_admin_actions::begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        let lease_until = chrono::Utc::now() + chrono::Duration::seconds(120);
+        let lease_token =
+            match buzz_db::relay_admin_actions::acquire_action_lease(&pool, action_id, lease_until)
+                .await
+                .expect("acquire lease")
+            {
+                buzz_db::relay_admin_actions::LeaseResult::Acquired(t) => t,
+                other => panic!("expected Acquired, got {other:?}"),
+            };
+        buzz_db::relay_admin_actions::execute_kick_with_marker(
+            &pool,
+            action_id,
+            lease_token,
+            cid,
+            channel_id,
+            &target,
+            &actor,
+        )
+        .await
+        .expect("execute_kick_with_marker");
+
+        // Verify pre-condition: mutation_committed set, action still enforcing.
+        let rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("action exists");
+        assert_eq!(rec.step_marker.as_deref(), Some("mutation_committed"));
+        assert_eq!(rec.state, "enforcing");
+
+        // Build state from a pool that is immediately closed so every DB
+        // operation in the live-effects path will fail — specifically the
+        // membership_removal_fence acquire.
+        let dying_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url())
+            .await
+            .expect("connect dying pool");
+        let state = state_from_pool(dying_pool.clone()).await;
+        dying_pool.close().await;
+
+        let tenant = e2e_tenant(community_id, &host);
+        let result = crate::handlers::report_resolution::drive_enforcement_pub(
+            &state,
+            &tenant,
+            cid,
+            report_id,
+            "kick",
+            None,
+            None,
+            &actor,
+            Some(&target),
+            None,
+            Some(channel_id),
+            &rec,
+            None,
+        )
+        .await;
+
+        // drive_enforcement_pub must return Err, not Ok.
+        assert!(
+            result.is_err(),
+            "drive_enforcement_pub must return Err when live effects fail, got Ok"
+        );
+
+        // Action must NOT have been finalized as succeeded — it must remain
+        // in enforcing with mutation_committed so the worker can retry.
+        // (Use the original pool, which is still open, to check.)
+        let after_rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action after")
+            .expect("record must still exist");
+        assert_eq!(
+            after_rec.state, "enforcing",
+            "action must remain in enforcing state, not succeeded, when live effects fail"
+        );
+        assert_eq!(
+            after_rec.step_marker.as_deref(),
+            Some("mutation_committed"),
+            "mutation_committed marker must be preserved for retry when live effects fail"
         );
     }
 }
