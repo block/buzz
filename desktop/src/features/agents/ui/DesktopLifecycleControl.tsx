@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/shared/ui/button";
 import type { RelayEvent } from "@/shared/api/types";
 import type { DesktopRow, DesktopScope } from "../desktopList";
@@ -14,31 +15,38 @@ export function DesktopLifecycleReceiver({
 }: {
   scope: DesktopScope | null;
 }) {
-  const [error, setError] = useState("");
   const { owner, community } = scope ?? {};
   useEffect(() => {
     if (!owner || !community) return;
     let active = true;
     let close: (() => void) | undefined;
-    setError("");
-    void receiveLifecycle({ owner, community }, () => active, setError)
+    let notification: string | number | undefined;
+    const reportError = (message: string) => {
+      if (!active) return;
+      // Startup mounts before the app shell: failure UI must not participate
+      // in layout or displace the fixed macOS window controls. Keep one visible
+      // notification for this receiver, and retire it with its owner/scope.
+      notification = toast.error(message, {
+        id: notification,
+        duration: Infinity,
+        closeButton: true,
+      });
+    };
+    void receiveLifecycle({ owner, community }, () => active, reportError)
       .then((fn) => {
         if (active) close = fn;
         else fn();
       })
       .catch(() => {
-        if (active) setError("Desktop lifecycle receiver is unavailable.");
+        reportError("Desktop lifecycle receiver is unavailable.");
       });
     return () => {
       active = false;
       close?.();
+      if (notification !== undefined) toast.dismiss(notification);
     };
   }, [owner, community]);
-  return error ? (
-    <p role="status" className="text-xs text-muted-foreground">
-      {error}
-    </p>
-  ) : null;
+  return null;
 }
 function message(outcome: LifecycleOutcome) {
   switch (outcome) {

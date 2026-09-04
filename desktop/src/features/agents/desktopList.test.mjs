@@ -160,6 +160,8 @@ test("rendered list distinguishes current, partial, unavailable and empty withou
 });
 
 test("mounted cache clears both scopes, fences late reads and retains rows on failure", async (t) => {
+  const originalRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM("<div id='root'></div>", {
     url: "https://desktop.test",
@@ -375,6 +377,7 @@ test("mounted cache clears both scopes, fences late reads and retains rows on fa
       "reconnect producer unsubscribed on unmount",
     );
     t.mock.timers.reset();
+    globalThis.requestAnimationFrame = originalRaf;
     dom.window.close();
   }
 });
