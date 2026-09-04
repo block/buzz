@@ -289,17 +289,15 @@ impl Session {
         }
         if let Some(reader) = self.reader.take() {
             #[cfg(unix)]
-            {
-                let _ = buzz_terminal::lifecycle::shutdown_draining(&mut self.child, reader);
-            }
+            let _ = buzz_terminal::lifecycle::shutdown_draining(&mut self.child, reader);
+            // Windows must also close the pseudo console, and only the helper
+            // knows when: see `lifecycle::shutdown_closing_console`.
             #[cfg(not(unix))]
-            {
-                reader.begin_closing();
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                reader.stop();
-                reader.join();
-            }
+            let _ = buzz_terminal::lifecycle::shutdown_closing_console(
+                &mut self.child,
+                reader,
+                self.master.take(),
+            );
         }
         if let Ok(mut channel) = self.channel.lock() {
             *channel = None;
