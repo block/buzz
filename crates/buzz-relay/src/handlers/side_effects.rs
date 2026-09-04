@@ -65,6 +65,13 @@ pub fn is_side_effect_kind(kind: u32) -> bool {
 /// after the effects complete (the re-add then succeeds cleanly). Cache
 /// invalidation fires unconditionally before the fence — stale-positive is
 /// always safe to drop.
+///
+/// The workflow-disable UPDATE (SEC-006) runs on the fence's own connection
+/// via [`buzz_db::channel_members::MembershipRemovalFence::commit_disabling_workflows`]
+/// rather than acquiring a second pool connection. This prevents a self-deadlock
+/// when N concurrent kicks ≥ pool size: each kick holds one connection while
+/// the disable would otherwise wait for a second — a cycle the 3 s acquire
+/// timeout would "resolve" by silently skipping the durable revocation.
 pub(crate) async fn apply_kick_live_side_effects(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -85,9 +92,37 @@ pub(crate) async fn apply_kick_live_side_effects(
         Ok(fence) => {
             if fence.still_removed {
                 // Still removed — fire effects while the lock is held.
+                // Eviction first (no DB write needed), then commit the fence
+                // with the workflow-disable UPDATE on the same connection so no
+                // second pool connection is needed (pool-exhaustion deadlock
+                // prevention — see module doc).
                 evict_live_channel_subscriptions(tenant, state, channel_id, target_pubkey).await;
-                disable_departed_member_workflows(tenant, state, channel_id, target_pubkey).await;
-                // Lock released here when `fence` is dropped.
+                match fence
+                    .commit_disabling_workflows(tenant.community(), channel_id, target_pubkey)
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        tracing::info!(
+                            channel = %channel_id,
+                            owner = %hex::encode(target_pubkey),
+                            disabled = n,
+                            "Disabled departed member's workflows"
+                        );
+                        state
+                            .workflow_engine
+                            .invalidate_channel_workflows(tenant.community(), channel_id);
+                    }
+                    Err(e) => {
+                        warn!(
+                            channel = %channel_id,
+                            owner = %hex::encode(target_pubkey),
+                            error = %e,
+                            "Failed to disable departed member's workflows — \
+                             per-fire authority gate still denies"
+                        );
+                    }
+                }
             } else {
                 // Member was re-added before this driver acquired the fence;
                 // skip eviction and workflow-disable so the re-add is not undone.
@@ -130,12 +165,19 @@ async fn evict_live_channel_subscriptions(
 
 /// Durably disable a departing member's workflows in the channel (SEC-006).
 ///
+/// Used by the inline remove paths (kind 9001 / kind 9022) where the member
+/// removal DB write has already committed and the caller does not hold a fence
+/// connection. For the fenced kick path (`apply_kick_live_side_effects`) use
+/// [`buzz_db::channel_members::MembershipRemovalFence::commit_disabling_workflows`]
+/// instead, which runs the UPDATE on the fence's own connection to avoid the
+/// pool-exhaustion self-deadlock.
+///
 /// A workflow runs with its owner's standing authority; once the owner is no
-/// longer a member (removed via kind 9001 or left via kind 9022) their
-/// workflows must stop firing on every path — event triggers, the scheduler,
-/// manual triggers, and the webhook endpoint all honor `enabled = FALSE`.
-/// The per-fire authority gate in `buzz-workflow` is the fail-closed backstop;
-/// this makes the revocation durable and immediately visible.
+/// longer a member their workflows must stop firing on every path — event
+/// triggers, the scheduler, manual triggers, and the webhook endpoint all
+/// honor `enabled = FALSE`. The per-fire authority gate in `buzz-workflow` is
+/// the fail-closed backstop; this makes the revocation durable and immediately
+/// visible.
 ///
 /// Failures are logged, not propagated: membership removal has already been
 /// committed, and the per-fire gate still denies a removed owner even if this

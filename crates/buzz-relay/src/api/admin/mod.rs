@@ -8489,4 +8489,126 @@ mod postgres_tests {
             "member must be active after add_member succeeds"
         );
     }
+
+    /// Pool-size-1 regression: `commit_disabling_workflows` runs the UPDATE on
+    /// the fence's own connection so no second pool connection is needed.
+    ///
+    /// This test would deadlock (or time out and skip the disable) on the
+    /// previous two-connection implementation: the fence holds the one available
+    /// connection while `disable_workflows_for_owner_in_channel(&pool, …)` waits
+    /// for another. With the fix, only the fence's connection is used for both
+    /// the lock and the UPDATE, so the test must complete and the workflow row
+    /// must be durably disabled.
+    #[tokio::test]
+    #[ignore = "requires Postgres — pool-size-1 fence workflow-disable does not self-deadlock"]
+    async fn pool_size_1_fence_commit_disabling_workflows_completes_without_deadlock() {
+        // Single-connection pool: every additional acquire blocks until the
+        // current holder releases. This makes the old two-connection path
+        // deterministically self-deadlock.
+        let url = database_url();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect with pool-size-1");
+
+        let (community_id, host) = e2e_community(&pool, "fence-pool1").await;
+        let cid = buzz_core::CommunityId::from_uuid(community_id);
+        let target = vec![0x11u8; 32];
+        let actor = vec![0x22u8; 32];
+
+        // Seed channel + member.
+        let channel_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
+               VALUES ($1, $2, 'fence-pool1-ch', 'stream', 'open', $3)"#,
+        )
+        .bind(channel_id)
+        .bind(community_id)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .expect("create channel");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) VALUES ($1, $2, $3, 'member')",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("add member");
+
+        // Simulate kick committed: set removed_at.
+        sqlx::query(
+            "UPDATE channel_members SET removed_at = now(), removed_by = $4 \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(&target)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .expect("kick member");
+
+        // Seed a user row and an enabled workflow for the target.
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        let state = state_from_pool(pool.clone()).await;
+        let workflow_id = state
+            .db
+            .create_workflow(
+                cid,
+                Some(channel_id),
+                &target,
+                "pool1-fence-workflow",
+                r#"{"kind":"workflow"}"#,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+
+        // Pre-condition: workflow is enabled.
+        assert!(
+            state
+                .db
+                .get_workflow(cid, workflow_id)
+                .await
+                .expect("get workflow")
+                .enabled,
+            "pre-condition: workflow must be enabled"
+        );
+
+        // The pool has max_connections=1. The fence acquires that one connection.
+        // On the old code, commit_disabling_workflows would try to acquire a
+        // SECOND connection from the pool here and deadlock (the fence still holds
+        // the first). With the fix, the UPDATE runs on the fence's own connection.
+        let tenant = buzz_core::tenant::TenantContext::resolved(cid, host.clone());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::handlers::side_effects::apply_kick_live_side_effects(
+                &tenant, &state, channel_id, &target,
+            ),
+        )
+        .await
+        .expect("apply_kick_live_side_effects must complete without deadlock on pool-size-1");
+
+        // Post-condition: workflow is disabled — the UPDATE committed.
+        assert!(
+            !state
+                .db
+                .get_workflow(cid, workflow_id)
+                .await
+                .expect("get workflow after effects")
+                .enabled,
+            "workflow must be durably disabled after kick live effects"
+        );
+    }
 }

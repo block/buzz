@@ -753,14 +753,53 @@ pub async fn verify_member_still_removed(
 /// the guard until after subscription eviction and workflow-disable complete,
 /// so that no concurrent [`add_member`] can commit between the `still_removed`
 /// observation and the destructive effects.
+///
+/// After firing all live side effects, call
+/// [`commit_disabling_workflows`][Self::commit_disabling_workflows] to run
+/// the durable workflow-disable UPDATE on this guard's own connection and
+/// commit the transaction (releasing the lock). If the guard is dropped
+/// without committing, the inner transaction rolls back — the advisory lock
+/// is released, but no domain writes persist.
 pub struct MembershipRemovalFence {
     /// `true` when the member row still has `removed_at IS NOT NULL` — i.e., no
     /// re-add has reversed the kick since it committed. When `false`, the caller
     /// must NOT fire eviction or workflow-disable.
     pub still_removed: bool,
-    // Keeps the advisory transaction lock alive. Rolled back (lock released)
-    // on drop — no domain writes happen here.
-    _tx: Transaction<'static, Postgres>,
+    // Holds the advisory transaction lock. The caller commits via
+    // `commit_disabling_workflows`; on drop without commit the tx rolls back.
+    tx: Transaction<'static, Postgres>,
+}
+
+impl MembershipRemovalFence {
+    /// Run the workflow-disable UPDATE on this guard's own connection, then
+    /// commit the transaction (releasing the advisory lock).
+    ///
+    /// By running the UPDATE inside the same connection that holds the lock,
+    /// no additional pool connection is needed — preventing the self-deadlock
+    /// that would arise from a pool-size-N scenario where every kick holds one
+    /// connection while trying to acquire a second for the disable write.
+    ///
+    /// The commit makes the disable durable before the lock is released, so
+    /// there is no window between "workflows disabled" and "lock released."
+    ///
+    /// On failure the transaction is rolled back (the advisory lock is still
+    /// released), and the error is returned to the caller to handle (log/skip).
+    pub async fn commit_disabling_workflows(
+        mut self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> crate::Result<u64> {
+        let affected = crate::workflow::disable_workflows_for_owner_in_channel_on_conn(
+            &mut self.tx,
+            community_id,
+            channel_id,
+            owner_pubkey,
+        )
+        .await?;
+        self.tx.commit().await?;
+        Ok(affected)
+    }
 }
 
 /// Acquire the per-channel membership advisory lock and check whether the
@@ -810,10 +849,7 @@ pub async fn membership_removal_fence(
         }
     };
 
-    Ok(MembershipRemovalFence {
-        still_removed,
-        _tx: tx,
-    })
+    Ok(MembershipRemovalFence { still_removed, tx })
 }
 
 /// Return which of the given (channel, pubkey) combinations are active
