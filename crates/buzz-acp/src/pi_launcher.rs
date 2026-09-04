@@ -37,9 +37,17 @@ impl PiLaunchOverride {
         agent_command: &str,
         base_prompt: Option<String>,
         managed_skills_dir: &Path,
+        inherited_pi_command_is_set: bool,
     ) -> io::Result<(Option<Self>, Option<String>)> {
         if crate::config::normalize_agent_command_identity(agent_command) != "pi-acp" {
             return Ok((None, base_prompt));
+        }
+
+        if inherited_pi_command_is_set {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "PI_ACP_PI_COMMAND is managed by Buzz; unset it before starting a managed Pi agent",
+            ));
         }
 
         // Buzz owns PI_ACP_PI_COMMAND and always uses it to point pi-acp at
@@ -235,16 +243,31 @@ mod tests {
     fn non_pi_adapter_keeps_base_prompt_for_acp_delivery() {
         let base = Some("Buzz base".to_string());
         let (prepared, remaining) =
-            PiLaunchOverride::prepare("goose", base.clone(), Path::new("/unused/skills"))
+            PiLaunchOverride::prepare("goose", base.clone(), Path::new("/unused/skills"), true)
                 .expect("prepare");
         assert!(prepared.is_none());
         assert_eq!(remaining, base);
     }
 
     #[test]
+    fn pi_adapter_rejects_inherited_pi_command() {
+        let error = PiLaunchOverride::prepare(
+            "pi-acp",
+            Some("Buzz base".to_string()),
+            Path::new("/unused/skills"),
+            true,
+        )
+        .err()
+        .expect("inherited PI_ACP_PI_COMMAND must be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("managed by Buzz"));
+    }
+
+    #[test]
     fn disabled_base_prompt_still_creates_pi_skills_launcher() {
         let (prepared, remaining) =
-            PiLaunchOverride::prepare("pi-acp", None, Path::new("/unused/skills"))
+            PiLaunchOverride::prepare("pi-acp", None, Path::new("/unused/skills"), false)
                 .expect("prepare");
         let prepared = prepared.expect("Pi skills launcher");
         assert!(remaining.is_none());
@@ -264,6 +287,7 @@ mod tests {
             "/opt/bin/pi-acp",
             Some(base.clone()),
             Path::new("/buzz/.agents/skills"),
+            false,
         )
         .expect("prepare");
         let prepared = prepared.expect("Pi launcher");

@@ -509,7 +509,7 @@ impl AcpClient {
                 continue;
             }
             let parent_has_value = std::env::var_os(key).is_some();
-            if should_apply_extra_env(key, parent_has_value) {
+            if !parent_has_value {
                 cmd.env(key, value);
             }
         }
@@ -2041,12 +2041,6 @@ impl AcpClient {
     }
 }
 
-fn should_apply_extra_env(key: &str, parent_has_value: bool) -> bool {
-    // buzz-acp strips user-provided copies and injects only its generated Pi
-    // launcher under this key, so it must override any inherited process value.
-    key == crate::pi_launcher::PI_ACP_PI_COMMAND_ENV || !parent_has_value
-}
-
 /// Build `session/prompt` params from one or more text content blocks.
 fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
@@ -2401,16 +2395,6 @@ mod tests {
             Some(StopReason::MaxTurnRequests)
         );
         assert_eq!(StopReason::from_str("Refusal"), Some(StopReason::Refusal));
-    }
-
-    #[test]
-    fn buzz_pi_launcher_overrides_inherited_adapter_command() {
-        assert!(should_apply_extra_env(
-            crate::pi_launcher::PI_ACP_PI_COMMAND_ENV,
-            true
-        ));
-        assert!(!should_apply_extra_env("ORDINARY_ENV", true));
-        assert!(should_apply_extra_env("ORDINARY_ENV", false));
     }
 
     #[test]
@@ -3139,27 +3123,6 @@ mod tests {
             spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn spawn_forces_generated_pi_launcher_into_adapter_environment() {
-        let launcher = "/tmp/buzz-generated-pi-launcher";
-        let extra_env = [(
-            crate::pi_launcher::PI_ACP_PI_COMMAND_ENV.to_string(),
-            launcher.to_string(),
-        )];
-
-        assert_eq!(
-            spawn_named_and_read_child_env(
-                "pi-acp",
-                crate::pi_launcher::PI_ACP_PI_COMMAND_ENV,
-                &extra_env,
-            )
-            .await,
-            launcher,
-            "pi-acp must observe Buzz's generated launcher even when the parent has PI_ACP_PI_COMMAND"
         );
     }
 

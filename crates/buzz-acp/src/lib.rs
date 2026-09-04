@@ -2534,10 +2534,13 @@ async fn tokio_main() -> Result<()> {
         .persona_env_vars
         .retain(|(key, _)| !key.eq_ignore_ascii_case(pi_launcher::PI_ACP_PI_COMMAND_ENV));
     let managed_skills_dir = std::path::Path::new(&cwd).join(".agents/skills");
+    let inherited_pi_command_is_set =
+        std::env::var_os(pi_launcher::PI_ACP_PI_COMMAND_ENV).is_some();
     let (pi_launch_override, base_prompt) = pi_launcher::PiLaunchOverride::prepare(
         &config.agent_command,
         base_prompt,
         &managed_skills_dir,
+        inherited_pi_command_is_set,
     )
     .context("failed to prepare Pi launch overrides")?;
     if let Some(prepared) = pi_launch_override.as_ref() {
