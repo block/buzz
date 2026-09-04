@@ -3049,9 +3049,13 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
                     typing_channels.insert(scope, thread_tags);
                 }
             }
@@ -3101,9 +3105,13 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (scope, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-            {
+            for (scope, thread_tags) in dispatch_pending(
+                &mut pool,
+                &mut queue,
+                &ctx,
+                &mut last_activity,
+                observer.as_ref(),
+            ) {
                 typing_channels.insert(scope, thread_tags);
             }
         }
@@ -3541,7 +3549,7 @@ async fn tokio_main() -> Result<()> {
                             );
                             if pool_ready {
                                 for (scope, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, observer.as_ref())
                                 {
                                     typing_channels.insert(scope, thread_tags);
                                 }
@@ -3641,7 +3649,7 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (scope, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, observer.as_ref())
                         {
                             typing_channels.insert(scope, thread_tags);
                         }
@@ -3742,9 +3750,13 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
                     typing_channels.insert(scope, thread_tags);
                 }
             }
@@ -3767,9 +3779,13 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
                     typing_channels.insert(scope, thread_tags);
                 }
             }
@@ -3921,9 +3937,13 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
                     typing_channels.insert(scope, thread_tags);
                 }
             }
@@ -3949,9 +3969,13 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (scope, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
+                        for (scope, thread_tags) in dispatch_pending(
+                            &mut pool,
+                            &mut queue,
+                            &ctx,
+                            &mut last_activity,
+                            observer.as_ref(),
+                        ) {
                             typing_channels.insert(scope, thread_tags);
                         }
                     }
@@ -4340,6 +4364,7 @@ fn dispatch_pending(
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
     last_activity: &mut tokio::time::Instant,
+    observer: Option<&observer::ObserverHandle>,
 ) -> Vec<(scope::SessionScope, ThreadTags)> {
     // Keyed by the exact session scope, not the channel: two threads dispatching
     // concurrently in one channel get distinct typing entries so completing one
@@ -4348,9 +4373,13 @@ fn dispatch_pending(
     // Batches held back this cycle because the worker that owns their thread's
     // session is busy. They stay flushed-out of the queue (in-flight) until we
     // release them at the end so `flush_next` cannot re-pick them mid-loop;
-    // releasing requeues them so the next dispatch (when the owner returns)
-    // reuses that exact session instead of forking a duplicate.
+    // releasing requeues them so the next dispatch (when the owner returns, or
+    // once the bounded hold expires) reuses that exact session or forks a fresh
+    // one instead of starving.
     let mut held: Vec<FlushBatch> = Vec::new();
+    // One clock read for the whole cycle so every batch's bounded-hold window is
+    // measured against the same instant.
+    let now = std::time::Instant::now();
     loop {
         let batch = match queue.flush_next() {
             Some(b) => b,
@@ -4358,17 +4387,68 @@ fn dispatch_pending(
         };
         let channel_id = batch.channel_id;
         let scope = batch.scope.clone();
-        // Authoritative affinity: if the worker that owns this thread's session
-        // is checked out (busy on another turn), hold the batch rather than let
-        // an idle worker open a second session for the same thread.
-        if pool.should_hold_for_busy_owner(&scope) {
-            tracing::debug!(
-                channel = %channel_id,
-                scope = %scope.telemetry_label(),
-                "holding batch — session owner busy; awaiting its return to avoid duplicate session"
-            );
-            held.push(batch);
-            continue;
+        // Authoritative affinity, variant-gated and bounded: only a `Thread`
+        // scope whose session owner is checked out (busy on another turn) is
+        // held, and only until `HOLD_BUSY_OWNER_TIMEOUT` elapses. `Conversation`
+        // scopes never hold — a busy owner there forks onto another idle worker,
+        // so an active channel cannot starve a sibling channel on a shared
+        // worker. A held thread that outwaits the window forks a fresh session
+        // rather than starve behind an unbounded turn.
+        match pool.hold_decision(&scope, now, pool::HOLD_BUSY_OWNER_TIMEOUT) {
+            pool::HoldDecision::Hold {
+                held_for,
+                owner_index,
+            } => {
+                tracing::info!(
+                    channel = %channel_id,
+                    scope = %scope.telemetry_label(),
+                    owner_index,
+                    held_for_secs = held_for.as_secs_f64(),
+                    "busy-owner hold — thread session owner busy; awaiting its return"
+                );
+                if let Some(observer) = observer {
+                    observer.emit(
+                        "busy_owner_hold",
+                        None,
+                        &observer::context_for(Some(channel_id), None, None),
+                        serde_json::json!({
+                            "scope": scope.telemetry_label(),
+                            "ownerIndex": owner_index,
+                            "heldForSecs": held_for.as_secs_f64(),
+                            "timeoutSecs": pool::HOLD_BUSY_OWNER_TIMEOUT.as_secs_f64(),
+                        }),
+                    );
+                }
+                held.push(batch);
+                continue;
+            }
+            pool::HoldDecision::ForkAfterHold {
+                held_for,
+                owner_index,
+            } => {
+                tracing::warn!(
+                    channel = %channel_id,
+                    scope = %scope.telemetry_label(),
+                    owner_index,
+                    held_for_secs = held_for.as_secs_f64(),
+                    "busy-owner hold expired — forking fresh session on an idle worker"
+                );
+                if let Some(observer) = observer {
+                    observer.emit(
+                        "busy_owner_hold_forked",
+                        None,
+                        &observer::context_for(Some(channel_id), None, None),
+                        serde_json::json!({
+                            "scope": scope.telemetry_label(),
+                            "ownerIndex": owner_index,
+                            "heldForSecs": held_for.as_secs_f64(),
+                        }),
+                    );
+                }
+                // Fall through to try_claim below (fork); record_scope_owner
+                // reassigns ownership to the new worker automatically.
+            }
+            pool::HoldDecision::Dispatch => {}
         }
         let typing_scope = batch
             .events
@@ -6117,12 +6197,60 @@ mod owner_control_command_tests {
         // A brand-new thread with no recorded owner is never held.
         assert!(!pool.should_hold_for_busy_owner(&thread_scope(ch, &"d".repeat(64))));
 
-        // Channel-wide session invalidation prunes the directory so a stale
-        // owner can never strand a held batch.
+        // The bounded hold decision stamps A's first-held time, then forks once
+        // the window elapses rather than starving behind the busy owner.
+        let now = std::time::Instant::now();
+        assert!(
+            matches!(
+                pool.hold_decision(&ta, now, pool::HOLD_BUSY_OWNER_TIMEOUT),
+                pool::HoldDecision::Hold { .. }
+            ),
+            "busy owner within window => hold"
+        );
+        assert!(pool.held_since_contains(&ta), "hold stamps first-held time");
+        assert!(
+            matches!(
+                pool.hold_decision(
+                    &ta,
+                    now + pool::HOLD_BUSY_OWNER_TIMEOUT,
+                    pool::HOLD_BUSY_OWNER_TIMEOUT
+                ),
+                pool::HoldDecision::ForkAfterHold { .. }
+            ),
+            "elapsed window => fork on an idle worker"
+        );
+        assert!(
+            !pool.held_since_contains(&ta),
+            "fork clears the first-held stamp"
+        );
+
+        // A conversation scope never holds even with a busy recorded owner —
+        // this is the cross-channel head-of-line-blocking regression guard.
+        let cs = scope::SessionScope::Conversation { channel_id: ch };
+        pool.record_scope_owner(cs.clone(), 0);
+        assert_eq!(
+            pool.hold_decision(&cs, now, pool::HOLD_BUSY_OWNER_TIMEOUT),
+            pool::HoldDecision::Dispatch,
+            "conversation scope forks a busy owner rather than holding"
+        );
+
+        // Re-stamp A's hold so channel invalidation has an entry to prune.
+        assert!(matches!(
+            pool.hold_decision(&ta, now, pool::HOLD_BUSY_OWNER_TIMEOUT),
+            pool::HoldDecision::Hold { .. }
+        ));
+        assert!(pool.held_since_contains(&ta));
+
+        // Channel-wide session invalidation prunes the owner directory and the
+        // hold stamps so a stale owner can never strand a held batch.
         pool.invalidate_channel_sessions(ch);
         assert!(
             !pool.should_hold_for_busy_owner(&ta),
             "owner directory pruned on channel invalidation"
+        );
+        assert!(
+            !pool.held_since_contains(&ta),
+            "hold stamps pruned on channel invalidation"
         );
     }
 
