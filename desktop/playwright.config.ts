@@ -123,6 +123,7 @@ export default defineConfig({
         "**/human-edit-agent-content.spec.ts",
         "**/empty-edit-delete.spec.ts",
         "**/reaction-order.spec.ts",
+        "**/quick-reaction-sharing.spec.ts",
         "**/reaction-names.spec.ts",
         "**/inbox-reactions.spec.ts",
         "**/inbox-edit.spec.ts",

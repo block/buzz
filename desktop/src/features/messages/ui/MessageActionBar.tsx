@@ -18,7 +18,6 @@ import { toast } from "sonner";
 
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
-import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { ReportMessageDialog } from "@/features/moderation/ui/ReportMessageDialog";
 import { MessageModerationMenuItems } from "@/features/moderation/ui/MessageModerationMenuItems";
@@ -26,11 +25,8 @@ import type {
   TimelineMessage,
   TimelineReaction,
 } from "@/features/messages/types";
-import {
-  recordQuickReactionEmoji,
-  useQuickReactionEmojis,
-} from "@/features/messages/ui/useQuickReactionEmojis";
-import { reactionEmojiUrl } from "@/shared/api/customEmoji";
+import { recordQuickReactionEmoji } from "@/features/messages/ui/useQuickReactionEmojis";
+import { useQuickReactionItems } from "./QuickReactionProvider";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
@@ -378,10 +374,6 @@ function QuickReactionButton({
   );
 }
 
-function isCustomEmojiShortcode(emoji: string) {
-  return emoji.startsWith(":") && emoji.endsWith(":");
-}
-
 export const MessageActionBar = React.memo(function MessageActionBar({
   channelId,
   message,
@@ -425,20 +417,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
-  const customEmoji = useCustomEmoji();
-  const quickReactionEmojis = useQuickReactionEmojis(3, customEmoji);
-  const quickReactionItems = React.useMemo(
-    () =>
-      quickReactionEmojis
-        .map((emoji) => ({
-          customEmojiUrl: reactionEmojiUrl(emoji, customEmoji),
-          emoji,
-        }))
-        .filter(
-          (item) => !isCustomEmojiShortcode(item.emoji) || item.customEmojiUrl,
-        ),
-    [customEmoji, quickReactionEmojis],
-  );
+  const quickReactionItems = useQuickReactionItems();
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
 
