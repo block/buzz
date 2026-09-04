@@ -4,9 +4,13 @@
 //! the identity nsec is handed to `git-credential-nostr` via environment
 //! variables so nothing key-related ever touches disk or global git config.
 
-use crate::{app_state::AppState, managed_agents::resolve_command};
+use crate::{
+    app_state::AppState,
+    managed_agents::{login_shell_path, resolve_command},
+};
 use nostr::{Keys, ToBech32};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -16,6 +20,191 @@ use url::Url;
 /// `spawn_blocking` threads indefinitely.
 const LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const REMOTE_GIT_TIMEOUT: Duration = Duration::from_secs(300);
+const MIN_GIT_VERSION: (u64, u64) = (2, 46);
+/// Deadline for a single `git --version` probe. Discovery runs on the
+/// caller's thread before any git work reaches `spawn_blocking`, so a broken
+/// candidate must fail fast instead of pinning the first auth-config build.
+const PROBE_GIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// `git --version` prints one short line; cap the capture so an arbitrary
+/// binary on a candidate path cannot balloon memory.
+const PROBE_OUTPUT_LIMIT: u64 = 4096;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitVersion {
+    major: u64,
+    minor: u64,
+    display: String,
+}
+
+fn parse_git_version(output: &str) -> Option<GitVersion> {
+    let display = output.trim().strip_prefix("git version ")?.to_string();
+    let numeric = display.split_whitespace().next()?;
+    let mut parts = numeric.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some(GitVersion {
+        major,
+        minor,
+        display,
+    })
+}
+
+fn probe_git_version(path: &Path) -> Result<GitVersion, String> {
+    probe_git_version_with_deadline(path, PROBE_GIT_TIMEOUT)
+}
+
+fn probe_git_version_with_deadline(path: &Path, timeout: Duration) -> Result<GitVersion, String> {
+    // Capture stdout in a regular file rather than a pipe: a file read never
+    // blocks on EOF, so a candidate that leaves a descendant holding the
+    // write end cannot stall discovery past the deadline.
+    let mut stdout_file =
+        tempfile::tempfile().map_err(|error| format!("{}: {error}", path.display()))?;
+    let stdout_handle = stdout_file
+        .try_clone()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut command = Command::new(path);
+    command
+        .arg("--version")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_handle))
+        .stderr(Stdio::null());
+    crate::util::configure_no_window(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{}: version probe timed out after {:?}",
+                        path.display(),
+                        timeout
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{}: failed to wait for version probe: {error}",
+                    path.display()
+                ));
+            }
+        }
+    };
+    if !status.success() {
+        return Err(format!("{}: exited with {status}", path.display()));
+    }
+    stdout_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    let _ = stdout_file
+        .by_ref()
+        .take(PROBE_OUTPUT_LIMIT)
+        .read_to_end(&mut bytes);
+    let stdout = String::from_utf8_lossy(&bytes);
+    parse_git_version(&stdout).ok_or_else(|| {
+        format!(
+            "{}: unrecognized version output `{}`",
+            path.display(),
+            stdout.trim()
+        )
+    })
+}
+
+fn select_compatible_git(
+    candidates: Vec<PathBuf>,
+    mut probe: impl FnMut(&Path) -> Result<GitVersion, String>,
+) -> Result<PathBuf, String> {
+    if candidates.is_empty() {
+        return Err(
+            "git was not found on PATH, the login-shell PATH, or the platform install locations"
+                .to_string(),
+        );
+    }
+
+    let mut found = Vec::new();
+    for path in candidates {
+        match probe(&path) {
+            Ok(version) if (version.major, version.minor) >= MIN_GIT_VERSION => {
+                return Ok(path);
+            }
+            Ok(version) => found.push(format!("{} at {}", version.display, path.display())),
+            Err(error) => found.push(error),
+        }
+    }
+
+    Err(format!(
+        "Buzz Git authentication requires Git {}.{} or newer. Found: {}. Install a compatible Git and restart Buzz.",
+        MIN_GIT_VERSION.0,
+        MIN_GIT_VERSION.1,
+        found.join(", ")
+    ))
+}
+
+fn git_candidate_paths() -> Vec<PathBuf> {
+    let executable = if cfg!(windows) { "git.exe" } else { "git" };
+    let mut candidates = Vec::new();
+    let mut push_candidate = |candidate: PathBuf| {
+        if candidate.is_file() && !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
+
+    if let Some(path) = resolve_command("git") {
+        push_candidate(path);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            push_candidate(directory.join(executable));
+        }
+    }
+    if let Some(path) = login_shell_path() {
+        for directory in std::env::split_paths(&path) {
+            push_candidate(directory.join(executable));
+        }
+    }
+
+    #[cfg(not(windows))]
+    for path in [
+        "/opt/homebrew/bin/git",
+        "/opt/local/bin/git",
+        "/usr/local/bin/git",
+        "/usr/bin/git",
+    ] {
+        push_candidate(PathBuf::from(path));
+    }
+    #[cfg(windows)]
+    for root in [
+        std::env::var_os("ProgramFiles"),
+        std::env::var_os("ProgramFiles(x86)"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push_candidate(PathBuf::from(root).join("Git").join("cmd").join(executable));
+    }
+
+    candidates
+}
+
+fn resolve_compatible_git() -> Result<PathBuf, String> {
+    use std::sync::OnceLock;
+    static COMPATIBLE_GIT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    COMPATIBLE_GIT
+        .get_or_init(|| select_compatible_git(git_candidate_paths(), probe_git_version))
+        .clone()
+}
 
 fn git_subcommand<'a>(args: &'a [&str]) -> Option<&'a str> {
     let mut index = 0;
@@ -220,7 +409,7 @@ pub(crate) fn build_git_clone_auth_config(
 }
 
 pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfig, String> {
-    let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
+    let git_path = resolve_compatible_git()?;
     let credential_helper = resolve_command("git-credential-nostr");
     let nsec = keys
         .secret_key()
@@ -394,9 +583,110 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 mod tests {
     use super::{
         clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
-        validate_local_clone_url,
+        git_subcommand, parse_git_version, select_compatible_git, validate_clone_url,
+        validate_clone_url_against_relay, validate_local_clone_url, GitVersion,
     };
+
+    #[test]
+    fn parses_platform_git_versions() {
+        assert_eq!(
+            parse_git_version("git version 2.39.5 (Apple Git-154)\n"),
+            Some(GitVersion {
+                major: 2,
+                minor: 39,
+                display: "2.39.5 (Apple Git-154)".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_git_version("git version 2.47.1.windows.1\n"),
+            Some(GitVersion {
+                major: 2,
+                minor: 47,
+                display: "2.47.1.windows.1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn compatible_git_selection_skips_an_older_first_candidate() {
+        let old = std::path::PathBuf::from("/usr/bin/git");
+        let current = std::path::PathBuf::from("/opt/local/bin/git");
+        let selected = select_compatible_git(vec![old.clone(), current.clone()], |path| {
+            if path == old {
+                Ok(GitVersion {
+                    major: 2,
+                    minor: 39,
+                    display: "2.39.5 (Apple Git-154)".to_string(),
+                })
+            } else {
+                Ok(GitVersion {
+                    major: 2,
+                    minor: 47,
+                    display: "2.47.0".to_string(),
+                })
+            }
+        })
+        .expect("compatible Git should be selected");
+
+        assert_eq!(selected, current);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_kills_a_hung_git_and_returns_promptly() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fake_git = dir.path().join("git");
+        let mut file = std::fs::File::create(&fake_git).expect("create fake git");
+        write!(file, "#!/bin/sh\nsleep 600\n").expect("write fake git");
+        drop(file);
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
+            .expect("mark fake git executable");
+
+        let started = std::time::Instant::now();
+        let error = super::probe_git_version_with_deadline(
+            &fake_git,
+            std::time::Duration::from_millis(200),
+        )
+        .expect_err("hung probe must time out");
+
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "probe did not return promptly: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn empty_candidate_error_reports_all_searched_locations() {
+        let error = select_compatible_git(vec![], |_| -> Result<GitVersion, String> {
+            unreachable!("no candidates to probe")
+        })
+        .expect_err("empty candidates must error");
+        assert!(
+            error.contains("login-shell PATH"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn incompatible_git_error_names_the_version_and_path() {
+        let path = std::path::PathBuf::from("/usr/bin/git");
+        let error = select_compatible_git(vec![path], |_| {
+            Ok(GitVersion {
+                major: 2,
+                minor: 39,
+                display: "2.39.5 (Apple Git-154)".to_string(),
+            })
+        })
+        .expect_err("old Git must be rejected");
+
+        assert!(error.contains("requires Git 2.46 or newer"));
+        assert!(error.contains("2.39.5 (Apple Git-154) at /usr/bin/git"));
+    }
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {
