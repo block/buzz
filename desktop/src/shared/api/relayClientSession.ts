@@ -725,6 +725,7 @@ export class RelayClient {
     event: RelayEvent,
     timeoutMessage: string,
     sendErrorMessage: string,
+    assertActive?: () => void,
   ) {
     return publishSessionEvent(
       {
@@ -742,6 +743,7 @@ export class RelayClient {
       event,
       timeoutMessage,
       sendErrorMessage,
+      assertActive,
     );
   }
 

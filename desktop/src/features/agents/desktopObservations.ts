@@ -35,6 +35,7 @@ export async function refreshDesktopObservations(
         event,
         "Desktop pulse timed out",
         "Desktop pulse failed",
+        check,
       ),
     );
   } catch {
@@ -48,7 +49,13 @@ export async function refreshDesktopObservations(
   const rows = await wait(
     ipc<DesktopObservation[]>("read_desktop_observations", {
       ...scope,
-      events,
+      // History is chronological and may include a live replacement before EOSE.
+      // First matching host wins in the view: newest signed time, then lower ID.
+      events: [...events].sort(
+        (a, b) =>
+          b.created_at - a.created_at ||
+          (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      ),
     }),
   );
   return { rows, warning, partial: events.length === 100 };
