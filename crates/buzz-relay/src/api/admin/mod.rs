@@ -8613,19 +8613,307 @@ mod postgres_tests {
         );
     }
 
-    /// Failure-path regression: when `apply_kick_live_side_effects` fails, the
-    /// action must NOT be finalized as `succeeded`.
+    /// Workflow-disable transaction failure regression: the specific seam that
+    /// SEC-006 protects.
     ///
-    /// Without the error-propagation fix the caller (drive_enforcement) would
-    /// ignore the `Err` and proceed to `finalize_action_success`, falsely
-    /// recording the kick as `succeeded` while the SEC-006 workflow-disable
-    /// never committed.
+    /// A `BEFORE UPDATE` trigger on `workflows` is installed to raise an
+    /// exception when the workflow-disable UPDATE fires (after fence acquisition
+    /// and member eviction have already succeeded).  The trigger is scoped to
+    /// one workflow row so it cannot affect unrelated tests running concurrently.
     ///
-    /// This test sets `mutation_committed` directly (simulating the state after
-    /// a crash or concurrent re-drive), then calls `drive_enforcement_pub` with
-    /// a pool that has been closed so the fence acquisition fails immediately.
-    /// The expected outcome is `Err(Internal)` and the action remains at
-    /// `mutation_committed` in `enforcing` state — retryable, not succeeded.
+    /// Phase 1 — fault injected:
+    ///   `drive_enforcement_pub` must return `Err` and leave the action at
+    ///   `enforcing / mutation_committed`.  The workflow must remain enabled
+    ///   (disable rolled back).
+    ///
+    /// Phase 2 — fault removed, lease expired, recovery worker re-drives:
+    ///   `claim_stranded_action_batch` must surface the action, `recover_one`
+    ///   must drive it to `succeeded`, and the workflow must be durably disabled.
+    ///
+    /// This test was introduced because the original failure-path test only
+    /// exercised the fence-acquisition arm (closed pool, pre-effects).  The
+    /// transaction-failure arm — the actual finding — was structurally correct
+    /// but unbound.
+    #[tokio::test]
+    #[ignore = "requires Postgres — workflow-disable tx failure must not finalize kick as succeeded, and recovery worker must converge"]
+    async fn kick_live_effects_disable_tx_failure_does_not_finalize_and_retries_to_success() {
+        let pool = e2e_pool().await;
+        let (community_id, host) = e2e_community(&pool, "wf-tx-fail").await;
+        let cid = buzz_core::CommunityId::from_uuid(community_id);
+        let target = vec![0xEEu8; 32];
+        let actor = vec![0xFFu8; 32];
+
+        // Seed channel + member.
+        let channel_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
+               VALUES ($1, $2, 'wf-tx-fail-ch', 'stream', 'open', $3)"#,
+        )
+        .bind(channel_id)
+        .bind(community_id)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .expect("create channel");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) VALUES ($1, $2, $3, 'member')",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("add member");
+
+        // Seed user + enabled workflow owned by the kick target.
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        let state = state_from_pool(pool.clone()).await;
+        let workflow_id = state
+            .db
+            .create_workflow(
+                cid,
+                Some(channel_id),
+                &target,
+                "wf-tx-fail-workflow",
+                r#"{"kind":"workflow"}"#,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+
+        // Confirm pre-condition: workflow enabled.
+        assert!(
+            state
+                .db
+                .get_workflow(cid, workflow_id)
+                .await
+                .expect("get workflow")
+                .enabled,
+            "pre-condition: workflow must be enabled"
+        );
+
+        // Claim → enforcing → lease → execute kick mutation + marker.
+        let report_id = e2e_report_pubkey(&pool, community_id, &target).await;
+        let action_id = match buzz_db::relay_admin_actions::claim_report(
+            &pool,
+            cid,
+            report_id,
+            uuid::Uuid::new_v4(),
+            &actor,
+            "operator",
+            "kick",
+            None,
+            None,
+            "resolve:kick",
+            "relay_operator",
+            Some(&target),
+            None,
+            Some(channel_id),
+        )
+        .await
+        .expect("claim")
+        {
+            buzz_db::relay_admin_actions::ClaimResult::Claimed(a) => a.id,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let _ = buzz_db::relay_admin_actions::begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        let lease_until = chrono::Utc::now() + chrono::Duration::seconds(120);
+        let lease_token =
+            match buzz_db::relay_admin_actions::acquire_action_lease(&pool, action_id, lease_until)
+                .await
+                .expect("acquire lease")
+            {
+                buzz_db::relay_admin_actions::LeaseResult::Acquired(t) => t,
+                other => panic!("expected Acquired, got {other:?}"),
+            };
+        buzz_db::relay_admin_actions::execute_kick_with_marker(
+            &pool,
+            action_id,
+            lease_token,
+            cid,
+            channel_id,
+            &target,
+            &actor,
+        )
+        .await
+        .expect("execute_kick_with_marker");
+
+        // Pre-condition: mutation_committed set, action still enforcing.
+        let rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("action exists");
+        assert_eq!(rec.step_marker.as_deref(), Some("mutation_committed"));
+        assert_eq!(rec.state, "enforcing");
+
+        // ── Phase 1: inject a trigger that raises on workflow-disable UPDATE ──
+        //
+        // The trigger function raises immediately for the seeded workflow row so
+        // the UPDATE inside `commit_disabling_workflows` fails after the fence
+        // acquires its connection and the member row is already removed.  It is
+        // DROP-ped before the retry, so recovery sees a clean database.
+        let fn_name = format!("raise_for_wf_{}", workflow_id.simple());
+        let trigger_name = format!("trg_raise_for_wf_{}", workflow_id.simple());
+
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"
+            CREATE OR REPLACE FUNCTION {fn_name}()
+            RETURNS TRIGGER LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.id = '{workflow_id}' THEN
+                    RAISE EXCEPTION 'injected fault: workflow-disable tx failure for test';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            "#
+        )))
+        .execute(&pool)
+        .await
+        .expect("create fault-injection function");
+
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"
+            CREATE TRIGGER {trigger_name}
+            BEFORE UPDATE ON workflows
+            FOR EACH ROW EXECUTE FUNCTION {fn_name}()
+            "#
+        )))
+        .execute(&pool)
+        .await
+        .expect("create fault-injection trigger");
+
+        // Drive enforcement — the workflow-disable UPDATE will raise, which
+        // means `commit_disabling_workflows` returns Err, which propagates
+        // through `apply_kick_live_side_effects` and out of `drive_enforcement`
+        // BEFORE `finalize_action_success`.
+        let tenant = e2e_tenant(community_id, &host);
+        let result = crate::handlers::report_resolution::drive_enforcement_pub(
+            &state,
+            &tenant,
+            cid,
+            report_id,
+            "kick",
+            None,
+            None,
+            &actor,
+            Some(&target),
+            None,
+            Some(channel_id),
+            &rec,
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "drive_enforcement_pub must return Err when workflow-disable tx fails, got Ok"
+        );
+
+        // Action must remain enforcing / mutation_committed — not succeeded.
+        let after_fault = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action after fault")
+            .expect("record must still exist");
+        assert_eq!(
+            after_fault.state, "enforcing",
+            "action must remain enforcing when disable tx fails, not finalize as succeeded"
+        );
+        assert_eq!(
+            after_fault.step_marker.as_deref(),
+            Some("mutation_committed"),
+            "mutation_committed marker must be preserved for retry"
+        );
+
+        // Workflow must still be enabled — the UPDATE rolled back.
+        assert!(
+            state
+                .db
+                .get_workflow(cid, workflow_id)
+                .await
+                .expect("get workflow after fault")
+                .enabled,
+            "workflow must remain enabled after rolled-back disable tx"
+        );
+
+        // ── Phase 2: remove fault, expire lease, recovery worker converges ────
+
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP TRIGGER IF EXISTS {trigger_name} ON workflows"
+        )))
+        .execute(&pool)
+        .await
+        .expect("drop fault trigger");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP FUNCTION IF EXISTS {fn_name}()"
+        )))
+        .execute(&pool)
+        .await
+        .expect("drop fault function");
+
+        // Expire the lease so claim_stranded_action_batch can reclaim it.
+        sqlx::query(
+            "UPDATE relay_admin_actions SET action_lease_expires_at = $2, action_lease_token = NULL WHERE id = $1",
+        )
+        .bind(action_id)
+        .bind(chrono::Utc::now() - chrono::Duration::seconds(300))
+        .execute(&pool)
+        .await
+        .expect("expire lease");
+
+        let batch = buzz_db::relay_admin_actions::claim_stranded_action_batch(
+            &pool,
+            "e2e-wf-tx-fail-worker",
+            chrono::Utc::now() + chrono::Duration::seconds(120),
+            1000,
+        )
+        .await
+        .expect("claim_stranded_action_batch");
+        let claim = batch
+            .into_iter()
+            .find(|c| c.record.id == action_id)
+            .expect("stranded action must appear in batch after lease expiry");
+
+        crate::handlers::admin_action_worker::recover_one(&state, claim).await;
+
+        // Recovery must have succeeded and disabled the workflow durably.
+        let final_rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action after recover_one")
+            .expect("record still exists");
+        assert_eq!(
+            final_rec.state, "succeeded",
+            "action must be succeeded after recovery worker re-drives with fault removed"
+        );
+
+        let wf_after = state
+            .db
+            .get_workflow(cid, workflow_id)
+            .await
+            .expect("get workflow after recovery");
+        assert!(
+            !wf_after.enabled,
+            "workflow must be durably disabled after successful recovery re-drive"
+        );
+    }
+
+    /// Failure-path regression (fence-acquire arm): when `apply_kick_live_side_effects`
+    /// fails because fence acquisition itself fails, the action must NOT be
+    /// finalized as `succeeded`.
+    ///
+    /// This test closes the pool before `drive_enforcement_pub` so the fence
+    /// acquire fails immediately, binding the propagation arm for that failure
+    /// mode.  For the disable-UPDATE/commit-failure arm, see
+    /// `kick_live_effects_disable_tx_failure_does_not_finalize_and_retries_to_success`.
     #[tokio::test]
     #[ignore = "requires Postgres — live-effects failure must not finalize action as succeeded"]
     async fn kick_live_effects_failure_does_not_finalize_as_succeeded() {
