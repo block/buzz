@@ -53,8 +53,27 @@ export function BotActivityComposerAction({
       workingBotPubkeys.map((pubkey) => pubkey.toLowerCase()),
     );
 
-    return agents.filter((agent) => workingSet.has(agent.pubkey.toLowerCase()));
-  }, [agents, workingBotPubkeys]);
+    const managed = agents.filter((agent) =>
+      workingSet.has(agent.pubkey.toLowerCase()),
+    );
+    if (managed.length > 0 || workingBotPubkeys.length === 0) {
+      return managed;
+    }
+
+    // This install does not manage the working agents — e.g. a second desktop
+    // signed in with the same owner identity. The observer stream is scoped to
+    // the owner, not the managing install, so activity is still renderable;
+    // derive display entries from the relay profile lookup instead of the
+    // local managed-agent registry.
+    return workingBotPubkeys.map((pubkey) => {
+      const profile = profiles?.[pubkey.toLowerCase()];
+
+      return {
+        pubkey,
+        name: profile?.displayName || profile?.name || "Agent",
+      };
+    });
+  }, [agents, profiles, workingBotPubkeys]);
   const singleWorkingAgent =
     workingAgents.length === 1 ? (workingAgents[0] ?? null) : null;
   const transcript = useAgentTranscript(
