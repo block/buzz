@@ -351,3 +351,32 @@ See the [root TESTING.md](../../TESTING.md) for the full integration testing gui
 ## License
 
 Apache-2.0
+
+### Transport overflow recovery
+
+The bounded event queue can overflow if the consumer falls behind. The socket
+owner records the oldest dropped timestamp per channel (and for membership
+notifications), removes dropped IDs from transport dedup, and coalesces recovery.
+It attempts **one affected subscription at most every five seconds**, only when
+at least half the consumer queue is free and the shared relay quota gate permits
+it. Least-recently-attempted selection prevents a busy channel from monopolizing
+recovery. Healthy subscriptions are not swept. A failed write retains the pending
+cursor and is paced as well; there is no retry-count cutoff that abandons loss.
+Actual connection loss still uses the existing reconnect/restore path.
+
+IDs, filters, five-second timestamp overlap and replay-attempt semantics are
+unchanged: a successful REQ write retires the pending drop cursor, **not because
+it proves delivery**. A new overflow records another cursor. EOSE is not a
+consumer receipt, and overlapping stable-ID requests cannot certify exact replay
+completion. Missing history/EOSE, loss after a successful write followed by a
+disconnect, relay history limits, additive proxy watch replay and downstream
+agent processing retain their existing limitations. No exactly-once or durable
+catch-up guarantee is introduced here.
+
+Progress requires recurring consumer headroom and available relay history. A
+permanently stalled consumer cannot recover; pending attempts wait rather than
+amplifying its backlog. An individual WebSocket write can still occupy the socket
+owner up to the existing ten-second send timeout; recovery no longer performs a
+paced all-subscription loop between socket reads. This bound covers overflow
+recovery, not initial subscriptions, genuine reconnects, CLOSED recovery, or HTTP
+request retries.
