@@ -306,9 +306,10 @@ with a TypeScript lookup table or an id comparison in a component.
 
 ## Remote Desktop Stop
 
-Native IPC accepts an owner-private, explicitly selected agent+Desktop Stop,
-not inferred agent location. The relay redelivers stored Stop duplicates without
-repeating relay side effects.
+Known Desktops exposes an owner-private, explicitly selected agent+Desktop Stop,
+not inferred agent location. The app-scoped receiver subscribes live only;
+reopening never replays commands. An explicit retry republishes the exact request;
+the relay redelivers stored Stop duplicates without repeating relay side effects.
 The receiver returns saved results or Unknown, never repeats a consumed Stop.
 Native owner-delegation and community checks
 precede durable admission and ordinary pair Stop. A delivery ACK is not success.
