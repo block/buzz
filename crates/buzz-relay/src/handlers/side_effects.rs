@@ -39,10 +39,18 @@ pub fn is_side_effect_kind(kind: u32) -> bool {
 
 /// Apply the three live side effects that must follow a successful admin kick:
 ///
-/// 1. `invalidate_membership` — drops the 10 s membership-cache entry locally
-///    AND cross-pod, so subsequent REQ/fan-out checks see the removal immediately.
-/// 2. `evict_live_channel_subscriptions` — closes every open channel subscription
-///    for the kicked pubkey so they stop receiving messages from this channel.
+/// 1. `invalidate_membership` — drops the 10 s membership-cache entry on this pod
+///    AND publishes a cross-pod `CacheInvalidation::Membership` message so every
+///    other relay instance also drops the entry. Subsequent REQ / fan-out
+///    `is_member_cached` calls on any pod see the removal immediately.
+/// 2. `evict_live_channel_subscriptions` — closes open channel subscriptions for
+///    the kicked pubkey **on this pod only**. A session connected to a different
+///    pod keeps its inert subscription state, but will not receive messages from
+///    this channel: the cross-pod membership invalidation (step 1) ensures that
+///    `filter_fanout_by_access` re-checks membership before delivery and denies
+///    the removed user on every pod. The same pod-local eviction primitive is
+///    used by the remove (kind 9001) and leave (kind 9022) paths; cross-pod
+///    remote `CLOSED` frame delivery is not yet implemented (tracked separately).
 /// 3. `disable_departed_member_workflows` — durably disables any workflows the
 ///    kicked user owned in this channel (SEC-006).
 ///
