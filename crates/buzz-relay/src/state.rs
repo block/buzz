@@ -72,6 +72,13 @@ pub(crate) struct CommunityConnectionControl {
     /// Written once by the handler immediately after successful auth; the
     /// registry's `disconnect_nip_fi` scan reads it to match targeted closures.
     proven_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+    /// Terminal-frame sender registered by audio handlers after the terminal
+    /// channel is created.  `disconnect_nip_fi` enqueues the route-specific
+    /// denial frame here before publishing the reason and cancelling, so the
+    /// send loop (or pre-send-loop drain) delivers the payload before the `1008`
+    /// close.  `None` for socket types that never register a sender (e.g. root
+    /// relay connections, which use a separate `ctrl_tx` path).
+    terminal_frame_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<WsMessage>>>>,
 }
 
 impl CommunityConnectionControl {
@@ -81,6 +88,7 @@ impl CommunityConnectionControl {
             cancel,
             reason_tx,
             proven_pubkey: Arc::new(std::sync::RwLock::new(None)),
+            terminal_frame_tx: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -109,6 +117,19 @@ impl CommunityConnectionControl {
         }
     }
 
+    /// Registers the audio terminal-frame sender so `disconnect_nip_fi` can
+    /// enqueue the denial payload before cancelling.
+    ///
+    /// Called by `handle_active_audio_connection` immediately after the terminal
+    /// channel is created (before any `check_cancel!` or `send_loop`).  The
+    /// sender is optional — root relay connections leave this unset and rely on
+    /// the separate `ctrl_tx` path in `ConnectionManager::disconnect_nip_fi`.
+    pub(crate) fn set_terminal_frame_sender(&self, tx: mpsc::Sender<WsMessage>) {
+        if let Ok(mut slot) = self.terminal_frame_tx.lock() {
+            *slot = Some(tx);
+        }
+    }
+
     /// Publishes a disconnect reason atomically using first-terminal-writer-wins
     /// semantics: writes `reason` only when the slot currently holds `None`.
     ///
@@ -133,6 +154,21 @@ impl CommunityConnectionControl {
     }
 
     fn disconnect_nip_fi(&self) {
+        // Enqueue the route-specific denial payload BEFORE publishing the reason
+        // and cancelling.  The send loop (or pre-send-loop drain) drains
+        // `terminal_frame_tx` before emitting the 1008 close, so the client sees
+        // the protocol message before the transport closes.  Capacity-1 contention
+        // with the expiry task is benign — both would enqueue the same canonical
+        // denial frame, and first-frame-wins mirrors first-writer-wins on the reason.
+        // `try_send` is non-blocking; a full channel means the expiry task already
+        // queued the frame, which is fine.
+        if let Ok(slot) = self.terminal_frame_tx.lock() {
+            if let Some(ref tx) = *slot {
+                let _ = tx.try_send(crate::nip_fi_session::authorization_denied_frame(
+                    crate::nip_fi_session::NipFiWsRoute::Audio,
+                ));
+            }
+        }
         self.publish_disconnect_reason(CommunityDisconnectReason::AuthorizationDenied);
         self.cancel.cancel();
     }

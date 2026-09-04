@@ -414,6 +414,13 @@ pub(crate) async fn handle_active_audio_connection(
     let (terminal_ctrl_tx, mut terminal_ctrl_rx) =
         tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
 
+    // Register the terminal sender with the control so that
+    // CommunityConnectionControl::disconnect_nip_fi (called by the registry's
+    // pubkey-scan path) can enqueue the denial frame before cancelling.  This
+    // is what makes admin-disconnect deliver payload-then-close on audio sockets.
+    // [FI-TRACE-ADMIN-DISCONNECT-PAYLOAD]
+    control.set_terminal_frame_sender(terminal_ctrl_tx.clone());
+
     // One gate per audio connection (one-gate-per-connection invariant).
     // Enforce mode: gate has a deadline; expiry task fires at that deadline.
     // Off-mode: off_mode() gate never self-expires; acquire_effect always succeeds.
@@ -4499,6 +4506,257 @@ mod tests {
         assert!(
             cancel_for_assert.is_cancelled(),
             "W_audio_deny_straddle: conn_cancel must be cancelled after straddle denial"
+        );
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    // ── W_admin_disconnect: registry disconnect_nip_fi delivers payload-then-close ─
+    //
+    // Witnesses that an active audio socket closed via the admin-disconnect path
+    // (`CommunityConnectionRegistry::disconnect_nip_fi`) delivers the restricted
+    // JSON payload BEFORE the 1008 POLICY close — the payload-then-close contract.
+    //
+    // Before this fix, `CommunityConnectionControl::disconnect_nip_fi` only
+    // published `AuthorizationDenied` + cancelled; no frame was enqueued on the
+    // terminal channel.  The send loop (or pre-send-loop drain) then emitted only
+    // the close, with no preceding restricted JSON frame.
+    //
+    // Setup:
+    //   - Pre-create and register `CommunityConnectionControl` (so the registry
+    //     scan can find this audio session by pubkey — same pattern as straddle).
+    //   - Key absent from deny map.  Assertion carries a 1-hour deadline so the
+    //     expiry task is armed but does NOT fire during the test.
+    //   - `before_first_audio_check_cancel` hook holds the handler AFTER
+    //     `set_terminal_frame_sender` registers the sender on the control (line
+    //     ~421) and BEFORE the first `check_cancel!()`.
+    //   - Test calls `registry.disconnect_nip_fi(&pubkey)` while the hook holds.
+    //     `CommunityConnectionControl::disconnect_nip_fi` enqueues the denial frame
+    //     on `terminal_frame_tx`, publishes `AuthorizationDenied`, then cancels.
+    //   - Hook is released; handler hits `check_cancel!()`, drains the denial
+    //     frame from `terminal_ctrl_rx`, sends `reason.close_message()`.
+    //   - Client asserts: Text(restricted JSON) → Close(1008 POLICY, "authorization denied").
+    //
+    // Mutation evidence (production seam, not copies):
+    //   A) Remove the `set_terminal_frame_sender` call from `handle_active_audio_connection`
+    //      → `terminal_frame_tx` slot is `None` → `disconnect_nip_fi` enqueues nothing
+    //      → client receives only `1008` with no preceding text frame → Text assertion
+    //      times out → panics.
+    //   B) Remove the `try_send` block from `CommunityConnectionControl::disconnect_nip_fi`
+    //      → same outcome as (A): enqueue suppressed → only close observed → panics.
+    //   C) Delete the `while let Ok(msg) = terminal_ctrl_rx.try_recv()` drain from the
+    //      plain `check_cancel!()` arm → no text frame delivered → panics.
+    //   D) Move `set_terminal_frame_sender` to AFTER `spawn_nip_fi_expiry_task` →
+    //      the expiry task's `terminal_ctrl_tx.clone()` (line ~437) captures the sender
+    //      before the control does, but sender registration races the expiry task window;
+    //      on the 1-hour deadline test this is benign — however, moving it AFTER the
+    //      `audio_gate` construction (i.e., past the hook window) means the sender is
+    //      not yet registered when the test calls `disconnect_nip_fi`, so nothing is
+    //      enqueued → only close observed → panics.
+    #[tokio::test]
+    async fn admin_disconnect_nip_fi_delivers_restricted_json_then_policy_close() {
+        use buzz_auth::VerifiedAssertion;
+        use chrono::{Duration, Utc};
+        use std::sync::Arc;
+
+        let key = nostr::Keys::generate();
+        // 1-hour deadline: expiry task armed but will NOT fire during this test.
+        let deadline = Utc::now() + Duration::hours(1);
+        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+
+        // State with deny map; key is absent (not denied).
+        let state = audio_deny_state(None).await;
+
+        // Unique community so hook and registry slots don't collide with parallel tests.
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let tenant =
+            buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string());
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let conn_cancel = CancellationToken::new();
+        let cancel_for_assert = conn_cancel.clone();
+
+        // Pre-create and register the control so the pubkey-scan can find it.
+        // `audio_post_auth_register` writes `proven_pubkey` on this same Arc;
+        // the registered entry is updated in-place. [same pattern as straddle test]
+        let conn_control = crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+        let conn_id = uuid::Uuid::new_v4();
+        let _conn_guard =
+            state
+                .community_connections
+                .register(conn_id, community, conn_control.clone());
+        let conn_control_for_server = conn_control.clone();
+
+        let state_c = Arc::clone(&state);
+        let tenant_c = tenant.clone();
+        let assertion_c = assertion.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("W_admin_disconnect: bind test listener");
+        let addr = listener
+            .local_addr()
+            .expect("W_admin_disconnect: test listener addr");
+
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/",
+                get({
+                    let state_i = Arc::clone(&state_c);
+                    let tenant_i = tenant_c.clone();
+                    let assertion_i = assertion_c.clone();
+                    let control_outer = conn_control_for_server.clone();
+                    move |ws: WebSocketUpgrade| {
+                        let state_i = Arc::clone(&state_i);
+                        let tenant_i = tenant_i.clone();
+                        let assertion_i = assertion_i.clone();
+                        let control_inner = control_outer.clone();
+                        let conn_time = chrono::Utc::now();
+                        async move {
+                            ws.on_upgrade(move |socket| async move {
+                                handle_active_audio_connection(
+                                    socket,
+                                    state_i,
+                                    tenant_i,
+                                    uuid::Uuid::new_v4(),
+                                    control_inner,
+                                    Some(assertion_i),
+                                    conn_time,
+                                )
+                                .await
+                            })
+                        }
+                    }
+                }),
+            );
+            let _ = ready_tx.send(());
+            axum::serve(listener, app)
+                .await
+                .expect("W_admin_disconnect: test server");
+        });
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), ready_rx)
+            .await
+            .expect("W_admin_disconnect: server ready");
+
+        let (mut client, _) = connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("W_admin_disconnect: connect client");
+
+        // Arm the hook BEFORE sending auth — it fires after `set_terminal_frame_sender`
+        // registers the sender (line ~421) and before the first `check_cancel!()`.
+        let (hook_arrived_rx, hook_release) =
+            crate::nip_fi_test_hooks::audio_before_first_check_cancel_hook::arm(community);
+
+        // NIP-42 challenge.
+        let challenge_msg = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+            .await
+            .expect("W_admin_disconnect: challenge timeout")
+            .expect("W_admin_disconnect: challenge item")
+            .expect("W_admin_disconnect: challenge message");
+        let challenge_text = match challenge_msg {
+            tokio_tungstenite::tungstenite::Message::Text(t) => t.to_string(),
+            other => panic!("W_admin_disconnect: expected text challenge; got {other:?}"),
+        };
+        let challenge_json: serde_json::Value =
+            serde_json::from_str(&challenge_text).expect("W_admin_disconnect: challenge JSON");
+        let challenge = challenge_json["challenge"]
+            .as_str()
+            .expect("W_admin_disconnect: challenge field")
+            .to_string();
+
+        let relay_url = "ws://test.local";
+        let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+            .tag(nostr::Tag::parse(["relay", relay_url]).unwrap())
+            .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+            .sign_with_keys(&key)
+            .unwrap();
+        let auth_msg = serde_json::json!({"type": "auth", "event": auth_event}).to_string();
+        client
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                auth_msg.into(),
+            ))
+            .await
+            .expect("W_admin_disconnect: send auth");
+
+        // Wait for the handler to reach before_first_audio_check_cancel.
+        // At this point `set_terminal_frame_sender` has already been called and
+        // the terminal sender is registered on the control.
+        tokio::time::timeout(std::time::Duration::from_secs(5), hook_arrived_rx)
+            .await
+            .expect(
+                "W_admin_disconnect: handler must reach before_first_audio_check_cancel within 5s",
+            )
+            .expect("W_admin_disconnect: hook arrived channel closed");
+
+        // Simulate admin-disconnect: call the real registry disconnect scan by pubkey.
+        // CommunityConnectionControl::disconnect_nip_fi enqueues the denial frame on
+        // the registered terminal sender, publishes AuthorizationDenied, then cancels.
+        let pubkey_bytes = key.public_key().to_bytes().to_vec();
+        let closed = state.community_connections.disconnect_nip_fi(&pubkey_bytes);
+        assert_eq!(
+            closed, 1,
+            "W_admin_disconnect: registry scan must find exactly 1 audio session \
+             (proves audio_post_auth_register ran before the hook)"
+        );
+
+        // Release hook — handler resumes, hits check_cancel!(), drains the
+        // enqueued denial frame, then sends reason.close_message().
+        hook_release.notify_one();
+
+        // Frame 0: restricted JSON payload.
+        let frame0 = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+            .await
+            .expect("W_admin_disconnect: frame 0 timeout")
+            .expect("W_admin_disconnect: frame 0 item")
+            .expect("W_admin_disconnect: frame 0 ws message");
+        let expected_json = serde_json::json!({
+            "type": "restricted",
+            "message": buzz_auth::DenialClass::AuthorizationDenied.nostr_text()
+        })
+        .to_string();
+        match frame0 {
+            tokio_tungstenite::tungstenite::Message::Text(t) => {
+                assert_eq!(
+                    t.as_str(),
+                    expected_json.as_str(),
+                    "W_admin_disconnect: frame 0 must be exact restricted JSON payload"
+                );
+            }
+            other => {
+                panic!("W_admin_disconnect: frame 0 must be Text(restricted JSON); got {other:?}")
+            }
+        }
+
+        // Frame 1: 1008 POLICY close.
+        let frame1 = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+            .await
+            .expect("W_admin_disconnect: frame 1 timeout")
+            .expect("W_admin_disconnect: frame 1 item")
+            .expect("W_admin_disconnect: frame 1 ws message");
+        match frame1 {
+            tokio_tungstenite::tungstenite::Message::Close(Some(cf)) => {
+                assert_eq!(
+                    cf.code,
+                    tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    "W_admin_disconnect: close code must be 1008 POLICY"
+                );
+                assert_eq!(
+                    <tokio_tungstenite::tungstenite::Utf8Bytes as AsRef<str>>::as_ref(&cf.reason),
+                    "authorization denied",
+                    "W_admin_disconnect: close reason must be exact 'authorization denied' bytes"
+                );
+            }
+            other => panic!(
+                "W_admin_disconnect: frame 1 must be Close(1008, 'authorization denied'); \
+                 got {other:?}"
+            ),
+        }
+
+        assert!(
+            cancel_for_assert.is_cancelled(),
+            "W_admin_disconnect: conn_cancel must be cancelled after admin disconnect"
         );
 
         server.abort();
