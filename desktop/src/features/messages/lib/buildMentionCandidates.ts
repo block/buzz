@@ -154,6 +154,7 @@ export function buildMentionCandidates({
         managedAgentNamesByPubkey.has(pubkey) ||
         relayAgentNamesByPubkey.has(pubkey),
       isActiveAgent: activeAgentPubkeys.has(pubkey),
+      isManagedAgent: managedAgentNamesByPubkey.has(pubkey),
       ownerPubkey: profile?.ownerPubkey ?? null,
       personaName: personaNameByPubkey.get(pubkey) ?? null,
       role: member.role,

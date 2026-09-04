@@ -563,3 +563,44 @@ test("full-name boundaries preserve internal spaces and intentional caret moves"
     1 + "@Scout (ed12) ".length,
   );
 });
+
+for (const [kind, label, literal] of [
+  ["human", "alice", false],
+  ["agent", "helper", false],
+  ["channel", "general", false],
+  ["human", `Scout (${"a".repeat(64)})`, true],
+  ["agent", `Scout (${"b".repeat(64)}) 2`, true],
+  ["human", "Scout (abcd)", false],
+]) {
+  test(`${kind} decoration classifies ${label} without using spellcheck as presentation`, () => {
+    const plugins = MentionHighlightExtension.config.addProseMirrorPlugins.call(
+      {
+        storage: {
+          names: kind === "human" ? [label] : [],
+          agentNames: kind === "agent" ? [label] : [],
+          channelNames: kind === "channel" ? [label] : [],
+        },
+      },
+    );
+    const state = EditorState.create({
+      doc: document(
+        paragraph(text(`${kind === "channel" ? "#" : "@"}${label} `)),
+      ),
+      schema,
+      plugins,
+    });
+    const decorations = mentionHighlightKey.getState(state).find();
+    assert.equal(decorations.length, 2);
+    for (const decoration of decorations) {
+      assert.equal(decoration.type.attrs.spellcheck, "false");
+      assert.equal(
+        decoration.type.attrs.class.includes("mention-literal-key"),
+        literal,
+      );
+    }
+    assert.match(
+      decorations[1].type.attrs.class,
+      new RegExp(`inline-chip-icon-${kind}`),
+    );
+  });
+}

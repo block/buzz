@@ -216,6 +216,11 @@ with a TypeScript lookup table or an id comparison in a component.
    Unqueried persona siblings are unknown. No presence state grants deletion or
    Stop authority; native local stop-before-remove remains independent. See
    [the availability contract](../../../../docs/agent-availability.md).
+   The shared cloud marker means “Not managed on this device” only
+   after ownership and successful local inventory are known. It does not imply
+   hosting location, availability, or permission. Keep all identity surfaces on
+   the shared provenance context, without per-row directory subscriptions. See
+   [the provenance contract](../../../../docs/agent-management-provenance.md).
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
@@ -288,7 +293,11 @@ with a TypeScript lookup table or an id comparison in a component.
     managed agent. Independently operated relay agents with NIP-OA ownership
     remain eligible in every build when their verified owner's signed
     `respond_to` policy admits the viewer and relay membership includes the
-    target channel. Marked builds require that verified owner coordinate but do
+    target channel at publication. Owned nonmembers may be offered for preparation
+    and Invite; this is not permission to publish. Final authorization refreshes
+    the exact destination and retains captured selected identities across uploads
+    and edits. Denial preserves the draft, never silently removes a selected key.
+    See `docs/remote-mention-routing.md`. Marked builds require that verified owner coordinate but do
     not require it to equal the viewer; OSS builds retain compatibility with
     self-authored legacy directory records. Keep native discovery and send-time
     revalidation fail closed on invalid ownership or managed policy evidence,

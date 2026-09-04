@@ -265,7 +265,7 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
 }
 
 enum NativeAttachmentMenuLayout {
-  static let itemCount: CGFloat = 4
+  static let itemCount: CGFloat = 5
   static let contentPadding: CGFloat = 16
   static let minimumItemHeight: CGFloat = 52
   static let itemSpacing: CGFloat = 8

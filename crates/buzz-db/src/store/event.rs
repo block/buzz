@@ -221,12 +221,68 @@ fn huddle_started_content_links(content: &str, ephemeral_channel_id: Uuid) -> bo
         .is_some_and(|id| id == ephemeral_channel_id)
 }
 
-/// Return whether `parent_channel_id` has a creator-signed huddle-start event
-/// that links to `ephemeral_channel_id`.
+/// Resolve creator-authenticated parent links for a bounded set of huddle sessions.
 ///
 /// The creator constraint matters: a member of some unrelated channel can post
 /// their own kind:48100 event there, but they cannot sign as the creator of the
-/// target ephemeral channel.
+/// target ephemeral channel. One set-based query replaces the liveness
+/// endpoint's former session × parent lookup loop. Malformed historical start
+/// content is ignored rather than aborting the complete liveness snapshot.
+pub async fn huddle_started_links(
+    pool: &PgPool,
+    community_id: CommunityId,
+    parent_channel_ids: &[Uuid],
+    ephemeral_channel_ids: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid, Vec<u8>)>> {
+    if parent_channel_ids.is_empty() || ephemeral_channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (backing.id)
+               backing.id AS session_id,
+               start.channel_id AS parent_channel_id,
+               backing.created_by
+        FROM events start
+        JOIN channels backing
+          ON backing.community_id = start.community_id
+         AND backing.id::text = CASE
+             WHEN start.content IS JSON OBJECT
+             THEN (start.content::json ->> 'ephemeral_channel_id')
+             ELSE NULL
+         END
+         AND backing.deleted_at IS NULL
+        WHERE start.deleted_at IS NULL
+          AND start.community_id = $1
+          AND start.channel_id = ANY($2)
+          AND start.kind = $3
+          AND octet_length(start.content) <= $5
+          AND backing.id = ANY($4)
+          AND start.pubkey = backing.created_by
+        ORDER BY backing.id, start.created_at DESC, start.id ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(parent_channel_ids)
+    .bind(KIND_HUDDLE_STARTED as i32)
+    .bind(ephemeral_channel_ids)
+    .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("session_id")?,
+                row.try_get("parent_channel_id")?,
+                row.try_get("created_by")?,
+            ))
+        })
+        .collect()
+}
+
+/// Return whether a creator-signed huddle-start event links a parent channel
+/// to the requested ephemeral huddle channel.
 pub async fn huddle_started_link_exists(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1702,8 +1758,25 @@ impl Db {
         }
     }
 
+    /// Resolve creator-signed huddle-start links for bounded parent/session sets.
+    #[datastore_span(name = "huddle_started_links", system = "postgresql")]
+    pub async fn huddle_started_links(
+        &self,
+        community_id: CommunityId,
+        parent_channel_ids: &[Uuid],
+        ephemeral_channel_ids: &[Uuid],
+    ) -> Result<Vec<(Uuid, Uuid, Vec<u8>)>> {
+        crate::event::huddle_started_links(
+            &self.pool,
+            community_id,
+            parent_channel_ids,
+            ephemeral_channel_ids,
+        )
+        .await
+    }
+
     /// Return whether a creator-signed huddle-start event links a parent
-    /// channel to an ephemeral huddle channel.
+    /// channel to the requested ephemeral huddle channel.
     #[datastore_span(name = "huddle_started_link_exists", system = "postgresql")]
     pub async fn huddle_started_link_exists(
         &self,
@@ -2721,6 +2794,47 @@ mod postgres_tests {
             current_deleted,
             "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn huddle_started_links_batches_valid_creator_links_and_ignores_malformed_content() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let parent = make_test_channel(&pool, community_uuid, None).await;
+        let session = make_test_channel(&pool, community_uuid, Some(60)).await;
+        let creator = vec![7_u8; 32];
+
+        for (index, content) in [
+            "not-json".to_owned(),
+            serde_json::json!({ "ephemeral_channel_id": session }).to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+                 VALUES ($1, $2, $3, NOW() + make_interval(secs => $4), $5, '[]', $6, $7, $8)",
+            )
+            .bind(community_uuid)
+            .bind(vec![(index + 1) as u8; 32])
+            .bind(&creator)
+            .bind(index as f64)
+            .bind(KIND_HUDDLE_STARTED as i32)
+            .bind(content)
+            .bind(vec![0_u8; 64])
+            .bind(parent)
+            .execute(&pool)
+            .await
+            .expect("insert huddle-start candidate");
+        }
+
+        let links = huddle_started_links(&pool, community, &[parent], &[session])
+            .await
+            .expect("batch huddle links");
+        assert_eq!(links, vec![(session, parent, creator)]);
     }
 
     #[test]

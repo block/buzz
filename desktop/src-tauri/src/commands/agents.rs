@@ -9,13 +9,12 @@ use crate::{
         bestie_assignment::{recover_pending_assignment_cleanup, with_agent_assignments_cleared},
         build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
         find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
-        managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        managed_agents_base_dir, normalize_agent_args, resolve_provider_binary,
+        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::relay_ws_url_with_override,
     util::now_iso,
@@ -56,50 +55,9 @@ pub(super) fn summarize_from_disk(
     )
 }
 
-fn normalize_relay_mesh(
-    config: Option<&RelayMeshConfig>,
-    backend: &BackendKind,
-) -> Result<Option<RelayMeshConfig>, String> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-
-    let model_ref = config.model_ref.trim();
-    if model_ref.is_empty() {
-        return Err("Buzz shared compute model is required".to_string());
-    }
-    if backend != &BackendKind::Local {
-        return Err("Buzz shared compute agents must use the local backend".to_string());
-    }
-
-    Ok(Some(RelayMeshConfig {
-        model_ref: model_ref.to_string(),
-    }))
-}
-
-fn trim_to_optional_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn resolve_created_avatar_url(
-    requested_avatar_url: Option<&str>,
-    persona_avatar_url: Option<String>,
-    agent_command: &str,
-) -> Option<String> {
-    requested_avatar_url
-        .and_then(trim_to_optional_string)
-        .or_else(|| {
-            persona_avatar_url
-                .as_deref()
-                .and_then(trim_to_optional_string)
-        })
-        .or_else(|| managed_agent_avatar_url(agent_command))
-}
+#[path = "agents_create_fields.rs"]
+mod create_fields;
+use create_fields::{normalize_relay_mesh, resolve_created_avatar_url, trim_to_optional_string};
 
 #[cfg(feature = "mesh-llm")]
 async fn ensure_relay_mesh_for_record(
@@ -209,6 +167,7 @@ pub(super) async fn start_local_agent_with_preflight(
     allow_fresh_create_start: bool,
     expected_relay_url: Option<&str>,
     expected_signer_pubkey: Option<&str>,
+    replay_floor_unix: Option<u64>,
 ) -> Result<ManagedAgentSummary, String> {
     let record_snapshot = {
         let _store_guard = state
@@ -302,6 +261,7 @@ pub(super) async fn start_local_agent_with_preflight(
         &mut runtimes,
         Some(workspace_owner.as_str()),
         &workspace_relay_url,
+        replay_floor_unix,
     )?;
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
@@ -753,7 +713,8 @@ pub async fn create_managed_agent(
     // ── Phase 3b: local spawn (async preflight outside store lock) ───────────
     let mut spawn_error = None;
     let agent = if input.spawn_after_create && input.backend == BackendKind::Local {
-        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None).await {
+        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None, None).await
+        {
             Ok(agent) => agent,
             Err(error) => {
                 let _store_guard = state
@@ -814,7 +775,7 @@ pub async fn create_managed_agent(
                 build_deploy_payload(&app, &state, rec)?
             };
             match deploy_to_provider(
-                &app, &state, &pubkey, id, config, agent_json, None, None, None,
+                &app, &state, &pubkey, id, config, agent_json, None, None, None, None,
             )
             .await
             {
@@ -862,6 +823,7 @@ pub async fn start_managed_agent(
     pubkey: String,
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
+    replay_floor_unix: Option<u64>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
@@ -961,6 +923,7 @@ pub async fn start_managed_agent(
                 false,
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
+                replay_floor_unix,
             )
             .await
         }
@@ -973,6 +936,9 @@ pub async fn start_managed_agent(
             // against the payload rebuilt after the deploy lock — the exact
             // payload invoked — so a switch racing the lock wait cannot deploy
             // the agent into the new tenant on behalf of a stale callback.
+            // The replay floor rides along so a publish-first mention send's
+            // remote harness replays past the already-published message, same
+            // as the local spawn path.
             deploy_to_provider(
                 &app,
                 &state,
@@ -983,6 +949,7 @@ pub async fn start_managed_agent(
                 cached_binary_path.as_deref(),
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
+                replay_floor_unix,
             )
             .await?;
 

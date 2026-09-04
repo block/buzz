@@ -74,7 +74,7 @@ import {
 } from "@/shared/api/relayAuthPolicy";
 import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
-
+type UserStatusInput = { text: string; emoji: string; expiresAt?: number };
 export class RelayClient {
   private wsId: number | null = null;
   private relayUrl: string | null = null;
@@ -376,17 +376,17 @@ export class RelayClient {
       onEvent,
     );
   }
-
-  async publishUserStatus(text: string, emoji: string): Promise<void> {
+  async publishUserStatus(status: UserStatusInput): Promise<RelayEvent> {
     await this.ensureConnected();
     const tags: string[][] = [["d", "general"]];
-    if (emoji) tags.push(["emoji", emoji]);
+    if (status.emoji) tags.push(["emoji", status.emoji]);
+    if (status.expiresAt) tags.push(["expiration", String(status.expiresAt)]);
     const event = await signRelayEvent({
       kind: KIND_USER_STATUS,
-      content: text,
+      content: status.text,
       tags,
     });
-    await this.publishEvent(
+    return this.publishEvent(
       event,
       "Timed out publishing user status",
       "Failed to publish user status",

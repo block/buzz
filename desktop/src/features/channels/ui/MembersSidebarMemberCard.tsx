@@ -19,7 +19,7 @@ import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import {
@@ -75,7 +75,7 @@ type MembersSidebarMemberCardProps = {
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
-  showOtherSetupMarker?: boolean;
+  profileOwnerPubkey?: string | null;
   viewerIsOwner: boolean;
 };
 
@@ -144,7 +144,7 @@ export function MembersSidebarMemberCard({
   onViewActivity,
   presenceStatus,
   profileAvatarUrl,
-  showOtherSetupMarker = false,
+  profileOwnerPubkey,
   viewerIsOwner,
 }: MembersSidebarMemberCardProps) {
   const roleLabel = formatRoleLabel(member, memberIsBot);
@@ -199,11 +199,11 @@ export function MembersSidebarMemberCard({
                 </span>
               </span>
             </div>
-            {showOtherSetupMarker ? (
-              <OtherSetupAgentMarker
-                testId={`sidebar-member-agent-provenance-${member.pubkey}`}
-              />
-            ) : null}
+            <AgentManagementMarker
+              pubkey={member.pubkey}
+              ownerPubkey={profileOwnerPubkey}
+              testId={`sidebar-member-agent-provenance-${member.pubkey}`}
+            />
           </div>
         ) : (
           <div className="flex min-w-0 items-center gap-2">

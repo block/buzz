@@ -38,6 +38,8 @@ dependencies:
   google_mlkit_selfie_segmentation: ^0.10.1
   photo_manager: ^3.11.0
   video_player: ^2.10.1
+  just_audio: ^0.10.6
+  record: ^6.2.1
   package_info_plus: ^10.0.0
   app_badge_plus: ^1.2.10
   app_links: ^6.4.0

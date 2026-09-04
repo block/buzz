@@ -45,6 +45,8 @@ export type RelaySubscriptionFilter = {
   authors?: string[];
   since?: number;
   until?: number;
+  /** Relay extension: composite pagination tiebreak paired with `until`. */
+  before_id?: string;
 } & Partial<Record<`#${string}`, string[]>>;
 
 type HistorySubscription = {

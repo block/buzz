@@ -334,25 +334,56 @@ function suggestion(agentProvenance) {
 
 test("duplicate owned agents mark only the other setup", () => {
   assert.equal(
-    showMentionAgentProvenanceMarker(suggestion("managed-here"), true),
+    showMentionAgentProvenanceMarker(suggestion("managed-here")),
     false,
   );
   assert.equal(
-    showMentionAgentProvenanceMarker(suggestion("managed-elsewhere"), true),
+    showMentionAgentProvenanceMarker(suggestion("managed-elsewhere")),
     true,
   );
 });
 
-test("unique agents omit management provenance", () => {
+test("unique agents mark the same not-locally-managed provenance", () => {
   assert.equal(
-    showMentionAgentProvenanceMarker(suggestion("managed-here"), false),
+    showMentionAgentProvenanceMarker(suggestion("managed-elsewhere")),
+    true,
+  );
+  assert.equal(
+    showMentionAgentProvenanceMarker(suggestion("managed-here")),
     false,
   );
 });
 
 test("agents without trustworthy provenance omit management provenance", () => {
-  assert.equal(
-    showMentionAgentProvenanceMarker(suggestion(undefined), true),
-    false,
-  );
+  assert.equal(showMentionAgentProvenanceMarker(suggestion(undefined)), false);
 });
+
+for (const duplicate of [false, true]) {
+  test(`rendered provenance is truthful (${duplicate ? "duplicate" : "unique"} names)`, async () => {
+    const React = await import("react");
+    const { render } = await import("@testing-library/react");
+    const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+    const { TooltipProvider } = await import("@/shared/ui/tooltip");
+    const remote = suggestion("managed-elsewhere");
+    const suggestions = duplicate
+      ? [remote, { ...suggestion("managed-here"), pubkey: "2".repeat(64) }]
+      : [remote];
+    const view = render(
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(MentionAutocomplete, {
+          suggestions,
+          selectedIndex: 0,
+          onSelect() {},
+        }),
+      ),
+    );
+    const markers = view.getAllByRole("img", {
+      name: "Not managed on this device",
+    });
+    assert.equal(markers.length, 1);
+    assert.equal(markers[0].title, "Not managed on this device");
+    assert.equal(view.queryByTitle("From another Buzz setup"), null);
+  });
+}
