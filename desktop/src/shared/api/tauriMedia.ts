@@ -128,7 +128,7 @@ export async function fetchMediaBytes(
 /** Read plain text without depending on embedded-webview clipboard grants. */
 export async function readTextFromSystemClipboard(): Promise<string> {
   // E2E installs Tauri's mocked IPC surface in a browser page, where the SDK's
-  // `isTauri()` marker remains false. Exercise the packaged-app command path in
+  // isTauri() marker remains false. Exercise the packaged-app command path in
   // that build so tests detect accidental regressions to permission-gated DOM
   // clipboard reads.
   if (isTauri() || import.meta.env.MODE === "e2e") {
@@ -140,6 +140,20 @@ export async function readTextFromSystemClipboard(): Promise<string> {
     throw new Error("Clipboard text reading is unavailable");
   }
   return clipboard.readText();
+}
+
+/** Convert Tauri's raw binary IPC response into upload-ready bytes. */
+export function clipboardArrayBufferToBytes(buffer: ArrayBuffer): Uint8Array {
+  return new Uint8Array(buffer);
+}
+
+/**
+ * Read a system clipboard image through the native shell. WebKitGTK does not
+ * always expose a Wayland image offer through `ClipboardEvent.clipboardData`.
+ */
+export async function readClipboardImage(): Promise<Uint8Array> {
+  const buffer = await invokeTauri<ArrayBuffer>("read_clipboard_image", {});
+  return clipboardArrayBufferToBytes(buffer);
 }
 
 /** Write text through the native clipboard after an asynchronous workflow. */

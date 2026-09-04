@@ -679,6 +679,7 @@ pub fn run() {
             cancel_media_fetch,
             release_media_fetch,
             copy_image_to_clipboard,
+            read_clipboard_image,
             copy_text_to_clipboard,
             read_clipboard_text,
             fetch_snapshot_bytes,

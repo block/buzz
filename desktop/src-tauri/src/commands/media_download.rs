@@ -4,7 +4,7 @@ use tauri::State;
 use tokio_util::sync::CancellationToken;
 
 use crate::app_state::AppState;
-use crate::commands::clipboard::with_clipboard;
+use crate::commands::clipboard::{read_system_clipboard_image, with_clipboard};
 use crate::commands::export_util::save_bytes_with_dialog;
 use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth};
 use crate::commands::media_filename::sanitize_filename;
@@ -21,6 +21,46 @@ use crate::relay::{classify_request_error, relay_api_base_url_with_override, rel
 
 /// Maximum download size: 50 MiB. Prevents OOM from oversized responses.
 pub(super) const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+
+fn ensure_clipboard_png_size(encoded_len: usize) -> Result<(), String> {
+    if encoded_len > MAX_DOWNLOAD_BYTES as usize {
+        return Err("encoded clipboard image is too large".to_string());
+    }
+    Ok(())
+}
+
+/// Encode an RGBA clipboard image as PNG before returning it across IPC.
+fn encode_clipboard_image_as_png(image: arboard::ImageData<'static>) -> Result<Vec<u8>, String> {
+    let width =
+        u32::try_from(image.width).map_err(|_| "clipboard image is too wide".to_string())?;
+    let height =
+        u32::try_from(image.height).map_err(|_| "clipboard image is too tall".to_string())?;
+    let expected_bytes = image
+        .width
+        .checked_mul(image.height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("clipboard image dimensions overflow")?;
+    if expected_bytes > MAX_DOWNLOAD_BYTES as usize {
+        return Err("clipboard image is too large".to_string());
+    }
+    if image.bytes.len() != expected_bytes {
+        return Err("clipboard image has invalid RGBA data".to_string());
+    }
+
+    let mut encoded = Vec::new();
+    let mut encoder = png::Encoder::new(&mut encoded, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| format!("failed to encode clipboard image: {error}"))?;
+    writer
+        .write_image_data(&image.bytes)
+        .map_err(|error| format!("failed to encode clipboard image: {error}"))?;
+    drop(writer);
+    ensure_clipboard_png_size(encoded.len())?;
+    Ok(encoded)
+}
 
 /// Download request timeout.
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -196,6 +236,30 @@ pub async fn copy_image_to_clipboard(
 
     rx.recv()
         .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
+}
+
+/// Read an image directly from the native system clipboard.
+///
+/// This is a fallback for Linux WebKitGTK, which can receive a paste event
+/// without exposing the Wayland `image/png` offer as a `DataTransferItem`.
+#[tauri::command]
+pub async fn read_clipboard_image(app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let clipboard_app = app.clone();
+    app.run_on_main_thread(move || {
+        let result = read_system_clipboard_image(&clipboard_app).and_then(|image| {
+            image
+                .ok_or_else(|| "clipboard contains no image".to_string())
+                .and_then(encode_clipboard_image_as_png)
+        });
+        let _ = tx.send(result);
+    })
+    .map_err(|error| format!("main thread dispatch failed: {error}"))?;
+
+    let png = rx
+        .recv()
+        .map_err(|_| "clipboard result channel closed unexpectedly".to_string())??;
+    Ok(tauri::ipc::Response::new(png))
 }
 
 /// Write text to the system clipboard through the native shell.
@@ -523,6 +587,29 @@ pub async fn fetch_snapshot_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_rgba_is_encoded_as_a_valid_png() {
+        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let encoded = encode_clipboard_image_as_png(arboard::ImageData {
+            width: 2,
+            height: 1,
+            bytes: std::borrow::Cow::Owned(rgba.clone()),
+        })
+        .expect("valid RGBA clipboard data must encode");
+
+        let decoded = image::load_from_memory(&encoded)
+            .expect("encoded clipboard image must be a PNG")
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.into_raw(), rgba);
+    }
+
+    #[test]
+    fn clipboard_encoded_png_cap_rejects_only_oversized_output() {
+        assert!(ensure_clipboard_png_size(MAX_DOWNLOAD_BYTES as usize).is_ok());
+        assert!(ensure_clipboard_png_size(MAX_DOWNLOAD_BYTES as usize + 1).is_err());
+    }
 
     #[test]
     fn snapshot_kind_json_returns_json_kind_and_correct_cap() {
