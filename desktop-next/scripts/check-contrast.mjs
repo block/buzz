@@ -71,6 +71,13 @@ const PAIRS = [
   ["--text-on-info", "--bg-info"],
 ];
 
+/**
+ * The families with a tint surface. DESIGN.md: "tint carries a meaning and takes
+ * coloured text", so each family's `text-*` must be readable on both its tint
+ * and that tint's hover — the hover state is the harder one and was the gap.
+ */
+const TINT_FAMILIES = ["accent", "danger", "success", "warning", "info"];
+
 const css = readFileSync(TOKENS, "utf8");
 
 /**
@@ -142,6 +149,10 @@ for (const [mode, map] of Object.entries(modes)) {
     for (const surface of SURFACES) check(role, surface);
   }
   for (const [role, fill] of PAIRS) check(role, fill);
+  for (const family of TINT_FAMILIES) {
+    check(`--text-${family}`, `--bg-${family}-tint`);
+    check(`--text-${family}`, `--bg-${family}-tint-hover`);
+  }
 }
 
 // Guard the maths itself: if these drift, every verdict above is wrong.

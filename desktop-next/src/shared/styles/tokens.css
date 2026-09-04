@@ -51,7 +51,7 @@
   --danger-3: #fecaca;
   --danger-8: #f5b5b5;
   --danger-9: #dc2626;
-  --danger-11: #b91c1c;
+  --danger-11: #a80008;
 
   --success-2: #e8f7ee;
   --success-3: #d1f0dd;
@@ -63,7 +63,7 @@
   --warning-3: #fde68a;
   --warning-8: #f2d98a;
   --warning-9: #eab308;
-  --warning-11: #a16207;
+  --warning-11: #9c5e00;
 
   --info-2: #e7f1ff;
   --info-3: #d0e3ff;
@@ -133,7 +133,7 @@
   --accent-3: #1a3358;
   --accent-8: #356dbd;
   --accent-9: #237eff;
-  --accent-11: #8fbaff;
+  --accent-11: #95c0ff;
 
   --danger-2: #3a1515;
   --danger-3: #4d1c1c;
@@ -157,7 +157,7 @@
   --info-3: #1a3358;
   --info-8: #356dbd;
   --info-9: #3d87ff;
-  --info-11: #8fbaff;
+  --info-11: #95c0ff;
 
   --glass-1: #1c1c1c5c;
   --glass-2: #1c1c1c85;
@@ -252,7 +252,13 @@
   --bg-panel-glass: var(--glass-2);
   --bg-float-glass: var(--glass-3);
 
-  /* --- Focus. ---------------------------------------------- */
+  /* --- Focus. ----------------------------------------------
+     Legible on every neutral surface (WCAG 3.0–3.5:1), but it is an accent
+     against accent: on `bg-accent` it measures 1.1:1 and disappears. A focused
+     primary button therefore needs the ring separated from the fill — an offset
+     in the surface colour, not a different ring hue, so one focus treatment
+     works everywhere. Whatever component layer introduces focus owns that
+     offset; there is no second ring token.                     */
   --ring-focus: var(--accent-8);
 
   /* ==========================================================

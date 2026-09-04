@@ -123,6 +123,15 @@ it is the rule a generated theme is measured against.
   every surface it can sit on, in both modes, parsed from `tokens.css` so the
   check cannot drift from the tokens. Exceptions live in that script with a
   stated reason, which keeps the list short and arguable.
+- **A tint's hover is the hardest surface in its family**, so a `text-*` step is
+  sized against that rather than against the neutral panel. Every failure the
+  audit found in the coloured families was on a tint-hover, never at rest.
+- **Hairline dividers are not held to a contrast target.** WCAG's 3:1 non-text
+  rule covers boundaries needed to identify a *control* or its state, not
+  grouping lines. Buzz's borders measure 1.2–1.8:1, which is where Radix and
+  Apple ship theirs; raising them would draw the box the fill already implies.
+  When the input layer lands, a control's own outline is a different question and
+  does need the 3:1 treatment.
 
 ## Writing
 
