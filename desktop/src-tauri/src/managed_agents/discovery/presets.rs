@@ -7,8 +7,6 @@ use crate::managed_agents::{
 
 use super::normalize_agent_args;
 
-pub(super) const PI_ACP_PI_COMMAND_ENV: &str = "PI_ACP_PI_COMMAND";
-
 /// Static data for a well-known tier-2 ACP harness.
 pub(super) struct PresetHarness {
     pub(super) id: &'static str,
@@ -28,17 +26,9 @@ pub(super) struct PresetHarness {
 pub(super) fn preset_catalog_entry(
     def: &PresetHarness,
     resolve: impl Fn(&str) -> Option<PathBuf>,
-    pi_command_override: Option<&str>,
 ) -> AcpRuntimeCatalogEntry {
-    // pi-acp treats PI_ACP_PI_COMMAND as the authoritative Pi executable.
-    // Resolve that exact value when configured instead of requiring the bare
-    // `pi` command to be on PATH; launch uses the same precedence.
-    let underlying_cli_command = if def.id == "pi" {
-        pi_command_override.or(def.underlying_cli)
-    } else {
-        def.underlying_cli
-    };
-    let underlying_cli_path = underlying_cli_command
+    let underlying_cli_path = def
+        .underlying_cli
         .and_then(&resolve)
         .map(|path| path.display().to_string());
     let (availability, command, binary_path) = super::classify_runtime(
@@ -367,11 +357,9 @@ mod tests {
         assert_eq!(preset.underlying_cli, None);
         assert_eq!(preset.install_instructions_url, "https://docs.devin.ai/cli");
 
-        let entry = preset_catalog_entry(
-            preset,
-            |command| (command == "devin").then(|| PathBuf::from("/usr/local/bin/devin")),
-            None,
-        );
+        let entry = preset_catalog_entry(preset, |command| {
+            (command == "devin").then(|| PathBuf::from("/usr/local/bin/devin"))
+        });
         assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
         assert_eq!(entry.command.as_deref(), Some("devin"));
         assert_eq!(entry.default_args, vec!["acp"]);
@@ -379,7 +367,7 @@ mod tests {
         assert_eq!(entry.auth_status, AuthStatus::NotApplicable);
         assert_eq!(entry.source, HarnessSource::Preset);
 
-        let missing_entry = preset_catalog_entry(preset, |_| None, None);
+        let missing_entry = preset_catalog_entry(preset, |_| None);
         assert_eq!(
             missing_entry.availability,
             AcpAvailabilityStatus::NotInstalled
@@ -408,68 +396,6 @@ mod tests {
         assert_eq!(entry.source, HarnessSource::Preset);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn pi_runtime_catalog_honors_command_override_outside_path() {
-        use std::os::unix::fs::PermissionsExt;
-
-        use crate::managed_agents::custom_harnesses::registry_test_lock;
-        use crate::managed_agents::discovery::clear_resolve_cache;
-
-        // Discovery reads process environment and mutates shared resolution
-        // caches, so serialize this production-path check with its peers.
-        let _path_guard = crate::managed_agents::lock_path_mutex();
-        let _registry_guard = registry_test_lock();
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path_dir = temp.path().join("path");
-        let override_dir = temp.path().join("override");
-        std::fs::create_dir_all(&path_dir).expect("create PATH dir");
-        std::fs::create_dir_all(&override_dir).expect("create override dir");
-
-        let adapter = path_dir.join("pi-acp");
-        let configured_pi = override_dir.join("custom-pi");
-        for executable in [&adapter, &configured_pi] {
-            std::fs::write(executable, "#!/bin/sh\nexit 0\n").expect("write fake executable");
-            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))
-                .expect("make fake executable runnable");
-        }
-
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let old_override = std::env::var_os(super::PI_ACP_PI_COMMAND_ENV);
-        let path =
-            std::env::join_paths(std::iter::once(path_dir).chain(std::env::split_paths(&old_path)))
-                .expect("join PATH");
-        std::env::set_var("PATH", path);
-        std::env::set_var(super::PI_ACP_PI_COMMAND_ENV, &configured_pi);
-        clear_resolve_cache();
-
-        let result = std::panic::catch_unwind(|| {
-            let pi = super::super::discover_acp_runtimes_from(None, true)
-                .into_iter()
-                .find(|entry| entry.id == "pi")
-                .expect("Pi preset should appear in runtime catalog");
-
-            assert_eq!(pi.availability, AcpAvailabilityStatus::Available);
-            assert_eq!(pi.command.as_deref(), Some("pi-acp"));
-            assert_eq!(
-                pi.underlying_cli_path.as_deref(),
-                Some(configured_pi.to_string_lossy().as_ref()),
-                "catalog must resolve PI_ACP_PI_COMMAND rather than the bare pi command"
-            );
-        });
-
-        std::env::set_var("PATH", old_path);
-        match old_override {
-            Some(value) => std::env::set_var(super::PI_ACP_PI_COMMAND_ENV, value),
-            None => std::env::remove_var(super::PI_ACP_PI_COMMAND_ENV),
-        }
-        clear_resolve_cache();
-        if let Err(error) = result {
-            std::panic::resume_unwind(error);
-        }
-    }
-
     #[test]
     fn pi_preset_uses_zero_arg_adapter_and_reports_missing_component() {
         let preset = PRESET_HARNESSES
@@ -482,15 +408,11 @@ mod tests {
         assert!(preset.args.is_empty());
         assert_eq!(preset.underlying_cli, Some("pi"));
 
-        let available = preset_catalog_entry(
-            preset,
-            |command| match command {
-                "pi-acp" => Some(PathBuf::from("/usr/local/bin/pi-acp")),
-                "pi" => Some(PathBuf::from("/usr/local/bin/pi")),
-                _ => None,
-            },
-            None,
-        );
+        let available = preset_catalog_entry(preset, |command| match command {
+            "pi-acp" => Some(PathBuf::from("/usr/local/bin/pi-acp")),
+            "pi" => Some(PathBuf::from("/usr/local/bin/pi")),
+            _ => None,
+        });
         assert_eq!(available.availability, AcpAvailabilityStatus::Available);
         assert_eq!(available.command.as_deref(), Some("pi-acp"));
         assert!(available.default_args.is_empty());
@@ -501,11 +423,9 @@ mod tests {
             Some("/usr/local/bin/pi")
         );
 
-        let adapter_missing = preset_catalog_entry(
-            preset,
-            |command| (command == "pi").then(|| PathBuf::from("/usr/local/bin/pi")),
-            None,
-        );
+        let adapter_missing = preset_catalog_entry(preset, |command| {
+            (command == "pi").then(|| PathBuf::from("/usr/local/bin/pi"))
+        });
         assert_eq!(
             adapter_missing.availability,
             AcpAvailabilityStatus::AdapterMissing
@@ -521,11 +441,9 @@ mod tests {
             "https://github.com/svkozak/pi-acp"
         );
 
-        let cli_missing = preset_catalog_entry(
-            preset,
-            |command| (command == "pi-acp").then(|| PathBuf::from("/usr/local/bin/pi-acp")),
-            None,
-        );
+        let cli_missing = preset_catalog_entry(preset, |command| {
+            (command == "pi-acp").then(|| PathBuf::from("/usr/local/bin/pi-acp"))
+        });
         assert_eq!(cli_missing.availability, AcpAvailabilityStatus::CliMissing);
         assert_eq!(cli_missing.command.as_deref(), Some("pi-acp"));
         assert_eq!(
@@ -537,7 +455,7 @@ mod tests {
             "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent"
         );
 
-        let not_installed = preset_catalog_entry(preset, |_| None, None);
+        let not_installed = preset_catalog_entry(preset, |_| None);
         assert_eq!(
             not_installed.availability,
             AcpAvailabilityStatus::NotInstalled
@@ -550,11 +468,9 @@ mod tests {
 
     #[test]
     fn adapter_missing_when_underlying_cli_present() {
-        let entry = preset_catalog_entry(
-            &ADAPTER_PRESET,
-            |command| (command == "amp").then(|| PathBuf::from("/usr/local/bin/amp")),
-            None,
-        );
+        let entry = preset_catalog_entry(&ADAPTER_PRESET, |command| {
+            (command == "amp").then(|| PathBuf::from("/usr/local/bin/amp"))
+        });
         assert_eq!(entry.availability, AcpAvailabilityStatus::AdapterMissing);
         assert!(entry.command.is_none());
         assert!(entry.binary_path.is_none());
@@ -572,7 +488,7 @@ mod tests {
 
     #[test]
     fn not_installed_when_adapter_and_cli_are_missing() {
-        let entry = preset_catalog_entry(&ADAPTER_PRESET, |_| None, None);
+        let entry = preset_catalog_entry(&ADAPTER_PRESET, |_| None);
         assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
         assert!(entry.underlying_cli_path.is_none());
         assert!(entry.requires_external_cli);
@@ -585,15 +501,11 @@ mod tests {
 
     #[test]
     fn available_when_adapter_and_cli_are_present() {
-        let entry = preset_catalog_entry(
-            &ADAPTER_PRESET,
-            |command| match command {
-                "amp-acp" => Some(PathBuf::from("/usr/local/bin/amp-acp")),
-                "amp" => Some(PathBuf::from("/usr/local/bin/amp")),
-                _ => None,
-            },
-            None,
-        );
+        let entry = preset_catalog_entry(&ADAPTER_PRESET, |command| match command {
+            "amp-acp" => Some(PathBuf::from("/usr/local/bin/amp-acp")),
+            "amp" => Some(PathBuf::from("/usr/local/bin/amp")),
+            _ => None,
+        });
         assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
         assert_eq!(entry.command.as_deref(), Some("amp-acp"));
         assert_eq!(entry.binary_path.as_deref(), Some("/usr/local/bin/amp-acp"));
@@ -606,11 +518,9 @@ mod tests {
 
     #[test]
     fn adapter_without_underlying_cli_reports_cli_missing() {
-        let entry = preset_catalog_entry(
-            &ADAPTER_PRESET,
-            |command| (command == "amp-acp").then(|| PathBuf::from("/usr/local/bin/amp-acp")),
-            None,
-        );
+        let entry = preset_catalog_entry(&ADAPTER_PRESET, |command| {
+            (command == "amp-acp").then(|| PathBuf::from("/usr/local/bin/amp-acp"))
+        });
         assert_eq!(entry.availability, AcpAvailabilityStatus::CliMissing);
         assert_eq!(entry.command.as_deref(), Some("amp-acp"));
         assert_eq!(entry.binary_path.as_deref(), Some("/usr/local/bin/amp-acp"));
@@ -625,7 +535,7 @@ mod tests {
             underlying_cli: None,
             ..ADAPTER_PRESET
         };
-        let entry = preset_catalog_entry(&preset, |_| None, None);
+        let entry = preset_catalog_entry(&preset, |_| None);
         assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
         assert!(!entry.requires_external_cli);
         assert!(entry.underlying_cli_path.is_none());
@@ -644,7 +554,7 @@ mod tests {
             .expect("openclaw preset must be present");
 
         // Simulate "not installed" — resolver always returns None.
-        let entry = preset_catalog_entry(openclaw, |_| None, None);
+        let entry = preset_catalog_entry(openclaw, |_| None);
         assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
         assert!(
             entry.command.is_none(),
@@ -666,14 +576,10 @@ mod tests {
             .find(|p| p.id == "openclaw")
             .expect("openclaw preset must be present");
 
-        let entry = preset_catalog_entry(
-            openclaw,
-            |cmd| {
-                (cmd == openclaw.id || cmd == "openclaw")
-                    .then(|| std::path::PathBuf::from("/usr/local/bin/openclaw"))
-            },
-            None,
-        );
+        let entry = preset_catalog_entry(openclaw, |cmd| {
+            (cmd == openclaw.id || cmd == "openclaw")
+                .then(|| std::path::PathBuf::from("/usr/local/bin/openclaw"))
+        });
         assert_eq!(
             entry.max_parallelism,
             Some(crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM),
@@ -689,7 +595,7 @@ mod tests {
             .iter()
             .find(|p| p.id == "devin")
             .expect("devin preset must be present");
-        let entry = preset_catalog_entry(devin, |_| None, None);
+        let entry = preset_catalog_entry(devin, |_| None);
         assert_eq!(
             entry.max_parallelism, None,
             "uncapped preset (devin) must have max_parallelism: None"

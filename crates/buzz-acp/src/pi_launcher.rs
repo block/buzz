@@ -17,10 +17,6 @@ use std::ffi::OsStr;
 use uuid::Uuid;
 
 pub(crate) const PI_ACP_PI_COMMAND_ENV: &str = "PI_ACP_PI_COMMAND";
-/// Internal `AcpClient` input translated to `PI_ACP_PI_COMMAND` with forced
-/// precedence. Keeping this distinct preserves normal operator-wins behavior
-/// for every actual adapter environment variable.
-pub(crate) const BUZZ_PI_LAUNCHER_OVERRIDE_ENV: &str = "BUZZ_ACP_INTERNAL_PI_LAUNCHER_OVERRIDE";
 
 /// Files backing the Pi launcher for one `buzz-acp` process.
 ///
@@ -40,23 +36,16 @@ impl PiLaunchOverride {
     pub(crate) fn prepare(
         agent_command: &str,
         base_prompt: Option<String>,
-        configured_pi_command: Option<&str>,
         managed_skills_dir: &Path,
     ) -> io::Result<(Option<Self>, Option<String>)> {
         if crate::config::normalize_agent_command_identity(agent_command) != "pi-acp" {
             return Ok((None, base_prompt));
         }
 
-        // Match AcpClient's normal environment precedence: an inherited
-        // operator value wins over persona/default environment. The generated
-        // launcher then becomes pi-acp's command and invokes that effective
-        // value as the real Pi executable.
-        let inherited_pi_command = std::env::var(PI_ACP_PI_COMMAND_ENV).ok();
-        let pi_command = inherited_pi_command
-            .as_deref()
-            .or(configured_pi_command)
-            .unwrap_or("pi");
-        let prepared = Self::create(pi_command, base_prompt.as_deref(), managed_skills_dir)?;
+        // Buzz owns PI_ACP_PI_COMMAND and always uses it to point pi-acp at
+        // this generated launcher. The launcher resolves the ordinary `pi`
+        // command from Buzz's effective PATH.
+        let prepared = Self::create("pi", base_prompt.as_deref(), managed_skills_dir)?;
         Ok((Some(prepared), None))
     }
 
@@ -246,7 +235,7 @@ mod tests {
     fn non_pi_adapter_keeps_base_prompt_for_acp_delivery() {
         let base = Some("Buzz base".to_string());
         let (prepared, remaining) =
-            PiLaunchOverride::prepare("goose", base.clone(), None, Path::new("/unused/skills"))
+            PiLaunchOverride::prepare("goose", base.clone(), Path::new("/unused/skills"))
                 .expect("prepare");
         assert!(prepared.is_none());
         assert_eq!(remaining, base);
@@ -255,7 +244,7 @@ mod tests {
     #[test]
     fn disabled_base_prompt_still_creates_pi_skills_launcher() {
         let (prepared, remaining) =
-            PiLaunchOverride::prepare("pi-acp", None, None, Path::new("/unused/skills"))
+            PiLaunchOverride::prepare("pi-acp", None, Path::new("/unused/skills"))
                 .expect("prepare");
         let prepared = prepared.expect("Pi skills launcher");
         assert!(remaining.is_none());
@@ -274,7 +263,6 @@ mod tests {
         let (prepared, remaining) = PiLaunchOverride::prepare(
             "/opt/bin/pi-acp",
             Some(base.clone()),
-            Some("alternate-pi"),
             Path::new("/buzz/.agents/skills"),
         )
         .expect("prepare");
@@ -286,6 +274,11 @@ mod tests {
             base
         );
         assert!(base.contains("each thread gets its own"));
+
+        #[cfg(unix)]
+        assert!(fs::read_to_string(prepared.launcher_path())
+            .expect("read launcher")
+            .contains("exec 'pi'"));
     }
 
     #[cfg(unix)]

@@ -2528,30 +2528,21 @@ async fn tokio_main() -> Result<()> {
             ),
         )
     };
-    let configured_pi_command = config
+    // PI_ACP_PI_COMMAND is Buzz-owned. Strip stale/user-provided copies from
+    // every adapter before optionally installing Buzz's generated Pi launcher.
+    config
         .persona_env_vars
-        .iter()
-        .rev()
-        .find(|(key, _)| key == pi_launcher::PI_ACP_PI_COMMAND_ENV)
-        .map(|(_, value)| value.clone());
+        .retain(|(key, _)| !key.eq_ignore_ascii_case(pi_launcher::PI_ACP_PI_COMMAND_ENV));
     let managed_skills_dir = std::path::Path::new(&cwd).join(".agents/skills");
     let (pi_launch_override, base_prompt) = pi_launcher::PiLaunchOverride::prepare(
         &config.agent_command,
         base_prompt,
-        configured_pi_command.as_deref(),
         &managed_skills_dir,
     )
     .context("failed to prepare Pi launch overrides")?;
     if let Some(prepared) = pi_launch_override.as_ref() {
-        // The wrapper invokes the effective inherited/persona Pi command, so
-        // remove any persona copy before installing the one forced adapter
-        // override that pi-acp must observe.
-        config.persona_env_vars.retain(|(key, _)| {
-            key != pi_launcher::PI_ACP_PI_COMMAND_ENV
-                && key != pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV
-        });
         config.persona_env_vars.push((
-            pi_launcher::BUZZ_PI_LAUNCHER_OVERRIDE_ENV.to_string(),
+            pi_launcher::PI_ACP_PI_COMMAND_ENV.to_string(),
             prepared.launcher_path().to_string_lossy().into_owned(),
         ));
         tracing::info!(
