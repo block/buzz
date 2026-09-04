@@ -31,7 +31,7 @@ mod setup_payload;
 use setup_payload::apply_setup_payload_env;
 
 mod stop;
-pub(crate) use stop::managed_agent_runtime_keys;
+pub(crate) use stop::{managed_agent_runtime_keys, stop_managed_agent_pair};
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
@@ -451,7 +451,10 @@ pub fn spawn_agent_child(
     lazy: bool,
     owner_hex: Option<&str>,
     replay_floor_unix: Option<u64>,
+    resume: Option<&super::remote_stop::ResumeTicket>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    super::remote_stop::check_launch(app, &key, owner_hex, resume)?;
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
@@ -881,6 +884,7 @@ pub fn start_managed_agent_process(
     owner_hex: Option<&str>,
     workspace_relay: &crate::relay::ScopedWorkspaceRelay,
     replay_floor_unix: Option<u64>,
+    resume: Option<&super::remote_stop::ResumeTicket>,
 ) -> Result<(), String> {
     let key = bound_runtime_key(record, workspace_relay)?;
     if let Some(runtime) = runtimes.get_mut(&key) {
@@ -907,6 +911,7 @@ pub fn start_managed_agent_process(
         false,
         owner_hex,
         replay_floor_unix,
+        resume,
     )?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
@@ -928,7 +933,8 @@ pub fn start_managed_agent_process(
     record.last_error = None;
     record.last_error_code = None;
 
-    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
+    runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
+    super::remote_stop::finish_resume(app, &key, owner_hex, resume)?;
     Ok(())
 }
 

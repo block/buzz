@@ -3,13 +3,12 @@ use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::{
-    agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
-    load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    agent_readiness, current_instance_id, find_managed_agent_mut, load_global_agent_config,
+    load_managed_agents, load_personas, managed_agent_runtime_log_path, process_is_running,
+    record_agent_command, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    terminate_process, terminate_untracked_pair_runtime, write_agent_runtime_receipt,
+    AgentReadiness, BackendKind, ManagedAgentPairRuntime, ManagedAgentRuntimeKey,
+    ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -229,16 +228,24 @@ pub(crate) fn start_managed_agent_runtime_pair_lazy(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, relay_url, true, None, false, app)
 }
 
 #[tauri::command]
 pub fn start_managed_agent_runtime(
     pubkey: String,
     relay_url: String,
+    explicit_start: Option<bool>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_managed_agent_runtime_pair_lazy(pubkey, relay_url, app)
+    start_pair(
+        pubkey,
+        relay_url,
+        true,
+        None,
+        explicit_start.unwrap_or(false),
+        app,
+    )
 }
 
 fn start_pair(
@@ -246,6 +253,7 @@ fn start_pair(
     relay_url: String,
     lazy: bool,
     expected_updated_at: Option<&str>,
+    explicit_start: bool,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
@@ -288,8 +296,24 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process =
-        spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref(), None)?;
+    let resume = if explicit_start {
+        Some(super::remote_stop::capture_resume(
+            &app,
+            &key,
+            owner.as_deref().ok_or("Desktop owner unavailable")?,
+        )?)
+    } else {
+        None
+    };
+    let mut process = spawn_agent_child(
+        &app,
+        record,
+        &key.relay_url,
+        lazy,
+        owner.as_deref(),
+        None,
+        resume.as_ref(),
+    )?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -308,6 +332,7 @@ fn start_pair(
     record.last_stopped_at = None;
     record.last_error = None;
     runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
+    super::remote_stop::finish_resume(&app, &key, owner.as_deref(), resume.as_ref())?;
     let status = status_for(&app, record, &key, runtimes.get(&key), None);
     drop(runtimes);
     save_managed_agents(&app, &records)?;
@@ -326,6 +351,16 @@ pub fn stop_managed_agent_runtime(
         .managed_agent_runtime_transition
         .lock()
         .map_err(|e| e.to_string())?;
+    stop_pair_locked(pubkey, relay_url, app.clone())
+}
+
+// Caller owns managed_agent_runtime_transition for the whole admission/effect.
+pub(crate) fn stop_pair_locked(
+    pubkey: String,
+    relay_url: String,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    let state = app.state::<AppState>();
     let _store = state
         .managed_agents_store_lock
         .lock()
@@ -337,42 +372,27 @@ pub fn stop_managed_agent_runtime(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    if let Some(mut runtime) = runtimes.remove(&key) {
-        let stop_result = if process_is_running(runtime.child.id()) {
-            terminate_process(runtime.child.id())
-        } else {
-            Ok(())
-        }
-        .and_then(|()| runtime.child.wait().map_err(|e| e.to_string()));
-        match stop_result {
-            Ok(status) => {
-                record.last_exit_code = status.code();
-                let _ = append_log_marker(&runtime.log_path, "=== stopped pair runtime ===");
-            }
-            Err(error) => {
-                // Keep failed teardown visible/manageable instead of
-                // orphaning it: the child stays tracked and the receipt
-                // stays on disk until a stop actually succeeds.
-                runtimes.insert(key, runtime);
-                return Err(error);
-            }
-        }
+    if runtimes.contains_key(&key) {
+        // Use ordinary Desktop Stop, including its platform-specific child/job
+        // ownership. Remote control must not grow a second teardown contract.
+        super::stop_managed_agent_pair(&app, record, &mut runtimes, &key)?;
     } else {
-        // No runtime is tracked at this key, but a valid prior-session
-        // receipt may still point at a live child (e.g. the crash-recovery
-        // window for a non-auto-start agent). Terminate that orphan before
-        // erasing its receipt — otherwise this "stop" leaves the harness
-        // running yet deletes the one artifact sweeps and
-        // terminate_untracked_pair_runtime use to find it, and a follow-up
-        // start would spawn a duplicate harness for the same pair. On
-        // failure the receipt stays on disk (terminate_untracked_pair_runtime
-        // only removes it after the child exits), mirroring the tracked
-        // path's keep-until-success invariant.
         terminate_untracked_pair_runtime(&app, &key)?;
     }
+    // Old scalar records have no community-bound receipt. Do not erase a live
+    // child or claim success for it when this request cannot establish scope.
+    reject_unscoped_live_child(
+        record.runtime_pid.filter(|pid| process_is_running(*pid)),
+        runtimes.values().map(|runtime| runtime.child.id()),
+    )?;
     super::remove_agent_runtime_receipt(&app, &key);
     state.clear_agent_session_cache(&key);
-    record.runtime_pid = None;
+    if record
+        .runtime_pid
+        .is_some_and(|pid| !process_is_running(pid))
+    {
+        record.runtime_pid = None;
+    }
     record.updated_at = crate::util::now_iso();
     record.last_stopped_at = Some(record.updated_at.clone());
     let status = status_for(&app, record, &key, None, None);
@@ -382,6 +402,16 @@ pub fn stop_managed_agent_runtime(
     Ok(status)
 }
 
+fn reject_unscoped_live_child(
+    live_pid: Option<u32>,
+    tracked: impl Iterator<Item = u32>,
+) -> Result<(), String> {
+    if live_pid.is_some_and(|pid| !tracked.into_iter().any(|other| other == pid)) {
+        return Err("Legacy runtime is not bound to this community; use local Desktop Stop".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn restart_managed_agent_runtime(
     pubkey: String,
@@ -389,7 +419,7 @@ pub fn restart_managed_agent_runtime(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, relay_url, true, None, false, app)
 }
 
 /// Probe whether this agent can operate on `requested_relay_url`.
@@ -513,6 +543,7 @@ pub async fn reconcile_managed_agent_runtimes(
                         key.relay_url.clone(),
                         true,
                         Some(&record.updated_at),
+                        false,
                         app.clone(),
                     ) {
                         Ok(mut status) => {
@@ -730,5 +761,18 @@ mod tests {
             Some("unexpected"),
         );
         assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
+    }
+}
+
+#[cfg(test)]
+mod stop_scope_tests {
+    use super::reject_unscoped_live_child;
+
+    #[test]
+    fn live_legacy_child_cannot_be_erased_or_reported_stopped() {
+        assert!(reject_unscoped_live_child(Some(12), [].into_iter()).is_err());
+        assert!(reject_unscoped_live_child(Some(12), [13].into_iter()).is_err());
+        assert!(reject_unscoped_live_child(Some(12), [12].into_iter()).is_ok());
+        assert!(reject_unscoped_live_child(None, [13].into_iter()).is_ok());
     }
 }

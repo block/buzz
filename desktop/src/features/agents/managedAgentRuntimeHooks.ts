@@ -185,10 +185,12 @@ export function useManagedAgentRuntimeAction() {
       action,
       pubkey,
       relayUrl,
+      explicitStart = false,
     }: {
       action: "start" | "stop" | "restart";
       pubkey: string;
       relayUrl: string;
+      explicitStart?: boolean;
     }) => {
       if (action === "stop") return stopManagedAgentRuntime(pubkey, relayUrl);
       if (action === "restart") {
@@ -200,7 +202,7 @@ export function useManagedAgentRuntimeAction() {
           startManagedAgentRuntime,
         );
       }
-      return startManagedAgentRuntime(pubkey, relayUrl);
+      return startManagedAgentRuntime(pubkey, relayUrl, explicitStart);
     },
     onSuccess: (runtime, { action }) => {
       // For stop-only: clear stale working badges immediately.  The restart

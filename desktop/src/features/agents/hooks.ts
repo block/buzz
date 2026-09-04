@@ -595,6 +595,7 @@ export function useStartManagedAgentMutation() {
             expectedRelayUrl?: string;
             expectedSignerPubkey?: string;
             replayFloorUnix?: number;
+            explicitStart?: boolean;
           },
     ) =>
       typeof input === "string"
@@ -603,6 +604,7 @@ export function useStartManagedAgentMutation() {
             expectedRelayUrl: input.expectedRelayUrl,
             expectedSignerPubkey: input.expectedSignerPubkey,
             replayFloorUnix: input.replayFloorUnix,
+            explicitStart: input.explicitStart,
           }),
     onSuccess: (updated) => {
       queryClient.setQueryData<ManagedAgent[]>(
