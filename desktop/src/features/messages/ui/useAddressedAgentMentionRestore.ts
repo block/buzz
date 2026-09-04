@@ -9,30 +9,48 @@ export function useAddressedAgentMentionRestore({
   audiencePubkeys,
   channelId,
   enabled,
+  getComposerRevision,
+  runComposerUpdate,
 }: {
   audiencePubkeys: readonly string[];
   channelId: string | null;
   enabled: boolean;
+  getComposerRevision: () => number;
+  runComposerUpdate: (update: () => void) => void;
 }) {
   const restoreAddressedAgentMentionsRef =
     React.useRef<RestoreAddressedAgentMentions>(() => "");
   const restoreFrameRef = React.useRef<number | null>(null);
-  const channelIdRef = React.useRef(channelId);
-  channelIdRef.current = channelId;
 
-  React.useEffect(
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revoke pending writes on owner/setting transitions
+  React.useLayoutEffect(
     () => () => {
       if (restoreFrameRef.current !== null) {
         cancelAnimationFrame(restoreFrameRef.current);
+        restoreFrameRef.current = null;
       }
     },
-    [],
+    // Accessor identity owns a draft visit, not just a channel (including A→B→A).
+    [channelId, enabled, getComposerRevision],
   );
 
   const onAddressedAgentsComposerCleared = React.useCallback(
-    (pubkeys: readonly string[]) =>
-      restoreAddressedAgentMentionsRef.current(pubkeys),
-    [],
+    (
+      pubkeys?: readonly string[],
+      allowedUnpinnedPubkeys?: readonly string[],
+    ) => {
+      let content = "";
+      // All automatic restorations share the draft owner's programmatic boundary.
+      // They must not manufacture authored intent, especially authored emptiness.
+      runComposerUpdate(() => {
+        content = restoreAddressedAgentMentionsRef.current(
+          pubkeys,
+          allowedUnpinnedPubkeys,
+        );
+      });
+      return content;
+    },
+    [runComposerUpdate],
   );
   const onAddressedAgentsSendSucceeded = React.useCallback(
     (pubkeys: readonly string[], newlyPinnedPubkeys: readonly string[]) => {
@@ -42,20 +60,26 @@ export function useAddressedAgentMentionRestore({
       );
       if (!enabled || confirmedPinnedPubkeys.length === 0) return;
 
-      const sentChannelId = channelId;
+      const revision = getComposerRevision();
       if (restoreFrameRef.current !== null) {
         cancelAnimationFrame(restoreFrameRef.current);
       }
-      restoreFrameRef.current = requestAnimationFrame(() => {
+      const frame = requestAnimationFrame(() => {
+        if (restoreFrameRef.current !== frame) return;
         restoreFrameRef.current = null;
-        if (channelIdRef.current !== sentChannelId) return;
-        restoreAddressedAgentMentionsRef.current(
-          pubkeys,
-          confirmedPinnedPubkeys,
-        );
+        // Recheck shared authority at execution, not only at send settlement.
+        // Authoring (even empty), deletion, reset and newer sends revoke it.
+        if (getComposerRevision() !== revision) return;
+        onAddressedAgentsComposerCleared(pubkeys, confirmedPinnedPubkeys);
       });
+      restoreFrameRef.current = frame;
     },
-    [audiencePubkeys, channelId, enabled],
+    [
+      audiencePubkeys,
+      enabled,
+      getComposerRevision,
+      onAddressedAgentsComposerCleared,
+    ],
   );
 
   return {

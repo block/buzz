@@ -159,6 +159,10 @@ export async function setup({ lifecycle = false } = {}) {
       AgentMentionAuthorizationError: class extends Error {},
     },
   };
+  stubs["./useMentionAvailableRuntimes"] = load(
+    "useMentionAvailableRuntimes",
+    stubs,
+  );
   stubs["./useNonMemberInvite"] = load("useNonMemberInvite", stubs);
   stubs["./useActivePreparedLinkPreviews"] = load(
     "useActivePreparedLinkPreviews",

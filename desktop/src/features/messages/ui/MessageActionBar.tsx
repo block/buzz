@@ -157,6 +157,9 @@ function MoreActionsMenu({
         </Tooltip>
         <DropdownMenuContent
           align="end"
+          // Exit animation keeps Radix pointer-leave handlers mounted after
+          // editing takes focus. A closed menu must no longer accept focus.
+          inert={!open}
           side="top"
           sideOffset={6}
           onCloseAutoFocus={(event) => {

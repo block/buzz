@@ -1,3 +1,4 @@
+import type { Editor } from "@tiptap/core";
 import { expect, test, type Page } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -330,3 +331,145 @@ test("editing to a longer typed member drops the original shorter reference", as
     .toEqual({ references: [], notifying: [SECOND] });
   await expect(row).toContainText("Scout Jones hello");
 });
+
+for (const name of ["Morgarita", "claude code", "Scout"]) {
+  test(`restored ${name} separator survives missing injected editor styles`, async ({
+    page,
+  }) => {
+    const keys = ["a".repeat(64), "b".repeat(64)];
+    const selected = name === "Scout" ? keys.slice(1) : keys.slice(0, 1);
+    await installMockBridge(page, {
+      managedAgents: keys.map((pubkey) => ({
+        pubkey,
+        name,
+        status: "running",
+        channelNames: ["general"],
+      })),
+    });
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    const composer = page.getByTestId("channel-composer-overlay");
+    const input = composer.getByTestId("message-input");
+    await composer.locator("[data-mention-picker-trigger]").click();
+    for (const key of name === "Scout" ? keys : selected) {
+      await composer.getByTestId(`mention-always-address-${key}`).click();
+    }
+    if (name === "Scout") {
+      await composer.getByTestId(`mention-always-address-${keys[0]}`).click();
+    }
+    await composer.locator("[data-mention-picker-trigger]").click();
+    const initialPrefix = `@${name}${name === "Scout" ? ` (${keys[1]})` : ""} `;
+    await expect(input).toHaveText(initialPrefix);
+    await input.pressSequentially("hello");
+    await input.press("Enter");
+    await expect
+      .poll(() => recipients(page, `${initialPrefix}hello`))
+      .toEqual([selected]);
+    // Send clears label registrations. The new draft can use the bare label,
+    // but it must still bind only the surviving identity (B for Scout).
+    const prefix = `@${name} `;
+    await expect(input).toHaveText(prefix);
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    // Generated-only text must not become an authored draft on navigation.
+    expect(
+      await page.evaluate(() =>
+        Object.keys(localStorage)
+          .filter((key) => key.startsWith("buzz-drafts.v2:"))
+          .flatMap((key) =>
+            Object.values(JSON.parse(localStorage.getItem(key) ?? "{}")),
+          ),
+      ),
+    ).toEqual([]);
+    await page.getByTestId("channel-general").click();
+    await expect(input).toHaveText(prefix);
+    // Check hydration before removing styles or typing: whitespace-normalized
+    // toHaveText alone cannot distinguish a lost separator.
+    await expect
+      .poll(() =>
+        input.evaluate((element) => {
+          const editor = (element as HTMLElement & { editor: Editor }).editor;
+          return [
+            editor.state.doc.textContent,
+            editor.state.selection.from,
+            editor.state.selection.to,
+          ];
+        }),
+      )
+      .toEqual([prefix, prefix.length + 1, prefix.length + 1]);
+    await expect(input).toBeFocused();
+    await expect(input.locator(".agent-mention-highlight")).toHaveCount(
+      selected.length,
+    );
+    // The reproduced failure had no injected TipTap whitespace stylesheet.
+    // Remove only that transient dependency, not app CSS or editor selection.
+    await input.evaluate(() => {
+      document.querySelector("style[data-tiptap-style]")?.remove();
+    });
+    await expect
+      .poll(() =>
+        input.evaluate((element) => {
+          const editor = (element as HTMLElement & { editor: Editor }).editor;
+          return {
+            text: editor.state.doc.textContent,
+            from: editor.state.selection.from,
+            to: editor.state.selection.to,
+          };
+        }),
+      )
+      .toEqual({
+        text: prefix,
+        from: prefix.length + 1,
+        to: prefix.length + 1,
+      });
+    await input.pressSequentially("follow-up");
+    await expect(input).toHaveText(`${prefix}follow-up`);
+    await expect(input).toHaveCSS("white-space", "break-spaces");
+    await expect(input.locator(".agent-mention-highlight")).toHaveCount(
+      selected.length,
+    );
+    await input.press("Enter");
+    await expect
+      .poll(() => recipients(page, `${prefix}follow-up`))
+      .toEqual([selected]);
+    // Inspect all kind-9 publications, not just a matching body: no extra A send.
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          type Event = { kind: number; content: string; tags: string[][] };
+          const summarize = (events: Event[]) =>
+            events
+              .filter((event) => event.kind === 9)
+              .map((event) => ({
+                content: event.content,
+                p: event.tags
+                  .filter((tag) => tag[0] === "p")
+                  .map((tag) => tag[1]),
+              }));
+          const wire = (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+            .filter((entry) => entry.command === "plugin:websocket|send")
+            .flatMap((entry) => {
+              const data = (entry.payload as { message?: { data?: string } })
+                ?.message?.data;
+              if (!data) return [];
+              const frame = JSON.parse(data);
+              return frame[0] === "EVENT" ? [frame[1]] : [];
+            });
+          return {
+            signed: summarize(window.__BUZZ_E2E_SIGNED_EVENTS__ ?? []),
+            wire: summarize(wire),
+          };
+        }),
+      )
+      .toEqual({
+        signed: [
+          { content: `${initialPrefix}hello`, p: selected },
+          { content: `${prefix}follow-up`, p: selected },
+        ],
+        wire: [
+          { content: `${initialPrefix}hello`, p: selected },
+          { content: `${prefix}follow-up`, p: selected },
+        ],
+      });
+  });
+}
