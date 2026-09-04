@@ -60,6 +60,35 @@ function autocomplete(page: import("@playwright/test").Page) {
     .getByTestId("mention-autocomplete");
 }
 
+async function waitForCompleteMentionSearch(
+  page: import("@playwright/test").Page,
+  query: string,
+) {
+  await expect
+    .poll(() =>
+      page.evaluate((query) => {
+        const state = window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState([
+          "user-search",
+          "infinite",
+          query,
+          50,
+        ]) as
+          | {
+              status: string;
+              fetchStatus: string;
+              data?: { pages: { nextCursor: string | null }[] };
+            }
+          | undefined;
+        return (
+          state?.status === "success" &&
+          state.fetchStatus === "idle" &&
+          state.data?.pages.at(-1)?.nextCursor === null
+        );
+      }, query),
+    )
+    .toBe(true);
+}
+
 async function readCommandLog(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
     return (
@@ -3146,23 +3175,38 @@ test("inserting a mention preserves Shift+Enter newlines (regression: bug #2)", 
   await expect(input.locator("br")).toHaveCount(1);
 });
 
-test("keyboard navigation selects mention with Enter", async ({ page }) => {
-  await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+for (const channel of ["general", "watercooler"]) {
+  test(`keyboard navigation selects mention with Enter in ${channel}`, async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByTestId(`channel-${channel}`).click();
+    await expect(page.getByTestId("chat-title")).toHaveText(channel);
+    if (channel === "watercooler")
+      await page.getByRole("button", { name: "Start a new post..." }).click();
 
-  const input = page.getByTestId("message-input");
-  await input.fill("@bo");
+    const input = page.getByTestId("message-input");
+    await input.click();
+    await page.keyboard.type("@bo");
 
-  const dropdown = autocomplete(page);
-  await expect(dropdown.getByText("bob")).toBeVisible();
+    const dropdown = page.getByTestId("mention-autocomplete");
+    await expect(dropdown.getByText("bob")).toBeVisible();
 
-  // Press Enter to select the first (and only) suggestion
-  await input.press("Enter");
+    // Select deliberately after the current search settles; a visible row alone
+    // does not authorize implicit completion while more results may arrive.
+    await waitForCompleteMentionSearch(page, "bo");
+    const baselineCommands = await readCommandLog(page);
+    await input.press("ArrowDown");
+    await input.press("Enter");
 
-  // Should insert @bob and NOT send the message
-  await expect(input).toHaveText("@bob ");
-});
+    // Should insert @bob and NOT send the message
+    await expect(input).toHaveText("@bob ");
+    await expect(input.locator("p")).toHaveCount(1);
+    expect(commandCount(await readCommandLog(page), "sign_event")).toBe(
+      commandCount(baselineCommands, "sign_event"),
+    );
+  });
+}
 
 test("Escape dismisses autocomplete dropdown", async ({ page }) => {
   await page.goto("/");
