@@ -89,6 +89,13 @@ const BASE_RETRY_DELAY_SECS: u64 = 5;
 /// Cap on retry delay in seconds.
 const MAX_RETRY_DELAY_SECS: u64 = 300;
 
+/// Fallback park duration when a provider session-limit/quota error is detected
+/// but the reset instant cannot be parsed from the error text (#5918).
+pub(crate) const SESSION_LIMIT_FALLBACK_DELAY: Duration = Duration::from_secs(3600);
+
+/// Upper bound on session-limit parks so a bad parse cannot stall a channel for days.
+pub(crate) const SESSION_LIMIT_MAX_PARK: Duration = Duration::from_secs(6 * 3600);
+
 /// Buffer added to `max_turn_duration` to derive the in-flight deadline.
 const IN_FLIGHT_DEADLINE_BUFFER_SECS: u64 = 100;
 
@@ -675,6 +682,49 @@ impl EventQueue {
             );
         }
         self.enforce_channel_cap(channel_id);
+    }
+
+    /// Re-queue a batch until `ready_at` **without** burning the retry budget.
+    ///
+    /// Used for provider session-limit / quota windows that self-heal after a
+    /// known delay. Ordinary [`Self::requeue`] exponential backoff exhausts
+    /// [`MAX_RETRIES`] in ~25 minutes and dead-letters the batch before a
+    /// multi-hour quota window ends (#5918).
+    ///
+    /// Does NOT increment `retry_counts`. Does NOT remove from
+    /// `in_flight_channels` — caller must call `mark_complete` separately.
+    pub fn requeue_until(&mut self, batch: FlushBatch, ready_at: Instant) {
+        let channel_id = batch.channel_id;
+        let event_count = batch.events.len();
+        let queue = self.queues.entry(channel_id).or_default();
+        // Push to front in reverse order so original order is preserved
+        // (front = next to process = oldest of this batch).
+        for be in batch.events.into_iter().rev() {
+            queue.push_front(QueuedEvent {
+                channel_id,
+                event: be.event,
+                prompt_tag: be.prompt_tag,
+                received_at: be.received_at,
+            });
+        }
+        // Cap enforcement: pop_back drops from the back of the deque.
+        // After push_front, the back holds the newest arrivals of this batch
+        // (and any still-newer events already queued behind prior fronts).
+        while queue.len() > MAX_PENDING_PER_CHANNEL {
+            queue.pop_back();
+            tracing::warn!(
+                channel_id = %channel_id,
+                limit = MAX_PENDING_PER_CHANNEL,
+                "requeue_until overflow — dropped newest-at-back event to enforce cap"
+            );
+        }
+        self.retry_after.insert(channel_id, ready_at);
+        tracing::warn!(
+            channel_id = %channel_id,
+            ready_in_secs = ready_at.saturating_duration_since(Instant::now()).as_secs_f64(),
+            events = event_count,
+            "parking failed batch until session-limit/quota window (retry budget preserved)"
+        );
     }
 
     /// Requeue a cancelled batch so its events appear as `cancelled_events`
@@ -3758,6 +3808,29 @@ mod tests {
         // Retry state is cleared so fresh traffic isn't throttled.
         assert!(!q.retry_counts.contains_key(&conv(ch)));
         assert!(!q.retry_after.contains_key(&conv(ch)));
+    }
+
+    #[test]
+    fn test_requeue_until_does_not_burn_retry_budget() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued(ch, "quota-bound"));
+        let batch = q.flush_next().expect("flush");
+        // Twenty session-limit parks must leave retry_counts untouched.
+        let mut batch = Some(batch);
+        for _ in 0..20 {
+            let b = batch.take().expect("batch");
+            q.requeue_until(b, Instant::now() + Duration::from_secs(3600));
+            q.mark_complete(ch);
+            assert_eq!(q.retry_counts.get(&ch).copied().unwrap_or(0), 0);
+            // Expire the park so we can flush again for the next iteration.
+            q.retry_after
+                .insert(ch, Instant::now() - Duration::from_secs(1));
+            batch = q.flush_next();
+        }
+        assert!(batch.is_some(), "event must still be queued after parks");
+        assert_eq!(q.retry_counts.get(&ch).copied().unwrap_or(0), 0);
     }
 
     #[test]

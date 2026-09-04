@@ -4497,6 +4497,274 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Provider session-limit / quota windows that self-heal after a delay.
+///
+/// Distinct from [`is_auth_error`]: auth will not recover between retries, so
+/// those batches dead-letter immediately. Session limits *do* recover, but not
+/// inside the ~25 minute ordinary retry budget (#5918).
+fn is_session_limit_error(error: &acp::AcpError) -> bool {
+    let acp::AcpError::AgentError { message, .. } = error else {
+        return false;
+    };
+    let m = message.to_ascii_lowercase();
+    // High-precision phrases from Claude subscription / similar providers.
+    m.contains("session limit")
+        || m.contains("hit your limit")
+        || m.contains("you've hit your") && m.contains("limit")
+        || m.contains("rate limit") && m.contains("resets")
+        || m.contains("usage limit") && m.contains("resets")
+}
+
+/// How long to park a batch after a session-limit error.
+///
+/// Prefers an explicit relative delay in the message (`resets in 2h`,
+/// `retry in 90s`). Falls back to wall-clock `resets 1:50pm` **only when no
+/// explicit timezone is named** (host-local, best-effort without tzdb).
+/// Named zones (e.g. `America/Buenos_Aires`) and unparseable messages use
+/// [`queue::SESSION_LIMIT_FALLBACK_DELAY`] (1h).
+fn session_limit_park_delay(error: &acp::AcpError) -> std::time::Duration {
+    let message = match error {
+        acp::AcpError::AgentError { message, .. } => message.as_str(),
+        _ => return queue::SESSION_LIMIT_FALLBACK_DELAY,
+    };
+    parse_session_limit_park_delay(message)
+}
+
+fn parse_session_limit_park_delay(message: &str) -> std::time::Duration {
+    let lower = message.to_ascii_lowercase();
+    if let Some(d) = parse_relative_reset_delay(&lower) {
+        return clamp_session_limit_delay(d);
+    }
+    if let Some(d) = parse_wall_clock_reset_delay(&lower) {
+        return clamp_session_limit_delay(d);
+    }
+    queue::SESSION_LIMIT_FALLBACK_DELAY
+}
+
+fn clamp_session_limit_delay(d: std::time::Duration) -> std::time::Duration {
+    let min = std::time::Duration::from_secs(60);
+    let max = queue::SESSION_LIMIT_MAX_PARK;
+    if d < min {
+        min
+    } else if d > max {
+        max
+    } else {
+        d
+    }
+}
+
+/// Parse `resets in 2h` / `resets in 45m` / `retry in 90s` style delays.
+fn parse_relative_reset_delay(lower: &str) -> Option<std::time::Duration> {
+    for marker in ["resets in ", "retry in ", "try again in "] {
+        if let Some(idx) = lower.find(marker) {
+            let rest = lower[idx + marker.len()..].trim_start();
+            if let Some(d) = parse_leading_duration_token(rest) {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
+fn parse_leading_duration_token(rest: &str) -> Option<std::time::Duration> {
+    let mut num = String::new();
+    let mut unit = String::new();
+    for ch in rest.chars() {
+        if ch.is_ascii_digit() {
+            if !unit.is_empty() {
+                break;
+            }
+            num.push(ch);
+        } else if ch == '.' && unit.is_empty() && !num.is_empty() && !num.contains('.') {
+            num.push(ch);
+        } else if ch.is_ascii_alphabetic() {
+            unit.push(ch.to_ascii_lowercase());
+        } else if !num.is_empty() {
+            break;
+        } else {
+            return None;
+        }
+    }
+    if num.is_empty() || unit.is_empty() {
+        return None;
+    }
+    let value: f64 = num.parse().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    // Clamp before unit scale — untrusted provider text can carry huge numbers
+    // that overflow f64 multiply to +inf and panic Duration::from_secs_f64.
+    let max_secs = queue::SESSION_LIMIT_MAX_PARK.as_secs_f64();
+    let secs = if unit.starts_with('h') {
+        value.saturating_mul_checked_secs(3600.0, max_secs)
+    } else if unit.starts_with('m') {
+        value.saturating_mul_checked_secs(60.0, max_secs)
+    } else if unit.starts_with('s') {
+        value.min(max_secs)
+    } else {
+        return None;
+    };
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    Some(std::time::Duration::from_secs_f64(secs))
+}
+
+/// Scale `value * factor` without producing non-finite seconds.
+trait SaturatingMulSecs {
+    fn saturating_mul_checked_secs(self, factor: f64, max_secs: f64) -> f64;
+}
+
+impl SaturatingMulSecs for f64 {
+    fn saturating_mul_checked_secs(self, factor: f64, max_secs: f64) -> f64 {
+        if !self.is_finite() || self < 0.0 || !factor.is_finite() || factor <= 0.0 {
+            return f64::NAN;
+        }
+        // Avoid inf: if value alone already exceeds max/factor, clamp.
+        let bound = max_secs / factor;
+        if self >= bound {
+            max_secs
+        } else {
+            let product = self * factor;
+            if product.is_finite() {
+                product.min(max_secs)
+            } else {
+                max_secs
+            }
+        }
+    }
+}
+
+/// Parse `resets 1:50pm` wall-clock forms.
+///
+/// Host-local interpretation is only used when the message does **not** name an
+/// explicit IANA timezone. Named zones (e.g. `America/Buenos_Aires`) cannot be
+/// applied without a tz database dependency — returning a wrong host-local
+/// instant can retry before the real reset. Those messages fall through to the
+/// one-hour fallback via [`parse_session_limit_park_delay`].
+fn parse_wall_clock_reset_delay(lower: &str) -> Option<std::time::Duration> {
+    let idx = lower.find("resets ")?;
+    let mut rest = lower[idx + "resets ".len()..].trim_start();
+    if rest.starts_with("in ") {
+        return None; // relative form handled elsewhere
+    }
+    // optional "at "
+    if let Some(stripped) = rest.strip_prefix("at ") {
+        rest = stripped.trim_start();
+    }
+    // Explicit named timezone → do not guess host local.
+    if wall_clock_names_explicit_timezone(rest) {
+        return None;
+    }
+    // time token until whitespace or '('
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == ':' || *c == '.')
+        .collect();
+    if token.is_empty() {
+        return None;
+    }
+    let (hour24, minute) = parse_clock_token(&token)?;
+    let now = chrono::Local::now();
+    let today = now.date_naive();
+    let naive = chrono::NaiveTime::from_hms_opt(hour24, minute, 0)?;
+    let mut candidate = today
+        .and_time(naive)
+        .and_local_timezone(chrono::Local)
+        .single()?;
+    if candidate <= now {
+        candidate += chrono::Duration::days(1);
+    }
+    let delta = candidate - now;
+    let secs = delta.num_seconds().max(0) as u64;
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// True when the wall-clock tail carries an explicit zone we cannot honor
+/// without tzdb (`(America/Buenos_Aires)`, `UTC`, `GMT+3`, etc.).
+fn wall_clock_names_explicit_timezone(rest_after_resets: &str) -> bool {
+    let r = rest_after_resets;
+    // Parenthetical IANA / label: resets 1:50pm (America/Buenos_Aires)
+    if let Some(open) = r.find('(') {
+        let inner = r[open + 1..].split(')').next().unwrap_or("").trim();
+        if !inner.is_empty() {
+            // Anything inside parens after the clock is treated as a zone label.
+            return true;
+        }
+    }
+    // Trailing bare zone tokens after the time: "resets 1:50pm utc"
+    let after_time = r
+        .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == ':' || c == '.')
+        .trim_start();
+    if after_time.is_empty() {
+        return false;
+    }
+    let token = after_time
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| c == ',' || c == ';' || c == '.');
+    if token.is_empty() {
+        return false;
+    }
+    token.contains('/')
+        || token.starts_with("utc")
+        || token.starts_with("gmt")
+        || token.starts_with('+')
+        || token.starts_with('-')
+        || token.contains("america")
+        || token.contains("europe")
+        || token.contains("asia")
+        || token.contains("africa")
+        || token.contains("pacific")
+        || token.contains("australia")
+}
+
+fn parse_clock_token(token: &str) -> Option<(u32, u32)> {
+    let t = token.trim().to_ascii_lowercase();
+    let (digits, ampm) = if t.ends_with("am") || t.ends_with("pm") {
+        let ampm = &t[t.len() - 2..];
+        let digits = t[..t.len() - 2].trim_end_matches(|c: char| !c.is_ascii_digit() && c != ':');
+        (digits, Some(ampm))
+    } else {
+        (t.as_str(), None)
+    };
+    let mut parts = digits.split(':');
+    let h: u32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next().unwrap_or("0").parse().ok()?;
+    if parts.next().is_some() || m > 59 {
+        return None;
+    }
+    let hour24 = match ampm {
+        Some("am") => {
+            if h == 12 {
+                0
+            } else if h > 12 {
+                return None;
+            } else {
+                h
+            }
+        }
+        Some("pm") => {
+            if h == 12 {
+                12
+            } else if h > 12 {
+                return None;
+            } else {
+                h + 12
+            }
+        }
+        None => {
+            if h > 23 {
+                return None;
+            }
+            h
+        }
+        Some(_) => return None,
+    };
+    Some((hour24, m))
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -4654,6 +4922,23 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_session_limit_error(e))
+            {
+                // Session-limit / quota windows self-heal after a known delay
+                // (often hours). Ordinary requeue burns MAX_RETRIES in ~25m and
+                // dead-letters the batch before the window ends (#5918). Park
+                // until the reset (or a 1h fallback) without counting attempts.
+                let delay = match &result.outcome {
+                    PromptOutcome::Error(e) => session_limit_park_delay(e),
+                    _ => queue::SESSION_LIMIT_FALLBACK_DELAY,
+                };
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    delay_secs = delay.as_secs(),
+                    "parking batch for provider session-limit — retry budget preserved"
+                );
+                queue.requeue_until(batch, std::time::Instant::now() + delay);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -10640,6 +10925,68 @@ mod error_outcome_emission_tests {
             !is_auth_error(&e),
             "usage-credit error must NOT be classified as auth error"
         );
+    }
+
+    #[test]
+    fn is_session_limit_error_matches_claude_subscription_phrase() {
+        let e = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error: You've hit your session limit · resets 1:50pm (America/Buenos_Aires)"
+                .to_string(),
+        };
+        assert!(is_session_limit_error(&e));
+        assert!(!is_auth_error(&e));
+    }
+
+    #[test]
+    fn is_session_limit_error_rejects_unrelated_agent_error() {
+        let e = acp::AcpError::AgentError {
+            code: -32603,
+            message: "model overloaded, try again later".to_string(),
+        };
+        assert!(!is_session_limit_error(&e));
+    }
+
+    #[test]
+    fn parse_session_limit_park_delay_relative_hours() {
+        let d = parse_session_limit_park_delay("session limit resets in 2h");
+        assert_eq!(d, std::time::Duration::from_secs(2 * 3600));
+    }
+
+    #[test]
+    fn parse_session_limit_park_delay_relative_minutes() {
+        let d = parse_session_limit_park_delay("hit your limit — retry in 45m");
+        assert_eq!(d, std::time::Duration::from_secs(45 * 60));
+    }
+
+    #[test]
+    fn parse_session_limit_park_delay_falls_back_to_one_hour() {
+        let d = parse_session_limit_park_delay("You've hit your session limit");
+        assert_eq!(d, queue::SESSION_LIMIT_FALLBACK_DELAY);
+    }
+
+    #[test]
+    fn parse_session_limit_park_delay_wall_clock_with_named_tz_uses_fallback() {
+        // Named zone cannot be applied without tzdb — do not host-local guess.
+        let d = parse_session_limit_park_delay(
+            "You've hit your session limit · resets 1:50pm (America/Buenos_Aires)",
+        );
+        assert_eq!(d, queue::SESSION_LIMIT_FALLBACK_DELAY);
+    }
+
+    #[test]
+    fn parse_session_limit_park_delay_relative_overflow_clamps_not_panic() {
+        // Untrusted huge number must not panic Duration::from_secs_f64(inf).
+        let d = parse_session_limit_park_delay("session limit resets in 999999999999999h");
+        assert_eq!(d, queue::SESSION_LIMIT_MAX_PARK);
+    }
+
+    #[test]
+    fn parse_session_limit_park_delay_wall_clock_without_tz_is_positive_and_capped() {
+        // Host-local interpretation only when no explicit zone is named.
+        let d = parse_session_limit_park_delay("You've hit your session limit · resets 1:50pm");
+        assert!(d >= std::time::Duration::from_secs(60));
+        assert!(d <= queue::SESSION_LIMIT_MAX_PARK);
     }
 
     #[test]
