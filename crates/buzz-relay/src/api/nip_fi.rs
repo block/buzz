@@ -155,6 +155,8 @@ pub async fn disconnect(
                     if let Err(e) = pubsub.publish_nip_fi_disconnect(&msg).await {
                         // [FI-TRACE-PRIVACY-NONPUBLIC]: no iss or pubkey in logs
                         tracing::warn!("nip-fi: cross-pod propagation publish failed: {e}");
+                        metrics::counter!("buzz_nip_fi_disconnect_propagation_failures_total")
+                            .increment(1);
                     }
                 });
             }

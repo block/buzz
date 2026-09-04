@@ -591,34 +591,7 @@ pub(super) struct ParsedHeader {
 /// base64url — is validated separately by [`enforce_signature_shape`] after
 /// header parsing, so that no structurally malformed token can defer to the
 /// key-source lookup and masquerade as a 503 outage (NIP-FI.md:151-171).
-pub(super) fn enforce_compact_structure_pub(token: &str) -> Result<(), VerifierError> {
-    enforce_compact_structure(token)
-}
-pub(super) fn enforce_signature_shape_pub(token: &str) -> Result<(), VerifierError> {
-    enforce_signature_shape(token)
-}
-pub(super) fn parse_header_pub(token: &str) -> Result<ParsedHeader, VerifierError> {
-    parse_header(token)
-}
-pub(super) fn parse_unique_claims_pub(
-    token: &str,
-) -> Result<serde_json::Map<String, serde_json::Value>, VerifierError> {
-    parse_unique_claims(token)
-}
-pub(super) fn select_unique_jwk_pub<'a>(
-    jwks: &'a jsonwebtoken::jwk::JwkSet,
-    kid: &str,
-) -> Result<&'a jsonwebtoken::jwk::Jwk, VerifierError> {
-    select_unique_jwk(jwks, kid)
-}
-pub(super) fn validate_jwk_pub(
-    jwk: &jsonwebtoken::jwk::Jwk,
-    algorithm: jsonwebtoken::Algorithm,
-) -> Result<(), VerifierError> {
-    validate_jwk(jwk, algorithm)
-}
-
-fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
+pub(super) fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
     if token.split('.').count() == 3 {
         Ok(())
     } else {
@@ -635,7 +608,7 @@ fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
 /// after [`parse_header`], so `alg=none`'s empty-signature token is already
 /// rejected at header parsing (unsupported algorithm) before this distinction
 /// matters (NIP-FI.md:151-171).
-fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
+pub(super) fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
     let signature = token
         .split('.')
         .nth(2)
@@ -644,7 +617,7 @@ fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
     base64url_decode(signature).map(|_| ())
 }
 
-fn parse_header(token: &str) -> Result<ParsedHeader, VerifierError> {
+pub(super) fn parse_header(token: &str) -> Result<ParsedHeader, VerifierError> {
     let segment = token
         .split('.')
         .next()
@@ -794,7 +767,7 @@ fn capture_capabilities(
     CanonicalCapabilities::from_pairs(entries)
 }
 
-fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, VerifierError> {
+pub(super) fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, VerifierError> {
     let mut matching = jwks
         .keys
         .iter()
@@ -806,7 +779,7 @@ fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, Verifie
     Ok(jwk)
 }
 
-fn validate_jwk(jwk: &Jwk, token_algorithm: Algorithm) -> Result<(), VerifierError> {
+pub(super) fn validate_jwk(jwk: &Jwk, token_algorithm: Algorithm) -> Result<(), VerifierError> {
     let usage_ok = jwk
         .common
         .public_key_use
@@ -962,7 +935,7 @@ fn checked_add(at: DateTime<Utc>, delta: chrono::Duration) -> Result<DateTime<Ut
 }
 
 /// Parse the claims segment as a JSON object, rejecting any duplicate member.
-fn parse_unique_claims(token: &str) -> Result<Map<String, Value>, VerifierError> {
+pub(super) fn parse_unique_claims(token: &str) -> Result<Map<String, Value>, VerifierError> {
     let segment = token
         .split('.')
         .nth(1)

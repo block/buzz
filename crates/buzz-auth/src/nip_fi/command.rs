@@ -25,9 +25,9 @@ use serde_json::{Map, Value};
 use super::config::{IssuerPolicy, IssuerRegistry, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES};
 use super::deny_map::{NipFiDenyMap, ReserveError};
 use super::verifier::{
-    enforce_compact_structure_pub, enforce_signature_shape_pub, parse_header_pub,
-    parse_numeric_date, parse_unique_claims_pub, select_unique_jwk_pub, validate_jwk_pub,
-    AssertionKeySet, IssuerKeySource, VerifierError,
+    enforce_compact_structure, enforce_signature_shape, parse_header, parse_numeric_date,
+    parse_unique_claims, select_unique_jwk, validate_jwk, AssertionKeySet, IssuerKeySource,
+    VerifierError,
 };
 
 /// The expected `typ` value for command JWTs ([NIP-FI.md §Command JWT]).
@@ -279,9 +279,9 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
             return Err(CommandError::EvidenceRejected);
         }
-        enforce_compact_structure_pub(token).map_err(|_| CommandError::EvidenceRejected)?;
-        let header = parse_header_pub(token).map_err(|_| CommandError::EvidenceRejected)?;
-        enforce_signature_shape_pub(token).map_err(|_| CommandError::EvidenceRejected)?;
+        enforce_compact_structure(token).map_err(|_| CommandError::EvidenceRejected)?;
+        let header = parse_header(token).map_err(|_| CommandError::EvidenceRejected)?;
+        enforce_signature_shape(token).map_err(|_| CommandError::EvidenceRejected)?;
 
         // typ MUST be exactly "nip-fi-command+jwt".
         if header.typ.as_deref() != Some(COMMAND_JWT_TYP) {
@@ -289,7 +289,7 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         }
 
         // ── Step 2: select issuer policy; verify signature ────────────────────
-        let claims = parse_unique_claims_pub(token).map_err(|_| CommandError::EvidenceRejected)?;
+        let claims = parse_unique_claims(token).map_err(|_| CommandError::EvidenceRejected)?;
 
         let signed_iss = claim_str(&claims, "iss").ok_or(CommandError::EvidenceRejected)?;
 
@@ -489,8 +489,8 @@ fn verify_jwt_signature(
         .filter(|s| !s.is_empty())
         .ok_or(VerifierError::MissingKeyId)?;
 
-    let jwk = select_unique_jwk_pub(key_set.jwks(), kid)?;
-    validate_jwk_pub(jwk, algorithm)?;
+    let jwk = select_unique_jwk(key_set.jwks(), kid)?;
+    validate_jwk(jwk, algorithm)?;
     let key = DecodingKey::from_jwk(jwk).map_err(|_| VerifierError::InvalidKey)?;
 
     let mut validation = Validation::new(algorithm);
