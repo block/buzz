@@ -1682,6 +1682,24 @@ pub enum PrCmd {
 
 #[derive(Subcommand)]
 pub enum IssuesCmd {
+    /// Comment on a git issue (kind:1 with NIP-34 project tags)
+    Comment {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Comment body. Use '-' to read from stdin.
+        #[arg(long)]
+        content: String,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
     /// Create a git issue (NIP-34 kind:1621)
     Create {
         /// Repo owner pubkey (64-char hex). Optional when `--channel` (or
@@ -2439,7 +2457,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["assign", "create", "get", "list", "status", "unassign"]
+            vec!["assign", "comment", "create", "get", "list", "status", "unassign",]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2468,7 +2486,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 6),
+            ("issues", 7),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
