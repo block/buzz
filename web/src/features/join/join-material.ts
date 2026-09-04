@@ -17,7 +17,8 @@
  *   "community": { "host": "skaists.buzz", "name": "skaists" },
  *   "invite_url": "/invite/v2…",          // the standing invite
  *   "default_channel": { "id": "<uuid>", "name": "welcome-everyone" },
- *   "note": "optional human line shown on the join page"
+ *   "note": "optional human line shown on the join page",
+ *   "voice": { "path": "/voice/", "tongues": ["lv","th","ru","uk"] }
  * }
  */
 
@@ -30,6 +31,11 @@ export type JoinMaterial = {
    * conventional, not required — the join always lands on default_channel. */
   rooms?: { id: string; name: string }[];
   note?: string;
+  /** The community's speech→text door, when it runs one. Absent = no mic
+   * in the composer (fail-closed: the capability is the operator's to
+   * declare, never the client's to assume). `tongues` orders the picker;
+   * the first tongue is the default. */
+  voice?: { path: string; tongues?: string[] };
 };
 
 const FETCH_TIMEOUT_MS = 8000;
@@ -63,6 +69,19 @@ export async function fetchJoinMaterial(
           (r) => typeof r?.id === "string" && typeof r?.name === "string",
         );
       if (!roomsOk) return null;
+    }
+    // voice is optional; same law — a malformed door declaration refuses
+    // the material, never a guessed endpoint
+    if (json.voice !== undefined) {
+      const voiceOk =
+        typeof json.voice?.path === "string" &&
+        json.voice.path.startsWith("/") &&
+        (json.voice.tongues === undefined ||
+          (Array.isArray(json.voice.tongues) &&
+            json.voice.tongues.every(
+              (t) => typeof t === "string" && t.length > 0,
+            )));
+      if (!voiceOk) return null;
     }
     return json;
   } catch {

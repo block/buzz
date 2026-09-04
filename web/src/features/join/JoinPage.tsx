@@ -296,7 +296,9 @@ export function JoinPage() {
         host={material.community.host || resolved.host}
         canonicalRelayUrl={resolved.canonicalRelayUrl}
         npub={local ? local.npub : ""}
+        origin={resolved.origin}
         signer={signer}
+        voice={material.voice}
         wsUrl={resolved.wsUrl}
       />
     );
