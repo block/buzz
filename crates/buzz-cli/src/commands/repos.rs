@@ -142,13 +142,18 @@ fn build_updated_repo_announcement(
         ))
     })?;
 
-    // Advance only the observed head. Using wall-clock time here would let a
-    // delayed writer leapfrog an intervening update and silently erase metadata.
-    let next_created_at = existing
+    // Advance past the observed head, but never stamp into the past: relays
+    // bound timestamp drift (±15 min in buzz-relay's ingest), so `head + 1`
+    // alone is rejected once the announcement is older than that window,
+    // making protection rules permanently unchangeable (#2876, #4431, #4432).
+    // `max(head + 1, now)` stays monotonic over the head this update was
+    // derived from while producing a timestamp the relay will accept.
+    let bumped_head = existing
         .created_at
         .as_secs()
         .checked_add(1)
         .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    let next_created_at = bumped_head.max(Timestamp::now().as_secs());
     buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
         .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
@@ -509,6 +514,7 @@ mod tests {
         let replacement = build_protection_tag("refs/heads/main", Some("admin"), true, true, false)
             .expect("valid replacement");
 
+        let before = Timestamp::now().as_secs();
         let updated = build_updated_repo_announcement(
             &existing,
             RepoChange::SetProtection(Box::new(replacement)),
@@ -516,9 +522,13 @@ mod tests {
         .expect("build update")
         .sign_with_keys(&Keys::generate())
         .expect("sign update");
+        let after = Timestamp::now().as_secs();
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        // Stale head (created_at 100): the update must be stamped at current
+        // wall-clock time so the relay's drift check accepts it (#2876).
+        assert!(updated.created_at.as_secs() >= before);
+        assert!(updated.created_at.as_secs() <= after);
         assert!(!updated
             .tags
             .iter()
@@ -587,6 +597,32 @@ mod tests {
             .tags
             .iter()
             .any(|tag| { tag.as_slice() == ["buzz-protect", "refs/heads/release", "push:owner"] }));
+    }
+
+    #[test]
+    fn update_of_fresh_head_stays_monotonic_over_it() {
+        // A head slightly in the future (peer clock ahead, still within relay
+        // drift) must yield head + 1, not wall-clock now — going backward
+        // would let this update lose to the head it was derived from.
+        let head = Timestamp::now().as_secs() + 100;
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["buzz-protect", "refs/heads/main", "no-delete"]),
+            ],
+            "",
+            head,
+        );
+
+        let updated = build_updated_repo_announcement(
+            &existing,
+            RepoChange::RemoveProtection("refs/heads/main".into()),
+        )
+        .expect("build removal")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign removal");
+
+        assert_eq!(updated.created_at.as_secs(), head + 1);
     }
 
     #[test]
@@ -712,7 +748,8 @@ mod tests {
                 .expect("sign bind update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        // Stale head: stamped at wall-clock time, not head + 1 (#2876).
+        assert!(updated.created_at.as_secs() >= existing.created_at.as_secs());
         // Exactly one binding remains, and it is the requested one.
         let bindings: Vec<_> = updated
             .tags
