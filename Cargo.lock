@@ -1130,6 +1130,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-ifc"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "hex",
+ "ifc-core",
+ "nostr 0.44.7",
+ "serde",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
