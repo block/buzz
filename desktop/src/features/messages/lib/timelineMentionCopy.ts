@@ -101,7 +101,9 @@ function inlineChipBoxes(root: HTMLElement): void {
       node && node !== root;
       node = node.parentElement
     ) {
-      if (getComputedStyle(node).display === "block") break;
+      // A wrapping chip can itself be blockified by its flex trigger. It is
+      // still inline message content; only a block ancestor ends this walk.
+      if (node !== chip && getComputedStyle(node).display === "block") break;
       node.style.display = "inline";
     }
   }

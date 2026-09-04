@@ -40,6 +40,7 @@ Regression coverage: `pastedMentionOccurrences.test.mjs` (range ownership
 through the real plugin), `mentionPasteBinding.test.mjs` (ordering, through the
 production hook), and the send-window, namesake, and delete-then-retype cases in
 `mention-clipboard.spec.ts`.
+
 ## Exact recipient labels
 
 A selected label is a binding to one exact public key, not a lookup by the latest

@@ -731,3 +731,70 @@ for (const mixed of [false, true]) {
     });
   });
 }
+
+for (const selection of ["picker", "automatic"]) {
+  test(`qualified ${selection} selection retires a pending paste of the original label`, async ({
+    page,
+  }) => {
+    const [a, b, pasted] = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+    await page.addInitScript(() =>
+      localStorage.setItem("buzz.messages.keepMentionedAgentsPinned", "true"),
+    );
+    await installMockBridge(page, {
+      managedAgents: [a, b].map((pubkey) => ({
+        pubkey,
+        name: "Scout",
+        status: "running",
+        channelNames: ["general"],
+      })),
+      searchProfiles: [{ pubkey: pasted, displayName: "Scout" }],
+    });
+    await page.goto(
+      "/#/channels/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50?messageId=mock-general-welcome&thread=mock-general-welcome",
+    );
+    const composer = page.getByTestId("thread-composer-overlay");
+    const input = composer.getByTestId("message-input");
+    await input.fill("@Scout");
+    await composer.getByTestId(`mention-suggestion-${a}`).click();
+    await page.evaluate(() => window.__BUZZ_E2E_HOLD_USERS_BATCH__?.(true));
+    await input.evaluate((element, pubkey) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", "@Scout pasted ");
+      clipboardData.setData(
+        "text/html",
+        `<span data-buzz-copy="markdown"><span data-mention="" data-mention-label="Scout" data-mention-pubkey="${pubkey}">@Scout</span> pasted </span>`,
+      );
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        }),
+      );
+    }, pasted);
+    await expect(input).toHaveText("@Scout @Scout pasted ");
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.__BUZZ_E2E_USERS_BATCH_PENDING__?.() ?? 0),
+      )
+      .toBeGreaterThan(0);
+    if (selection === "picker") {
+      await page.keyboard.type("@Scout");
+      await composer.getByTestId(`mention-suggestion-${b}`).click();
+    } else {
+      await composer.locator("[data-mention-picker-trigger]").click();
+      await composer.getByTestId(`mention-always-address-${b}`).click();
+      await input.press("Escape");
+    }
+    await expect(input).toContainText(`@Scout (${b})`);
+    const content = (await input.innerText()).trim();
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_HOLD_USERS_BATCH__?.(false) ?? 0,
+      ),
+    ).toBeGreaterThan(0);
+    await composer.getByTestId("send-message").click();
+    await expect(input).toHaveText(`@Scout @Scout (${b}) `);
+    await expect.poll(() => recipients(page, content)).toEqual([[a, b]]);
+  });
+}
