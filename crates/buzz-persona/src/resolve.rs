@@ -57,7 +57,8 @@ pub struct ResolvedPersona {
     // Hooks (parsed, not executed — reserved for future use, not yet wired)
     pub hooks: Option<ResolvedHooks>,
 
-    // Skills (bare names — reserved for future use, not yet wired)
+    // Skills as declared in frontmatter. buzz-acp scopes them with
+    // `pack::resolve_skills` and materializes them into the agent workdir.
     pub skills: Vec<String>,
 
     // Env var projection for agent subprocess

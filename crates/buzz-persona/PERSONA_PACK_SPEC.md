@@ -309,9 +309,11 @@ and team-specific protocols.
 
 ## 6. Skills
 
-> **Implementation note**: Skill paths are stored as declared in persona frontmatter. Resolution
-> to `SKILL.md` `name:` fields and runtime copying to `$AGENT_CWD/.agents/skills/` is planned
-> for a future release.
+> **Implementation note**: `buzz-acp --persona-pack <DIR> --persona <NAME>` copies the persona's
+> skills into `$AGENT_CWD/.agents/skills/` at startup and links them into the per-runtime
+> discovery directories. Skill paths are matched by directory name; resolution to `SKILL.md`
+> `name:` fields is still planned. Pair with `--workdir` to give each agent its own
+> `$AGENT_CWD`, otherwise agents sharing a directory share their skills.
 
 Skills are reusable instruction sets that agents load on demand. They are markdown files that teach
 the agent how to perform a specific task.
@@ -470,6 +472,9 @@ mcp_servers:
 1. Pack-level servers are the base set; per-persona servers merged on top.
 2. **Name collision**: per-persona entry wins entirely (no partial merge).
 3. The merged set is passed to the agent runtime via `NewSessionRequest.mcp_servers`.
+4. The Buzz-managed server (`--mcp-command`, which carries the agent's relay
+   credentials) is added alongside them and keeps its name: a pack server that
+   collides with it is dropped, not substituted.
 
 ### Environment Variable Interpolation
 

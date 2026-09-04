@@ -3490,6 +3490,50 @@ mod tests {
         );
     }
 
+    /// Persona MCP servers must reach the agent on the wire, not merely exist
+    /// in `Config` — this asserts the serialized `session/new` request the
+    /// adapter actually receives.
+    #[tokio::test]
+    async fn session_new_full_sends_mcp_servers_on_the_wire() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full(
+                "/tmp",
+                vec![McpServer {
+                    name: "semgrep".into(),
+                    command: "semgrep-mcp".into(),
+                    args: vec!["--stdio".into()],
+                    env: vec![EnvVar {
+                        name: "TOKEN".into(),
+                        value: "abc123".into(),
+                    }],
+                }],
+                None,
+                None,
+            )
+            .await
+            .expect("session_new_full should succeed");
+
+        let server = &resp.raw["_receivedRequest"]["params"]["mcpServers"][0];
+        assert_eq!(server["name"], "semgrep");
+        assert_eq!(server["command"], "semgrep-mcp");
+        assert_eq!(server["args"][0], "--stdio");
+        assert_eq!(server["env"][0]["name"], "TOKEN");
+        assert_eq!(server["env"][0]["value"], "abc123");
+    }
+
     #[tokio::test]
     async fn goose_system_prompt_request_uses_set_contract() {
         let script = r#"

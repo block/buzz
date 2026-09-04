@@ -13,6 +13,7 @@ mod queue;
 mod relay;
 mod scope;
 mod setup_mode;
+mod skills;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -83,6 +84,23 @@ fn current_working_directory() -> Result<String> {
         cwd.display()
     );
     Ok(cwd.to_string_lossy().into_owned())
+}
+
+/// Switch the process into `--workdir`, creating it if needed.
+///
+/// Called before any working-directory read so the ACP session cwd, the agent
+/// subprocess (which inherits this process's cwd), and runtime skill discovery
+/// all resolve to the same place. `None` keeps the inherited directory.
+fn apply_workdir(workdir: Option<&std::path::Path>) -> Result<()> {
+    let Some(workdir) = workdir else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(workdir)
+        .with_context(|| format!("failed to create workdir {}", workdir.display()))?;
+    std::env::set_current_dir(workdir)
+        .with_context(|| format!("failed to enter workdir {}", workdir.display()))?;
+    tracing::info!(workdir = %workdir.display(), "agent working directory set");
+    Ok(())
 }
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
@@ -2409,6 +2427,43 @@ fn startup_watermark_with_floor(now_unix: u64, replay_floor: Option<u64>) -> u64
 }
 
 #[cfg(test)]
+mod workdir_tests {
+    use super::{apply_workdir, current_working_directory};
+
+    /// The process working directory is global — these tests must not overlap.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn workdir_is_created_and_entered() {
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::current_dir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // Nested: the directory must be created, not merely entered.
+        let workdir = tmp.path().join("agents/alpha");
+
+        apply_workdir(Some(&workdir)).unwrap();
+        let entered = current_working_directory().unwrap();
+        std::env::set_current_dir(&original).unwrap();
+
+        assert_eq!(
+            std::path::Path::new(&entered).canonicalize().unwrap(),
+            workdir.canonicalize().unwrap(),
+            "the ACP session cwd must be the configured workdir"
+        );
+    }
+
+    #[test]
+    fn no_workdir_keeps_the_inherited_directory() {
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = std::env::current_dir().unwrap();
+
+        apply_workdir(None).unwrap();
+
+        assert_eq!(std::env::current_dir().unwrap(), before);
+    }
+}
+
+#[cfg(test)]
 mod replay_floor_tests {
     use super::{startup_watermark_with_floor, REPLAY_FLOOR_MAX_AGE_SECS};
 
@@ -2495,6 +2550,23 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+
+    // ── Working directory + persona skills ────────────────────────────────────
+    //
+    // `--workdir` is applied before anything reads the working directory, so
+    // the ACP session cwd, the agent subprocess, and skill discovery all agree.
+    // A private workdir per agent is what keeps one agent's skills and runtime
+    // config out of another's.
+    apply_workdir(config.workdir.as_deref())?;
+    if !config.persona_skill_dirs.is_empty() {
+        let workdir = std::env::current_dir().context("failed to resolve working directory")?;
+        skills::materialize(&config.persona_skill_dirs, &workdir).with_context(|| {
+            format!(
+                "failed to materialize persona skills into {}",
+                workdir.display()
+            )
+        })?;
+    }
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -5807,11 +5879,47 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Assemble the MCP servers passed to every `session/new`: the Buzz-managed
+/// server plus whatever the configured persona declares.
+///
+/// The Buzz server owns its name — a persona server that collides with it is
+/// dropped rather than silently replacing the agent's relay access.
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+    let mut servers = buzz_mcp_server(config).into_iter().collect::<Vec<_>>();
+
+    for server in &config.persona_mcp_servers {
+        if servers.iter().any(|existing| existing.name == server.name) {
+            tracing::warn!(
+                server = %server.name,
+                "persona MCP server collides with the Buzz-managed server; keeping the Buzz one"
+            );
+            continue;
+        }
+        servers.push(McpServer {
+            name: server.name.clone(),
+            command: server.command.clone(),
+            args: server.args.clone(),
+            env: server
+                .env
+                .iter()
+                .map(|(name, value)| EnvVar {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        });
     }
-    vec![McpServer {
+
+    servers
+}
+
+/// The Buzz-managed MCP server (`--mcp-command`), pre-loaded with the agent's
+/// relay credentials. `None` when no MCP command is configured.
+fn buzz_mcp_server(config: &Config) -> Option<McpServer> {
+    if config.mcp_command.is_empty() {
+        return None;
+    }
+    Some(McpServer {
         name: std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -5861,7 +5969,7 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             }
             env
         },
-    }]
+    })
 }
 
 #[cfg(test)]
@@ -9056,6 +9164,9 @@ mod build_mcp_servers_tests {
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            persona_mcp_servers: vec![],
+            persona_skill_dirs: vec![],
+            workdir: None,
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
@@ -9182,6 +9293,61 @@ mod build_mcp_servers_tests {
         );
     }
 
+    fn persona_server(name: &str, command: &str) -> buzz_persona::resolve::ResolvedMcpServer {
+        buzz_persona::resolve::ResolvedMcpServer {
+            name: name.into(),
+            command: command.into(),
+            args: vec!["--stdio".into()],
+            env: vec![("TOKEN".into(), "abc123".into())],
+        }
+    }
+
+    #[test]
+    fn persona_mcp_servers_join_the_buzz_managed_server() {
+        let mut config = test_config();
+        config.persona_mcp_servers = vec![persona_server("semgrep", "semgrep-mcp")];
+
+        let servers = build_mcp_servers(&config);
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "test-mcp-server");
+        let semgrep = &servers[1];
+        assert_eq!(semgrep.name, "semgrep");
+        assert_eq!(semgrep.command, "semgrep-mcp");
+        assert_eq!(semgrep.args, vec!["--stdio".to_string()]);
+        assert_eq!(semgrep.env.len(), 1);
+        assert_eq!(semgrep.env[0].name, "TOKEN");
+        assert_eq!(semgrep.env[0].value, "abc123");
+    }
+
+    #[test]
+    fn persona_server_cannot_displace_the_buzz_managed_server() {
+        let mut config = test_config();
+        // Same name as the server derived from `mcp_command`.
+        config.persona_mcp_servers = vec![persona_server("test-mcp-server", "impostor")];
+
+        let servers = build_mcp_servers(&config);
+
+        assert_eq!(servers.len(), 1, "the colliding persona server is dropped");
+        assert_eq!(servers[0].command, "test-mcp-server");
+        assert!(
+            servers[0].env.iter().any(|e| e.name == "BUZZ_PRIVATE_KEY"),
+            "the surviving server must be the credentialed Buzz one"
+        );
+    }
+
+    #[test]
+    fn persona_mcp_servers_apply_without_a_buzz_managed_server() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        config.persona_mcp_servers = vec![persona_server("semgrep", "semgrep-mcp")];
+
+        let servers = build_mcp_servers(&config);
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "semgrep");
+    }
+
     #[test]
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
@@ -9282,6 +9448,9 @@ mod error_outcome_emission_tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            persona_mcp_servers: vec![],
+            persona_skill_dirs: vec![],
+            workdir: None,
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
