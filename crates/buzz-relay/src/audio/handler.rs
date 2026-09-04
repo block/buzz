@@ -362,6 +362,18 @@ pub(crate) async fn handle_active_audio_connection(
                             crate::nip_fi_session::NipFiWsRoute::Audio,
                         ))
                         .await;
+                    // Send explicit 1008 POLICY close frame; send_loop not yet
+                    // started so ws_send is directly owned. [FI-TRACE-CLOSE-CODE]
+                    let _ = ws_send
+                        .send(axum::extract::ws::Message::Close(Some(
+                            axum::extract::ws::CloseFrame {
+                                code: axum::extract::ws::close_code::POLICY,
+                                reason: axum::extract::ws::Utf8Bytes::from_static(
+                                    "authorization denied",
+                                ),
+                            },
+                        )))
+                        .await;
                     cancel.cancel();
                     return;
                 }
@@ -417,6 +429,7 @@ pub(crate) async fn handle_active_audio_connection(
             std::sync::Arc::clone(&audio_gate),
             terminal_ctrl_tx.clone(),
             crate::nip_fi_session::NipFiWsRoute::Audio,
+            control.disconnect_reason_sender(),
         )
     });
 
@@ -436,6 +449,16 @@ pub(crate) async fn handle_active_audio_connection(
                 .send(crate::nip_fi_session::authorization_denied_frame(
                     crate::nip_fi_session::NipFiWsRoute::Audio,
                 ))
+                .await;
+            // Send explicit 1008 POLICY close frame; send_loop not yet
+            // started so ws_send is directly owned. [FI-TRACE-CLOSE-CODE]
+            let _ = ws_send
+                .send(axum::extract::ws::Message::Close(Some(
+                    axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::POLICY,
+                        reason: axum::extract::ws::Utf8Bytes::from_static("authorization denied"),
+                    },
+                )))
                 .await;
             cancel.cancel();
             return;
@@ -3407,7 +3430,6 @@ mod tests {
         let (terminal_tx, terminal_rx) = mpsc::channel::<WsMessage>(1);
         let cancel = CancellationToken::new();
         let (disconnect_tx, disconnect_rx) = watch::channel(None);
-        drop(disconnect_tx); // plain Close(None)
 
         // Step 1: spawn audio send_loop and yield so it parks in its select.
         let send_cancel = cancel.clone();
@@ -3431,6 +3453,7 @@ mod tests {
             gate,
             terminal_tx,
             crate::nip_fi_session::NipFiWsRoute::Audio,
+            disconnect_tx,
         );
         expiry_handle.await.expect("expiry task must complete");
         drop(ctrl_tx); // satisfy the unused-variable lint
@@ -3464,12 +3487,26 @@ mod tests {
             other => panic!("frame 0 must be Text(restricted JSON); got {other:?}"),
         }
 
-        // Frame 1: Close(None).
-        assert!(
-            matches!(frames[1], WsMessage::Close(None)),
-            "frame 1 must be Close(None); got {:?}",
-            frames[1]
-        );
+        // Frame 1: Close(Some) with 1008 POLICY code — expiry sets AuthorizationDenied
+        // on the disconnect_reason watch so the send loop emits a policy close.
+        match &frames[1] {
+            WsMessage::Close(Some(cf)) => {
+                assert_eq!(
+                    cf.code,
+                    axum::extract::ws::close_code::POLICY,
+                    "frame 1 must be 1008 POLICY close; got code {}",
+                    cf.code
+                );
+                assert_eq!(
+                    cf.reason.as_str(),
+                    "authorization denied",
+                    "frame 1 close reason must be 'authorization denied'"
+                );
+            }
+            other => {
+                panic!("frame 1 must be Close(Some(POLICY, 'authorization denied')); got {other:?}")
+            }
+        }
     }
 
     // ── W8: barrier at membership check — cancel before first DB read ─────────

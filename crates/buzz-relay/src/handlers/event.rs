@@ -1455,6 +1455,7 @@ mod tests {
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
                 CancellationToken::new(),
             ),
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         });
 
         super::handle_agent_observer_event(
@@ -1519,6 +1520,7 @@ mod tests {
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                tokio::sync::watch::channel(None).0,
             );
             if let Some(pubkey) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pubkey);
@@ -2159,6 +2161,7 @@ mod tests {
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                tokio::sync::watch::channel(None).0,
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
@@ -2485,6 +2488,7 @@ mod tests {
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                tokio::sync::watch::channel(None).0,
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
@@ -2634,6 +2638,7 @@ mod tests {
                 nip_fi_assertion: None,
                 session_deadline: Some(deadline),
                 nip_fi_gate: gate,
+                nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
             });
 
             // Kind:1 TextNote with no #h tag — no DB calls before before_event_ingest.

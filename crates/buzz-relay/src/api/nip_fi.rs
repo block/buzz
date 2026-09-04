@@ -1445,6 +1445,7 @@ mod route_integration_tests {
                     bp,
                     std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
                     3,
+                    tokio::sync::watch::channel(None).0,
                 );
                 state
                     .conn_manager

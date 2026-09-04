@@ -92,6 +92,15 @@ impl CommunityConnectionControl {
         self.reason_tx.subscribe()
     }
 
+    /// Returns a clone of the disconnect-reason sender so callers (e.g. the
+    /// expiry task, `enforce_nip_fi_key_pairing`) can set `AuthorizationDenied`
+    /// before cancelling, letting the send loop produce a policy close frame.
+    pub(crate) fn disconnect_reason_sender(
+        &self,
+    ) -> watch::Sender<Option<CommunityDisconnectReason>> {
+        self.reason_tx.clone()
+    }
+
     /// Records the NIP-42-proven pubkey for this connection so the registry
     /// can close it by pubkey via `disconnect_nip_fi`.
     pub(crate) fn set_proven_pubkey(&self, pubkey: Vec<u8>) {
@@ -136,6 +145,11 @@ struct ConnEntry {
     subscriptions: ConnectionSubscriptions,
     authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
     grace_limit: u8,
+    /// Shared with `ConnectionState::nip_fi_reason_tx`.  Set to
+    /// `AuthorizationDenied` before cancelling so the send loop's cancel
+    /// branch reads the reason and emits a 1008 close frame instead of a
+    /// bare close.
+    nip_fi_reason_tx: watch::Sender<Option<CommunityDisconnectReason>>,
 }
 
 /// Community-scoped lifecycle registry shared by every long-lived socket type.
@@ -325,6 +339,7 @@ impl ConnectionManager {
         backpressure_count: Arc<AtomicU8>,
         subscriptions: ConnectionSubscriptions,
         grace_limit: u8,
+        nip_fi_reason_tx: watch::Sender<Option<CommunityDisconnectReason>>,
     ) {
         let drain_ctrl_tx = ctrl_tx.clone();
         let drain_cancel = cancel.clone();
@@ -340,6 +355,7 @@ impl ConnectionManager {
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
                 grace_limit,
+                nip_fi_reason_tx,
             },
         );
         // Insert-then-check pairs with drain_all's store-then-iterate: either
@@ -479,6 +495,12 @@ impl ConnectionManager {
                 let _ = entry
                     .ctrl_tx
                     .try_send(WsMessage::Text(denied_notice.clone().into()));
+                // Set the disconnect reason BEFORE cancelling so the send
+                // loop's cancel branch reads `AuthorizationDenied` and emits
+                // a 1008 POLICY close frame instead of a bare close.
+                entry
+                    .nip_fi_reason_tx
+                    .send_replace(Some(CommunityDisconnectReason::AuthorizationDenied));
                 entry.cancel.cancel();
                 closed += 1;
             }
@@ -1642,6 +1664,7 @@ pub(crate) mod tests {
         let (ctrl_tx, ctrl_rx) = mpsc::channel(buffer_size);
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
+        let (reason_tx, _reason_rx) = tokio::sync::watch::channel(None);
         mgr.register(
             conn_id,
             tx,
@@ -1652,6 +1675,7 @@ pub(crate) mod tests {
             Arc::clone(&bp),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            reason_tx,
         );
         (mgr, conn_id, rx, ctrl_rx, cancel, bp)
     }
@@ -1904,6 +1928,7 @@ pub(crate) mod tests {
             nip_fi_assertion: None,
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         };
 
         let mgr = ConnectionManager::new();
@@ -1917,6 +1942,7 @@ pub(crate) mod tests {
             Arc::clone(&bp),
             Arc::clone(&conn.subscriptions),
             3,
+            tokio::sync::watch::channel(None).0,
         );
 
         // Fill the buffer via direct send.
@@ -1964,6 +1990,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
         mgr.register(
             conn_b,
@@ -1975,6 +2002,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
 
         let pubkey = vec![7u8; 32];
@@ -2012,6 +2040,7 @@ pub(crate) mod tests {
             bp,
             subscriptions,
             3,
+            tokio::sync::watch::channel(None).0,
         );
 
         assert_eq!(mgr.pubkey_for_conn(conn_id), None);
@@ -2346,6 +2375,7 @@ pub(crate) mod tests {
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                tokio::sync::watch::channel(None).0,
             );
             mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
             cancel
@@ -2369,6 +2399,86 @@ pub(crate) mod tests {
         );
     }
 
+    // ── F10: ConnectionManager::disconnect_nip_fi sets AuthorizationDenied ────
+    //
+    // When the deny-API closes an active root-WS connection via
+    // `disconnect_nip_fi`, the `nip_fi_reason_tx` stored in the `ConnEntry`
+    // must be set to `AuthorizationDenied` before the cancellation fires.
+    // The send loop reads this reason via `disconnect_reason.borrow()` and
+    // emits a 1008 POLICY close frame instead of a bare Close(None).
+    // [FI-TRACE-CLOSE-CODE]
+    #[test]
+    fn conn_manager_disconnect_nip_fi_sets_authorization_denied_reason() {
+        let mgr = ConnectionManager::new();
+        let conn_id = Uuid::new_v4();
+        let pubkey = vec![0xabu8; 32];
+
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let (reason_tx, reason_rx) = tokio::sync::watch::channel(None);
+
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            None,
+            cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+            reason_tx,
+        );
+        mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
+
+        let closed = mgr.disconnect_nip_fi(&pubkey);
+
+        assert_eq!(closed, 1, "one matching connection must be closed");
+        assert!(cancel.is_cancelled(), "connection token must be cancelled");
+        assert_eq!(
+            *reason_rx.borrow(),
+            Some(CommunityDisconnectReason::AuthorizationDenied),
+            "reason must be AuthorizationDenied so the send loop emits 1008 POLICY",
+        );
+    }
+
+    #[test]
+    fn conn_manager_disconnect_nip_fi_ignores_unproven_connection() {
+        let mgr = ConnectionManager::new();
+        let conn_id = Uuid::new_v4();
+        let pubkey = vec![0xabu8; 32];
+
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let (reason_tx, reason_rx) = tokio::sync::watch::channel(None);
+
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            None,
+            cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+            reason_tx,
+        );
+        // No set_authenticated_pubkey — simulates pre-NIP-42 state.
+
+        let closed = mgr.disconnect_nip_fi(&pubkey);
+
+        assert_eq!(closed, 0, "unproven connection must not be closed");
+        assert!(!cancel.is_cancelled(), "unproven connection must stay live");
+        assert_eq!(
+            *reason_rx.borrow(),
+            None,
+            "reason must remain None for untouched connection",
+        );
+    }
+
     #[tokio::test]
     async fn drain_all_jittered_waits_for_writer_acknowledgement_without_cancelling() {
         let mgr = Arc::new(ConnectionManager::new());
@@ -2387,6 +2497,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
 
         let drain_mgr = Arc::clone(&mgr);
@@ -2431,6 +2542,7 @@ pub(crate) mod tests {
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                tokio::sync::watch::channel(None).0,
             );
 
             assert_eq!(mgr.drain_all_jittered(1).await, 1);
@@ -2462,6 +2574,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
 
         let drain_mgr = Arc::clone(&mgr);
@@ -2502,6 +2615,7 @@ pub(crate) mod tests {
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                tokio::sync::watch::channel(None).0,
             );
             (ctrl_rx, cancel)
         };
@@ -2554,6 +2668,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
         // Wedge the 1-slot control channel.
         ctrl_tx
@@ -2602,6 +2717,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
 
         assert!(
@@ -2640,6 +2756,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
 
         let closed = mgr.drain_all();
@@ -2677,6 +2794,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
 
         let jitter_ms = 20_000u64;
@@ -2715,6 +2833,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
+            tokio::sync::watch::channel(None).0,
         );
         assert!(
             late_cancel.is_cancelled(),

@@ -358,6 +358,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                                 "reason" => "deny_set_post_registration"
                             )
                             .increment(1);
+                            // Set reason BEFORE cancel fires so the send loop's cancel
+                            // branch reads AuthorizationDenied and emits 1008. [FI-TRACE-CLOSE-CODE]
+                            conn.nip_fi_reason_tx.send_replace(Some(
+                                crate::state::CommunityDisconnectReason::AuthorizationDenied,
+                            ));
                             let _ = conn.ctrl_tx.try_send(
                                 crate::nip_fi_session::authorization_denied_frame(
                                     crate::nip_fi_session::NipFiWsRoute::Root,
@@ -593,6 +598,7 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         });
 
         let state = auth_test_state().await;
@@ -714,6 +720,7 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         });
 
         let state = auth_test_state().await;
@@ -809,6 +816,7 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         });
 
         // W1 requires a real DB (ban-check is fail-closed; lazy pool errors → deny before hook).
@@ -939,6 +947,7 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         });
 
         // Real DB required (ban-check is fail-closed; lazy pool denies before hook).
@@ -982,6 +991,7 @@ mod tests {
             Arc::clone(&conn.backpressure_count),
             Arc::clone(&conn.subscriptions),
             conn.grace_limit,
+            tokio::sync::watch::channel(None).0,
         );
 
         let relay_url = "ws://test.local";

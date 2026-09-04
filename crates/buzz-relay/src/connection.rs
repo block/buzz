@@ -127,6 +127,14 @@ pub struct ConnectionState {
     /// peer cleanup) cannot start until all pre-expiry effects finish their
     /// bounded commits. [FI-TRACE-LEASE-BOUND, one-gate-per-connection]
     pub(crate) nip_fi_gate: std::sync::Arc<crate::nip_fi_gate::SessionAdmissionGate>,
+
+    /// Shared with `ConnEntry::nip_fi_reason_tx` and `CommunityConnectionControl::reason_tx`.
+    ///
+    /// Set to `AuthorizationDenied` before `cancel.cancel()` on all NIP-FI
+    /// denial paths (key-pairing mismatch, deny-set hit, expiry) so the send
+    /// loop's cancel branch produces a 1008 POLICY close frame instead of a
+    /// bare close. [FI-TRACE-CLOSE-CODE]
+    pub(crate) nip_fi_reason_tx: tokio::sync::watch::Sender<Option<CommunityDisconnectReason>>,
 }
 
 impl ConnectionState {
@@ -256,6 +264,11 @@ async fn handle_active_connection(
 ) {
     let cancel = control.cancellation_token();
     let disconnect_reason = control.disconnect_reason();
+    // Extract the reason sender before control is consumed by the registry.
+    // Shared with ConnEntry::nip_fi_reason_tx and conn.nip_fi_reason_tx so that
+    // NIP-FI denial paths (key-pairing, deny-set, expiry) can set
+    // AuthorizationDenied before cancel() fires. [FI-TRACE-CLOSE-CODE]
+    let nip_fi_reason_tx = control.disconnect_reason_sender();
     // connection_time is threaded in from the HTTP handler (captured immediately
     // before on_upgrade) so the session partition is rooted at the true upgrade
     // instant, not the post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
@@ -339,6 +352,7 @@ async fn handle_active_connection(
         nip_fi_assertion,
         session_deadline,
         nip_fi_gate: nip_fi_gate.clone(),
+        nip_fi_reason_tx: nip_fi_reason_tx.clone(),
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
@@ -373,6 +387,7 @@ async fn handle_active_connection(
         Arc::clone(&backpressure_count),
         subscriptions,
         state.config.slow_client_grace_limit,
+        nip_fi_reason_tx.clone(),
     );
 
     let (ws_send, ws_recv) = socket.split();
@@ -430,6 +445,7 @@ async fn handle_active_connection(
             Arc::clone(&nip_fi_gate),
             conn.terminal_ctrl_tx.clone(),
             crate::nip_fi_session::NipFiWsRoute::Root,
+            conn.nip_fi_reason_tx.clone(),
         )
     });
 
@@ -877,6 +893,7 @@ pub(crate) mod tests {
             nip_fi_assertion: None,
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         };
         (Arc::new(conn), send_rx)
     }
@@ -1439,6 +1456,7 @@ pub(crate) mod tests {
             gate,
             terminal_ctrl_tx,
             crate::nip_fi_session::NipFiWsRoute::Root,
+            tokio::sync::watch::channel(None).0,
         );
 
         tokio::time::timeout(std::time::Duration::from_secs(2), expiry_task)
@@ -1524,6 +1542,7 @@ pub(crate) mod tests {
             nip_fi_assertion: None,
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         });
 
         let state = crate::state::tests::test_state().await;
@@ -1644,8 +1663,13 @@ pub(crate) mod tests {
         // cancel the token.
         let already_expired = Utc::now() - chrono::Duration::seconds(1);
         let gate = crate::nip_fi_gate::SessionAdmissionGate::new(already_expired, cancel.clone());
-        let expiry_handle =
-            spawn_nip_fi_expiry_task(already_expired, gate, terminal_ctrl_tx, NipFiWsRoute::Root);
+        let expiry_handle = spawn_nip_fi_expiry_task(
+            already_expired,
+            gate,
+            terminal_ctrl_tx,
+            NipFiWsRoute::Root,
+            tokio::sync::watch::channel(None).0,
+        );
         // Wait for the expiry task to fire before we run the send_loop.
         expiry_handle.await.expect("expiry task must complete");
 

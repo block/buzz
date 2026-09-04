@@ -2637,6 +2637,7 @@ mod tests {
             nip_fi_assertion: None,
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         });
 
         let state = crate::state::tests::test_state().await;

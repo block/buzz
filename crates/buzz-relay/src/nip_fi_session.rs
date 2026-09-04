@@ -105,6 +105,12 @@ pub(crate) async fn enforce_nip_fi_key_pairing(
                 "NIP-FI key pairing mismatch — closing connection"
             );
             *conn.auth_state.write().await = crate::connection::AuthState::Failed;
+            // Set reason BEFORE cancel fires so the send loop's cancel branch
+            // reads AuthorizationDenied and emits a 1008 POLICY close frame.
+            // [FI-TRACE-CLOSE-CODE]
+            conn.nip_fi_reason_tx.send_replace(Some(
+                crate::state::CommunityDisconnectReason::AuthorizationDenied,
+            ));
             // Use the dedicated terminal channel — guaranteed one free slot even
             // when ctrl_tx (capacity 8) is saturated by ordinary control traffic.
             let _ = conn
@@ -126,6 +132,15 @@ pub(crate) async fn enforce_nip_fi_key_pairing(
             use futures_util::SinkExt as _;
             let _ = ws_send
                 .send(authorization_denied_frame(NipFiWsRoute::Audio))
+                .await;
+            // Send explicit 1008 POLICY close frame before dropping. The audio
+            // handler owns ws_send directly here (send_loop not yet started).
+            // [FI-TRACE-CLOSE-CODE]
+            let _ = ws_send
+                .send(WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::POLICY,
+                    reason: axum::extract::ws::Utf8Bytes::from_static("authorization denied"),
+                })))
                 .await;
             cancel.cancel();
         }
@@ -158,8 +173,10 @@ pub(crate) fn authorization_denied_frame(route: NipFiWsRoute) -> WsMessage {
 /// At `deadline`, the task:
 /// 1. Calls `gate.expire(terminal)` with the route-specific terminal closure.
 ///    Inside `gate.expire()`:
-///    a. The terminal closure enqueues the denial frame on `terminal_ctrl_tx`
-///    and increments the lease-expiration metric.
+///    a. The terminal closure sets `deny_reason_tx` to `AuthorizationDenied`
+///    (so the send loop's cancel branch emits a 1008 POLICY close frame),
+///    enqueues the denial frame on `terminal_ctrl_tx`, and increments the
+///    lease-expiration metric. [FI-TRACE-CLOSE-CODE]
 ///    b. `cancel.cancel()` — socket termination starts immediately.
 ///    c. The gate acquires the write guard (quiescence barrier) — blocks until
 ///    all outstanding effect permits are released, then records `Expired`.
@@ -172,6 +189,7 @@ pub(crate) fn spawn_nip_fi_expiry_task(
     gate: std::sync::Arc<crate::nip_fi_gate::SessionAdmissionGate>,
     terminal_ctrl_tx: mpsc::Sender<WsMessage>,
     route: NipFiWsRoute,
+    deny_reason_tx: tokio::sync::watch::Sender<Option<crate::state::CommunityDisconnectReason>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let now = chrono::Utc::now();
@@ -195,6 +213,11 @@ pub(crate) fn spawn_nip_fi_expiry_task(
                 // handle before remove_connection) cannot start until pre-expiry
                 // effects have finished their bounded commits.
                 gate.expire(|| {
+                    // Set reason BEFORE cancel fires so the send loop's cancel
+                    // branch reads AuthorizationDenied and emits 1008. [FI-TRACE-CLOSE-CODE]
+                    deny_reason_tx.send_replace(Some(
+                        crate::state::CommunityDisconnectReason::AuthorizationDenied,
+                    ));
                     let _ = terminal_ctrl_tx.try_send(authorization_denied_frame(route));
                     metrics::counter!("buzz_nip_fi_lease_expirations_total").increment(1);
                     warn!(
@@ -278,6 +301,7 @@ mod tests {
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
                 CancellationToken::new(),
             ),
+            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
         });
 
         // Use a different key as the proven pubkey → forced mismatch.
@@ -332,8 +356,13 @@ mod tests {
         let already_expired = Utc::now() - chrono::Duration::seconds(1);
 
         let gate = crate::nip_fi_gate::SessionAdmissionGate::new(already_expired, cancel.clone());
-        let handle =
-            spawn_nip_fi_expiry_task(already_expired, gate, terminal_tx, NipFiWsRoute::Root);
+        let handle = spawn_nip_fi_expiry_task(
+            already_expired,
+            gate,
+            terminal_tx,
+            NipFiWsRoute::Root,
+            tokio::sync::watch::channel(None).0,
+        );
         handle.await.expect("expiry task must complete");
 
         assert!(
