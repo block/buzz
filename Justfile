@@ -656,8 +656,8 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 
-# Run desktop-next in dev mode with the same local relay, services, ports, and identity as `dev`.
-desktop-next-dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
+# Run desktop-new in dev mode with the same local relay, services, ports, and identity as `dev`.
+desktop-new-dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
@@ -711,7 +711,7 @@ desktop-next-dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
         exit 1
     fi
     [[ -d desktop/node_modules ]] || pnpm --dir desktop install
-    [[ -d desktop-next/node_modules ]] || pnpm --dir desktop-next install
+    [[ -d desktop-new/node_modules ]] || pnpm --dir desktop-new install
     cd {{desktop_dir}}
     source ../scripts/instance-env.sh
     # Keep instance-env's worktree-specific identifier, ports, icon, reset URL,
@@ -720,11 +720,11 @@ desktop-next-dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
       const config = JSON.parse(process.env.BUZZ_TAURI_CONFIG);
       config.productName = `Buzz Sessions (${process.env.BUZZ_WORKTREE_LABEL ?? "Dev"})`;
       config.build.devUrl = `http://localhost:${process.env.BUZZ_VITE_PORT}${process.env.BUZZ_RESET_WEBVIEW_STATE === "1" ? "?resetDevState=1" : ""}`;
-      config.build.beforeDevCommand = `exec pnpm --dir ../desktop-next exec vite --port ${process.env.BUZZ_VITE_PORT} --strictPort`;
+      config.build.beforeDevCommand = `exec pnpm --dir ../desktop-new exec vite --port ${process.env.BUZZ_VITE_PORT} --strictPort`;
       console.log(JSON.stringify(config));
     ')
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
-    echo "Starting desktop-next on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    echo "Starting desktop-new on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     FEATURES=(); [[ -n "{{mesh}}" ]] && FEATURES=(--features mesh-llm)
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
