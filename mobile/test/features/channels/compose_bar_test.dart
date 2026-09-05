@@ -31,6 +31,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/durable_mention_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -192,6 +193,7 @@ Widget _buildComposeBar({
   ValueChanged<VoidCallback>? onFocusRestorerChanged,
   AppLifecycleNotifier Function()? appLifecycle,
   String composeBarKey = 'compose-bar',
+  String? threadHeadId,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
 }) {
@@ -255,6 +257,7 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
+                  threadHeadId: threadHeadId,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
@@ -644,6 +647,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   exactMentionTests();
+  durableMentionTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
