@@ -506,21 +506,26 @@ class ComposeBar extends HookConsumerWidget {
         ensureCurrent();
         if (draftRevision.value != submittedDraftRevision) return;
 
-        // Mentioning humans outside the channel prompts "Invite" / "Do
-        // nothing" (send without inviting) — mirrors desktop's
-        // NonMemberMentionDialog. Agents keep the existing silent auto-add.
-        if (scan.humans.isNotEmpty) {
+        // Agents and humans both require deliberate invitation intent.
+        final nonMembers = [
+          ...scan.humans,
+          ...selectedMentions.where(
+            (candidate) =>
+                scan.agentPubkeys.contains(candidate.pubkey.toLowerCase()),
+          ),
+        ];
+        if (nonMembers.isNotEmpty) {
           if (!context.mounted) return;
           final choice = await _promptNonMemberMention(
             context,
-            names: [for (final candidate in scan.humans) candidate.label],
+            names: [for (final candidate in nonMembers) candidate.label],
             canInvite: scan.canAddMembers,
           );
           ensureCurrent();
           if (choice == null || draftRevision.value != submittedDraftRevision) {
             return; // Dismissal or newer intent keeps the draft, sends nothing.
           }
-          outgoing.resolveHumanChoice(choice, scan.humans);
+          outgoing.resolveChoice(choice, nonMembers);
         }
 
         final queuedAttachments = List<_PendingAttachment>.of(
@@ -528,8 +533,7 @@ class ComposeBar extends HookConsumerWidget {
         );
         final channelActions = ref.read(channelActionsProvider);
 
-        // An add that was refused doesn't block the message: it is reported and
-        // the un-added mentions are demoted to reference tags so the send lands.
+        // Failed preparation never silently changes the intended audience.
         Future<void> addMentionedNonMembers() => outgoing.addNonMembers(
           channelActions,
           scan: scan,
