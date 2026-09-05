@@ -15,6 +15,7 @@
 //! dropped, the next auth attempt is refused at the auth seam.
 
 use buzz_core::{CommunityId, TenantContext};
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -55,7 +56,16 @@ pub fn parse_conn_control_channel(channel: &str) -> Option<CommunityId> {
 #[serde(tag = "op")]
 pub enum ConnControl {
     /// Disconnect every live socket bound to the carrying community.
-    DisconnectCommunity,
+    ///
+    /// Archive callers include the durable archive-transition timestamp. Each
+    /// receiver checks it under a row lock before disconnecting, so a delayed
+    /// command cannot disconnect a subsequently restored community. `None`
+    /// preserves the unconditional command used by permanent deletion.
+    DisconnectCommunity {
+        /// Exact archive transition this command belongs to, when reversible.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        archived_at: Option<DateTime<Utc>>,
+    },
     /// Disconnect every live connection authenticated as `pubkey` in the
     /// carrying community — live ban enforcement. `pubkey` is 32 raw bytes.
     /// `event_id` and `reason` reproduce the same NIP-01 `OK` frame the origin
@@ -201,18 +211,55 @@ mod tests {
 
     #[test]
     fn disconnect_community_command_serde_round_trips() {
-        let cmd = ConnControl::DisconnectCommunity;
+        let cmd = ConnControl::DisconnectCommunity { archived_at: None };
         let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"op":"DisconnectCommunity"}"#);
         assert_eq!(serde_json::from_str::<ConnControl>(&json).unwrap(), cmd);
+    }
+
+    #[test]
+    fn archived_community_disconnect_carries_the_lifecycle_fence() {
+        let archived_at = chrono::DateTime::parse_from_rfc3339("2026-08-31T12:34:56.123456Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cmd = ConnControl::DisconnectCommunity {
+            archived_at: Some(archived_at),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""archived_at":"2026-08-31T12:34:56.123456Z""#));
+        assert_eq!(serde_json::from_str::<ConnControl>(&json).unwrap(), cmd);
+    }
+
+    #[test]
+    fn legacy_consumer_accepts_archived_community_disconnect_payload() {
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        #[serde(tag = "op")]
+        enum LegacyConnControl {
+            DisconnectCommunity,
+        }
+
+        let archived_at = chrono::DateTime::parse_from_rfc3339("2026-08-31T12:34:56.123456Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let json = serde_json::to_string(&ConnControl::DisconnectCommunity {
+            archived_at: Some(archived_at),
+        })
+        .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<LegacyConnControl>(&json).unwrap(),
+            LegacyConnControl::DisconnectCommunity
+        );
     }
 
     #[test]
     fn unknown_command_is_rejected_without_affecting_later_messages() {
         assert!(serde_json::from_str::<ConnControl>(r#"{"op":"FutureCommand"}"#).is_err());
-        let known = serde_json::to_string(&ConnControl::DisconnectCommunity).unwrap();
+        let known =
+            serde_json::to_string(&ConnControl::DisconnectCommunity { archived_at: None }).unwrap();
         assert_eq!(
             serde_json::from_str::<ConnControl>(&known).unwrap(),
-            ConnControl::DisconnectCommunity
+            ConnControl::DisconnectCommunity { archived_at: None }
         );
     }
 

@@ -1679,7 +1679,7 @@ mod tests {
         let registry = crate::state::CommunityConnectionRegistry::new();
         let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
         let _guard = registry.register(Uuid::new_v4(), community, control);
-        assert_eq!(registry.disconnect_community(community), 1);
+        assert_eq!(registry.disconnect_deleted_community(community), 1);
         let messages = Arc::new(Mutex::new(Vec::new()));
         let sink = MockSink {
             messages: Arc::clone(&messages),
