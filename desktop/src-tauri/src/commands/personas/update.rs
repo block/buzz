@@ -14,7 +14,9 @@ use crate::{
     util::now_iso,
 };
 
-use super::{normalize_description, pending, retain_persona_pending, trim_optional, trim_required};
+use super::{normalize_description, pending, propagate, retain_persona_pending, trim_optional, trim_required};
+
+use propagate::{propagate_persona_name_rename, propagate_persona_respond_to};
 
 #[cfg(test)]
 mod name_propagation_tests;
@@ -28,87 +30,6 @@ pub struct UpdatePersonaResult {
     persona: AgentDefinition,
 }
 
-/// Propagate a persona definition's display_name rename to linked agent instances.
-/// Only instances whose current `name` equals `old_display_name` are updated;
-/// pool-named instances (e.g. "Birch", "Compass") keep their individualised name.
-/// Updates both `record.name` (relay display name) and `record.display_name`.
-/// Returns the pubkeys of the records that were renamed.
-fn propagate_persona_name_rename(
-    records: &mut [ManagedAgentRecord],
-    persona_id: &str,
-    old_display_name: &str,
-    new_display_name: &str,
-) -> Vec<String> {
-    let mut renamed = Vec::new();
-    for record in records.iter_mut() {
-        if record.persona_id.as_deref() != Some(persona_id) {
-            continue;
-        }
-        if record.name != old_display_name {
-            continue; // pool-named instance — keep its individualised name
-        }
-        record.name = new_display_name.to_string();
-        record.display_name = Some(new_display_name.to_string());
-        renamed.push(record.pubkey.clone());
-    }
-    renamed
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct LinkedProfileUpdate {
-    /// Whether this update changed bytes in the managed-agent record.
-    record_changed: bool,
-    /// Whether this instance needs a complete kind:0 replacement event.
-    profile_sync_required: bool,
-    /// Avatar to publish with the complete kind:0 replacement event.
-    profile_avatar: Option<String>,
-}
-
-/// Apply the persisted portion of a persona identity edit to one linked
-/// instance and resolve the avatar for the complete kind:0 replacement.
-///
-/// Description-only edits deliberately leave the record unchanged, but still
-/// need a non-empty avatar projection for legacy records whose `avatar_url`
-/// has not yet been backfilled. The persona avatar is authoritative there;
-/// the effective command icon is the final fallback.
-fn prepare_linked_profile_update(
-    record: &mut ManagedAgentRecord,
-    persona: &AgentDefinition,
-    renamed: bool,
-    avatar_changed: bool,
-    about_changed: bool,
-) -> LinkedProfileUpdate {
-    let mut record_changed = renamed;
-    if avatar_changed {
-        let effective_cmd = effective_agent_command(
-            record.persona_id.as_deref(),
-            std::slice::from_ref(persona),
-            record.agent_command_override.as_deref(),
-        );
-        record.avatar_url = persona
-            .avatar_url
-            .clone()
-            .or_else(|| managed_agent_avatar_url(&effective_cmd));
-        record_changed = true;
-    }
-
-    let effective_cmd = effective_agent_command(
-        record.persona_id.as_deref(),
-        std::slice::from_ref(persona),
-        record.agent_command_override.as_deref(),
-    );
-    let profile_avatar = record
-        .avatar_url
-        .clone()
-        .or_else(|| persona.avatar_url.clone())
-        .or_else(|| managed_agent_avatar_url(&effective_cmd));
-
-    LinkedProfileUpdate {
-        record_changed,
-        profile_sync_required: record_changed || about_changed,
-        profile_avatar,
-    }
-}
 
 /// Profile sync params collected under the store lock for async relay publish:
 /// (agent keys, relay url, display name, avatar url, kind:0 about, auth tag).
@@ -120,6 +41,7 @@ type ProfileSyncParams = Vec<(
     Option<String>,
     Option<String>,
 )>;
+
 
 #[tauri::command]
 pub async fn update_persona(
@@ -206,6 +128,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 crate::managed_agents::validate_user_env_keys(&env_vars)?;
                 persona.env_vars = env_vars;
             }
+            let behavior_present = input.behavior.is_some();
             apply_persona_behavior(persona, input.behavior)?;
             persona.updated_at = now_iso();
 
@@ -215,11 +138,21 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let retained = retain(&app, &state, &result)?;
             try_regenerate_nest(&app);
 
-            // If the avatar, display_name, or effective description changed,
-            // propagate to linked agent records and collect relay profile sync
-            // params for the async phase. An about-only change touches no
-            // record bytes but still republishes each linked kind:0 profile.
-            let sync_params: ProfileSyncParams = if avatar_changed || name_changed || about_changed
+
+            // Propagate definition edits that instances must mirror (avatar,
+            // display name, respond-to gate) and collect relay profile sync
+            // params for the async phase.
+            //
+            // Also enter when the definition already carries an explicit gate:
+            // unrelated edits (prompt, model, …) must still reconcile that gate
+            // onto instances so a prior broken owner-only instance can heal
+            // without toggling the behavior control.
+            let sync_params: ProfileSyncParams = if avatar_changed
+                || name_changed
+                || about_changed
+                || behavior_present
+                || result.respond_to.is_some()
+
             {
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
@@ -240,6 +173,13 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 } else {
                     Vec::new()
                 };
+
+                // Explicit definition gate only — unset leaves instances alone.
+                if result.respond_to.is_some()
+                    && propagate_persona_respond_to(&mut records, &result.id, &result)? > 0
+                {
+                    agents_modified = true;
+                }
 
                 for record in records.iter_mut() {
                     if record.persona_id.as_deref() != Some(&result.id) {

@@ -131,6 +131,27 @@ test("personaManagedAgentUpdate syncs definition access to the linked agent", ()
   );
 });
 
+
+test("personaManagedAgentUpdate prompt-only save leaves unset respondTo alone", () => {
+  // Instance already anyone; persona gate unset. A prompt tweak must not
+  // coerce undefined → owner-only onto the instance the harness reads.
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({
+        name: "Fizz Prime",
+        model: "new-model",
+        envVars: { NEW_KEY: "2" },
+        respondTo: "anyone",
+      }),
+      persona({ respondTo: null, respondToAllowlist: [] }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      systemPrompt: "New prompt",
+    },
+  );
+});
+
 test("personaManagedAgentUpdate skips unrelated or unchanged agents", () => {
   assert.equal(
     personaManagedAgentUpdate(agent({ personaId: "persona-2" }), persona()),
