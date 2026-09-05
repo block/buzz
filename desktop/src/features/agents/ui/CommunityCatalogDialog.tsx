@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Plus, Upload } from "lucide-react";
+import { ChevronDown, Link2, Plus, Upload } from "lucide-react";
 
 import { isCatalogPersonaSelected } from "@/features/agents/lib/catalog";
 import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
@@ -8,6 +8,10 @@ import type { CatalogTeam } from "@/features/agents/lib/teamCatalogRelay";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { AgentPersona } from "@/shared/api/types";
+import type {
+  ExistingAgentRegistrationResult,
+  RegisterExistingAgentInput,
+} from "@/shared/api/tauriAgentRegistration";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -27,16 +31,17 @@ import { Skeleton } from "@/shared/ui/skeleton";
 
 import agentOutlineUrl from "../assets/agent-outline.svg";
 import { AgentDefinitionMetadata } from "./AgentDefinitionMetadata";
+import { RegisterExistingAgentPane } from "./ExistingAgentRegistrationPane";
 import { PersonaAddedBy } from "./PersonaAddedBy";
 import { resolveCatalogOwnerLabel } from "./catalogOwnerLabel";
 
 // ── Type-tagged selection keys ────────────────────────────────────────────────
 
-// The detail pane is a single-select surface across four kinds of content:
-// the "create" and "import" panes carried from the unified add-agent dialog
-// (#5015), plus a persona or team browsed from the community catalog. Persona
-// IDs and team coordinates are prefixed so they cannot collide with each other
-// or with the fixed "create"/"import" keys.
+// The detail pane is a single-select surface across five kinds of content:
+// the "create", "register", and "import" panes carried from the unified
+// add-agent dialog (#5015), plus a persona or team browsed from the community
+// catalog. Persona IDs and team coordinates are prefixed so they cannot collide
+// with each other or with the fixed navigation keys.
 type CatalogSelectionKey =
   | { kind: "persona"; id: string }
   | { kind: "team"; key: string };
@@ -68,6 +73,10 @@ type CommunityCatalogDialogProps = {
     onRequestClose: () => void;
   }) => React.ReactNode;
   onImportFile: (fileBytes: number[], fileName: string) => void;
+  isRegistrationPending: boolean;
+  onRegisterExistingAgent: (
+    input: RegisterExistingAgentInput,
+  ) => Promise<ExistingAgentRegistrationResult>;
 
   // Persona side
   personas: AgentPersona[];
@@ -101,6 +110,8 @@ type PendingNavigation =
 export function CommunityCatalogDialog({
   createContent,
   onImportFile,
+  isRegistrationPending,
+  onRegisterExistingAgent,
   personas,
   personasError,
   personasLoading,
@@ -278,7 +289,7 @@ export function CommunityCatalogDialog({
     <>
       <Dialog
         onOpenChange={(nextOpen) => {
-          if (!nextOpen && personasPending) return;
+          if (!nextOpen && (personasPending || isRegistrationPending)) return;
           if (!nextOpen) {
             requestClose();
             return;
@@ -354,6 +365,13 @@ export function CommunityCatalogDialog({
                     label="Create agent"
                     onClick={() => requestSelection("create")}
                     testId="agent-catalog-create"
+                  />
+                  <CatalogNavigationButton
+                    icon={<Link2 className="h-4 w-4" />}
+                    isCurrent={selection === "register"}
+                    label="Register existing"
+                    onClick={() => requestSelection("register")}
+                    testId="agent-catalog-register-existing"
                   />
                   <CatalogNavigationButton
                     icon={<Upload className="h-4 w-4" />}
@@ -478,6 +496,13 @@ export function CommunityCatalogDialog({
               {isImportSelected ? (
                 <ImportAgentPane
                   onImport={() => fileInputRef.current?.click()}
+                />
+              ) : null}
+
+              {selection === "register" ? (
+                <RegisterExistingAgentPane
+                  isPending={isRegistrationPending}
+                  onRegister={onRegisterExistingAgent}
                 />
               ) : null}
 

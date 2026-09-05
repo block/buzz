@@ -13558,6 +13558,17 @@ export function maybeInstallE2eTauriMocks() {
         return handleCreatePersona(
           payload as Parameters<typeof handleCreatePersona>[0],
         );
+      case "register_existing_agent": {
+        const agentPubkey = (
+          payload as { input: { agentPubkey: string } }
+        ).input.agentPubkey.toLowerCase();
+        return {
+          agentPubkey,
+          displayName: "Existing agent",
+          publicationStatus: "published",
+          alreadyRegistered: false,
+        };
+      }
       case "update_persona":
         return handleUpdatePersona(
           payload as Parameters<typeof handleUpdatePersona>[0],

@@ -308,6 +308,20 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+18. **Registering an existing agent never takes custody of its identity.** The
+    registration path accepts only an existing pubkey whose live kind:0 profile
+    contains a valid NIP-OA attestation to the current owner. It publishes an
+    owner-signed kind:30177 directory record with the explicitly selected
+    `respond_to` policy and allowlist, and does not generate, import, replace,
+    persist, or request the agent's private key. Allowlist mode does not
+    implicitly admit the owner: the UI must tell the owner to include their own
+    pubkey when they want discovery, and the published allowlist must match the
+    requested normalized values exactly. This directory policy controls Desktop
+    discovery only; an independently operated agent's runtime gate remains
+    external and must be configured to admit the same audience. Registration
+    also must not create a secretless local `ManagedAgentRecord`: independently
+    operated agents remain relay agents, not startable Desktop runtimes.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness
@@ -332,7 +346,6 @@ the CLI with the channel and target thread root:
 buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   --mention <agent-pubkey> --content '!cancel'
 ```
-
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
