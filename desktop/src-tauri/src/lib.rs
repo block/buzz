@@ -1,4 +1,5 @@
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
+mod agent_operations;
 mod app_menu;
 mod app_state;
 mod archive;
@@ -375,6 +376,9 @@ pub fn run() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
             archive::spawn_warm_init(app_handle.clone());
+            if !recovery_mode {
+                agent_operations::spawn(app_handle.clone());
+            }
 
             // Resolve the REPOS symlink from the persisted repos_dir BEFORE
             // agents are restored below, and decide whether restore is safe.
@@ -696,6 +700,8 @@ pub fn run() {
             list_relay_agents,
             revalidate_relay_agents,
             list_managed_agents,
+            get_agent_operations_status,
+            save_agent_operations_config,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,

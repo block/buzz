@@ -1320,6 +1320,23 @@ declare global {
       command: string,
       payload?: Record<string, unknown>,
     ) => Promise<unknown>;
+    /** Drive one deterministic operations-worker scan through the browser fixture. */
+    __BUZZ_E2E_RUN_OPERATIONS_SCAN__?: (input: {
+      now: string;
+      ownerPubkey: string;
+      agents: MockOperationsAgent[];
+      activity: string;
+      trigger?: "tick" | "resume";
+    }) => MockOperationsMessage[];
+    /** Seed the assistant-authored daily digest used by delivery reconciliation. */
+    __BUZZ_E2E_POST_OPERATIONS_DIGEST__?: (input: {
+      now: string;
+      content?: string;
+    }) => MockOperationsMessage;
+    /** Read the exact messages emitted by the deterministic operations journey. */
+    __BUZZ_E2E_GET_OPERATIONS_MESSAGES__?: () => MockOperationsMessage[];
+    /** Simulate a worker restart while preserving its persisted delivery state. */
+    __BUZZ_E2E_RESTART_OPERATIONS_WORKER__?: () => void;
     __BUZZ_E2E_EMIT_TAURI_EVENT__?: (
       event: string,
       payload: unknown,
@@ -3319,6 +3336,205 @@ let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
+let mockAgentOperationsStatus = {
+  config: {
+    enabled: false,
+    channelId: null as string | null,
+    assistantPubkey: null as string | null,
+  },
+  schedule:
+    "Daily at 09:00 Asia/Manila; liveness every 30 seconds while Buzz Desktop is running",
+  nextManilaBoundaryUtc: "2026-09-03T01:00:00Z",
+  metricCoverageSince: null as number | null,
+  lastConfirmedDigest: null,
+};
+
+type MockOperationsAgent = {
+  pubkey: string;
+  name: string;
+  status: "running" | "stopped" | "deployed" | "not_deployed";
+  startOnAppLaunch: boolean;
+  lastError?: string | null;
+  lastErrorCode?: number | null;
+  lastExitCode?: number | null;
+};
+
+type MockOperationsMessage = {
+  id: string;
+  author: string;
+  channelId: string;
+  marker: string | null;
+  content: string;
+  mentionPubkeys: string[];
+};
+
+let mockOperationsMessages: MockOperationsMessage[] = [];
+let mockOperationsActiveEpisodes = new Set<string>();
+let mockOperationsEpisodeSequence = 0;
+let mockOperationsEventSequence = 0;
+
+function resetMockOperationsJourney() {
+  mockOperationsMessages = [];
+  mockOperationsActiveEpisodes = new Set<string>();
+  mockOperationsEpisodeSequence = 0;
+  mockOperationsEventSequence = 0;
+}
+
+function mockOperationsId() {
+  mockOperationsEventSequence += 1;
+  return mockOperationsEventSequence.toString(16).padStart(64, "0");
+}
+
+function mockSafeAgentName(value: string) {
+  return (
+    Array.from(value)
+      .map((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        const isControl = codePoint <= 0x1f || codePoint === 0x7f;
+        const isBidiControl =
+          codePoint === 0x061c ||
+          codePoint === 0x200e ||
+          codePoint === 0x200f ||
+          (codePoint >= 0x202a && codePoint <= 0x202e) ||
+          (codePoint >= 0x2066 && codePoint <= 0x2069);
+        return isControl || isBidiControl || "@|`*_[]<>#".includes(character)
+          ? " "
+          : character;
+      })
+      .join("")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, 80) || "Unnamed agent"
+  );
+}
+
+function mockOperationsDate(now: Date) {
+  return new Date(now.getTime() + 8 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+}
+
+function mockOperationsBoundary(date: string) {
+  return new Date(`${date}T01:00:00Z`);
+}
+
+function mockOperationsPush(message: Omit<MockOperationsMessage, "id">) {
+  const stored = { ...message, id: mockOperationsId() };
+  mockOperationsMessages.push(stored);
+  return stored;
+}
+
+function runMockOperationsScan(input: {
+  now: string;
+  ownerPubkey: string;
+  agents: MockOperationsAgent[];
+  activity: string;
+}) {
+  const config = mockAgentOperationsStatus.config;
+  if (!config.enabled || !config.channelId || !config.assistantPubkey) {
+    return structuredClone(mockOperationsMessages);
+  }
+  const now = new Date(input.now);
+  const date = mockOperationsDate(now);
+  const boundary = mockOperationsBoundary(date);
+
+  const newlyUnhealthy: MockOperationsAgent[] = [];
+  for (const agent of input.agents) {
+    const eligible = agent.startOnAppLaunch && agent.status === "stopped";
+    if (!eligible) {
+      if (agent.startOnAppLaunch && agent.status === "running") {
+        mockOperationsActiveEpisodes.delete(agent.pubkey);
+      }
+      continue;
+    }
+    if (!mockOperationsActiveEpisodes.has(agent.pubkey)) {
+      mockOperationsActiveEpisodes.add(agent.pubkey);
+      newlyUnhealthy.push(agent);
+    }
+  }
+  if (newlyUnhealthy.length > 0) {
+    mockOperationsEpisodeSequence += 1;
+    const marker = `buzz:ops-agent-outage:v1:fixture-${mockOperationsEpisodeSequence}`;
+    const detected = now.toISOString().replace(".000Z", "Z");
+    const lines = newlyUnhealthy
+      .sort((left, right) => left.pubkey.localeCompare(right.pubkey))
+      .map((agent) => {
+        const isError =
+          Boolean(agent.lastError?.trim()) ||
+          agent.lastErrorCode != null ||
+          (agent.lastExitCode != null && agent.lastExitCode !== 0);
+        const codes = [
+          agent.lastExitCode ? `exit code ${agent.lastExitCode}` : null,
+          agent.lastErrorCode != null
+            ? `error code ${agent.lastErrorCode}`
+            : null,
+        ].filter(Boolean);
+        return `- ${mockSafeAgentName(agent.name)}: ${isError ? "Error" : "Stopped"}${codes.length ? `; ${codes.join("; ")}` : ""}`;
+      });
+    mockOperationsPush({
+      author: config.assistantPubkey,
+      channelId: config.channelId,
+      marker,
+      content: [
+        `Start-on-launch agent outage detected at ${detected}.`,
+        ...lines,
+      ].join("\n"),
+      mentionPubkeys: [],
+    });
+  }
+
+  if (now >= boundary) {
+    const digestKey = `buzz-ops-digest:v1:${date}`;
+    const digestExists = mockOperationsMessages.some(
+      (message) =>
+        message.author === config.assistantPubkey &&
+        message.channelId === config.channelId &&
+        message.content.includes(digestKey),
+    );
+    const marker = `buzz:ops-digest-wake:v1:${date}`;
+    const wakeExists = mockOperationsMessages.some(
+      (message) =>
+        message.author === input.ownerPubkey &&
+        message.channelId === config.channelId &&
+        message.marker === marker,
+    );
+    if (!digestExists && !wakeExists) {
+      const start = new Date(boundary.getTime() - 24 * 60 * 60 * 1000);
+      mockOperationsPush({
+        author: input.ownerPubkey,
+        channelId: config.channelId,
+        marker,
+        content: [
+          `Operations assistant, post the daily operations digest for Asia/Manila date ${date}.`,
+          `Digest key: ${digestKey}`,
+          `Scheduled boundary UTC: ${boundary.toISOString()}`,
+          `Agent activity window: [${start.toISOString()}, ${boundary.toISOString()})`,
+          "1. In progress",
+          "2. Blocked on Mohammad",
+          "3. Merged since last digest",
+          "4. Next actions",
+          "YouTube Value Inbox: videos this week 0, applied 0, retained 0",
+          "5. Agent activity, last 24h",
+          input.activity,
+        ].join("\n"),
+        mentionPubkeys: [config.assistantPubkey],
+      });
+    }
+  }
+  return structuredClone(mockOperationsMessages);
+}
+
+function resetMockAgentOperationsStatus() {
+  mockAgentOperationsStatus = {
+    config: { enabled: false, channelId: null, assistantPubkey: null },
+    schedule:
+      "Daily at 09:00 Asia/Manila; liveness every 30 seconds while Buzz Desktop is running",
+    nextManilaBoundaryUtc: "2026-09-03T01:00:00Z",
+    metricCoverageSince: null,
+    lastConfirmedDigest: null,
+  };
+  resetMockOperationsJourney();
+}
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
 let mockBestieAssignment: {
   agent_pubkey: string;
@@ -11369,6 +11585,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
+  resetMockAgentOperationsStatus();
   resetMockPersonas(config);
   resetMockTeams(config);
   seedMockSearchProfiles(config);
@@ -11392,6 +11609,38 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
   window.__BUZZ_E2E_OBSERVER_CONTROLS__ = [];
+  window.__BUZZ_E2E_RUN_OPERATIONS_SCAN__ = runMockOperationsScan;
+  window.__BUZZ_E2E_POST_OPERATIONS_DIGEST__ = ({ now, content }) => {
+    const { channelId, assistantPubkey } = mockAgentOperationsStatus.config;
+    if (!channelId || !assistantPubkey) {
+      throw new Error(
+        "Operations fixture must be configured before posting a digest",
+      );
+    }
+    const date = mockOperationsDate(new Date(now));
+    return mockOperationsPush({
+      author: assistantPubkey,
+      channelId,
+      marker: null,
+      content:
+        content ??
+        [
+          `buzz-ops-digest:v1:${date}`,
+          "1. In progress",
+          "2. Blocked on Mohammad",
+          "3. Merged since last digest",
+          "4. Next actions",
+          "YouTube Value Inbox: videos this week 0, applied 0, retained 0",
+          "5. Agent activity, last 24h",
+        ].join("\n"),
+      mentionPubkeys: [],
+    });
+  };
+  window.__BUZZ_E2E_GET_OPERATIONS_MESSAGES__ = () =>
+    structuredClone(mockOperationsMessages);
+  window.__BUZZ_E2E_RESTART_OPERATIONS_WORKER__ = () => {
+    // Delivery and outage-episode state are persisted across real worker restarts.
+  };
   window.__BUZZ_E2E_RUN_MODEL_SWITCH__ = async ({
     agentPubkey,
     channelIds,
@@ -13912,6 +14161,22 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
+      case "get_agent_operations_status":
+        return structuredClone(mockAgentOperationsStatus);
+      case "save_agent_operations_config": {
+        const args = payload as {
+          input: {
+            enabled: boolean;
+            channelId: string | null;
+            assistantPubkey: string | null;
+          };
+        };
+        mockAgentOperationsStatus = {
+          ...mockAgentOperationsStatus,
+          config: { ...args.input },
+        };
+        return structuredClone(mockAgentOperationsStatus);
+      }
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},

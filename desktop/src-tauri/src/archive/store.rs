@@ -15,6 +15,61 @@ use std::time::{Duration, Instant};
 
 use super::store_migrations::apply_schema_migrations;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentMetricArchiveRow {
+    pub id: String,
+    pub author_pubkey: String,
+    pub created_at: i64,
+    pub payload_json: String,
+}
+
+pub(crate) fn read_agent_metric_window(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    start: i64,
+    end: i64,
+) -> Result<Vec<AgentMetricArchiveRow>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, pubkey, created_at, raw_json
+             FROM archived_events
+             WHERE identity_pubkey = ?1 AND relay_url = ?2 AND kind = 44200
+               AND created_at >= ?3 AND created_at < ?4
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|error| format!("prepare agent metric window: {error}"))?;
+    let rows = statement
+        .query_map(params![identity_pubkey, relay_url, start, end], |row| {
+            Ok(AgentMetricArchiveRow {
+                id: row.get(0)?,
+                author_pubkey: row.get(1)?,
+                created_at: row.get(2)?,
+                payload_json: row.get(3)?,
+            })
+        })
+        .map_err(|error| format!("query agent metric window: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read agent metric window: {error}"))
+}
+
+pub(crate) fn owner_metric_subscription_created_at(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+) -> Result<Option<i64>, String> {
+    conn.query_row(
+        "SELECT MIN(created_at)
+         FROM save_subscriptions
+         WHERE identity_pubkey = ?1 AND relay_url = ?2
+           AND scope_type = 'owner_p' AND scope_value = ?1
+           AND EXISTS (SELECT 1 FROM json_each(kinds) WHERE value = 44200)",
+        params![identity_pubkey, relay_url],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("read agent metric subscription: {error}"))
+}
+
 // ── Schema ─────────────────────────────────────────────────────────────────
 
 pub(super) const SCHEMA: &str = "

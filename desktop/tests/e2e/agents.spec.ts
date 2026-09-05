@@ -9,6 +9,10 @@ import { emojiAvatarDataUrl } from "@/features/profile/ui/ProfileAvatarEditor.ut
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { seedActiveIdentity } from "../helpers/onboarding";
+import { openSettings } from "../helpers/settings";
+
+const OPERATIONS_ASSISTANT_PUBKEY =
+  "1010101010101010101010101010101010101010101010101010101010101010";
 
 function createCatalogEvent(input: {
   eventId?: string;
@@ -54,6 +58,259 @@ function createCatalogEvent(input: {
     hexToBytes(ownerPrivateKey),
   );
 }
+
+test("owner configures persistent operations automation through Settings", async ({
+  page,
+}) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: OPERATIONS_ASSISTANT_PUBKEY,
+        name: "Fixture Operations Assistant",
+        runtime: "codex",
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await openSettings(page, "agents");
+
+  const card = page.getByTestId("settings-agent-operations");
+  await expect(card).toBeVisible();
+  // Ignore the mock shell's expected localhost relay-info CORS probe. From
+  // this point forward, the operations journey must remain console-clean.
+  consoleErrors.length = 0;
+  await expect(
+    card.getByText("Daily at 09:00 Asia/Manila", { exact: false }),
+  ).toBeVisible();
+  await card
+    .getByLabel("Destination channel")
+    .selectOption({ label: "general" });
+  await card
+    .getByLabel("Digest and alert assistant")
+    .selectOption(OPERATIONS_ASSISTANT_PUBKEY);
+  await card.getByLabel("Enable").click();
+  await card.getByRole("button", { name: "Save settings" }).click();
+  await expect(card.getByRole("status")).toContainText(
+    "Operations automation is enabled",
+  );
+
+  const savePayload = await page.evaluate(() =>
+    window.__BUZZ_E2E_COMMAND_PAYLOADS__?.find(
+      (entry) => entry.command === "save_agent_operations_config",
+    ),
+  );
+  expect(savePayload).toMatchObject({
+    payload: {
+      input: {
+        enabled: true,
+        assistantPubkey: OPERATIONS_ASSISTANT_PUBKEY,
+      },
+    },
+  });
+
+  const configuredChannelId = (
+    savePayload as {
+      payload: { input: { channelId: string } };
+    }
+  ).payload.input.channelId;
+  const ownerPubkey = TEST_IDENTITIES.alice.pubkey;
+  const secondAgentPubkey = "30".repeat(32);
+  const hostileAgentPubkey = "40".repeat(32);
+  const firstWindow = await page.evaluate(
+    ({ ownerPubkey, secondAgentPubkey, hostileAgentPubkey }) =>
+      window.__BUZZ_E2E_RUN_OPERATIONS_SCAN__?.({
+        now: "2026-09-02T01:00:01Z",
+        ownerPubkey,
+        trigger: "resume",
+        agents: [
+          {
+            pubkey: secondAgentPubkey,
+            name: "Second stopped agent",
+            status: "stopped",
+            startOnAppLaunch: true,
+            lastExitCode: 9,
+          },
+          {
+            pubkey: hostileAgentPubkey,
+            name: "@ops | **boom**",
+            status: "stopped",
+            startOnAppLaunch: true,
+            lastError: "SECRET nsec1unsafe /tmp/private.log",
+            lastErrorCode: 73,
+          },
+        ],
+        activity:
+          "Coverage: Incomplete\n- Fixture Operations Assistant: turns ≥0, completions ≥0, errors ≥0 (partial)",
+      }),
+    { ownerPubkey, secondAgentPubkey, hostileAgentPubkey },
+  );
+  expect(firstWindow).toHaveLength(2);
+  const firstAlert = firstWindow?.find((message) =>
+    message.marker?.startsWith("buzz:ops-agent-outage:v1:"),
+  );
+  const firstWake = firstWindow?.find(
+    (message) => message.marker === "buzz:ops-digest-wake:v1:2026-09-02",
+  );
+  expect(firstAlert).toMatchObject({
+    author: OPERATIONS_ASSISTANT_PUBKEY,
+    channelId: configuredChannelId,
+    mentionPubkeys: [],
+  });
+  expect(firstAlert?.content).toContain(
+    "Second stopped agent: Error; exit code 9",
+  );
+  expect(firstAlert?.content).toContain("ops boom: Error; error code 73");
+  expect(firstAlert?.content).not.toMatch(/SECRET|nsec1unsafe|\/tmp\/private/);
+  expect(firstWake).toMatchObject({
+    author: ownerPubkey,
+    channelId: configuredChannelId,
+    mentionPubkeys: [OPERATIONS_ASSISTANT_PUBKEY],
+  });
+  expect(firstWake?.content).toContain("buzz-ops-digest:v1:2026-09-02");
+  expect(firstWake?.content).toContain(
+    "Agent activity window: [2026-09-01T01:00:00.000Z, 2026-09-02T01:00:00.000Z)",
+  );
+  expect(firstWake?.content).toContain("Coverage: Incomplete");
+  const sectionOffsets = [
+    "1. In progress",
+    "2. Blocked on Mohammad",
+    "3. Merged since last digest",
+    "4. Next actions",
+    "YouTube Value Inbox: videos this week 0, applied 0, retained 0",
+    "5. Agent activity, last 24h",
+  ].map((section) => firstWake?.content.indexOf(section) ?? -1);
+  expect(sectionOffsets).toEqual(
+    [...sectionOffsets].sort((left, right) => left - right),
+  );
+  expect(sectionOffsets.every((offset) => offset >= 0)).toBe(true);
+
+  const afterLostAcknowledgements = await page.evaluate(
+    ({ ownerPubkey, secondAgentPubkey, hostileAgentPubkey }) =>
+      window.__BUZZ_E2E_RUN_OPERATIONS_SCAN__?.({
+        now: "2026-09-02T01:00:02Z",
+        ownerPubkey,
+        agents: [
+          {
+            pubkey: secondAgentPubkey,
+            name: "Second stopped agent",
+            status: "stopped",
+            startOnAppLaunch: true,
+          },
+          {
+            pubkey: hostileAgentPubkey,
+            name: "hostile",
+            status: "stopped",
+            startOnAppLaunch: true,
+          },
+        ],
+        activity: "Coverage: Incomplete",
+      }),
+    { ownerPubkey, secondAgentPubkey, hostileAgentPubkey },
+  );
+  expect(afterLostAcknowledgements).toHaveLength(2);
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_POST_OPERATIONS_DIGEST__?.({
+      now: "2026-09-02T01:00:03Z",
+    });
+  });
+  const afterConfirmedDigest = await page.evaluate(
+    ({ ownerPubkey, secondAgentPubkey, hostileAgentPubkey }) =>
+      window.__BUZZ_E2E_RUN_OPERATIONS_SCAN__?.({
+        now: "2026-09-02T01:00:04Z",
+        ownerPubkey,
+        agents: [
+          {
+            pubkey: secondAgentPubkey,
+            name: "Second stopped agent",
+            status: "running",
+            startOnAppLaunch: true,
+          },
+          {
+            pubkey: hostileAgentPubkey,
+            name: "hostile",
+            status: "running",
+            startOnAppLaunch: true,
+          },
+        ],
+        activity: "Coverage: Complete",
+      }),
+    { ownerPubkey, secondAgentPubkey, hostileAgentPubkey },
+  );
+  expect(afterConfirmedDigest).toHaveLength(3);
+
+  const laterEpisode = await page.evaluate(
+    ({ ownerPubkey, secondAgentPubkey }) => {
+      window.__BUZZ_E2E_RUN_OPERATIONS_SCAN__?.({
+        now: "2026-09-02T01:00:31Z",
+        ownerPubkey,
+        agents: [
+          {
+            pubkey: secondAgentPubkey,
+            name: "Second stopped agent",
+            status: "stopped",
+            startOnAppLaunch: true,
+          },
+        ],
+        activity: "Coverage: Complete",
+      });
+      window.__BUZZ_E2E_RESTART_OPERATIONS_WORKER__?.();
+      return window.__BUZZ_E2E_RUN_OPERATIONS_SCAN__?.({
+        now: "2026-09-02T01:00:32Z",
+        ownerPubkey,
+        agents: [
+          {
+            pubkey: secondAgentPubkey,
+            name: "Second stopped agent",
+            status: "stopped",
+            startOnAppLaunch: true,
+          },
+        ],
+        activity: "Coverage: Complete",
+      });
+    },
+    { ownerPubkey, secondAgentPubkey },
+  );
+  expect(
+    laterEpisode?.filter((message) =>
+      message.marker?.startsWith("buzz:ops-agent-outage:v1:"),
+    ),
+  ).toHaveLength(2);
+
+  const nextDay = await page.evaluate(
+    ({ ownerPubkey }) =>
+      window.__BUZZ_E2E_RUN_OPERATIONS_SCAN__?.({
+        now: "2026-09-03T01:00:00Z",
+        ownerPubkey,
+        agents: [],
+        activity:
+          "Coverage: Complete\n- Fixture Operations Assistant: turns 0, completions 0, errors 0",
+      }),
+    { ownerPubkey },
+  );
+  const nextWake = nextDay?.find(
+    (message) => message.marker === "buzz:ops-digest-wake:v1:2026-09-03",
+  );
+  expect(nextWake?.content).toContain("Coverage: Complete");
+  expect(nextWake?.content).toContain("turns 0, completions 0, errors 0");
+  expect(
+    nextDay?.every((message) => message.channelId === configuredChannelId),
+  ).toBe(true);
+
+  await page.setViewportSize({ width: 320, height: 720 });
+  await expect(card).toBeVisible();
+  expect(
+    await card.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  expect(consoleErrors).toEqual([]);
+});
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
