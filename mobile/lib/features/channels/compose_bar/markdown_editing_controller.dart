@@ -15,6 +15,7 @@ class _MarkdownRule {
 }
 
 class _MarkdownEditingController extends TextEditingController {
+  Map<String, String> _mentionPubkeys = const {};
   final Set<String> _agentMentionNames = <String>{};
   TextSpan? _cachedTextSpan;
   String? _cachedText;
@@ -23,6 +24,13 @@ class _MarkdownEditingController extends TextEditingController {
   Color? _cachedOnSurface;
   Color? _cachedSurface;
   Map<String, String> _channelNames = const {};
+
+  void setMentionPubkeys(Map<String, String> keys) {
+    if (mapEquals(keys, _mentionPubkeys)) return;
+    _mentionPubkeys = keys;
+    _cachedTextSpan = null;
+    notifyListeners();
+  }
 
   void setChannelNames(Map<String, String> names) {
     if (mapEquals(_channelNames, names)) return;
@@ -286,7 +294,11 @@ class _MarkdownEditingController extends TextEditingController {
         WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: _ComposerAgentMentionChip(label: label, textStyle: style),
+          child: _ComposerAgentMentionChip(
+            label: label,
+            textStyle: style,
+            pubkey: _mentionPubkeys[label.toLowerCase()],
+          ),
         ),
       );
       // The visual chip replaces the `@` placeholder. Keep the label as
@@ -537,17 +549,19 @@ class _ComposerBuzzLinkChip extends StatelessWidget {
   }
 }
 
-class _ComposerAgentMentionChip extends StatelessWidget {
+class _ComposerAgentMentionChip extends ConsumerWidget {
+  final String? pubkey;
   final String label;
   final TextStyle textStyle;
 
   const _ComposerAgentMentionChip({
+    this.pubkey,
     required this.label,
     required this.textStyle,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final style = textStyle.copyWith(
       color: context.colors.primary,
       fontWeight: FontWeight.w500,
@@ -555,8 +569,11 @@ class _ComposerAgentMentionChip extends StatelessWidget {
     );
     final fontSize = style.fontSize ?? 16;
 
+    final notManaged =
+        pubkey != null && ref.watch(agentNotManagedHereProvider(pubkey!));
     return Semantics(
-      label: 'Agent mention: $label',
+      label:
+          'Agent mention: $label${notManaged ? ', Not managed on this device' : ''}',
       excludeSemantics: true,
       child: Container(
         key: const ValueKey('composer-agent-mention-chip'),
@@ -587,6 +604,7 @@ class _ComposerAgentMentionChip extends StatelessWidget {
             ),
             const SizedBox(width: Grid.quarter),
             Text(label, style: style),
+            AgentProvenance(pubkey: pubkey),
           ],
         ),
       ),

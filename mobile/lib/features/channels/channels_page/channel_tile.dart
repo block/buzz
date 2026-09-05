@@ -203,6 +203,7 @@ class _DmAvatar extends ConsumerWidget {
         clipBehavior: Clip.none,
         children: [
           AvatarImage(
+            pubkey: otherPubkey,
             imageUrl: avatarUrl,
             radius: _kDmAvatarSize / 2,
             backgroundColor: context.colors.primaryContainer,

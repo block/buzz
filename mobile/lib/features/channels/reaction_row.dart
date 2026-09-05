@@ -458,6 +458,7 @@ class _ReactorTile extends StatelessWidget {
 
     return ListTile(
       leading: _ReactorAvatar(
+        pubkey: pubkey,
         avatarUrl: profile?.avatarUrl,
         initial:
             profile?.initial ??
@@ -487,11 +488,13 @@ class _ReactorTile extends StatelessWidget {
 }
 
 class _ReactorAvatar extends StatelessWidget {
+  final String pubkey;
   final String? avatarUrl;
   final String initial;
   final bool isAgent;
 
   const _ReactorAvatar({
+    required this.pubkey,
     required this.avatarUrl,
     required this.initial,
     required this.isAgent,
@@ -500,6 +503,7 @@ class _ReactorAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AvatarImage(
+      pubkey: pubkey,
       imageUrl: avatarUrl,
       radius: 20,
       fallback: Text(initial),
