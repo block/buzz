@@ -72,8 +72,8 @@ import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/Aux
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { Button } from "@/shared/ui/button";
+import { useInboxUnreadOnlyPreference } from "@/features/home/lib/inboxUnreadOnlyPreference";
 import { HomeMembersSidebarOverlay } from "./HomeMembersSidebarOverlay";
-
 const INBOX_SEARCH_KEYS = [
   "item",
   "profile",
@@ -110,7 +110,7 @@ export function HomeView({
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
-  const [unreadOnly, setUnreadOnly] = React.useState(false);
+  const [unreadOnly, persistUnreadOnly] = useInboxUnreadOnlyPreference();
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
   // restores the detail pane each history entry was showing and reloads
   // restore it from the URL. Default/automatic selection stays local-only —
@@ -745,7 +745,7 @@ export function HomeView({
                 handleUserSelectItem(null);
                 setSelectedReminderId(reminderId);
               }}
-              onUnreadOnlyChange={setUnreadOnly}
+              onUnreadOnlyChange={persistUnreadOnly}
               reminderPubkey={currentPubkey}
               reminders={pendingReminders}
               selectedConversationId={selectedConversationId}
