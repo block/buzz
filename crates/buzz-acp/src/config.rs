@@ -268,6 +268,13 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_CORTEX_MCP_TOKEN", default_value = "", hide_env_values = true)]
     pub cortex_mcp_token: String,
 
+    /// Base URL of the Cortex remote MCP endpoint, passed to mcp-remote.
+    /// Deployment configuration with no default: the endpoint is private
+    /// infrastructure and never ships in this repository. Empty means no
+    /// Cortex MCP server is added, even when a token is present.
+    #[arg(long, env = "BUZZ_ACP_CORTEX_MCP_URL", default_value = "")]
+    pub cortex_mcp_url: String,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -515,6 +522,7 @@ pub struct Config {
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub cortex_mcp_token: String,
+    pub cortex_mcp_url: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1086,6 +1094,7 @@ impl Config {
             agent_args,
             mcp_command: args.mcp_command,
             cortex_mcp_token: args.cortex_mcp_token,
+            cortex_mcp_url: args.cortex_mcp_url,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1467,6 +1476,7 @@ mod tests {
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
             cortex_mcp_token: "".into(),
+            cortex_mcp_url: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

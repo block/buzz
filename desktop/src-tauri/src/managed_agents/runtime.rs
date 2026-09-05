@@ -567,6 +567,14 @@ pub fn spawn_agent_child(
         }
     }
     command.env("BUZZ_ACP_CORTEX_MCP_TOKEN", &cortex_mcp_token);
+    // The Cortex MCP endpoint URL is deployment configuration, forwarded from
+    // this process's environment rather than compiled in. Absent means the
+    // Cortex bridge stays off for this spawn, which buzz-acp treats as "not
+    // wired up" rather than an error.
+    command.env(
+        "BUZZ_ACP_CORTEX_MCP_URL",
+        std::env::var("BUZZ_ACP_CORTEX_MCP_URL").unwrap_or_default(),
+    );
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);

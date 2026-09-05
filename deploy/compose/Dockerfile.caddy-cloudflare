@@ -1,6 +1,6 @@
 # Custom Caddy build with the Cloudflare DNS provider plugin, for DNS-01
-# ACME challenges against zones (like wiles.1507.cloud) that only resolve to
-# a Tailscale IP and can never satisfy an HTTP-01 challenge.
+# ACME challenges against a $BUZZ_DOMAIN that resolves only to a private
+# address and can therefore never satisfy an HTTP-01 challenge.
 FROM caddy:2-builder-alpine AS builder
 
 RUN xcaddy build \

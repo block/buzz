@@ -5058,18 +5058,20 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     // Cortex MCP bridge, added alongside (not instead of) the dev-mcp server
     // above -- buzz-agent's McpRegistry supports up to MAX_MCP_SERVERS (16),
     // so there's no need to sacrifice dev-mcp's tools to get Cortex tools.
-    // Gated on cortex_mcp_token being set; Desktop sources that token from
-    // wicket at spawn time (see managed_agents/runtime.rs) and sets it as
-    // BUZZ_ACP_CORTEX_MCP_TOKEN, so an empty value here just means Cortex
-    // wasn't wired up for this persona / wicket lookup failed -- not an error.
-    if !config.cortex_mcp_token.is_empty() {
+    // Gated on BOTH the token and the endpoint URL being set. Desktop sources
+    // the token from wicket at spawn time (see managed_agents/runtime.rs); the
+    // URL is deployment configuration supplied through the environment, since
+    // a private MCP endpoint is not something this repository should name.
+    // Either one empty just means Cortex wasn't wired up for this persona --
+    // not an error.
+    if !config.cortex_mcp_token.is_empty() && !config.cortex_mcp_url.is_empty() {
         servers.push(McpServer {
             name: "cortex".to_string(),
             command: "npx".to_string(),
             args: vec![
                 "-y".into(),
                 "mcp-remote@0.1.16".into(),
-                "https://mcp.1507.cloud/cortex/mcp".into(),
+                config.cortex_mcp_url.clone(),
                 "--header".into(),
                 // No space after the colon: documented mcp-remote arg-escaping
                 // workaround for passing a header value containing a space.
@@ -6756,6 +6758,7 @@ mod build_mcp_servers_tests {
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
             cortex_mcp_token: "".into(),
+            cortex_mcp_url: "".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -6958,6 +6961,7 @@ mod build_mcp_servers_tests {
     fn cortex_mcp_token_adds_a_cortex_server_alongside_dev_mcp() {
         let mut config = test_config();
         config.cortex_mcp_token = "test-cortex-token".into();
+        config.cortex_mcp_url = "https://mcp.example.invalid/cortex/mcp".into();
         let servers = build_mcp_servers(&config);
 
         // Both the existing dev-mcp server and the new Cortex server should be
@@ -6975,7 +6979,7 @@ mod build_mcp_servers_tests {
             vec![
                 "-y",
                 "mcp-remote@0.1.16",
-                "https://mcp.1507.cloud/cortex/mcp",
+                "https://mcp.example.invalid/cortex/mcp",
                 "--header",
                 "Authorization:Bearer test-cortex-token",
             ]
@@ -6991,9 +6995,25 @@ mod build_mcp_servers_tests {
         let mut config = test_config();
         config.mcp_command = "".into();
         config.cortex_mcp_token = "test-cortex-token".into();
+        config.cortex_mcp_url = "https://mcp.example.invalid/cortex/mcp".into();
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "cortex");
+    }
+
+    // The endpoint URL is deployment configuration, not a source constant. A
+    // token with no URL must add nothing rather than fall back to a baked-in
+    // endpoint -- this is the guard on that.
+    #[test]
+    fn cortex_mcp_token_without_a_url_adds_no_cortex_server() {
+        let mut config = test_config();
+        config.cortex_mcp_token = "test-cortex-token".into();
+        config.cortex_mcp_url = "".into();
+        let servers = build_mcp_servers(&config);
+        assert!(
+            !servers.iter().any(|s| s.name == "cortex"),
+            "a token with no endpoint URL should not add a cortex MCP server"
+        );
     }
 }
 
@@ -7033,6 +7053,7 @@ mod error_outcome_emission_tests {
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
             cortex_mcp_token: "".into(),
+            cortex_mcp_url: "".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
