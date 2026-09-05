@@ -335,22 +335,26 @@ export async function receiveLifecycle(
             pending--;
           });
       },
-      (readiness) => {
-        if (!valid()) return;
-        subscriptionReady = readiness === "eose";
-        if (readiness === "closed") {
-          stopped = true;
-          stopSubscription();
-          onError(
-            "Desktop lifecycle receiver subscription closed. Retry the receiver to accept new requests.",
-          );
-        } else if (readiness === "timeout") {
-          onError(
-            "Desktop lifecycle subscription readiness timed out. Delivery is unconfirmed.",
-          );
-        } else if (synced) onReady();
-      },
+      undefined,
       5000,
+      {
+        closedRecovery: "explicit",
+        onState: (readiness) => {
+          if (!valid()) return;
+          subscriptionReady = readiness === "eose";
+          if (readiness === "closed") {
+            stopped = true;
+            stopSubscription();
+            onError(
+              "Desktop lifecycle receiver subscription closed. Retry the receiver to accept new requests.",
+            );
+          } else if (readiness === "timeout") {
+            onError(
+              "Desktop lifecycle subscription readiness timed out. Delivery is unconfirmed.",
+            );
+          } else if (synced) onReady();
+        },
+      },
     ),
   );
   const close = () => {

@@ -166,10 +166,16 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
       });
     return [];
   };
-  relayClient.subscribeLive = async (_filter, _event, onReadiness) => {
+  relayClient.subscribeLive = async (
+    _filter,
+    _event,
+    _onReadiness,
+    _timeout,
+    options,
+  ) => {
     subscribed++;
-    readiness = onReadiness;
-    onReadiness("eose");
+    readiness = options.onState;
+    readiness("eose");
     return () => {
       closed++;
     };
