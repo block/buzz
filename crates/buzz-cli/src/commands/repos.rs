@@ -293,7 +293,7 @@ pub async fn cmd_get_repo(
     // If owner specified, filter by author pubkey; otherwise return any match.
     // Note: without --owner, multiple repos with the same name (different owners) may be returned.
     if let Some(pk) = owner {
-        crate::validate::validate_hex64(pk)?;
+        let pk = crate::validate::canonicalize_hex64(pk)?;
         filter["authors"] = serde_json::json!([pk]);
     }
 
@@ -309,10 +309,7 @@ pub async fn cmd_list_repos(
 ) -> Result<(), CliError> {
     // Default to self if no owner specified.
     let pubkey = match owner {
-        Some(pk) => {
-            crate::validate::validate_hex64(pk)?;
-            pk.to_string()
-        }
+        Some(pk) => crate::validate::canonicalize_hex64(pk)?,
         None => client.keys().public_key().to_hex(),
     };
 
