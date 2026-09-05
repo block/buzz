@@ -21,7 +21,7 @@ test("canonicalCommunityRelays dedupes by canonical form, keeps stored spelling"
   const relays = canonicalCommunityRelays(
     [
       { relayUrl: "ws://localhost:3000" },
-      // Same relay, different spelling — folds onto the first entry.
+      // A distinct loopback authority is a distinct community.
       { relayUrl: "ws://127.0.0.1:3000" },
       { relayUrl: "wss://relay.example" },
       // Unparsable entries are dropped rather than reconciled.
@@ -32,7 +32,8 @@ test("canonicalCommunityRelays dedupes by canonical form, keeps stored spelling"
   assert.deepEqual(
     [...relays.entries()],
     [
-      ["ws://127.0.0.1:3000", "ws://localhost:3000"],
+      ["ws://localhost:3000", "ws://localhost:3000"],
+      ["ws://127.0.0.1:3000", "ws://127.0.0.1:3000"],
       ["wss://relay.example", "wss://relay.example"],
     ],
   );
@@ -40,7 +41,8 @@ test("canonicalCommunityRelays dedupes by canonical form, keeps stored spelling"
 
 test("pendingReconcileRelays skips reconciled and in-flight relays", () => {
   const canonicalToRequested = new Map([
-    ["ws://127.0.0.1:3000", "ws://localhost:3000"],
+    ["ws://localhost:3000", "ws://localhost:3000"],
+    ["ws://127.0.0.1:3000", "ws://127.0.0.1:3000"],
     ["wss://a.example", "wss://a.example"],
     ["wss://b.example", "wss://b.example"],
   ]);
@@ -49,7 +51,7 @@ test("pendingReconcileRelays skips reconciled and in-flight relays", () => {
     new Set(["wss://a.example"]),
     new Set(["ws://127.0.0.1:3000"]),
   );
-  assert.deepEqual(pending, ["wss://b.example"]);
+  assert.deepEqual(pending, ["ws://localhost:3000", "wss://b.example"]);
 });
 
 test("classifyReconcileResult marks the whole batch failed when the call throws", () => {
@@ -64,7 +66,7 @@ test("classifyReconcileResult marks the whole batch failed when the call throws"
 });
 
 test("classifyReconcileResult splits by Failed rows, matching on requested URL", () => {
-  const attempted = ["ws://127.0.0.1:3000", "wss://b.example"];
+  const attempted = ["ws://localhost:3000", "wss://b.example"];
   const rows = [
     // Started cleanly on the loopback relay — reconciled.
     {
@@ -92,7 +94,7 @@ test("classifyReconcileResult splits by Failed rows, matching on requested URL",
   assert.deepEqual(
     classifyReconcileResult(attempted, rows, canonicalRelayUrl),
     {
-      succeeded: ["ws://127.0.0.1:3000"],
+      succeeded: ["ws://localhost:3000"],
       failed: ["wss://b.example"],
     },
   );
