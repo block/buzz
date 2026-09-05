@@ -217,9 +217,7 @@ class _DmAppBarTitle extends ConsumerWidget {
     );
     final presence = ref.watch(
       presenceCacheProvider.select(
-        (presenceMap) => otherPubkey == null
-            ? 'offline'
-            : (presenceMap[otherPubkey] ?? 'offline'),
+        (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
       ),
     );
 
@@ -246,7 +244,8 @@ class _DmAppBarTitle extends ConsumerWidget {
     final presenceLabel = switch (presence) {
       'online' => 'Online',
       'away' => 'Away',
-      _ => 'Offline',
+      'offline' => 'Offline',
+      _ => 'Unknown',
     };
 
     return Row(
@@ -275,22 +274,24 @@ class _DmAppBarTitle extends ConsumerWidget {
               ),
             ),
           ),
-          badge: Center(
-            child: FractionallySizedBox(
-              widthFactor: _dmPresenceDotRatio,
-              heightFactor: _dmPresenceDotRatio,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: switch (presence) {
-                    'online' => context.appColors.success,
-                    'away' => context.appColors.warning,
-                    _ => context.colors.outline,
-                  },
-                  shape: BoxShape.circle,
+          badge: presence == null
+              ? null
+              : Center(
+                  child: FractionallySizedBox(
+                    widthFactor: _dmPresenceDotRatio,
+                    heightFactor: _dmPresenceDotRatio,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: switch (presence) {
+                          'online' => context.appColors.success,
+                          'away' => context.appColors.warning,
+                          _ => context.colors.outline,
+                        },
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          ),
         ),
         const SizedBox(width: Grid.xxs),
         Expanded(

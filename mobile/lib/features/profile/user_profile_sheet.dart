@@ -54,7 +54,7 @@ class UserProfileSheet extends HookConsumerWidget {
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
     final presenceMap = ref.watch(presenceCacheProvider);
-    final presence = presenceMap[pk] ?? 'offline';
+    final presence = presenceMap[pk];
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
 
@@ -328,13 +328,13 @@ void _showProfileCopyToast(BuildContext context) {
 class _ProfilePresenceChip extends StatelessWidget {
   const _ProfilePresenceChip({required this.presence});
 
-  final String presence;
+  final String? presence;
 
   @override
   Widget build(BuildContext context) {
     final effectivePresence = switch (presence) {
-      'online' || 'away' => presence,
-      _ => 'offline',
+      'online' || 'away' || 'offline' => presence,
+      _ => null,
     };
     final backgroundColor = switch (effectivePresence) {
       'online' => context.appColors.success,
@@ -344,11 +344,13 @@ class _ProfilePresenceChip extends StatelessWidget {
     final label = switch (effectivePresence) {
       'online' => 'Online',
       'away' => 'Away',
-      _ => 'Offline',
+      'offline' => 'Offline',
+      _ => 'Unknown',
     };
 
     return Semantics(
       label: 'Presence: $label',
+      excludeSemantics: true,
       child: SizedBox(
         height: Grid.xl,
         child: Center(
