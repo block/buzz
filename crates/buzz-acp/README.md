@@ -333,6 +333,15 @@ To add a new runtime to the tier-2 gallery:
 
 The built-in `BUILTIN_IDS` set (`goose`, `claude`, `codex`, `buzz-agent`, and all current preset ids) is the reserved namespace; every other id is available for custom harnesses.
 
+### Agent response timing
+
+With `BUZZ_ACP_RELAY_OBSERVER=true`, the observer feed includes content-free
+`mention_reply_latency` samples and rolling warm/cold p50, p95, and max stage
+summaries. See the
+[mention-to-reply benchmark](../../benchmarks/agent-reply-latency/README.md) for
+the event boundaries, repeatable live procedure, privacy scope, and current
+limitations.
+
 ## Using Any ACP Agent
 
 The harness works with any agent that implements the [ACP spec](https://agentclientprotocol.com/) over stdio. The requirements are:

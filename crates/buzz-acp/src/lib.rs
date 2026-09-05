@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod latency;
 mod observer;
 mod pi_launcher;
 mod pool;
@@ -1085,6 +1086,7 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         .expect("batch envelope needs at least 1 event");
     observer::ObserverEvent {
         seq: last.seq,
+        monotonic_ms: last.monotonic_ms,
         timestamp: last.timestamp.clone(),
         kind: OBSERVER_BATCH_KIND.to_string(),
         agent_index: last.agent_index,
@@ -2612,10 +2614,15 @@ async fn tokio_main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
-    let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
-            .await
-            .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+    let mut relay = HarnessRelay::connect(
+        &config.relay_url,
+        &config.keys,
+        &pubkey_hex,
+        relay_auth_tag,
+        config.relay_observer && config.ignore_self,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -3242,6 +3249,7 @@ async fn tokio_main() -> Result<()> {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
                         Some(buzz_event) => {
+                            let event_received_at = buzz_event.received_at;
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
@@ -3362,7 +3370,38 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
-                            if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
+                            let is_self_authored = buzz_event.event.pubkey.to_hex() == pubkey_hex;
+                            if is_self_authored
+                                && kind_u32 == KIND_STREAM_MESSAGE
+                                && config.relay_observer
+                            {
+                                if let Some(ref observer) = observer {
+                                    let thread_tags = queue::parse_thread_tags(&buzz_event.event);
+                                    let active_turn = pool
+                                        .task_map()
+                                        .values()
+                                        .find(|meta| meta.channel_id == Some(buzz_event.channel_id));
+                                    let agent_index = active_turn.map(|meta| meta.agent_index);
+                                    let turn_id = active_turn.map(|meta| meta.turn_id.clone());
+                                    observer.emit(
+                                        "reply_observed",
+                                        agent_index,
+                                        &observer::context_for(
+                                            Some(buzz_event.channel_id),
+                                            None,
+                                            turn_id,
+                                        ),
+                                        serde_json::json!({
+                                            "eventId": buzz_event.event.id.to_hex(),
+                                            "relayCreatedAt": buzz_event.event.created_at.as_secs(),
+                                            "rootEventId": thread_tags.root_event_id,
+                                            "parentEventId": thread_tags.parent_event_id,
+                                        }),
+                                    );
+                                }
+                            }
+
+                            if config.ignore_self && is_self_authored {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -3558,12 +3597,49 @@ async fn tokio_main() -> Result<()> {
                                 policy = %config.session_policy,
                                 "admitted event — resolved session scope"
                             );
+                            let event_id_hex = ingress.buzz_event.event.id.to_hex();
+                            let event_created_at = ingress.buzz_event.event.created_at.as_secs();
+                            if let Some(ref observer) = observer {
+                                observer.emit(
+                                    "event_received",
+                                    None,
+                                    &observer::context_for(
+                                        Some(ingress.buzz_event.channel_id),
+                                        None,
+                                        None,
+                                    ),
+                                    serde_json::json!({
+                                        "eventId": event_id_hex.clone(),
+                                        "relayCreatedAt": event_created_at,
+                                        "receiptToObserverMs": latency::duration_ms(
+                                            event_received_at.elapsed()
+                                        ),
+                                    }),
+                                );
+                            }
                             let queued = ingress.push(&mut queue, session_scope);
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
+                            if queued.accepted {
+                                if let Some(ref observer) = observer {
+                                    observer.emit(
+                                        "event_queued",
+                                        None,
+                                        &observer::context_for(
+                                            Some(queued.scope.channel_id()),
+                                            None,
+                                            None,
+                                        ),
+                                        serde_json::json!({
+                                            "eventId": event_id_hex.clone(),
+                                            "relayCreatedAt": event_created_at,
+                                        }),
+                                    );
+                                }
+                            }
                             queued.mark_seen(&ctx.rest_client);
                             // Event is already queued. The authorized ingress
                             // retains its verified author, resolved scope, and
@@ -8087,6 +8163,7 @@ mod observer_publish_queue_tests {
     fn event(seq: u64, kind: &str, channel: Option<&str>) -> observer::ObserverEvent {
         observer::ObserverEvent {
             seq,
+            monotonic_ms: seq,
             timestamp: format!("2026-04-29T04:00:{:02}Z", seq.min(59)),
             kind: kind.to_string(),
             agent_index: Some(0),
@@ -8955,6 +9032,7 @@ mod observer_chunk_coalescer_tests {
     ) -> observer::ObserverEvent {
         observer::ObserverEvent {
             seq,
+            monotonic_ms: seq,
             timestamp: format!("2026-04-29T04:00:0{seq}Z"),
             kind: "acp_read".to_string(),
             agent_index: Some(0),
@@ -8983,6 +9061,7 @@ mod observer_chunk_coalescer_tests {
     fn non_chunk_event(seq: u64) -> observer::ObserverEvent {
         observer::ObserverEvent {
             seq,
+            monotonic_ms: seq,
             timestamp: format!("2026-04-29T04:00:0{seq}Z"),
             kind: "turn_started".to_string(),
             agent_index: Some(0),
@@ -11007,6 +11086,7 @@ mod observer_payload_trim_tests {
     fn event_with_payload(kind: &str, payload: serde_json::Value) -> observer::ObserverEvent {
         observer::ObserverEvent {
             seq: 1,
+            monotonic_ms: 1,
             timestamp: "2026-06-16T00:00:00Z".to_string(),
             kind: kind.to_string(),
             agent_index: Some(0),

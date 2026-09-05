@@ -2,6 +2,8 @@ import type { LucideIcon } from "lucide-react";
 
 export type ObserverEvent = {
   seq: number;
+  /** Process-local monotonic milliseconds; never compare across harnesses. */
+  monotonicMs?: number;
   timestamp: string;
   kind: string;
   agentIndex: number | null;
