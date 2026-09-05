@@ -12,6 +12,11 @@ bool agentIsSharedWithUser(
   Set<String> sharedChannelIds,
   String? currentPubkey,
 ) {
+  if (currentPubkey != null &&
+      agent.ownerPubkey == currentPubkey.toLowerCase() &&
+      const ['owner-only', 'allowlist', 'anyone'].contains(agent.respondTo)) {
+    return true;
+  }
   if (agent.respondTo == 'allowlist' && currentPubkey != null) {
     return agent.respondToAllowlist.contains(currentPubkey.toLowerCase());
   }
@@ -62,6 +67,11 @@ List<MentionCandidate> buildMentionCandidates({
     final profile = userCache[pk];
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
     final isAgent = member.isBot || ownerPubkey != null;
+    final policy = relayAgents.where((agent) => agent.pubkey == pk).firstOrNull;
+    if (policy?.ownerPubkey != null &&
+        !agentIsSharedWithUser(policy!, sharedChannelIds, currentPubkey)) {
+      continue;
+    }
     candidates.add(
       MentionCandidate(
         pubkey: pk,
@@ -121,6 +131,12 @@ List<MentionCandidate> buildMentionCandidates({
       // verified NIP-OA owner) or shared via the relay agent directory.
       final ownedByCurrentUser =
           currentLower != null && ownerPubkey?.toLowerCase() == currentLower;
+      final policy = relayAgents
+          .where((agent) => agent.pubkey == pk)
+          .firstOrNull;
+      if (policy?.ownerPubkey != null && !sharedAgentPubkeys.contains(pk)) {
+        continue;
+      }
       if (!ownedByCurrentUser && !sharedAgentPubkeys.contains(pk)) {
         continue;
       }

@@ -5,7 +5,10 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/crypto/nip_oa.dart';
+import '../../shared/crypto/signed_event.dart';
 import '../../shared/relay/relay.dart';
+
+part 'agent_policy.dart';
 
 /// A relay agent parsed from its kind:10100 agent-profile event.
 ///
@@ -15,6 +18,7 @@ import '../../shared/relay/relay.dart';
 class AgentDirectoryEntry {
   final String pubkey;
   final String? displayName;
+  final String? ownerPubkey;
   final String? respondTo;
   final List<String> respondToAllowlist;
   final List<String> channelIds;
@@ -22,6 +26,7 @@ class AgentDirectoryEntry {
   const AgentDirectoryEntry({
     required this.pubkey,
     this.displayName,
+    this.ownerPubkey,
     this.respondTo,
     this.respondToAllowlist = const [],
     this.channelIds = const [],
@@ -66,7 +71,7 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   if (sessionState.status != SessionStatus.connected) return const [];
   final session = ref.read(relaySessionProvider.notifier);
   final events = await session.fetchHistory(NostrFilters.agentProfiles());
-  return [for (final event in events) AgentDirectoryEntry.fromEvent(event)];
+  return resolveAgentPolicies(session, events);
 });
 
 /// Verified NIP-OA owner pubkey per agent pubkey, from the agents' kind:0
