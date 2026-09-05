@@ -38,16 +38,7 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       // Keep only the latest kind:0 event per pubkey (the bridge does not
       // honor the `kinds` filter under search, and may return several
       // profile revisions — mirrors desktop's `list_user_search_results`).
-      final latestByPubkey = <String, NostrEvent>{};
-      for (final event in events) {
-        if (event.kind != 0) continue;
-        final pk = event.pubkey.toLowerCase();
-        final current = latestByPubkey[pk];
-        if (current == null || event.createdAt > current.createdAt) {
-          latestByPubkey[pk] = event;
-        }
-      }
-
+      final latestByPubkey = latestProfileEvents(events);
       return [
         for (final event in latestByPubkey.values) _profileFromEvent(event),
       ];
@@ -61,7 +52,7 @@ UserProfile _profileFromEvent(NostrEvent event) {
     avatarUrl: data.avatarUrl,
     about: data.about,
     nip05Handle: data.nip05,
-    ownerPubkey: verifiedOaOwnerPubkey(event.tags, event.pubkey),
+    ownerPubkey: verifiedOaOwnerPubkey(event),
   );
 }
 

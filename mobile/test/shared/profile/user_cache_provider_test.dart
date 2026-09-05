@@ -60,6 +60,7 @@ void main() {
       _profileEvent(
         id: 'newer-agent',
         pubkey: agent.public,
+        secretKey: agent.secret,
         createdAt: 2,
         name: 'Agent',
         tags: [_authTag(owner, agent.public)],
@@ -101,6 +102,7 @@ void main() {
       _profileEvent(
         id: 'older-agent',
         pubkey: agent.public,
+        secretKey: agent.secret,
         createdAt: 1,
         name: 'Agent',
         tags: [_authTag(owner, agent.public)],
@@ -165,16 +167,27 @@ NostrEvent _profileEvent({
   required String name,
   String pubkey = 'agent',
   List<List<String>> tags = const [],
+  String? secretKey,
   int kind = 0,
-}) => NostrEvent(
-  id: id,
-  pubkey: pubkey,
-  createdAt: createdAt,
-  kind: kind,
-  tags: tags,
-  content: jsonEncode({'name': name}),
-  sig: 'sig',
-);
+}) => secretKey != null
+    ? NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 0,
+          content: jsonEncode({'name': name}),
+          secretKey: secretKey,
+          createdAt: createdAt,
+          tags: tags,
+        ).toMap(),
+      )
+    : NostrEvent(
+        id: id,
+        pubkey: pubkey,
+        createdAt: createdAt,
+        kind: kind,
+        tags: tags,
+        content: jsonEncode({'name': name}),
+        sig: 'sig',
+      );
 
 List<String> _authTag(nostr.Keys owner, String agentPubkey) {
   final digest = SHA256Digest().process(

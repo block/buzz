@@ -116,7 +116,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       avatarUrl: data.avatarUrl,
       about: data.about,
       nip05Handle: data.nip05,
-      ownerPubkey: verifiedOaOwnerPubkey(latest.tags, data.pubkey),
+      ownerPubkey: verifiedOaOwnerPubkey(latest),
     );
     _requireCurrentWriteContext(context);
     _metadata = metadata;
@@ -233,7 +233,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       avatarUrl: _metadata['picture'] as String?,
       about: _metadata['about'] as String?,
       nip05Handle: _metadata['nip05'] as String?,
-      ownerPubkey: verifiedOaOwnerPubkey(submittedEvent.tags, pubkey),
+      ownerPubkey: verifiedOaOwnerPubkey(submittedEvent),
     );
     state = AsyncData(profile);
     ref.read(userCacheProvider.notifier).put(profile);

@@ -296,17 +296,7 @@ List<String> relayMemberPubkeysFromEvents(List<NostrEvent> events) {
 /// Converts kind:0 events into a deduplicated, alphabetized people directory.
 @visibleForTesting
 List<DirectoryUser> directoryUsersFromProfileEvents(List<NostrEvent> events) {
-  final latestByPubkey = <String, NostrEvent>{};
-  for (final event in events) {
-    if (event.kind != 0) {
-      continue;
-    }
-    final pubkey = event.pubkey.toLowerCase();
-    final current = latestByPubkey[pubkey];
-    if (current == null || event.createdAt > current.createdAt) {
-      latestByPubkey[pubkey] = event;
-    }
-  }
+  final latestByPubkey = latestProfileEvents(events);
 
   return [
     for (final event in latestByPubkey.values)
@@ -316,7 +306,7 @@ List<DirectoryUser> directoryUsersFromProfileEvents(List<NostrEvent> events) {
           displayName: profile.displayName,
           avatarUrl: profile.avatarUrl,
           nip05Handle: profile.nip05,
-          isAgent: verifiedOaOwnerPubkey(event.tags, event.pubkey) != null,
+          isAgent: verifiedOaOwnerPubkey(event) != null,
         ),
   ]..sort((a, b) {
     final labelComparison = a.label.toLowerCase().compareTo(
@@ -373,29 +363,14 @@ final relayDirectoryUsersProvider =
         NostrFilters.profilesBatch(memberPubkeys),
       ]);
       final profilesByPubkey = {
-        for (final event in profileEvents)
-          event.pubkey.toLowerCase(): ProfileData.fromEvent(event),
+        for (final user in directoryUsersFromProfileEvents(profileEvents))
+          user.pubkey: user,
       };
       users =
           [
             for (final pubkey in memberPubkeys)
               if (profilesByPubkey[pubkey] case final profile?)
-                DirectoryUser(
-                  pubkey: pubkey,
-                  displayName: profile.displayName,
-                  avatarUrl: profile.avatarUrl,
-                  nip05Handle: profile.nip05,
-                  isAgent:
-                      verifiedOaOwnerPubkey(
-                        profileEvents
-                            .firstWhere(
-                              (event) => event.pubkey.toLowerCase() == pubkey,
-                            )
-                            .tags,
-                        pubkey,
-                      ) !=
-                      null,
-                )
+                profile
               else
                 DirectoryUser(pubkey: pubkey),
           ]..sort((a, b) {

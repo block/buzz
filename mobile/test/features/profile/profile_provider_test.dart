@@ -23,21 +23,21 @@ void main() {
       const ['custom', 'preserve-tag'],
     ];
     final relaySession = _ProfileRelaySession(
-      NostrEvent(
-        id: 'profile-1',
-        pubkey: keys.public,
-        createdAt: 1,
-        kind: EventKind.profile,
-        tags: profileTags,
-        content: jsonEncode({
-          'name': 'alice',
-          'display_name': 'Alice',
-          'about': 'Building Buzz',
-          'picture': 'https://relay.example/alice.png',
-          'nip05': 'alice@example.com',
-          'custom': 'preserve-me',
-        }),
-        sig: 'sig',
+      NostrEvent.fromJson(
+        nostr.Event.from(
+          secretKey: keys.secret,
+          createdAt: 1,
+          kind: EventKind.profile,
+          tags: profileTags,
+          content: jsonEncode({
+            'name': 'alice',
+            'display_name': 'Alice',
+            'about': 'Building Buzz',
+            'picture': 'https://relay.example/alice.png',
+            'nip05': 'alice@example.com',
+            'custom': 'preserve-me',
+          }),
+        ).toMap(),
       ),
     );
     final container = ProviderContainer(
