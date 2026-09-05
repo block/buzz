@@ -395,8 +395,9 @@ mod tests {
     // `managed_agents/runtime.rs`), after Buzz sets the access gates. If a
     // baked reserved key survived here, an internal build packaged with
     // `BUZZ_ACP_RESPOND_TO=anyone` would answer anyone while the UI shows
-    // "Only me". `build.rs` rejects such a key at build time; these tests pin
-    // the runtime backstop for a binary built without that check.
+    // "Me and my agents only". `build.rs` rejects such a key at build time;
+    // these tests pin the runtime backstop for a binary built without that
+    // check.
 
     #[test]
     fn build_env_map_drops_baked_access_gate_keys() {

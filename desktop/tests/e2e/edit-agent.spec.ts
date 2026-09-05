@@ -96,7 +96,7 @@ test.describe("agent definition dialog", () => {
     await expect(dialog.getByTestId("agent-respond-to")).toBeVisible();
     await expect(dialog.locator("#agent-respond-to")).toBeDisabled();
     await expect(dialog.locator("#agent-respond-to")).toContainText(
-      "Only me (default)",
+      "Me and my agents only (default)",
     );
     await expect(
       dialog.getByTestId("agent-respond-to-disabled-reason"),
@@ -128,7 +128,7 @@ test.describe("edit agent dialog", () => {
     await expect(accessControl).toBeVisible();
     await expect(page.locator("#agent-respond-to")).toBeDisabled();
     await expect(page.locator("#agent-respond-to")).toContainText(
-      "Only me (default)",
+      "Me and my agents only (default)",
     );
     await expect(
       page.getByTestId("agent-respond-to-disabled-reason"),

@@ -30,7 +30,7 @@ buzz agents draft-create \
   --system-prompt "Find reliable sources and summarize them concisely."
 ```
 
-Use the UUID from the current Buzz `[Context]`; do not ask the user for it. Do not ask about runtime, provider, model, credentials, environment variables, or access. Desktop uses the machine's real defaults, and new agents start as **Only me**. The command sends an encrypted draft to the owner's Desktop. It does not create the agent until the owner reviews and saves the form, so report the result as “ready for review,” never “created.”
+Use the UUID from the current Buzz `[Context]`; do not ask the user for it. Do not ask about runtime, provider, model, credentials, environment variables, or access. Desktop uses the machine's real defaults, and new agents start as **Me and my agents only**. The command sends an encrypted draft to the owner's Desktop. It does not create the agent until the owner reviews and saves the form, so report the result as “ready for review,” never “created.”
 
 For an explicit change to an existing personal agent, use:
 
