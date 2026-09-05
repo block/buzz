@@ -687,6 +687,64 @@ pub async fn is_member(
     Ok(cnt > 0)
 }
 
+/// Return whether a pubkey inherits access to a Session through an active
+/// parent-channel link. The link must be creator-authenticated and the Session
+/// must still be an active private stream channel.
+pub async fn has_session_parent_access(
+    pool: &PgPool,
+    community_id: CommunityId,
+    session_channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let allowed: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+          SELECT 1
+          FROM events session_link
+          JOIN channels parent
+            ON parent.community_id = session_link.community_id
+           AND parent.id = session_link.channel_id
+           AND parent.deleted_at IS NULL
+          JOIN channels session_channel
+            ON session_channel.community_id = session_link.community_id
+           AND session_channel.id = $2
+           AND session_channel.id::text = CASE
+               WHEN session_link.content IS JSON OBJECT
+               THEN (session_link.content::json ->> 'session_channel_id')
+               ELSE NULL
+           END
+           AND session_channel.created_by = session_link.pubkey
+           AND session_channel.visibility = 'private'
+           AND session_channel.channel_type = 'stream'
+           AND session_channel.ttl_seconds IS NULL
+           AND session_channel.archived_at IS NULL
+           AND session_channel.deleted_at IS NULL
+          JOIN channel_members parent_member
+            ON parent_member.community_id = parent.community_id
+           AND parent_member.channel_id = parent.id
+           AND parent_member.pubkey = $3
+           AND parent_member.role <> 'bot'
+           AND parent_member.removed_at IS NULL
+          WHERE session_link.community_id = $1
+            AND session_link.kind = $4
+            AND session_link.deleted_at IS NULL
+        )
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(session_channel_id)
+    .bind(pubkey)
+    .bind(buzz_core::kind::KIND_SESSION_LINK as i32)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(allowed)
+}
+
 /// Return which of the given (channel, pubkey) combinations are active
 /// memberships, restricted to non-deleted channels — one statement for any
 /// batch size (T2b). Semantics per pair match [`is_member`].
@@ -824,10 +882,40 @@ pub async fn get_accessible_channel_ids(
         SELECT id AS channel_id
         FROM channels
         WHERE community_id = $1 AND visibility = 'open' AND deleted_at IS NULL
+        UNION
+        SELECT session_channel.id AS channel_id
+        FROM events session_link
+        JOIN channels parent
+          ON parent.community_id = session_link.community_id
+         AND parent.id = session_link.channel_id
+         AND parent.deleted_at IS NULL
+        JOIN channels session_channel
+          ON session_channel.community_id = session_link.community_id
+         AND session_channel.id::text = CASE
+             WHEN session_link.content IS JSON OBJECT
+             THEN (session_link.content::json ->> 'session_channel_id')
+             ELSE NULL
+         END
+         AND session_channel.created_by = session_link.pubkey
+         AND session_channel.visibility = 'private'
+         AND session_channel.channel_type = 'stream'
+         AND session_channel.ttl_seconds IS NULL
+         AND session_channel.archived_at IS NULL
+         AND session_channel.deleted_at IS NULL
+        JOIN channel_members parent_member
+          ON parent_member.community_id = parent.community_id
+         AND parent_member.channel_id = parent.id
+         AND parent_member.pubkey = $2
+         AND parent_member.role <> 'bot'
+         AND parent_member.removed_at IS NULL
+        WHERE session_link.community_id = $1
+          AND session_link.kind = $3
+          AND session_link.deleted_at IS NULL
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(pubkey)
+    .bind(buzz_core::kind::KIND_SESSION_LINK as i32)
     .fetch_all(&mut *connection)
     .await?;
 
@@ -1364,6 +1452,17 @@ impl Db {
         is_member(&self.pool, community_id, channel_id, pubkey).await
     }
 
+    /// Return whether the pubkey inherits Session access from a parent channel.
+    #[datastore_span(name = "has_session_parent_access", system = "postgresql")]
+    pub async fn has_session_parent_access(
+        &self,
+        community_id: CommunityId,
+        session_channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<bool> {
+        has_session_parent_access(&self.pool, community_id, session_channel_id, pubkey).await
+    }
+
     /// Return the active (channel, pubkey) membership pairs among the given
     /// sets, in one statement.
     #[datastore_span(name = "membership_pairs", system = "postgresql")]
@@ -1599,6 +1698,90 @@ mod postgres_tests {
         .expect("insert owner membership");
 
         crate::channel::get_channel(pool, CommunityId::from_uuid(community_id), id).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn session_parent_access_inherits_to_humans_but_not_bots() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+        let human = random_pubkey();
+        let bot = random_pubkey();
+        for pubkey in [&creator, &human, &bot] {
+            ensure_user(&pool, community, pubkey)
+                .await
+                .expect("ensure user");
+        }
+        let parent = create_test_channel(
+            &pool,
+            community_id,
+            "parent",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create parent");
+        let session = create_test_channel(
+            &pool,
+            community_id,
+            "session",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create session");
+        for (pubkey, role) in [(&human, "member"), (&bot, "bot")] {
+            sqlx::query("INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) VALUES ($1,$2,$3,$4::member_role,$5)")
+                .bind(community_id)
+                .bind(parent.id)
+                .bind(pubkey)
+                .bind(role)
+                .bind(&creator)
+                .execute(&pool)
+                .await
+                .expect("add parent member");
+        }
+        // Insert a structurally equivalent stored link directly to isolate the
+        // authorization SQL from event-signing behavior.
+        let event_id = random_pubkey();
+        sqlx::query("INSERT INTO events (id, community_id, pubkey, created_at, kind, tags, content, sig, channel_id) VALUES ($1,$2,$3,NOW(),$4,$5,$6,$7,$8)")
+            .bind(event_id)
+            .bind(community_id)
+            .bind(&creator)
+            .bind(buzz_core::kind::KIND_SESSION_LINK as i32)
+            .bind(serde_json::json!([["h", parent.id.to_string()]]))
+            .bind(serde_json::json!({"session_channel_id": session.id}).to_string())
+            .bind(vec![0_u8; 64])
+            .bind(parent.id)
+            .execute(&pool)
+            .await
+            .expect("insert Session link");
+        assert!(
+            has_session_parent_access(&pool, community, session.id, &human)
+                .await
+                .expect("human access")
+        );
+        assert!(
+            !has_session_parent_access(&pool, community, session.id, &bot)
+                .await
+                .expect("bot access")
+        );
+        remove_member(&pool, community, parent.id, &human, &creator)
+            .await
+            .expect("remove parent member");
+        assert!(
+            !has_session_parent_access(&pool, community, session.id, &human)
+                .await
+                .expect("revoked access")
+        );
     }
 
     #[tokio::test]

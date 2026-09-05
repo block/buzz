@@ -209,3 +209,45 @@ test("community switch defers stale outgoing appearance persistence", () => {
   );
   assert.equal(communityThemePersistenceAction(null, incoming), "persist");
 });
+
+test("a retired accent hex is migrated rather than discarding the whole theme", () => {
+  // #3b82f6 was the default until it was deepened to #2563eb for legible white
+  // label text. It is no longer in ACCENT_COLORS, so without a migration it
+  // fails the allowlist and takes the user's syntax theme and follow-system
+  // flag down with it.
+  const stored = {
+    version: 1,
+    theme: "catppuccin-latte",
+    accent: "#3b82f6",
+    followSystem: false,
+  };
+
+  const parsed = parseCommunityThemePreference(stored);
+
+  assert.notEqual(
+    parsed,
+    null,
+    "a retired accent must not void the preference",
+  );
+  assert.equal(parsed.accent, "#2563eb", "the retired hex is upgraded");
+  assert.equal(
+    parsed.theme,
+    "catppuccin-latte",
+    "the rest of the theme survives",
+  );
+  assert.equal(parsed.followSystem, false);
+});
+
+test("an accent that was never offered is still rejected", () => {
+  // The migration must not become a general-purpose escape hatch: an arbitrary
+  // hex is not a retired value and still fails the allowlist.
+  assert.equal(
+    parseCommunityThemePreference({
+      version: 1,
+      theme: "buzz",
+      accent: "#123456",
+      followSystem: true,
+    }),
+    null,
+  );
+});

@@ -11,7 +11,7 @@ import {
 const preference = {
   version: 1,
   theme: "houston",
-  accent: "#3b82f6",
+  accent: "#2563eb",
   followSystem: false,
 };
 

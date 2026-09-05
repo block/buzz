@@ -1,0 +1,7 @@
+node_modules
+dist
+playwright-report
+test-results
+*.log
+.DS_Store
+src/app/routeTree.gen.ts

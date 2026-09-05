@@ -1,5 +1,6 @@
 packages:
   - "desktop"
+  - "desktop-new"
   - "web"
   - "admin-web"
 allowBuilds:

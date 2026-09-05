@@ -1,0 +1,157 @@
+@layer components {
+  .panel-heading-between,
+  .agent-profile-header {
+    justify-content: space-between;
+  }
+
+  .navigator-row-action.always-visible {
+    opacity: 1;
+  }
+
+  .agent-navigator-row {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.625rem;
+    border: 0;
+    border-radius: 0.75rem;
+    padding: 0.625rem;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .agent-navigator-row:hover,
+  .agent-navigator-row[data-selected] {
+    background: var(--bg-inset);
+  }
+
+  .agent-avatar,
+  .agent-profile-avatar {
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--bg-accent-tint);
+    color: var(--text-accent);
+  }
+
+  .agent-avatar {
+    width: 2rem;
+    height: 2rem;
+  }
+
+  .agent-profile-avatar {
+    width: 3.25rem;
+    height: 3.25rem;
+  }
+
+  .agent-row-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+  }
+
+  .agent-row-copy > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-presence {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--text-disabled);
+  }
+
+  .agent-presence[data-running] {
+    background: var(--bg-success);
+  }
+
+  .agent-main-panel {
+    height: 100%;
+    overflow-y: auto;
+    background: var(--bg-panel-glass);
+  }
+
+  .agent-profile-header {
+    display: grid;
+    min-height: 6.5rem;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid var(--border-tertiary);
+  }
+
+  .agent-profile-title {
+    min-width: 0;
+  }
+
+  .agent-lifecycle-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .agent-profile-body,
+  .agent-form {
+    display: flex;
+    width: min(100%, 42rem);
+    flex-direction: column;
+    gap: 1.5rem;
+    padding: 2rem 1.5rem;
+  }
+
+  .agent-profile-body section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
+  .agent-runtime-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    border-radius: 1rem;
+    padding: 1rem;
+    background: var(--bg-inset);
+  }
+
+  .field-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .field-stack input,
+  .field-stack textarea,
+  .field-stack select {
+    width: 100%;
+    border: 1px solid var(--border-secondary);
+    border-radius: 0.75rem;
+    padding: 0.75rem;
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    font: inherit;
+  }
+
+  .field-stack textarea {
+    min-height: 9rem;
+    resize: vertical;
+  }
+
+  .setup-callout {
+    border-radius: 0.875rem;
+    padding: 0.875rem 1rem;
+    background: var(--bg-inset);
+  }
+
+  .agent-create-action {
+    align-self: flex-start;
+  }
+}
