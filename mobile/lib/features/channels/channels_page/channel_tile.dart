@@ -176,9 +176,7 @@ class _DmAvatar extends ConsumerWidget {
     );
     final presence = ref.watch(
       presenceCacheProvider.select(
-        (presenceMap) => otherPubkey == null
-            ? 'offline'
-            : (presenceMap[otherPubkey] ?? 'offline'),
+        (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
       ),
     );
 
@@ -216,28 +214,29 @@ class _DmAvatar extends ConsumerWidget {
             ),
             isAgent: profile?.isAgent == true,
           ),
-          Positioned(
-            right: -1,
-            bottom: -1,
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                color: _presenceColor(context, presence),
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: context.theme.scaffoldBackgroundColor,
-                  width: 1.5,
+          if (presence != null)
+            Positioned(
+              right: -1,
+              bottom: -1,
+              child: Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: _presenceColor(context, presence),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: context.theme.scaffoldBackgroundColor,
+                    width: 1.5,
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  Color _presenceColor(BuildContext context, String presence) {
+  Color _presenceColor(BuildContext context, String? presence) {
     return switch (presence) {
       'online' => context.appColors.success,
       'away' => context.appColors.warning,
