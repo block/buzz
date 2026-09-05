@@ -1509,6 +1509,56 @@ async fn query_events_authed(
                 return Err(internal_error(&format!("query error: {e}")));
             }
         }
+
+        // Aux closure for the catch-all path: include reactions, deletions,
+        // and edits targeting the returned events, plus deletions targeting
+        // those aux events. This covers `messages get` (no top_level, no
+        // depth_limit) and the root-event filter in `messages thread` (an
+        // `ids` filter that falls through to catch-all).
+        if extension_flag(&raw_filters[idx], "include_aux") {
+            let result_ids: Vec<String> = events
+                .iter()
+                .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            if !result_ids.is_empty() {
+                let mut seen_aux = std::collections::HashSet::new();
+                let mut hop_ids = result_ids;
+                for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+                    let aux_query = build_aux_query(
+                        tenant.community(),
+                        std::mem::take(&mut hop_ids),
+                        hop_kinds,
+                    );
+                    let aux_events = query_all_pages(
+                        aux_query,
+                        AUX_PAGE_LIMIT,
+                        &mut AuxReader::Routed(&state.db, "bridge_catchall_aux"),
+                    )
+                    .await
+                    .map_err(|e| {
+                        internal_error(&format!("catch-all aux query error: {e}"))
+                    })?;
+                    for se in aux_events {
+                        if !seen_aux.insert(se.event.id)
+                            || !event_in_accessible_channel(&se, &accessible_channels)
+                            || !crate::handlers::req::event_visible_to_reader(
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                        {
+                            continue;
+                        }
+                        hop_ids.push(se.event.id.to_hex());
+                        if let Ok(value) = serde_json::to_value(&se.event) {
+                            events.push(value);
+                        }
+                    }
+                    if hop_ids.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     Ok(Json(Value::Array(events)))
