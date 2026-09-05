@@ -2,7 +2,7 @@ import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { UserRoundPlus, X } from "lucide-react";
 import {
-  invalidateChannelState,
+  queueChannelStateInvalidation,
   useAddChannelMembersMutation,
   useChannelMembersQuery,
   useChannelsQuery,
@@ -574,7 +574,8 @@ export function MembersSidebar({
             agent: managedAgent,
             ensureRunning: true,
           });
-          await invalidateChannelState(queryClient, channelId);
+          // fire-and-forget: awaiting the channels-list refetch blocks Add.
+          queueChannelStateInvalidation(queryClient, channelId);
         } catch (error) {
           setInviteSubmissionErrors((prev) => [
             ...prev,

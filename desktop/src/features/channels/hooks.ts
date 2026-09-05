@@ -266,6 +266,20 @@ export async function invalidateChannelState(
   ]);
 }
 
+/**
+ * Queue {@link invalidateChannelState} without blocking the caller.
+ *
+ * The channels query refetches every channel. `mutateAsync` waits for
+ * `onSettled`, so awaiting that refetch keeps Add/dialog buttons pending
+ * for seconds after the relay already finished.
+ */
+export function queueChannelStateInvalidation(
+  queryClient: ReturnType<typeof useQueryClient>,
+  channelId: string | null | undefined,
+): void {
+  void invalidateChannelState(queryClient, channelId);
+}
+
 function setChannelArchivedState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string,
@@ -855,11 +869,12 @@ export function useAddChannelMembersMutation(channelId: string | null) {
         });
       }
     },
-    onSettled: async (_data, _err, variables) => {
+    onSettled: (_data, _err, variables) => {
       // Invalidate the effective channel (the one actually mutated) not the
       // live hook-closure channel, which may have changed mid-send.
+      // fire-and-forget: awaiting the channels-list refetch blocks Add.
       const effectiveChannelId = variables?.channelId ?? channelId;
-      await invalidateChannelState(queryClient, effectiveChannelId);
+      queueChannelStateInvalidation(queryClient, effectiveChannelId);
     },
   });
 }
