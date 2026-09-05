@@ -313,6 +313,59 @@ pub fn cli_link_name(is_dev: bool) -> String {
     crate::build_identity::cli_name(is_dev)
 }
 
+/// Directory roots whose contents do not survive a reboot.
+///
+/// A Linux AppImage runs from an extract under the temp dir — `/tmp/.mount_*`
+/// for the default runtime, `/tmp/appimage_extracted_*` with
+/// `APPIMAGE_EXTRACT_AND_RUN=1` — and `/tmp` is tmpfs on many distros. A
+/// symlink into that extract works for the current boot and dangles after the
+/// next one. `TMPDIR` may point somewhere else, so literal `/tmp` is always
+/// included alongside it.
+#[cfg(unix)]
+fn ephemeral_exe_roots() -> Vec<PathBuf> {
+    let mut roots = vec![std::env::temp_dir()];
+    let tmp = PathBuf::from("/tmp");
+    if !roots.contains(&tmp) {
+        roots.push(tmp);
+    }
+    roots
+}
+
+#[cfg(unix)]
+fn is_ephemeral_path(path: &Path, ephemeral_roots: &[PathBuf]) -> bool {
+    ephemeral_roots.iter().any(|root| path.starts_with(root))
+}
+
+/// Whether an existing symlink at `link` should be retargeted at `buzz_bin`.
+///
+/// A durable bundle always wins: the link name is our namespace and gets
+/// refreshed on every boot so it never keeps naming a moved app bundle.
+///
+/// The exception is a bundled CLI that only exists for this boot — an AppImage
+/// extract under tmpfs. Retargeting then trades a working `buzz` for one that
+/// dangles after the next reboot, so a link that still resolves to a durable
+/// binary is left alone. A dangling, unreadable, or itself-ephemeral target is
+/// still replaced, so a machine whose only CLI is the AppImage extract keeps
+/// getting the convenience link.
+#[cfg(unix)]
+fn should_retarget_cli_symlink(buzz_bin: &Path, link: &Path, ephemeral_roots: &[PathBuf]) -> bool {
+    if !is_ephemeral_path(buzz_bin, ephemeral_roots) {
+        return true;
+    }
+    let Ok(target) = fs::read_link(link) else {
+        return true;
+    };
+    let current = if target.is_absolute() {
+        target
+    } else {
+        match link.parent() {
+            Some(parent) => parent.join(target),
+            None => return true,
+        }
+    };
+    !current.exists() || is_ephemeral_path(&current, ephemeral_roots)
+}
+
 /// Ensures `~/.local/bin/buzz` (prod) or `~/.local/bin/buzz-dev` (dev) is a
 /// symlink to the bundled CLI binary.
 ///
@@ -321,28 +374,51 @@ pub fn cli_link_name(is_dev: bool) -> String {
 /// overwrite each other's target — the same isolation that separates the
 /// `~/.buzz` and `~/.buzz-dev` nests (see [`NEST_DIR_DEV`]).
 ///
-/// On every boot: replaces any existing symlink unconditionally (the `buzz` /
-/// `buzz-dev` name is our namespace), creates a new one if absent, and leaves
-/// regular files alone to avoid clobbering a user-compiled binary.
+/// On every boot: replaces any existing symlink (the `buzz` / `buzz-dev` name
+/// is our namespace), creates a new one if absent, and leaves regular files
+/// alone to avoid clobbering a user-compiled binary. The one symlink we keep is
+/// a durable target that this boot cannot improve on — see
+/// [`should_retarget_cli_symlink`].
 ///
 /// Non-fatal: callers should ignore errors — the symlink is a convenience
 /// for human Terminal use; agents find the CLI via PATH augmentation.
 #[cfg(unix)]
 pub fn ensure_cli_symlink(exe_parent: &Path, is_dev: bool) -> Result<(), String> {
+    let local_bin = dirs::home_dir()
+        .ok_or("cannot resolve home directory")?
+        .join(".local")
+        .join("bin");
+    ensure_cli_symlink_in(
+        exe_parent,
+        &local_bin,
+        cli_link_name(is_dev),
+        &ephemeral_exe_roots(),
+    )
+}
+
+/// [`ensure_cli_symlink`] with the link directory and the ephemeral roots passed
+/// in, so tests drive the real filesystem writes without touching `$HOME` or
+/// depending on where the host puts its temp dir.
+#[cfg(unix)]
+fn ensure_cli_symlink_in(
+    exe_parent: &Path,
+    local_bin: &Path,
+    link_name: &str,
+    ephemeral_roots: &[PathBuf],
+) -> Result<(), String> {
     let buzz_bin = exe_parent.join("buzz");
     if !buzz_bin.exists() {
         return Ok(()); // CLI not bundled (e.g., dev builds without sidecars).
     }
 
-    let local_bin = dirs::home_dir()
-        .ok_or("cannot resolve home directory")?
-        .join(".local")
-        .join("bin");
-    fs::create_dir_all(&local_bin).map_err(|e| format!("create {}: {e}", local_bin.display()))?;
+    fs::create_dir_all(local_bin).map_err(|e| format!("create {}: {e}", local_bin.display()))?;
 
-    let link = local_bin.join(cli_link_name(is_dev));
+    let link = local_bin.join(link_name);
     match link.symlink_metadata() {
         Ok(meta) if meta.file_type().is_symlink() => {
+            if !should_retarget_cli_symlink(&buzz_bin, &link, ephemeral_roots) {
+                return Ok(()); // durable CLI already linked; this boot is ephemeral.
+            }
             let _ = fs::remove_file(&link);
             create_symlink(&buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
