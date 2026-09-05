@@ -3005,6 +3005,7 @@ async fn tokio_main() -> Result<()> {
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
         Wake(u32, Result<AgentPool, String>),
+        HoldDeadline,
     }
 
     loop {
@@ -3146,6 +3147,8 @@ async fn tokio_main() -> Result<()> {
         }
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
+        pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
+        let hold_deadline = pool.next_hold_deadline(pool::HOLD_BUSY_OWNER_TIMEOUT);
         let pool_event: Option<PoolEvent> = {
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
@@ -3188,6 +3191,9 @@ async fn tokio_main() -> Result<()> {
                         _ => std::future::pending().await,
                     }
                 } => None,
+                _ = pool::AgentPool::wait_for_hold_deadline(hold_deadline), if pool_ready => {
+                    Some(PoolEvent::HoldDeadline)
+                },
                 Some(Err(error)) = wake_tasks.join_next(), if !wake_tasks.is_empty() => {
                     if let Some(attempt) = pool_lifecycle.waking_attempt() {
                         let message = format!("pool wake task failed: {error}");
@@ -4021,6 +4027,21 @@ async fn tokio_main() -> Result<()> {
                     }
                 }
             }
+            Some(PoolEvent::HoldDeadline) => {
+                // A held thread must make progress even when every unrelated
+                // relay/timer source is quiet. The deadline is derived from
+                // the pool's first-held stamp, so this dispatch observes
+                // `ForkAfterHold` and claims an idle worker immediately.
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
+                    typing_channels.insert(scope, thread_tags);
+                }
+            }
             None => {} // relay/heartbeat/shutdown branches handled inline above
         }
     }
@@ -4412,7 +4433,7 @@ fn dispatch_pending(
     let mut held: Vec<FlushBatch> = Vec::new();
     // One clock read for the whole cycle so every batch's bounded-hold window is
     // measured against the same instant.
-    let now = std::time::Instant::now();
+    let now = tokio::time::Instant::now();
     loop {
         let batch = match queue.flush_next() {
             Some(b) => b,
@@ -4427,7 +4448,8 @@ fn dispatch_pending(
         // so an active channel cannot starve a sibling channel on a shared
         // worker. A held thread that outwaits the window forks a fresh session
         // rather than starve behind an unbounded turn.
-        match pool.hold_decision(&scope, now, pool::HOLD_BUSY_OWNER_TIMEOUT) {
+        let forked_after_hold = match pool.hold_decision(&scope, now, pool::HOLD_BUSY_OWNER_TIMEOUT)
+        {
             pool::HoldDecision::Hold {
                 held_for,
                 owner_index,
@@ -4458,31 +4480,9 @@ fn dispatch_pending(
             pool::HoldDecision::ForkAfterHold {
                 held_for,
                 owner_index,
-            } => {
-                tracing::warn!(
-                    channel = %channel_id,
-                    scope = %scope.telemetry_label(),
-                    owner_index,
-                    held_for_secs = held_for.as_secs_f64(),
-                    "busy-owner hold expired — forking fresh session on an idle worker"
-                );
-                if let Some(observer) = observer {
-                    observer.emit(
-                        "busy_owner_hold_forked",
-                        None,
-                        &observer::context_for(Some(channel_id), None, None),
-                        serde_json::json!({
-                            "scope": scope.telemetry_label(),
-                            "ownerIndex": owner_index,
-                            "heldForSecs": held_for.as_secs_f64(),
-                        }),
-                    );
-                }
-                // Fall through to try_claim below (fork); record_scope_owner
-                // reassigns ownership to the new worker automatically.
-            }
-            pool::HoldDecision::Dispatch => {}
-        }
+            } => Some((held_for, owner_index)),
+            pool::HoldDecision::Dispatch => None,
+        };
         let typing_scope = batch
             .events
             .last()
@@ -4502,6 +4502,32 @@ fn dispatch_pending(
                 break;
             }
         };
+        // Consume a bounded hold only after a worker was actually claimed.
+        // If every slot is checked out, the expired stamp remains sticky and
+        // the worker-return event retries immediately instead of waiting for a
+        // fresh timeout window.
+        pool.clear_hold(&scope);
+        if let Some((held_for, owner_index)) = forked_after_hold {
+            tracing::warn!(
+                channel = %channel_id,
+                scope = %scope.telemetry_label(),
+                owner_index,
+                held_for_secs = held_for.as_secs_f64(),
+                "busy-owner hold expired — forking fresh session on an idle worker"
+            );
+            if let Some(observer) = observer {
+                observer.emit(
+                    "busy_owner_hold_forked",
+                    None,
+                    &observer::context_for(Some(channel_id), None, None),
+                    serde_json::json!({
+                        "scope": scope.telemetry_label(),
+                        "ownerIndex": owner_index,
+                        "heldForSecs": held_for.as_secs_f64(),
+                    }),
+                );
+            }
+        }
         tracing::debug!(agent = agent.index, channel = %channel_id, scope = %scope.telemetry_label(), affinity_hit, "agent_claimed");
 
         let recoverable_batch = match ctx.dedup_mode {
@@ -4532,6 +4558,14 @@ fn dispatch_pending(
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
 
+        // Assign ownership before moving the worker into the task. If this is
+        // a bounded-hold fork, the new generation immediately invalidates the
+        // prior busy worker's copy when that worker eventually returns.
+        let owner_generation = pool.record_scope_owner(scope.clone(), agent.index);
+        agent
+            .state
+            .set_scope_owner_generation(scope.clone(), owner_generation);
+
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
                 agent,
@@ -4558,9 +4592,6 @@ fn dispatch_pending(
                 successful_steer_deliveries: HashSet::new(),
             },
         );
-        // Record this worker as the scope's session owner so a later dispatch
-        // while it is busy holds instead of forking a duplicate session.
-        pool.record_scope_owner(scope.clone(), agent_index);
         dispatched_channels.push((scope, typing_scope));
         *last_activity = tokio::time::Instant::now();
     }
@@ -6235,7 +6266,7 @@ mod owner_control_command_tests {
 
         // The bounded hold decision stamps A's first-held time, then forks once
         // the window elapses rather than starving behind the busy owner.
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         assert!(
             matches!(
                 pool.hold_decision(&ta, now, pool::HOLD_BUSY_OWNER_TIMEOUT),
@@ -6256,9 +6287,10 @@ mod owner_control_command_tests {
             "elapsed window => fork on an idle worker"
         );
         assert!(
-            !pool.held_since_contains(&ta),
-            "fork clears the first-held stamp"
+            pool.held_since_contains(&ta),
+            "expired hold stays sticky until an idle worker is claimed"
         );
+        pool.clear_hold(&ta);
 
         // A conversation scope never holds even with a busy recorded owner —
         // this is the cross-channel head-of-line-blocking regression guard.
@@ -6287,6 +6319,55 @@ mod owner_control_command_tests {
         assert!(
             !pool.held_since_contains(&ta),
             "hold stamps pruned on channel invalidation"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_cap_eviction_prunes_orphaned_hold_deadline() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let held_scope = thread_scope(channel_id, &"a".repeat(64));
+        let surviving_scope = thread_scope(channel_id, &"b".repeat(64));
+
+        pool.record_scope_owner(held_scope.clone(), 0);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        insert_task_meta(&mut pool, 0, surviving_scope.clone(), tx);
+        assert!(matches!(
+            pool.hold_decision(
+                &held_scope,
+                tokio::time::Instant::now(),
+                pool::HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            pool::HoldDecision::Hold { .. }
+        ));
+
+        let oldest = std::time::Instant::now() - Duration::from_secs(1);
+        queue.push(queue::QueuedEvent {
+            channel_id,
+            scope: held_scope.clone(),
+            event: make_event(KIND_STREAM_MESSAGE, "held", None),
+            received_at: oldest,
+            prompt_tag: "test".into(),
+        });
+        for i in 0..500 {
+            queue.push(queue::QueuedEvent {
+                channel_id,
+                scope: surviving_scope.clone(),
+                event: make_event(KIND_STREAM_MESSAGE, &format!("new-{i}"), None),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "test".into(),
+            });
+        }
+
+        assert!(
+            !queue.has_pending_scope(&held_scope),
+            "aggregate cap evicts the globally oldest scope"
+        );
+        pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
+        assert!(
+            !pool.held_since_contains(&held_scope),
+            "evicted scope cannot leave an immediately-ready deadline behind"
         );
     }
 
@@ -9370,6 +9451,15 @@ mod error_outcome_emission_tests {
         }
     }
 
+    fn bind_agent_scope_owner(
+        pool: &mut AgentPool,
+        agent: &mut OwnedAgent,
+        scope: scope::SessionScope,
+    ) {
+        let generation = pool.record_scope_owner(scope.clone(), agent.index);
+        agent.state.set_scope_owner_generation(scope, generation);
+    }
+
     #[tokio::test]
     async fn successful_native_steer_is_transferred_to_live_session_delivery_state() {
         let channel_id = Uuid::new_v4();
@@ -9385,6 +9475,11 @@ mod error_outcome_emission_tests {
         );
 
         let mut pool = AgentPool::from_slots(vec![None]);
+        bind_agent_scope_owner(
+            &mut pool,
+            &mut agent,
+            scope::SessionScope::Conversation { channel_id },
+        );
         let task_id = pool.join_set.spawn(async {}).id();
         pool.task_map_mut().insert(
             task_id,
@@ -9460,6 +9555,11 @@ mod error_outcome_emission_tests {
         );
 
         let mut pool = AgentPool::from_slots(vec![None]);
+        bind_agent_scope_owner(
+            &mut pool,
+            &mut agent,
+            scope::SessionScope::Conversation { channel_id },
+        );
         let task_id = pool.join_set.spawn(async {}).id();
         pool.task_map_mut().insert(
             task_id,
@@ -10697,6 +10797,7 @@ mod error_outcome_emission_tests {
             .sessions
             .insert(session_scope.clone(), "healthy-session".into());
         let mut pool = AgentPool::from_slots(vec![None]);
+        bind_agent_scope_owner(&mut pool, &mut agent, session_scope.clone());
         let task_id = pool.join_set.spawn(async {}).id();
         pool.task_map_mut().insert(
             task_id,
