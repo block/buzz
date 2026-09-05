@@ -11,7 +11,7 @@ use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
 
 /// List workflows in a channel — query kind:30620 workflow definition events.
 pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+    let channel_id = parse_uuid(channel_id)?.to_string();
     let filter = serde_json::json!({
         "kinds": [30620],
         "#h": [channel_id]
@@ -36,7 +36,7 @@ pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result
 
 /// Get a single workflow definition.
 pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
+    let workflow_id = parse_uuid(workflow_id)?.to_string();
     let filter = serde_json::json!({
         "kinds": [30620],
         "#d": [workflow_id]
@@ -68,7 +68,7 @@ pub async fn cmd_get_workflow_runs(
     workflow_id: &str,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
+    let workflow_id = parse_uuid(workflow_id)?.to_string();
     let limit = limit.unwrap_or(20).min(100);
     let filter = serde_json::json!({
         "kinds": [46001, 46002, 46003],
@@ -124,6 +124,7 @@ pub async fn cmd_update_workflow(
 ) -> Result<(), CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
     let wf_uuid = parse_uuid(workflow_id)?;
+    let workflow_id = wf_uuid.to_string();
     let yaml_definition = read_or_stdin(yaml)?;
 
     let filter = serde_json::json!({
