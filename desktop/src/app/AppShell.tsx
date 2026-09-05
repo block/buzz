@@ -39,6 +39,7 @@ import { useDmResurfaceFromMessages } from "@/features/channels/useDmResurfaceFr
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
+import { useInboxViewPreference } from "@/features/home/useInboxViewPreference";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
 import {
   useHomeFeedNotifications,
@@ -235,6 +236,10 @@ export function AppShell() {
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
+  const inboxViewPreference = useInboxViewPreference(
+    identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
+  );
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
   useReminderNotifications(
@@ -743,6 +748,7 @@ export function AppShell() {
             topLevelUnreadChannelIds,
             hasSidebarUnreadProjections: true,
             feedItemState,
+            inboxViewPreference,
             onOpenSettings: handleOpenSettings,
           }}
         >
