@@ -2501,6 +2501,14 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   }) async => [];
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus) onStatusChanged,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
