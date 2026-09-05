@@ -41,6 +41,15 @@ class ComposeBar extends HookConsumerWidget {
     final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
     final draftRevision = useRef(0);
     final draftIdentity = _composerDraftIdentity(ref);
+    final authorizationVisit = useRef<Object?>(null);
+    final authorizationAttempt = useRef<Object?>(null);
+    useEffect(() {
+      final visit = Object();
+      authorizationVisit.value = visit;
+      return () {
+        if (authorizationVisit.value == visit) authorizationVisit.value = null;
+      };
+    }, [draftKey, draftIdentity]);
     final isComposerExpanded = useState(false);
     final androidImeTransitionStarted = useState(
       defaultTargetPlatform != TargetPlatform.android,
@@ -464,51 +473,93 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount.value > 0) {
         return;
       }
-      final submittedDraftRevision = draftRevision.value;
-      // Resolved before any await: see
-      // `_reportSendCancelledByCommunitySwitch`.
-      final messenger = ScaffoldMessenger.maybeOf(context);
-
-      // Extract pubkeys for mentions present in the final text.
-      final selectedMentions = <MentionCandidate>[
-        for (final entry in mentionMap.value.entries)
-          if (hasMention(text, entry.key)) entry.value,
-      ];
-      final outgoing = _OutgoingMentions(selectedMentions);
-      final scan = await _scanNonMemberMentions(
-        ref,
-        channelId: channelId,
-        selectedMentions: selectedMentions,
-        currentPubkey: currentPubkey,
-      );
-
-      // Mentioning humans outside the channel prompts "Invite" / "Do
-      // nothing" (send without inviting) — mirrors desktop's
-      // NonMemberMentionDialog. Agents keep the existing silent auto-add.
-      if (scan.humans.isNotEmpty) {
-        if (!context.mounted) return;
-        final choice = await _promptNonMemberMention(
-          context,
-          names: [for (final candidate in scan.humans) candidate.label],
-          canInvite: scan.canAddMembers,
-        );
-        if (choice == null) return; // Dismissed — keep the draft, send nothing.
-        outgoing.resolveHumanChoice(choice, scan.humans);
-      }
-
-      final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
-      final channelActions = ref.read(channelActionsProvider);
-
-      // An add that was refused doesn't block the message: it is reported and
-      // the un-added mentions are demoted to reference tags so the send lands.
-      Future<void> addMentionedNonMembers() => outgoing.addNonMembers(
-        channelActions,
-        scan: scan,
-        messenger: messenger,
-      );
-
+      final attempt = Object();
+      authorizationAttempt.value = attempt;
       isSending.value = true;
       try {
+        final submittedDraftRevision = draftRevision.value;
+        var authorizationRevision = submittedDraftRevision;
+        final visit = authorizationVisit.value;
+        final config = ref.read(relayConfigProvider);
+        final readAuthorization = ref.read(agentAuthorizationReaderProvider);
+        bool isAuthorizationCurrent() =>
+            context.mounted &&
+            visit == authorizationVisit.value &&
+            authorizationRevision == draftRevision.value &&
+            identical(config, ref.read(relayConfigProvider));
+        // Resolved before any await: see
+        // `_reportSendCancelledByCommunitySwitch`.
+        final messenger = ScaffoldMessenger.maybeOf(context);
+
+        // Extract pubkeys for mentions present in the final text.
+        final selectedMentions = <MentionCandidate>[
+          for (final entry in mentionMap.value.entries)
+            if (hasMention(text, entry.key)) entry.value,
+        ];
+        final outgoing = _OutgoingMentions(selectedMentions);
+        final intendedAgentKeys = {
+          for (final mention in selectedMentions)
+            if (mention.isAgent) mention.pubkey.toLowerCase(),
+        };
+        final scan = await _scanNonMemberMentions(
+          ref,
+          channelId: channelId,
+          selectedMentions: selectedMentions,
+          currentPubkey: currentPubkey,
+        );
+
+        if (intendedAgentKeys.isNotEmpty && !isAuthorizationCurrent()) return;
+        // Mentioning humans outside the channel prompts "Invite" / "Do
+        // nothing" (send without inviting) — mirrors desktop's
+        // NonMemberMentionDialog. Agents keep the existing silent auto-add.
+        if (scan.humans.isNotEmpty) {
+          if (!context.mounted) return;
+          final choice = await _promptNonMemberMention(
+            context,
+            names: [for (final candidate in scan.humans) candidate.label],
+            canInvite: scan.canAddMembers,
+          );
+          if (choice == null) {
+            return; // Dismissed — keep the draft, send nothing.
+          }
+          outgoing.resolveHumanChoice(choice, scan.humans);
+        }
+
+        final queuedAttachments = List<_PendingAttachment>.of(
+          attachments.value,
+        );
+        final channelActions = ref.read(channelActionsProvider);
+
+        // Agent failures stop publication; the original draft keeps its keys.
+        Future<void> addMentionedNonMembers() async {
+          final keys = intendedAgentKeys.intersection(outgoing.pubkeys.toSet());
+          await authorizeAgentMentions(
+            readAuthorization,
+            keys,
+            currentPubkey,
+            channelId,
+            isAuthorizationCurrent,
+            prepare: true,
+          );
+          await outgoing.addNonMembers(
+            channelActions,
+            scan: scan,
+            messenger: messenger,
+          );
+          if (!outgoing.pubkeys.toSet().containsAll(keys)) {
+            throw Exception(
+              'Mention invitation failed. Draft kept; retry or remove the mention.',
+            );
+          }
+          await authorizeAgentMentions(
+            readAuthorization,
+            keys,
+            currentPubkey,
+            channelId,
+            isAuthorizationCurrent,
+          );
+        }
+
         if (queuedAttachments.isEmpty) {
           if (!context.mounted) return;
           await _sendTextOnlyDraft(
@@ -532,13 +583,17 @@ class ComposeBar extends HookConsumerWidget {
           return;
         }
 
+        if (intendedAgentKeys.isNotEmpty && !isAuthorizationCurrent()) return;
         final draftText = controller.value;
         final draftAttachments = List<_PendingAttachment>.of(attachments.value);
         final draftMentions = Map<String, MentionCandidate>.of(
           mentionMap.value,
         );
-        clearComposer();
+        // Agent authorization is preparation, not a detached background send.
+        final preparingAgents = intendedAgentKeys.isNotEmpty;
+        if (!preparingAgents) clearComposer();
         final clearedDraftRevision = draftRevision.value;
+        authorizationRevision = clearedDraftRevision;
         uploadingCount.value += 1;
         uploadProgress.value = 0;
         isSending.value = false;
@@ -578,6 +633,11 @@ class ComposeBar extends HookConsumerWidget {
             if (queueGeneration != uploadGeneration.value) return;
             await addMentionedNonMembers();
             if (queueGeneration != uploadGeneration.value) return;
+            if (preparingAgents) {
+              if (!isAuthorizationCurrent()) return;
+              clearComposer();
+              authorizationRevision = draftRevision.value;
+            }
             await delivery(
               payload.content,
               outgoing.pubkeys,
@@ -585,10 +645,12 @@ class ComposeBar extends HookConsumerWidget {
             );
           } catch (error) {
             if (cancellation.isCancelled) return;
-            if (context.mounted) uploadError.value = _formatUploadError(error);
+            if (context.mounted) {
+              uploadError.value = _formatUploadError(error);
+            }
             if (context.mounted &&
                 queueGeneration == uploadGeneration.value &&
-                draftRevision.value == clearedDraftRevision) {
+                draftRevision.value == authorizationRevision) {
               controller.value = draftText;
               attachments.value = draftAttachments;
               retainedForRetry = true;
@@ -598,7 +660,13 @@ class ComposeBar extends HookConsumerWidget {
               focusNode.requestFocus();
             }
           } finally {
-            if (!retainedForRetry) {
+            final sourceRetainsFiles =
+                preparingAgents &&
+                context.mounted &&
+                attachments.value.any(
+                  (item) => queuedAttachments.contains(item),
+                );
+            if (!retainedForRetry && !sourceRetainsFiles) {
               await _deleteOwnedAttachments(queuedAttachments);
             }
             if (activeUploadCancellation.value == cancellation) {
@@ -609,8 +677,17 @@ class ComposeBar extends HookConsumerWidget {
             }
           }
         }());
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(content: Text(_composeSendErrorMessage(error))),
+          );
+        }
       } finally {
-        if (context.mounted && isSending.value) isSending.value = false;
+        if (context.mounted && authorizationAttempt.value == attempt) {
+          authorizationAttempt.value = null;
+          isSending.value = false;
+        }
       }
     }
 

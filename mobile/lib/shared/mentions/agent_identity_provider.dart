@@ -10,6 +10,7 @@ import '../../shared/relay/relay.dart';
 
 part 'agent_policy.dart';
 part 'agent_authorization.dart';
+part 'agent_publication.dart';
 
 /// A relay agent parsed from its kind:10100 agent-profile event.
 ///
