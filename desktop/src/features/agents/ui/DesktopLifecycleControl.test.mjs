@@ -136,7 +136,7 @@ test("mounted Start exposes unavailable provisioning and exact retry; Restart re
   }
 });
 
-test("receiver failure is a scope-owned notification, not pre-shell layout", async () => {
+test("terminal receiver failure is a scope-owned notification, not pre-shell layout", async () => {
   const originalRaf = globalThis.requestAnimationFrame;
   globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
   const dom = new JSDOM("<div id='root'></div>", {
@@ -157,7 +157,6 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
   let closed = 0;
   let rejectLate;
   let delayed = false;
-  let storageAvailable = false;
   let subscribed = 0;
   relayClient.fetchEvents = async () => {
     if (delayed)
@@ -181,10 +180,7 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
     };
   };
   window.__TAURI_INTERNALS__ = {
-    invoke: async () => {
-      if (storageAvailable) return;
-      throw new Error("fixture: storage unavailable");
-    },
+    invoke: async () => {},
   };
   const root = createRoot(document.getElementById("root"));
   const scope = { owner: "owner", community: "wss://one.example" };
@@ -201,14 +197,18 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
       0,
       "startup must not render in-flow failure UI",
     );
+    assert.equal(warnings().length, 0);
+    await React.act(async () =>
+      readiness("closed", { classification: "terminal", retryAfterMs: 0 }),
+    );
     assert.equal(warnings().length, 1);
     assert.equal(
       warnings()[0].title,
-      "Desktop lifecycle receiver is unavailable (projection: request failed).",
+      "Desktop lifecycle receiver subscription closed. Retry the receiver to accept new requests.",
     );
     assert.equal(warnings()[0].duration, Infinity);
     assert.equal(warnings()[0].closeButton, true);
-    readiness("closed");
+    readiness("closed", { classification: "terminal", retryAfterMs: 0 });
     assert.equal(
       warnings().length,
       1,
@@ -216,7 +216,6 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
     );
     const retryAction = warnings()[0].action;
     assert.equal(retryAction.label, "Retry receiver");
-    storageAvailable = true;
     await React.act(async () => retryAction.onClick());
     assert.equal(subscribed, 2, "explicit recovery starts a new live receiver");
     assert.equal(
@@ -230,7 +229,7 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
       ),
     );
     assert.equal(warnings().length, 0, "leaving the scope removes its warning");
-    readiness("closed");
+    readiness("closed", { classification: "terminal", retryAfterMs: 0 });
     assert.equal(
       warnings().length,
       0,

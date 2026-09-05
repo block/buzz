@@ -1,4 +1,5 @@
 import type { RelayEvent } from "@/shared/api/types";
+import type { RelayClosedClass } from "@/shared/api/relayClosedPolicy";
 
 /**
  * Observable connection state for the relay singleton.
@@ -70,16 +71,26 @@ type FirstEventSubscription = {
 
 export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
 
+export type LiveSubscriptionClosedRecovery = {
+  classification: RelayClosedClass;
+  /** Minimum delay before the owner creates a fresh subscription. */
+  retryAfterMs: number;
+};
+
 /**
  * Optional lifecycle policy for a live subscription.
  *
  * Most subscriptions keep the shared reconnect/CLOSED recovery behavior. A
  * command receiver can instead request explicit recovery: every CLOSED retires
- * that subscription and `onState` remains observable after initial EOSE so the
- * owning UI can offer a deliberate fresh subscription.
+ * that subscription and `onState` remains observable after initial EOSE. The
+ * owner receives only a safe recovery class/delay and decides whether to create
+ * a fresh subscription or require deliberate retry.
  */
 export type LiveSubscriptionOptions = {
-  onState?: (state: LiveSubscriptionReadiness) => void;
+  onState?: (
+    state: LiveSubscriptionReadiness,
+    closed?: LiveSubscriptionClosedRecovery,
+  ) => void;
   closedRecovery?: "shared" | "explicit";
 };
 
@@ -88,7 +99,10 @@ type LiveSubscription = {
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
-  onState?: (state: LiveSubscriptionReadiness) => void;
+  onState?: (
+    state: LiveSubscriptionReadiness,
+    closed?: LiveSubscriptionClosedRecovery,
+  ) => void;
   closedRecovery: "shared" | "explicit";
   lastSeenCreatedAt?: number;
   /**

@@ -3,13 +3,9 @@ import { toast } from "sonner";
 import { Button } from "@/shared/ui/button";
 import type { RelayEvent } from "@/shared/api/types";
 import type { DesktopRow, DesktopScope } from "../desktopList";
-import {
-  lifecycleClient,
-  receiveLifecycle,
-  type LifecycleOutcome,
-} from "../desktopLifecycle";
+import { lifecycleClient, type LifecycleOutcome } from "../desktopLifecycle";
+import { ownLifecycleReceiver } from "../desktopLifecycleReceiver";
 import { useRelayAgentsQuery } from "../hooks";
-import { receiverErrorMessage } from "../desktopLifecycleDiagnostics";
 
 export function DesktopLifecycleReceiver({
   scope,
@@ -21,7 +17,7 @@ export function DesktopLifecycleReceiver({
   useEffect(() => {
     if (!owner || !community) return;
     let active = true;
-    let close: (() => void) | undefined;
+    let stop = () => {};
     let notification: string | number | undefined;
     const reportError = (message: string) => {
       if (!active) return;
@@ -37,32 +33,18 @@ export function DesktopLifecycleReceiver({
           onClick: () => {
             if (!active) return;
             active = false;
-            close?.();
+            stop();
             retry(attempt + 1);
           },
         },
       });
     };
-    void receiveLifecycle(
-      { owner, community },
-      () => active,
-      reportError,
-      undefined,
-      undefined,
-      () => {
-        if (active && notification !== undefined) toast.dismiss(notification);
-      },
-    )
-      .then((fn) => {
-        if (active) close = fn;
-        else fn();
-      })
-      .catch((error) => {
-        reportError(receiverErrorMessage(error));
-      });
+    stop = ownLifecycleReceiver({ owner, community }, reportError, () => {
+      if (active && notification !== undefined) toast.dismiss(notification);
+    });
     return () => {
       active = false;
-      close?.();
+      stop();
       if (notification !== undefined) toast.dismiss(notification);
     };
   }, [owner, community, attempt]);
