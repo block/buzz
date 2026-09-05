@@ -235,6 +235,59 @@ async fn is_owner_or_sibling(
     is_sibling
 }
 
+/// How many distinct subjects one diagnostic reporter will remember.
+///
+/// The subject of an author-gate drop is a pubkey, and pubkeys are chosen by
+/// whoever is sending. Remembering every one for the process lifetime makes
+/// the diagnostic a memory sink and an unbounded `info!` stream that key
+/// rotation alone can drive. Past this many subjects the reporter stops
+/// remembering and stops reporting: bounded either way, and a drop is still
+/// recorded at `debug!`.
+const MAX_REPORTED_DROP_SUBJECTS: usize = 256;
+
+/// Remembers which `(channel, subject)` pairs have already been reported, so
+/// a repeated drop is logged once at `info!` and thereafter at `debug!`.
+///
+/// A dropped event is the quietest way an agent can ignore you: it arrives,
+/// the agent is online, and nothing happens. Logging that only at `debug!` —
+/// off under the default `buzz_acp=info` filter — leaves no record at all.
+///
+/// `S` is the thing worth naming in the log: the author for the inbound
+/// author gate, the event kind for a subscription miss. Kinds stay `u16`
+/// rather than being rendered to `String`.
+struct DropReporter<S> {
+    reported: HashSet<(Uuid, S)>,
+    warned_at_cap: bool,
+}
+
+impl<S> Default for DropReporter<S> {
+    fn default() -> Self {
+        Self {
+            reported: HashSet::new(),
+            warned_at_cap: false,
+        }
+    }
+}
+
+impl<S: Eq + std::hash::Hash> DropReporter<S> {
+    /// Whether this drop is the first for `subject` in `channel_id`, and the
+    /// reporter still has room to remember it.
+    fn should_report(&mut self, channel_id: Uuid, subject: S) -> bool {
+        if self.reported.len() >= MAX_REPORTED_DROP_SUBJECTS {
+            if !self.warned_at_cap {
+                self.warned_at_cap = true;
+                tracing::warn!(
+                    cap = MAX_REPORTED_DROP_SUBJECTS,
+                    "drop diagnostics reached their subject cap; further first \
+                     drops are recorded at debug level only"
+                );
+            }
+            return false;
+        }
+        self.reported.insert((channel_id, subject))
+    }
+}
+
 /// Return the workflow owner attributed by a relay-signed workflow message.
 ///
 /// `buzz:workflow-owner` alone is not authority: any ordinary event author can
@@ -530,6 +583,7 @@ mod inbound_author_gate {
             owner_cache: &OwnerCache,
             channel_info: &pool::ChannelInfoResolver,
             rest_client: &relay::RestClient,
+            drop_reporter: Option<&mut super::DropReporter<String>>,
         ) -> Option<AuthorizedListenerEvent> {
             let decision = self
                 .evaluate_listener_event(
@@ -542,14 +596,33 @@ mod inbound_author_gate {
                 )
                 .await;
             if !decision.allowed {
-                tracing::debug!(
-                    channel_id = %buzz_event.channel_id,
-                    raw_author = %buzz_event.event.pubkey.to_hex(),
-                    effective_author = %decision.effective_author,
-                    mode = %respond_to,
-                    is_dm = decision.is_dm,
-                    "inbound author gate — dropping event"
-                );
+                let first = drop_reporter
+                    .map(|reporter| {
+                        reporter.should_report(
+                            buzz_event.channel_id,
+                            decision.effective_author.clone(),
+                        )
+                    })
+                    .unwrap_or(false);
+                if first {
+                    tracing::info!(
+                        channel_id = %buzz_event.channel_id,
+                        raw_author = %buzz_event.event.pubkey.to_hex(),
+                        effective_author = %decision.effective_author,
+                        mode = %respond_to,
+                        is_dm = decision.is_dm,
+                        "inbound author gate — dropping event; this author                          is not permitted to instruct the agent under the                          current --respond-to mode"
+                    );
+                } else {
+                    tracing::debug!(
+                        channel_id = %buzz_event.channel_id,
+                        raw_author = %buzz_event.event.pubkey.to_hex(),
+                        effective_author = %decision.effective_author,
+                        mode = %respond_to,
+                        is_dm = decision.is_dm,
+                        "inbound author gate — dropping event"
+                    );
+                }
                 return None;
             }
             Some(AuthorizedListenerEvent {
@@ -596,15 +669,34 @@ impl AuthorizedNormalListenerEvent {
         self,
         rules: &[SubscriptionRule],
         agent_pubkey_hex: &str,
+        drop_reporter: &mut DropReporter<u16>,
     ) -> Option<NormalListenerIngress> {
         let (buzz_event, effective_author) = self.0.into_parts();
+        let kind = buzz_event.event.kind.as_u16();
+        let channel_id = buzz_event.channel_id;
         let matched = filter::match_event(
             &buzz_event.event,
             buzz_event.channel_id,
             rules,
             agent_pubkey_hex,
         )
-        .await?;
+        .await;
+        let Some(matched) = matched else {
+            if drop_reporter.should_report(channel_id, kind) {
+                tracing::info!(
+                    channel_id = %channel_id,
+                    kind,
+                    "event matched no subscription rule — dropping;                      the kind, the channel scope, a required mention                      or a filter could each account for this, and a                      filter that timed out or errored fails closed                      here too"
+                );
+            } else {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    kind,
+                    "authorized event matched no rule — dropping"
+                );
+            }
+            return None;
+        };
         Some(NormalListenerIngress {
             buzz_event,
             effective_author,
@@ -708,6 +800,7 @@ async fn authorize_normal_listener_event(
     owner_cache: &OwnerCache,
     channel_info: &pool::ChannelInfoResolver,
     rest_client: &relay::RestClient,
+    drop_reporter: &mut DropReporter<String>,
 ) -> Option<AuthorizedListenerEvent> {
     author_gate
         .authorize_listener_event(
@@ -717,6 +810,7 @@ async fn authorize_normal_listener_event(
             owner_cache,
             channel_info,
             rest_client,
+            Some(drop_reporter),
         )
         .await
 }
@@ -2667,6 +2761,11 @@ async fn tokio_main() -> Result<()> {
         }
     }
     let owner_cache = OwnerCache::new(startup_owner.clone());
+    // First-drop-per-author reporting for the inbound author gate; see
+    // `DropReporter`.
+    let mut author_gate_reporter: DropReporter<String> = DropReporter::default();
+    // Same treatment for the subscription miss below, keyed by event kind.
+    let mut subscription_reporter: DropReporter<u16> = DropReporter::default();
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
@@ -3520,6 +3619,7 @@ async fn tokio_main() -> Result<()> {
                                 &owner_cache,
                                 &ctx.channel_info,
                                 &ctx.rest_client,
+                                &mut author_gate_reporter,
                             )
                             .await
                             else {
@@ -3527,10 +3627,13 @@ async fn tokio_main() -> Result<()> {
                             };
                             let Some(ingress) =
                                 AuthorizedNormalListenerEvent(authorized_event)
-                                    .match_subscription(&rules, &pubkey_hex)
+                                    .match_subscription(
+                                        &rules,
+                                        &pubkey_hex,
+                                        &mut subscription_reporter,
+                                    )
                                     .await
                             else {
-                                tracing::debug!("authorized event matched no rule — dropping");
                                 continue;
                             };
                             // Derive the session scope once, at admission, from
@@ -6867,6 +6970,7 @@ mod author_gate_tests {
                     &owner_cache,
                     &channel_info,
                     &rest_client,
+                    &mut DropReporter::default(),
                 )
                 .await
             }
@@ -11246,5 +11350,75 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod drop_reporter_tests {
+    use super::{DropReporter, MAX_REPORTED_DROP_SUBJECTS};
+    use uuid::Uuid;
+
+    fn pubkey(n: usize) -> String {
+        format!("{n:064x}")
+    }
+
+    #[test]
+    fn the_first_drop_for_a_subject_is_reported_once() {
+        let mut reporter: DropReporter<String> = DropReporter::default();
+        let channel = Uuid::new_v4();
+
+        assert!(reporter.should_report(channel, pubkey(1)));
+        assert!(
+            !reporter.should_report(channel, pubkey(1)),
+            "a chatty author must not turn one diagnostic into a flood"
+        );
+    }
+
+    #[test]
+    fn each_subject_is_reported_on_its_own() {
+        let mut reporter: DropReporter<String> = DropReporter::default();
+        let channel = Uuid::new_v4();
+
+        assert!(reporter.should_report(channel, pubkey(1)));
+        assert!(reporter.should_report(channel, pubkey(2)));
+    }
+
+    #[test]
+    fn the_same_subject_is_reported_again_in_another_channel() {
+        // The gate's answer can differ per channel — a DM is resolved
+        // fail-closed — so a drop elsewhere is news.
+        let mut reporter: DropReporter<String> = DropReporter::default();
+
+        assert!(reporter.should_report(Uuid::new_v4(), pubkey(1)));
+        assert!(reporter.should_report(Uuid::new_v4(), pubkey(1)));
+    }
+
+    #[test]
+    fn a_rotating_sender_cannot_grow_the_reporter_without_bound() {
+        // Pubkeys are chosen by whoever is sending, so without a cap this is
+        // both a memory sink and an unbounded info stream.
+        let mut reporter: DropReporter<String> = DropReporter::default();
+        let channel = Uuid::new_v4();
+
+        for n in 0..MAX_REPORTED_DROP_SUBJECTS {
+            assert!(reporter.should_report(channel, pubkey(n)), "{n}");
+        }
+        for n in MAX_REPORTED_DROP_SUBJECTS..MAX_REPORTED_DROP_SUBJECTS + 50 {
+            assert!(
+                !reporter.should_report(channel, pubkey(n)),
+                "past the cap nothing more is remembered or reported: {n}"
+            );
+        }
+        assert_eq!(reporter.reported.len(), MAX_REPORTED_DROP_SUBJECTS);
+    }
+
+    #[test]
+    fn a_kind_subject_needs_no_string() {
+        let mut reporter: DropReporter<u16> = DropReporter::default();
+        let channel = Uuid::new_v4();
+
+        assert!(reporter.should_report(channel, 9));
+        assert!(!reporter.should_report(channel, 9));
+        assert!(reporter.should_report(channel, 45001));
     }
 }
