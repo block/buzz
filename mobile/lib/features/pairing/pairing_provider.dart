@@ -12,6 +12,7 @@ import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/security/sensitive_action_authorizer.dart';
+import 'join_by_address.dart';
 import 'pairing_crypto.dart';
 import 'pairing_socket.dart';
 
@@ -128,11 +129,49 @@ class PairingNotifier extends Notifier<PairingState> {
     }
 
     final trimmed = rawInput.trim();
+    // JOIN BY ADDRESS: a bare wss:// URL is a whole invitation — the
+    // relay publishes the community's owner-signed join material (kind
+    // 34550), the key is minted in-pocket, and no desktop is involved.
+    if (trimmed.startsWith('wss://') || trimmed.startsWith('ws://')) {
+      return _pairByAddress(trimmed);
+    }
     if (trimmed.startsWith('nostrpair://')) {
       return _pairNipAb(trimmed);
     }
     // Legacy buzz:// flow.
     return _pairLegacy(trimmed);
+  }
+
+  /// Join a community from the relay address alone. Mirrors _pairLegacy's
+  /// shape: connect-materialize-store, then the app's normal session takes
+  /// over against the CANONICAL origin the material named.
+  Future<void> _pairByAddress(String wsUrl) async {
+    state = const PairingState(status: PairingStatus.connecting);
+    try {
+      final joined = await joinByAddress(wsUrl);
+      final community = Community.create(
+        name: joined.material.name,
+        relayUrl: 'wss://${joined.material.canonicalHost}',
+        pubkey: joined.pubkeyHex,
+        nsec: joined.nsec,
+      );
+      await ref
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(community);
+      state = const PairingState(status: PairingStatus.success);
+    } on JoinByAddressException catch (e) {
+      state = PairingState(
+        status: PairingStatus.error,
+        errorMessage: e.message,
+      );
+    } catch (e) {
+      state = PairingState(
+        status: PairingStatus.error,
+        errorMessage:
+            'Could not join at that address. Make sure it is the '
+            'community relay URL you were given.',
+      );
+    }
   }
 
   Future<bool> authorizeIdentityExport({required Community community}) async {
