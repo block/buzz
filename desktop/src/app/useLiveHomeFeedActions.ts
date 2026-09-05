@@ -7,9 +7,30 @@ import {
   KIND_APPROVAL_REQUEST,
   KIND_EVENT_REMINDER,
   KIND_REMINDER,
+  KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
 
-const HOME_FEED_ACTION_KINDS = [KIND_APPROVAL_REQUEST, KIND_REMINDER] as const;
+/**
+ * Kinds that must trigger a home-feed refresh when they arrive p-tagging the
+ * user. The home feed poll pauses while the window is unfocused, so any
+ * feed-driven alert — Pulse mentions (kind 1), approval requests, reminders —
+ * only reaches the notification pipeline in the background through this
+ * always-on subscription.
+ */
+export const HOME_FEED_LIVE_P_TAG_KINDS = [
+  KIND_TEXT_NOTE,
+  KIND_APPROVAL_REQUEST,
+  KIND_REMINDER,
+] as const;
+
+export function buildHomeFeedLivePTagFilter(pubkey: string, since: number) {
+  return {
+    kinds: [...HOME_FEED_LIVE_P_TAG_KINDS],
+    "#p": [pubkey],
+    limit: 50,
+    since,
+  };
+}
 const LIVE_HOME_FEED_RETRY_BASE_MS = 1_000;
 const LIVE_HOME_FEED_RETRY_MAX_MS = 30_000;
 
@@ -64,12 +85,7 @@ export function useLiveHomeFeedActions(
 
       void Promise.allSettled([
         relayClient.subscribeLive(
-          {
-            kinds: [...HOME_FEED_ACTION_KINDS],
-            "#p": [normalizedPubkey],
-            limit: 50,
-            since,
-          },
+          buildHomeFeedLivePTagFilter(normalizedPubkey, since),
           handleLiveHomeFeedEvent,
         ),
         relayClient.subscribeLive(
