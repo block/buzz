@@ -129,6 +129,24 @@ fn from_payload_accepts_missing_cumulative_without_session_seq() {
     assert_eq!(row.turn_input_tokens, Some(5));
 }
 
+#[test]
+fn from_payload_accepts_no_usage_metric_without_inventing_zeroes() {
+    let json = r#"{"harness":"hermes-acp","model":null,"sessionId":"hermes-session","adapterSessionId":"hermes-session","turnId":"turn-1","timestamp":"2026-08-17T00:00:01Z","startedAt":"2026-08-17T00:00:00Z","outcome":"success","terminalEvidence":"prompt_response","turn":null,"cumulative":null,"turnSeq":null,"deltaReliable":false}"#;
+    let row = AgentMetricIndexRow::from_payload(json, "eid-hermes", "agent-hermes", 100, 200);
+    assert_eq!(row.parse_status, ParseStatus::Valid);
+    assert_eq!(row.session_id.as_deref(), Some("hermes-session"));
+    assert_eq!(row.harness.as_deref(), Some("hermes-acp"));
+    assert_eq!(row.turn_seq, None);
+    assert_eq!(row.turn_input_tokens, None);
+    assert_eq!(row.turn_output_tokens, None);
+    assert_eq!(row.turn_total_tokens, None);
+    assert_eq!(row.turn_cost_usd, None);
+    assert_eq!(row.cumulative_input_tokens, None);
+    assert_eq!(row.cumulative_output_tokens, None);
+    assert_eq!(row.cumulative_total_tokens, None);
+    assert_eq!(row.cumulative_cost_usd, None);
+}
+
 // ── insert / idempotence ──────────────────────────────────────────────────────
 
 #[test]

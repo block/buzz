@@ -599,6 +599,38 @@ fn compute_series_model_breakdown_attributes_per_event_model() {
 }
 
 #[test]
+fn compute_series_counts_no_usage_turn_without_fabricating_numeric_values() {
+    let usage = AgentMetricIndexRow {
+        harness: Some("goose".to_string()),
+        turn_input_tokens: Some(100),
+        turn_cost_usd: Some(0.01),
+        delta_reliable: Some(true),
+        ..row("e1", "agent1", "s1", 1, 0)
+    };
+    let no_usage = AgentMetricIndexRow {
+        harness: Some("hermes-acp".to_string()),
+        model: None,
+        turn_seq: None,
+        delta_reliable: Some(false),
+        ..row("e2", "agent1", "s2", 2, 1)
+    };
+    let boundaries = boundaries_7();
+    let rows = vec![usage, no_usage];
+    let series = compute_series(&rows, &rows, 0, &boundaries, None, true);
+
+    assert_eq!(series.coverage.report_count, 2);
+    assert!(series.coverage.has_unknown_usage);
+    assert_eq!(series.agents[0].report_count, 2);
+    assert_eq!(
+        series.agents[0].usage.input_tokens.value.as_deref(),
+        Some("100")
+    );
+    assert!(series.agents[0].usage.input_tokens.incomplete);
+    assert_eq!(series.agents[0].usage.estimated_cost_usd.value, Some(0.01));
+    assert!(series.agents[0].usage.estimated_cost_usd.incomplete);
+}
+
+#[test]
 fn compute_series_same_model_two_harnesses_produces_two_rows() {
     // Collapse-fix requirement: same model via two different harnesses must
     // NOT collapse into one row — (harness, model) is the grouping key.
