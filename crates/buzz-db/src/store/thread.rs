@@ -656,6 +656,14 @@ pub(crate) async fn get_channel_window_on(
     cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
 ) -> Result<ChannelWindow> {
+    if limit == 0 {
+        return Ok(ChannelWindow {
+            rows: Vec::new(),
+            has_more: false,
+            next_cursor: None,
+        });
+    }
+
     let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
     let mut sql = String::from(
         r#"
@@ -2003,6 +2011,36 @@ mod postgres_tests {
         let mut expected_sorted = expected_ids.clone();
         expected_sorted.sort();
         assert_eq!(unique, expected_sorted, "paged set != inserted tied set");
+    }
+
+    /// A zero limit is a legitimate empty-page request. It must not perform
+    /// the internal limit+1 probe and then report has_more with no cursor.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_zero_limit_returns_empty_page() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-zero-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let event = make_stream_event(&author, "row");
+        insert_root(&pool, community, channel.id, &event).await;
+
+        let window = get_channel_window(&pool, community, channel.id, 0, None, None)
+            .await
+            .expect("fetch zero-limit window");
+        assert!(window.rows.is_empty());
+        assert!(!window.has_more);
+        assert!(window.next_cursor.is_none());
     }
 
     /// The exact-multiple final page: when the channel's row count is an
