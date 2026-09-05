@@ -5888,29 +5888,53 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     let mut servers = buzz_mcp_server(config).into_iter().collect::<Vec<_>>();
 
     for server in &config.persona_mcp_servers {
-        if servers.iter().any(|existing| existing.name == server.name) {
+        if servers
+            .iter()
+            .any(|existing| existing.name() == server.name)
+        {
             tracing::warn!(
                 server = %server.name,
                 "persona MCP server collides with the Buzz-managed server; keeping the Buzz one"
             );
             continue;
         }
-        servers.push(McpServer {
-            name: server.name.clone(),
-            command: server.command.clone(),
-            args: server.args.clone(),
-            env: server
-                .env
-                .iter()
-                .map(|(name, value)| EnvVar {
-                    name: name.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
-        });
+        servers.push(persona_mcp_server(server));
     }
 
     servers
+}
+
+/// Map one resolved persona MCP server onto its ACP wire form.
+///
+/// Env and header maps both become `[{name, value}]` lists — the shape the ACP
+/// schema uses for each.
+fn persona_mcp_server(server: &buzz_persona::resolve::ResolvedMcpServer) -> McpServer {
+    use buzz_persona::resolve::McpTransport;
+
+    let pairs = |values: &[(String, String)]| -> Vec<EnvVar> {
+        values
+            .iter()
+            .map(|(name, value)| EnvVar {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect()
+    };
+
+    match &server.transport {
+        McpTransport::Stdio { command, args, env } => McpServer::Stdio {
+            name: server.name.clone(),
+            command: command.clone(),
+            args: args.clone(),
+            env: pairs(env),
+        },
+        McpTransport::Http { url, headers } => McpServer::Http {
+            transport: acp::HttpTransport::Http,
+            name: server.name.clone(),
+            url: url.clone(),
+            headers: pairs(headers),
+        },
+    }
 }
 
 /// The Buzz-managed MCP server (`--mcp-command`), pre-loaded with the agent's
@@ -5919,7 +5943,7 @@ fn buzz_mcp_server(config: &Config) -> Option<McpServer> {
     if config.mcp_command.is_empty() {
         return None;
     }
-    Some(McpServer {
+    Some(McpServer::Stdio {
         name: std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -9185,9 +9209,9 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
-        assert_eq!(server.name, "test-mcp-server");
+        assert_eq!(server.name(), "test-mcp-server");
 
-        let names: Vec<&str> = server.env.iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&str> = server.env().iter().map(|e| e.name.as_str()).collect();
         assert!(
             names.contains(&"BUZZ_RELAY_URL"),
             "missing BUZZ_RELAY_URL; got {names:?}"
@@ -9207,7 +9231,7 @@ mod build_mcp_servers_tests {
         std::env::remove_var("BUZZ_AUTH_TAG");
 
         let server = &servers[0];
-        let auth_tag_env = server.env.iter().find(|e| e.name == "BUZZ_AUTH_TAG");
+        let auth_tag_env = server.env().iter().find(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(
             auth_tag_env.is_some(),
             "BUZZ_AUTH_TAG should be forwarded when set"
@@ -9224,7 +9248,7 @@ mod build_mcp_servers_tests {
         std::env::remove_var("BUZZ_AUTH_TAG");
 
         let server = &servers[0];
-        let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
+        let has_auth_tag = server.env().iter().any(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
     }
 
@@ -9237,7 +9261,7 @@ mod build_mcp_servers_tests {
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         let entry = servers[0]
-            .env
+            .env()
             .iter()
             .find(|e| e.name == "BUZZ_ACP_DISPLAY_NAME");
         assert_eq!(
@@ -9258,7 +9282,7 @@ mod build_mcp_servers_tests {
         // falls back to the npub when the key is missing or blank.
         assert!(
             !servers[0]
-                .env
+                .env()
                 .iter()
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "unset display name should not add the key"
@@ -9275,7 +9299,7 @@ mod build_mcp_servers_tests {
 
         assert!(
             !servers[0]
-                .env
+                .env()
                 .iter()
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "empty display name should not be forwarded"
@@ -9296,9 +9320,21 @@ mod build_mcp_servers_tests {
     fn persona_server(name: &str, command: &str) -> buzz_persona::resolve::ResolvedMcpServer {
         buzz_persona::resolve::ResolvedMcpServer {
             name: name.into(),
-            command: command.into(),
-            args: vec!["--stdio".into()],
-            env: vec![("TOKEN".into(), "abc123".into())],
+            transport: buzz_persona::resolve::McpTransport::Stdio {
+                command: command.into(),
+                args: vec!["--stdio".into()],
+                env: vec![("TOKEN".into(), "abc123".into())],
+            },
+        }
+    }
+
+    fn persona_http_server(name: &str, url: &str) -> buzz_persona::resolve::ResolvedMcpServer {
+        buzz_persona::resolve::ResolvedMcpServer {
+            name: name.into(),
+            transport: buzz_persona::resolve::McpTransport::Http {
+                url: url.into(),
+                headers: vec![("Authorization".into(), "Bearer t0ken".into())],
+            },
         }
     }
 
@@ -9310,14 +9346,79 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
 
         assert_eq!(servers.len(), 2);
-        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[0].name(), "test-mcp-server");
         let semgrep = &servers[1];
-        assert_eq!(semgrep.name, "semgrep");
-        assert_eq!(semgrep.command, "semgrep-mcp");
-        assert_eq!(semgrep.args, vec!["--stdio".to_string()]);
-        assert_eq!(semgrep.env.len(), 1);
-        assert_eq!(semgrep.env[0].name, "TOKEN");
-        assert_eq!(semgrep.env[0].value, "abc123");
+        assert_eq!(semgrep.name(), "semgrep");
+        assert_eq!(semgrep.command(), Some("semgrep-mcp"));
+        assert_eq!(semgrep.env().len(), 1);
+        assert_eq!(semgrep.env()[0].name, "TOKEN");
+        assert_eq!(semgrep.env()[0].value, "abc123");
+        match semgrep {
+            McpServer::Stdio { args, .. } => assert_eq!(args, &vec!["--stdio".to_string()]),
+            McpServer::Http { .. } => panic!("a command-backed server must map to stdio"),
+        }
+    }
+
+    #[test]
+    fn persona_http_server_maps_to_the_http_variant() {
+        let mut config = test_config();
+        config.persona_mcp_servers =
+            vec![persona_http_server("arcctl", "http://127.0.0.1:8888/mcp")];
+
+        let servers = build_mcp_servers(&config);
+
+        let arcctl = servers
+            .iter()
+            .find(|s| s.name() == "arcctl")
+            .expect("the http server must survive resolution");
+        assert_eq!(
+            arcctl.command(),
+            None,
+            "an http server has no local executable"
+        );
+        match arcctl {
+            McpServer::Http { url, headers, .. } => {
+                assert_eq!(url, "http://127.0.0.1:8888/mcp");
+                assert_eq!(headers.len(), 1);
+                assert_eq!(headers[0].name, "Authorization");
+            }
+            McpServer::Stdio { .. } => panic!("a url-backed server must map to http"),
+        }
+    }
+
+    /// The adapter routes stdio on the ABSENCE of `type`
+    /// (`else if (!("type" in server))`). Emitting `"type":"stdio"` matches
+    /// neither branch and the server is never started.
+    #[test]
+    fn stdio_server_serializes_without_a_type_key() {
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        let json = serde_json::to_value(&servers[0]).unwrap();
+
+        assert!(
+            json.get("type").is_none(),
+            "stdio must not carry a type field, got {json}"
+        );
+        assert_eq!(json["command"], "test-mcp-server");
+    }
+
+    #[test]
+    fn http_server_serializes_with_the_http_type_tag() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        config.persona_mcp_servers =
+            vec![persona_http_server("arcctl", "http://127.0.0.1:8888/mcp")];
+
+        let servers = build_mcp_servers(&config);
+        let json = serde_json::to_value(&servers[0]).unwrap();
+
+        assert_eq!(json["type"], "http");
+        assert_eq!(json["url"], "http://127.0.0.1:8888/mcp");
+        assert_eq!(json["headers"][0]["name"], "Authorization");
+        assert!(
+            json.get("command").is_none(),
+            "an http entry must not carry a command"
+        );
     }
 
     #[test]
@@ -9329,9 +9430,12 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
 
         assert_eq!(servers.len(), 1, "the colliding persona server is dropped");
-        assert_eq!(servers[0].command, "test-mcp-server");
+        assert_eq!(servers[0].command(), Some("test-mcp-server"));
         assert!(
-            servers[0].env.iter().any(|e| e.name == "BUZZ_PRIVATE_KEY"),
+            servers[0]
+                .env()
+                .iter()
+                .any(|e| e.name == "BUZZ_PRIVATE_KEY"),
             "the surviving server must be the credentialed Buzz one"
         );
     }
@@ -9345,7 +9449,7 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
 
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "semgrep");
+        assert_eq!(servers[0].name(), "semgrep");
     }
 
     #[test]
@@ -9354,7 +9458,7 @@ mod build_mcp_servers_tests {
         config.mcp_command = "/opt/bin/my-mcp-server".into();
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "my-mcp-server");
+        assert_eq!(servers[0].name(), "my-mcp-server");
     }
 
     #[test]
@@ -9376,7 +9480,8 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         assert_eq!(
-            servers[0].name, "mcp",
+            servers[0].name(),
+            "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
     }

@@ -3356,11 +3356,13 @@ You are Alpha.
         names.sort_unstable();
         assert_eq!(names, vec!["fetch", "semgrep"]);
         let semgrep = servers.iter().find(|s| s.name == "semgrep").unwrap();
-        assert_eq!(semgrep.command, "semgrep-mcp");
-        assert_eq!(semgrep.args, vec!["--stdio".to_string()]);
         assert_eq!(
-            semgrep.env,
-            vec![("TOKEN".to_string(), "abc123".to_string())]
+            semgrep.transport,
+            buzz_persona::resolve::McpTransport::Stdio {
+                command: "semgrep-mcp".to_string(),
+                args: vec!["--stdio".to_string()],
+                env: vec![("TOKEN".to_string(), "abc123".to_string())],
+            }
         );
     }
 

@@ -51,6 +51,9 @@ pub enum PackError {
 
     #[error("failed to parse .mcp.json at {path}: {reason}")]
     McpConfigParse { path: PathBuf, reason: String },
+
+    #[error("invalid MCP server \"{name}\": {reason}")]
+    McpServerConfig { name: String, reason: String },
 }
 
 impl From<ManifestError> for PackError {

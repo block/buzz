@@ -24,14 +24,68 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
 /// An MCP server configuration passed to `session/new`.
 ///
-/// Corresponds to the `McpServerStdio` variant in the ACP schema.
-/// All four fields are **required** by the schema (`args` and `env` may be empty arrays).
+/// Corresponds to the `McpServerStdio` and `McpServerHttp` variants in the ACP
+/// schema. The stdio variant carries **no** `type` field: adapters route on its
+/// absence (`else if (!("type" in server))`), so emitting `"type":"stdio"` makes
+/// the entry match neither branch and the server is silently never started.
+/// Stdio's `command`/`args`/`env` are required by the schema (`args` and `env`
+/// may be empty arrays).
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct McpServer {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Vec<EnvVar>,
+#[serde(untagged)]
+pub enum McpServer {
+    Stdio {
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: Vec<EnvVar>,
+    },
+    Http {
+        #[serde(rename = "type")]
+        transport: HttpTransport,
+        name: String,
+        url: String,
+        headers: Vec<EnvVar>,
+    },
+}
+
+/// The `type` discriminant for an HTTP MCP server. Single-variant: SSE is
+/// rejected during pack resolution, so it can never reach the wire.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub enum HttpTransport {
+    #[serde(rename = "http")]
+    Http,
+}
+
+impl McpServer {
+    /// The server's name — the key adapters register it under, and the value
+    /// name collisions are resolved on.
+    pub fn name(&self) -> &str {
+        match self {
+            McpServer::Stdio { name, .. } | McpServer::Http { name, .. } => name,
+        }
+    }
+
+    /// Environment for a stdio server's subprocess. Empty for HTTP, which runs
+    /// elsewhere and is configured with headers instead.
+    ///
+    /// Test-only: production code pattern-matches the variant it needs, so
+    /// gating this keeps it from reading as unused production API.
+    #[cfg(test)]
+    pub fn env(&self) -> &[EnvVar] {
+        match self {
+            McpServer::Stdio { env, .. } => env,
+            McpServer::Http { .. } => &[],
+        }
+    }
+
+    /// The executable for a stdio server; `None` for HTTP. Test-only, as above.
+    #[cfg(test)]
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            McpServer::Stdio { command, .. } => Some(command),
+            McpServer::Http { .. } => None,
+        }
+    }
 }
 
 /// A single environment variable for an MCP server.
@@ -2524,7 +2578,7 @@ mod tests {
     #[test]
     fn session_new_mcp_server_has_required_fields() {
         // Schema requires name, command, args, env — all present, args/env may be empty.
-        let server = McpServer {
+        let server = McpServer::Stdio {
             name: "test-mcp".into(),
             command: "/usr/local/bin/test-mcp-server".into(),
             args: vec![],
@@ -3511,7 +3565,7 @@ mod tests {
         let resp = client
             .session_new_full(
                 "/tmp",
-                vec![McpServer {
+                vec![McpServer::Stdio {
                     name: "semgrep".into(),
                     command: "semgrep-mcp".into(),
                     args: vec!["--stdio".into()],

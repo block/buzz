@@ -458,6 +458,8 @@ buzz-acp merges them and passes the result via the ACP protocol — no filesyste
 
 ### Per-Persona: `mcp_servers` in Frontmatter
 
+Stdio — a local subprocess:
+
 ```yaml
 mcp_servers:
   - name: "semgrep"
@@ -467,6 +469,23 @@ mcp_servers:
       SEMGREP_TOKEN: "${SEMGREP_TOKEN}"
 ```
 
+Streamable HTTP — a remote server. `command` is absent; `url` selects the
+transport, and `type: "http"` is optional but recommended for clarity:
+
+```yaml
+mcp_servers:
+  - name: "arcctl"
+    type: "http"
+    url: "http://127.0.0.1:8888/mcp"
+    headers:
+      Authorization: "Bearer ${ARCCTL_TOKEN}"
+```
+
+An entry declaring **neither** `command` nor `url`, or declaring
+`type: "sse"`, fails pack resolution and names the offending server. It is not
+skipped: starting an agent with quietly fewer tools than its persona declares
+is the failure mode this rejects.
+
 ### Merge Rules
 
 1. Pack-level servers are the base set; per-persona servers merged on top.
@@ -475,6 +494,9 @@ mcp_servers:
 4. The Buzz-managed server (`--mcp-command`, which carries the agent's relay
    credentials) is added alongside them and keeps its name: a pack server that
    collides with it is dropped, not substituted.
+5. Transport is preserved onto the wire: stdio entries serialize **without** a
+   `type` field (adapters route stdio on its absence), HTTP entries as
+   `{"type": "http", "name", "url", "headers": [{name, value}]}`.
 
 ### Environment Variable Interpolation
 
