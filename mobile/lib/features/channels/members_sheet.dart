@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/agent_usage/agent_usage_indicator.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -225,13 +226,21 @@ class _MemberTile extends ConsumerWidget {
     final showManagementActions = canManage && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
 
+    final avatar = _MemberAvatar(
+      avatarUrl: profile?.avatarUrl,
+      initial: initial,
+      isAgent: member.isBot || profile?.isAgent == true,
+    );
+
     return ListTile(
       contentPadding: EdgeInsets.zero,
-      leading: _MemberAvatar(
-        avatarUrl: profile?.avatarUrl,
-        initial: initial,
-        isAgent: member.isBot || profile?.isAgent == true,
-      ),
+      leading: member.isBot
+          ? AgentUsageIndicator(
+              agentPubkey: member.pubkey,
+              agentLabel: label,
+              child: avatar,
+            )
+          : avatar,
       title: Text(label),
       subtitle: isWorking
           ? Row(

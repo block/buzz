@@ -24,6 +24,9 @@ abstract final class EventKind {
   static const typingIndicator = 20002;
   static const auth = 22242;
   static const agentObserverFrame = 24200;
+
+  /// NIP-AM: kind:44200 agent turn metric, NIP-44 encrypted to the owner.
+  static const agentTurnMetric = 44200;
   static const huddleReaction = 24810;
   static const readState = 30078;
   static const eventReminder = 30300;
