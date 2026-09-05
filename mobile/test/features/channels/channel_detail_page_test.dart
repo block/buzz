@@ -1,11 +1,17 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
-    show RenderParagraph, ScrollDirection, SemanticsAction;
+    show
+        RenderParagraph,
+        RenderRepaintBoundary,
+        ScrollDirection,
+        SemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -43,6 +49,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
@@ -63,6 +70,8 @@ import 'package:buzz/shared/widgets/lucide_star_icon.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+part 'channel_detail_page_test/presence_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -199,6 +208,7 @@ NostrEvent _edit({
 
 Widget _buildTestable({
   required List<NostrEvent> messages,
+  PresenceCacheNotifier? presenceCache,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
@@ -269,6 +279,8 @@ Widget _buildTestable({
         () => userCacheNotifier ?? _FakeUserCacheNotifier(users),
       ),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
+      if (presenceCache != null)
+        presenceCacheProvider.overrideWith(() => presenceCache),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
       channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
@@ -471,6 +483,7 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  presenceTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -550,7 +563,7 @@ void main() {
       final avatar = tester.widget<MaskedAvatarBadge>(avatarFinder);
       expect(tester.getSize(avatarFinder), const Size.square(32));
       expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
-      expect(avatar.badge, isNotNull);
+      expect(avatar.badge, isNull);
       expect(
         tester
             .widget<ClipRRect>(
@@ -564,7 +577,7 @@ void main() {
       );
       expect(
         find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
-        findsOneWidget,
+        findsNothing,
       );
       final name = tester.widget<Text>(
         find.byKey(const ValueKey('dm-header-name')),
@@ -631,7 +644,7 @@ void main() {
       );
       expect(
         find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
-        findsOneWidget,
+        findsNothing,
       );
     });
 
