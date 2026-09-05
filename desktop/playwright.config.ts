@@ -146,6 +146,7 @@ export default defineConfig({
         "**/appearance-previews.spec.ts",
         "**/channel-sort.spec.ts",
         "**/identity-lost.spec.ts",
+        "**/identity-recovery-local-relay.spec.ts",
         "**/deep-link-invite.spec.ts",
         "**/invite-link-copy.spec.ts",
         "**/global-agent-config-screenshots.spec.ts",
