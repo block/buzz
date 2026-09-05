@@ -23,6 +23,7 @@ members = [
     "crates/buzz-pairing-cli",
     "crates/buzz-sdk",
     "crates/buzz-persona",
+    "crates/buzz-runtime-config",
     "crates/git-credential-nostr",
     "crates/git-sign-nostr",
     "crates/buzz-pair-relay",
