@@ -1,5 +1,8 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[path = "authority_tests.rs"]
+mod authority_tests;
+
 #[path = "cli_tests.rs"]
 mod cli_tests;
 
@@ -860,6 +863,7 @@ fn receipt_fixture(
     key: crate::managed_agents::ManagedAgentRuntimeKey,
 ) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
     crate::managed_agents::ManagedAgentRuntimeReceipt {
+        authority_version: crate::managed_agents::RUNTIME_AUTHORITY_RECEIPT_VERSION,
         key,
         pid: std::process::id(),
         desktop_instance_id: "test-instance".into(),
@@ -896,64 +900,6 @@ fn receipt_validation_rejects_wrong_pair_filename() {
 }
 
 #[test]
-fn replacement_removes_receipt_only_after_confirmed_exit() {
-    use std::cell::{Cell, RefCell};
-
-    let receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
-    );
-    let path = std::path::Path::new("pair.json");
-    let terminated = Cell::new(None);
-    let polls = Cell::new(0);
-    let removed = RefCell::new(None);
-
-    super::terminate_runtime_receipt_with(
-        path,
-        &receipt,
-        |pid| {
-            terminated.set(Some(pid));
-            Ok(())
-        },
-        |_| {
-            let poll = polls.get() + 1;
-            polls.set(poll);
-            poll < 2
-        },
-        |path| *removed.borrow_mut() = Some(path.to_path_buf()),
-    )
-    .unwrap();
-
-    assert_eq!(terminated.get(), Some(receipt.pid));
-    assert_eq!(polls.get(), 2);
-    assert_eq!(removed.into_inner().as_deref(), Some(path));
-}
-
-#[test]
-fn replacement_failure_keeps_receipt() {
-    use std::cell::Cell;
-
-    let receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
-    );
-    let removed = Cell::new(false);
-    let error = super::terminate_runtime_receipt_with(
-        std::path::Path::new("pair.json"),
-        &receipt,
-        |_| Err("signal failed".into()),
-        |_| false,
-        |_| removed.set(true),
-    )
-    .unwrap_err();
-
-    assert_eq!(error, "signal failed");
-    assert!(!removed.get());
-}
-
-// ── workspace pair-key resolution (summary/stop scoping) ────────────────
-
-#[test]
 fn unpinned_record_resolves_pair_key_per_workspace() {
     // Community-scoped truth: an unpinned agent running only on relay A must
     // read as running in workspace A and stopped in workspace B — the pair
@@ -965,6 +911,17 @@ fn unpinned_record_resolves_pair_key_per_workspace() {
     let runtimes = std::collections::HashMap::from([(key_a.clone(), ())]);
     assert!(runtimes.contains_key(&key_a));
     assert!(!runtimes.contains_key(&key_b));
+}
+
+#[test]
+fn workspace_pair_resolution_distinguishes_loopback_communities() {
+    let pubkey = "aa".repeat(32);
+    let localhost = super::resolve_workspace_pair_key(&pubkey, "", "ws://localhost:3000").unwrap();
+    let numeric = super::resolve_workspace_pair_key(&pubkey, "", "ws://127.0.0.1:3000").unwrap();
+
+    let runtimes = std::collections::HashMap::from([(localhost.clone(), ())]);
+    assert!(runtimes.contains_key(&localhost));
+    assert!(!runtimes.contains_key(&numeric));
 }
 
 #[test]

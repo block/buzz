@@ -63,30 +63,54 @@ export const MANAGED_AGENT_PAIR_ACTION_LABELS: Record<
 };
 
 /**
- * Canonicalize a relay URL the way the backend keys runtime pairs, so a
- * stored community URL (e.g. `ws://localhost:3000`) matches backend rows
- * (`ws://127.0.0.1:3000`). Mirrors buzz-core's `normalize_relay_url`
- * (`crates/buzz-core/src/relay.rs`): lowercase host, loopback hosts folded
- * to 127.0.0.1, default ports and root-path trailing slash stripped.
- * Returns null when the URL cannot be parsed as ws/wss.
+ * Canonicalize a relay URL the way the backend keys runtime pairs. Host
+ * spellings remain distinct because the relay authority is the community:
+ * `localhost`, `127.*`, and `::1` must never select one another's process.
+ * DNS case/default ports and a root slash are syntax-only; non-root paths,
+ * queries, and meaningful trailing slashes are preserved.
  */
 export function canonicalRelayUrl(raw: string): string | null {
+  const input = raw.trim();
   let url: URL;
   try {
-    url = new URL(raw.trim());
+    url = new URL(input);
   } catch {
     return null;
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  if (url.username !== "" || url.password !== "" || input.includes("#"))
+    return null;
+  const host = url.hostname.toLowerCase();
+  const defaultPort = url.protocol === "ws:" ? "80" : "443";
+  const port = url.port && url.port !== defaultPort ? `:${url.port}` : "";
+  const path = url.pathname === "/" ? "" : url.pathname;
+  const query = url.search || (url.href.endsWith("?") ? "?" : "");
+  return `${url.protocol}//${host}${port}${path}${query}`;
+}
+
+/**
+ * Bestie's Rust scope check intentionally retains buzz-core's legacy
+ * loopback-folding equivalence. Keep its React Query cache key aligned without
+ * reusing that broader equivalence for managed-runtime identity.
+ */
+export function canonicalBestieRelayUrl(raw: string): string | null {
+  const input = raw.trim();
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  if (url.username !== "" || url.password !== "" || input.includes("#"))
+    return null;
   let host = url.hostname.toLowerCase();
   if (host === "localhost" || host === "[::1]" || host.startsWith("127.")) {
     host = "127.0.0.1";
   }
-  const defaultPort = url.protocol === "ws:" ? "80" : "443";
-  const port = url.port && url.port !== defaultPort ? `:${url.port}` : "";
-  const path = url.pathname === "/" ? "" : url.pathname;
-  // The backend trims trailing slashes from the final rendered URL.
-  return `${url.protocol}//${host}${port}${path}${url.search}`.replace(
+  const port = url.port ? `:${url.port}` : "";
+  const query = url.search || (url.href.endsWith("?") ? "?" : "");
+  return `${url.protocol}//${host}${port}${url.pathname}${query}`.replace(
     /\/+$/,
     "",
   );
@@ -98,10 +122,8 @@ export function findManagedAgentRuntime(
   relayUrl: string,
 ): ManagedAgentRuntimeStatus | undefined {
   const normalizedPubkey = pubkey.toLowerCase();
-  // Backend rows carry the canonical pair URL; the caller passes the
-  // community's stored URL, which may differ in spelling (localhost vs
-  // 127.0.0.1, default port, trailing slash). Compare canonically, keeping
-  // the exact-string checks as a fallback for unparsable stored URLs.
+  // Backend rows carry the canonical pair URL; compare syntax-equivalent
+  // spellings while preserving distinct host authorities.
   const canonical = canonicalRelayUrl(relayUrl);
   return runtimes.find(
     (runtime) =>

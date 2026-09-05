@@ -81,4 +81,21 @@ mod tests {
         let key = bound_runtime_key(&record, &bound).expect("keyable record and relay");
         assert_eq!(key.relay_url, "wss://tenant-a.example");
     }
+
+    #[test]
+    fn production_spawn_key_preserves_loopback_community_authority() {
+        let record = record(&"cc".repeat(32), "");
+        let localhost =
+            crate::relay::bind_expected_relay_scope(None, "ws://localhost:3000".to_string())
+                .unwrap();
+        let numeric =
+            crate::relay::bind_expected_relay_scope(None, "ws://127.0.0.1:3000".to_string())
+                .unwrap();
+
+        let localhost_key = bound_runtime_key(&record, &localhost).unwrap();
+        let numeric_key = bound_runtime_key(&record, &numeric).unwrap();
+        assert_eq!(localhost_key.relay_url, "ws://localhost:3000");
+        assert_eq!(numeric_key.relay_url, "ws://127.0.0.1:3000");
+        assert_ne!(localhost_key, numeric_key);
+    }
 }

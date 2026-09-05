@@ -14,8 +14,8 @@ use crate::app_state::AppState;
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
 
-fn status_for(
-    app: &AppHandle,
+fn status_for<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
     runtime: Option<&ManagedAgentPairRuntime>,
@@ -43,8 +43,8 @@ struct StatusInputs<'a> {
     global: &'a super::GlobalAgentConfig,
 }
 
-fn status_for_with(
-    app: &AppHandle,
+fn status_for_with<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
     runtime: Option<&ManagedAgentPairRuntime>,
@@ -72,7 +72,7 @@ fn status_for_with(
     }
 }
 
-fn emit_status(app: &AppHandle, status: &ManagedAgentRuntimeStatus) {
+fn emit_status<R: tauri::Runtime>(app: &AppHandle<R>, status: &ManagedAgentRuntimeStatus) {
     let _ = app.emit(STATUS_EVENT, status);
 }
 
@@ -339,12 +339,12 @@ pub(crate) fn start_pair_locked(
         broker,
     )?;
     let now = crate::util::now_iso();
-    let receipt = ManagedAgentRuntimeReceipt {
-        key: key.clone(),
-        pid: process.child.id(),
-        desktop_instance_id: current_instance_id(&app),
-        started_at: now.clone(),
-    };
+    let receipt = ManagedAgentRuntimeReceipt::new(
+        key.clone(),
+        process.child.id(),
+        current_instance_id(&app),
+        now.clone(),
+    );
     if let Err(error) = write_agent_runtime_receipt(&app, &receipt) {
         let _ = terminate_process(process.child.id());
         let _ = process.child.wait();
@@ -379,10 +379,10 @@ pub fn stop_managed_agent_runtime(
 }
 
 // Caller owns managed_agent_runtime_transition for the whole admission/effect.
-pub(crate) fn stop_pair_locked(
+pub(crate) fn stop_pair_locked<R: tauri::Runtime>(
     pubkey: String,
     relay_url: String,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
     let _store = state
@@ -396,30 +396,36 @@ pub(crate) fn stop_pair_locked(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    if runtimes.contains_key(&key) {
-        // Use ordinary Desktop Stop, including its platform-specific child/job
-        // ownership. Remote control must not grow a second teardown contract.
-        super::stop_managed_agent_pair(&app, record, &mut runtimes, &key)?;
-    } else {
-        terminate_untracked_pair_runtime(&app, &key)?;
-    }
-    // Old scalar records have no community-bound receipt. Do not erase a live
-    // child or claim success for it when this request cannot establish scope.
-    reject_unscoped_live_child(
-        record.runtime_pid.filter(|pid| process_is_running(*pid)),
-        runtimes.values().map(|runtime| runtime.child.id()),
-    )?;
-    super::remove_agent_runtime_receipt(&app, &key);
-    state.clear_agent_session_cache(&key);
-    if record
-        .runtime_pid
-        .is_some_and(|pid| !process_is_running(pid))
-    {
-        record.runtime_pid = None;
-    }
-    record.updated_at = crate::util::now_iso();
-    record.last_stopped_at = Some(record.updated_at.clone());
-    let status = status_for(&app, record, &key, None, None);
+    // V0 receipt normalization was lossy. Wrap every tracked/untracked Stop
+    // side effect so an ambiguous receipt cannot be killed, deleted, cleared
+    // from cache, persisted as stopped, or reported stopped.
+    let status = super::with_pair_runtime_receipt_authority(&app, &key, || {
+        if runtimes.contains_key(&key) {
+            // Use ordinary Desktop Stop, including its platform-specific
+            // child/job ownership. Remote control must not grow a second
+            // teardown contract.
+            super::stop_managed_agent_pair(&app, record, &mut runtimes, &key)?;
+        } else {
+            terminate_untracked_pair_runtime(&app, &key)?;
+        }
+        // Old scalar records have no community-bound receipt. Do not erase a
+        // live child or claim success when this request cannot establish scope.
+        reject_unscoped_live_child(
+            record.runtime_pid.filter(|pid| process_is_running(*pid)),
+            runtimes.values().map(|runtime| runtime.child.id()),
+        )?;
+        super::remove_agent_runtime_receipt(&app, &key);
+        state.clear_agent_session_cache(&key);
+        if record
+            .runtime_pid
+            .is_some_and(|pid| !process_is_running(pid))
+        {
+            record.runtime_pid = None;
+        }
+        record.updated_at = crate::util::now_iso();
+        record.last_stopped_at = Some(record.updated_at.clone());
+        Ok(status_for(&app, record, &key, None, None))
+    })?;
     drop(runtimes);
     save_managed_agents(&app, &records)?;
     emit_status(&app, &status);
@@ -754,6 +760,24 @@ mod tests {
     }
 
     #[test]
+    fn observer_lifecycle_key_does_not_cross_loopback_communities() {
+        let localhost = payload(
+            "ws://localhost:3000",
+            ManagedAgentRuntimeLifecycle::Ready,
+            None,
+        );
+        let numeric = payload(
+            "ws://127.0.0.1:3000",
+            ManagedAgentRuntimeLifecycle::Ready,
+            None,
+        );
+        assert_ne!(
+            observer_lifecycle_key(&localhost.pubkey, &localhost).unwrap(),
+            observer_lifecycle_key(&numeric.pubkey, &numeric).unwrap()
+        );
+    }
+
+    #[test]
     fn observer_lifecycle_rejects_cross_agent_and_desktop_states() {
         let ready = payload(
             "wss://relay.example",
@@ -792,11 +816,164 @@ mod tests {
 mod stop_scope_tests {
     use super::reject_unscoped_live_child;
 
+    #[cfg(unix)]
+    fn assert_remote_stop_effect_is_blocked(tracked: bool) {
+        use tauri::Manager as _;
+
+        let _path_guard = crate::managed_agents::lock_path_mutex();
+        let temp = tempfile::tempdir().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_xdg = std::env::var_os("XDG_DATA_HOME");
+        struct RestoreEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.1.take() {
+                    Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                    None => std::env::remove_var("XDG_DATA_HOME"),
+                }
+            }
+        }
+        let _restore_env = RestoreEnv(old_home, old_xdg);
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("XDG_DATA_HOME", temp.path());
+
+        let requested_relay = "wss://relay.example/room/";
+        let stored_relay = "wss://relay.example/room";
+        let pubkey = "aa".repeat(32);
+        let app = tauri::test::mock_builder()
+            .manage(crate::app_state::build_app_state())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let instance_id = super::super::current_instance_id(app.handle());
+        let mut child = Some(
+            super::super::runtime::test_fixtures::MarkedTestChild::spawn(&instance_id).unwrap(),
+        );
+        let pid = child.as_ref().unwrap().id();
+        let _process_guard = super::super::runtime::test_fixtures::MarkedProcessGuard::new(pid);
+        assert!(super::super::process_has_buzz_marker(pid, &instance_id));
+
+        let mut record = super::super::runtime::test_fixtures::fixture(
+            super::super::RespondTo::OwnerOnly,
+            Vec::new(),
+            None,
+        );
+        record.pubkey = pubkey.clone();
+        record.updated_at = "before".into();
+        super::super::save_managed_agents(app.handle(), &[record.clone()]).unwrap();
+
+        let stored_key = super::ManagedAgentRuntimeKey::new(&pubkey, stored_relay).unwrap();
+        let requested_key = super::ManagedAgentRuntimeKey::new(&pubkey, requested_relay).unwrap();
+        let receipt = super::ManagedAgentRuntimeReceipt {
+            authority_version: 0,
+            key: stored_key.clone(),
+            pid,
+            desktop_instance_id: instance_id,
+            started_at: "now".into(),
+        };
+        super::super::write_agent_runtime_receipt(app.handle(), &receipt).unwrap();
+
+        if tracked {
+            let process = crate::managed_agents::ManagedAgentProcess {
+                child: child.take().unwrap().into_child(),
+                log_path: Default::default(),
+                spawn_config:
+                    crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
+                        &record,
+                        &[],
+                        &[],
+                        requested_relay,
+                        &Default::default(),
+                        false,
+                        crate::managed_agents::AcpSessionPolicy::Channel,
+                    ),
+                setup_mode: false,
+                adapter_availability: None,
+                start_nonce: "test-nonce".into(),
+            };
+            app.state::<crate::app_state::AppState>()
+                .managed_agent_processes
+                .lock()
+                .unwrap()
+                .insert(
+                    requested_key.clone(),
+                    super::ManagedAgentPairRuntime::starting(process),
+                );
+        }
+
+        let cache: crate::managed_agents::config_bridge::SessionConfigCache =
+            serde_json::from_value(serde_json::json!({
+                "configOptions": [],
+                "availableModes": [],
+                "availableModels": [],
+                "currentModel": null,
+                "modelOverridden": false,
+                "gooseNativeConfig": null,
+                "capturedAt": "now"
+            }))
+            .unwrap();
+        app.state::<crate::app_state::AppState>()
+            .put_session_cache(requested_key.clone(), cache);
+
+        let error =
+            super::stop_pair_locked(pubkey.clone(), requested_relay.into(), app.handle().clone())
+                .unwrap_err();
+        assert!(error.contains("cannot prove the requested community authority"));
+        assert_eq!(
+            super::super::load_managed_agents(app.handle()).unwrap()[0].updated_at,
+            "before"
+        );
+        assert!(app
+            .state::<crate::app_state::AppState>()
+            .get_session_cache(&requested_key)
+            .is_some());
+        assert!(super::super::read_all_agent_runtime_receipts(app.handle())
+            .iter()
+            .any(|(_, candidate)| candidate == &receipt));
+
+        if tracked {
+            let mut runtime = app
+                .state::<crate::app_state::AppState>()
+                .managed_agent_processes
+                .lock()
+                .unwrap()
+                .remove(&requested_key)
+                .unwrap();
+            assert!(runtime.child.try_wait().unwrap().is_none());
+            let _ = runtime.child.kill();
+            let _ = runtime.child.wait();
+        } else {
+            assert!(child
+                .as_mut()
+                .unwrap()
+                .child_mut()
+                .try_wait()
+                .unwrap()
+                .is_none());
+        }
+        super::super::remove_agent_runtime_receipt(app.handle(), &stored_key);
+    }
+
     #[test]
     fn live_legacy_child_cannot_be_erased_or_reported_stopped() {
         assert!(reject_unscoped_live_child(Some(12), [].into_iter()).is_err());
         assert!(reject_unscoped_live_child(Some(12), [13].into_iter()).is_err());
         assert!(reject_unscoped_live_child(Some(12), [12].into_iter()).is_ok());
         assert!(reject_unscoped_live_child(None, [13].into_iter()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_remote_stop_has_no_effect_before_ambiguous_receipt_refusal() {
+        assert_remote_stop_effect_is_blocked(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_remote_stop_has_no_effect_before_ambiguous_receipt_refusal() {
+        assert_remote_stop_effect_is_blocked(false);
     }
 }

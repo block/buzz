@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   agentCommunityAvailability,
   agentCommunityStatusDetail,
+  canonicalBestieRelayUrl,
   canonicalRelayUrl,
   findManagedAgentRuntime,
   managedAgentRuntimeKey,
@@ -78,9 +79,8 @@ test("selects one relay without collapsing same-pubkey pairs", () => {
 });
 
 test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
-  // Loopback folding + default-port and trailing-slash stripping — the
-  // standard dev setup that previously broke pair matching.
-  assert.equal(canonicalRelayUrl("ws://localhost:3000"), "ws://127.0.0.1:3000");
+  assert.equal(canonicalRelayUrl("ws://localhost:3000"), "ws://localhost:3000");
+  assert.equal(canonicalRelayUrl("ws://127.0.0.1:3000"), "ws://127.0.0.1:3000");
   assert.equal(
     canonicalRelayUrl("WSS://Relay.Example:443/"),
     "wss://relay.example",
@@ -91,23 +91,57 @@ test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
   );
   assert.equal(
     canonicalRelayUrl("wss://relay.example/path/"),
-    "wss://relay.example/path",
+    "wss://relay.example/path/",
   );
-  assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://127.0.0.1:3000");
+  assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://[::1]:3000");
+  assert.equal(
+    canonicalRelayUrl("wss://relay.example/community/?mode=one"),
+    "wss://relay.example/community/?mode=one",
+  );
+  assert.equal(
+    canonicalRelayUrl("wss://relay.example/?"),
+    "wss://relay.example?",
+  );
+  assert.notEqual(
+    canonicalRelayUrl("wss://relay.example/?"),
+    canonicalRelayUrl("wss://relay.example"),
+  );
   assert.equal(canonicalRelayUrl("https://relay.example"), null);
+  assert.equal(canonicalRelayUrl("wss://user@relay.example"), null);
+  assert.equal(canonicalRelayUrl("wss://relay.example/#"), null);
+  assert.equal(canonicalRelayUrl("wss://relay.example/#fragment"), null);
   assert.equal(canonicalRelayUrl("not a url"), null);
 });
 
-test("matches a stored community URL against canonical backend rows", () => {
+test("Bestie retains its Rust legacy equivalence without widening runtime identity", () => {
+  assert.equal(
+    canonicalBestieRelayUrl("ws://localhost:3000"),
+    "ws://127.0.0.1:3000",
+  );
+  assert.equal(
+    canonicalBestieRelayUrl("wss://relay.example/path/"),
+    "wss://relay.example/path",
+  );
+  assert.equal(
+    canonicalBestieRelayUrl("wss://relay.example/?mode=one"),
+    "wss://relay.example/?mode=one",
+  );
+  assert.equal(
+    canonicalBestieRelayUrl("wss://relay.example/?"),
+    "wss://relay.example/?",
+  );
+});
+
+test("runtime lookup never crosses loopback community authorities", () => {
   const runtimes = [
     runtime({ relayUrl: "ws://127.0.0.1:3000", lifecycle: "ready" }),
   ];
   assert.equal(
-    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3000")?.lifecycle,
-    "ready",
+    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3000"),
+    undefined,
   );
   assert.equal(
-    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3001"),
-    undefined,
+    findManagedAgentRuntime(runtimes, "aa", "ws://127.0.0.1:3000"),
+    runtimes[0],
   );
 });

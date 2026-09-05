@@ -176,8 +176,8 @@ async fn start_local_agent_with_preflight(
     replay_floor_unix: Option<u64>,
 ) -> Result<ManagedAgentSummary, String> {
     let launch_owner = workspace_owner_hex(state)?;
-    // Runtime keys fold loopback aliases for process bookkeeping, not tenant
-    // identity. Preserve the workspace authority across the preflight await.
+    // Runtime keys preserve the workspace host authority. Bind that same
+    // authority across the preflight await so the eventual spawn cannot move.
     let launch_relay = crate::relay::bind_expected_relay_scope(
         expected_relay_url,
         relay_ws_url_with_override(state),

@@ -41,11 +41,13 @@ mod process;
 #[cfg(test)]
 use process::{
     buzz_marker_entry, name_matches_interpreter, name_matches_known_binary,
-    terminate_runtime_receipt_with, valid_agent_runtime_receipt_with,
+    select_pair_runtime_receipt_with, terminate_runtime_receipt_with,
+    valid_agent_runtime_receipt_with,
 };
 pub(crate) use process::{
     current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
     terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    with_pair_runtime_receipt_authority,
 };
 
 mod orphan_sweep;
@@ -108,8 +110,8 @@ fn persona_drift_state(
 /// pin is ignored — see `effective_agent_relay_url`). Returns `None` for
 /// records that cannot form a valid pair key yet (e.g. key-less agents that
 /// mint keys on first start).
-pub(crate) fn workspace_pair_key(
-    app: &AppHandle,
+pub(crate) fn workspace_pair_key<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
 ) -> Option<ManagedAgentRuntimeKey> {
     let state = app.state::<crate::app_state::AppState>();
@@ -444,8 +446,8 @@ pub(crate) fn spawn_with_effort_proof(
 /// publishes the triggering message before this spawn and passes its send
 /// timestamp here so the harness's first REQ replays past that message no
 /// matter how long the spawn takes. buzz-acp clamps stale floors to ~15 min.
-pub fn spawn_agent_child(
-    app: &AppHandle,
+pub fn spawn_agent_child<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     relay_url: &str,
     lazy: bool,
@@ -466,8 +468,8 @@ pub fn spawn_agent_child(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_agent_child_with_broker(
-    app: &AppHandle,
+pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     relay_url: &str,
     lazy: bool,
@@ -917,8 +919,8 @@ pub(crate) fn spawn_agent_child_with_broker(
 /// exact workspace-relay read the caller's scope assertion passed on; it never
 /// re-reads the mutable override (see `relay::scope`). The key comes from
 /// [`bound_runtime_key`] — the seam the spawn-key regressions exercise.
-pub fn start_managed_agent_process(
-    app: &AppHandle,
+pub fn start_managed_agent_process<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     owner_hex: Option<&str>,
@@ -944,6 +946,10 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
+    // A prior-session receipt is the only untracked process this pair may
+    // replace. Selection enforces host-preserving authority provenance and
+    // uses the ordinary process-tree termination contract.
+    terminate_untracked_pair_runtime(app, &key)?;
     let mut process = spawn_agent_child(
         app,
         record,
@@ -954,12 +960,12 @@ pub fn start_managed_agent_process(
         resume,
     )?;
     let now = now_iso();
-    let receipt = super::ManagedAgentRuntimeReceipt {
-        key: key.clone(),
-        pid: process.child.id(),
-        desktop_instance_id: current_instance_id(app),
-        started_at: now.clone(),
-    };
+    let receipt = super::ManagedAgentRuntimeReceipt::new(
+        key.clone(),
+        process.child.id(),
+        current_instance_id(app),
+        now.clone(),
+    );
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
         let _ = terminate_process(process.child.id());
         let _ = process.child.wait();
@@ -979,7 +985,7 @@ pub fn start_managed_agent_process(
 }
 
 #[cfg(test)]
-mod test_fixtures;
+pub(super) mod test_fixtures;
 
 #[cfg(test)]
 mod tests;
