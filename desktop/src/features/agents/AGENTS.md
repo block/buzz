@@ -314,8 +314,10 @@ failures and transient CLOSED states recover through a bounded receiver-owner
 budget; each attempt uses a fresh live-only subscription and repeats
 projection-only sync before admission. Terminal closure or exhausted recovery
 stays in the scope-owned notification, whose deliberate retry resets the receiver
-budget. Recovery must discard queued callbacks from the retired receiver, not
-retry an operation, and must respect the relay rate-limit gate.
+budget. A known latched-terminal relay session also reports immediately during
+initialization without consuming that budget; unknown and transient failures
+remain bounded retries. Recovery must discard queued callbacks from the retired
+receiver, not retry an operation, and must respect the relay rate-limit gate.
 A readiness timeout is unconfirmed delivery, not a failed initialization; late
 EOSE clears that warning after successful projection. An explicit operation retry republishes the exact request;
 the relay redelivers stored Stop duplicates without repeating relay side effects.

@@ -133,6 +133,50 @@ test("first subscribe failure recovers without a reconnect callback and syncs be
   assert.equal(closed, 1);
 });
 
+test("terminal relay-session initialization failure does not consume the recovery budget", async () => {
+  const clock = timers();
+  let subscribeCalls = 0;
+  const relay = {
+    getSessionEpoch: () => 1,
+    getConnectionGeneration: () => 1,
+    subscribeLive: async () => {
+      subscribeCalls++;
+      throw new Error("Relay session is terminal; cannot reconnect.");
+    },
+    fetchEvents: async () => assert.fail("terminal session must not sync"),
+    publishEvent: async () => {},
+  };
+  const errors = [];
+  ownLifecycleReceiver(
+    scope,
+    (error) => errors.push(error),
+    () => {},
+    {
+      ...clock,
+      waitForRateLimit: async () => {},
+      startReceiver: (receiverScope, active, onError, onReady, onClosed) =>
+        receiveLifecycle(
+          receiverScope,
+          active,
+          onError,
+          async () =>
+            assert.fail("terminal session must not invoke native IPC"),
+          relay,
+          onReady,
+          onClosed,
+        ),
+    },
+  );
+
+  await flushUntil(() => errors.length === 1);
+  assert.equal(subscribeCalls, 1);
+  assert.equal(clock.pending.size, 0);
+  assert.equal(
+    errors[0],
+    "Desktop lifecycle receiver is unavailable (subscription: relay session requires reconnection).",
+  );
+});
+
 test("transient CLOSED before readiness retires and replaces the whole receiver", async () => {
   const clock = timers();
   let subscribeCalls = 0;

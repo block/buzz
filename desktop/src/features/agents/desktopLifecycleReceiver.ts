@@ -2,7 +2,10 @@ import type { LiveSubscriptionClosedRecovery } from "@/shared/api/relayClientSha
 import { waitForRateLimit } from "@/shared/api/relayRateLimitGate";
 import type { DesktopScope } from "./desktopList";
 import { receiveLifecycle } from "./desktopLifecycle";
-import { receiverErrorMessage } from "./desktopLifecycleDiagnostics";
+import {
+  LifecycleReceiverError,
+  receiverErrorMessage,
+} from "./desktopLifecycleDiagnostics";
 
 export const RECEIVER_RECOVERY_DELAYS_MS = [1_000, 2_000, 4_000] as const;
 
@@ -121,7 +124,10 @@ export function ownLifecycleReceiver(
       .catch((error) => {
         if (current(token))
           recover(token, receiverErrorMessage(error), {
-            classification: "retryable",
+            classification:
+              error instanceof LifecycleReceiverError
+                ? error.recoveryClassification
+                : "retryable",
             retryAfterMs: 0,
           });
       });
