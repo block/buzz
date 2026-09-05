@@ -116,10 +116,11 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     });
     await page.goto("/");
     // A failed global receiver must remain visible without entering the shell's
-    // layout flow. This also forces the error to settle before measuring chrome.
+    // layout flow. Wait through its bounded 1s/2s/4s recovery budget before
+    // measuring chrome; an intermediate transient failure need not notify.
     await expect(
       page.getByText(/Desktop lifecycle receiver is unavailable/),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 15_000 });
 
     // Lock the native and webview placements together: removing this explicit
     // Tauri inset or shifting the nav row regresses the macOS chrome alignment.

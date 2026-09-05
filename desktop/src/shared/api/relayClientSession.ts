@@ -164,6 +164,12 @@ export class RelayClient {
         sub.reject(error);
       } else {
         clearClosedRetry(sub);
+        sub.resolveReady?.("closed");
+        sub.onState?.("closed", {
+          classification: "terminal",
+          retryAfterMs: 0,
+        });
+        sub.resolveReady = undefined;
       }
       this.subscriptions.delete(subId);
     }
@@ -635,19 +641,23 @@ export class RelayClient {
       resolveReady("timeout");
     }, readinessTimeoutMs);
 
-    this.subscriptions.set(subId, {
+    const subscription: Extract<RelaySubscription, { mode: "live" }> = {
       mode: "live",
       filter,
       onEvent,
       resolveReady,
       onState: options.onState,
       closedRecovery: options.closedRecovery ?? "shared",
-    });
+    };
+    this.subscriptions.set(subId, subscription);
 
     try {
       await this.sendRawWithReconnectRetry(
         ["REQ", subId, filter],
         "Failed to restore relay subscription.",
+        () =>
+          subscription.closedRecovery !== "explicit" ||
+          this.subscriptions.get(subId) === subscription,
       );
     } catch (error) {
       window.clearTimeout(fallbackTimeout);
@@ -709,6 +719,7 @@ export class RelayClient {
   private async sendRawWithReconnectRetry(
     payload: unknown[],
     fallbackMessage: string,
+    retryStillOwned: () => boolean = () => true,
   ) {
     try {
       await this.sendRaw(payload);
@@ -717,8 +728,13 @@ export class RelayClient {
         error,
         fallbackMessage,
       );
+      // resetConnection may retire an explicit subscription synchronously.
+      // Never put its now-ownerless REQ onto the replacement connection;
+      // shared subscriptions retain their existing reconnect retry behavior.
+      if (!retryStillOwned()) throw normalizedError;
       try {
         await this.ensureConnected();
+        if (!retryStillOwned()) throw normalizedError;
         await this.sendRaw(payload);
       } catch (retryError) {
         throw this.recoverFromSocketFailure(
@@ -1077,7 +1093,10 @@ export class RelayClient {
         continue;
       }
       subscription.resolveReady?.("closed");
-      subscription.onState?.("closed");
+      subscription.onState?.("closed", {
+        classification: options?.reconnect === false ? "terminal" : "retryable",
+        retryAfterMs: 0,
+      });
       subscription.resolveReady = undefined;
       clearClosedRetry(subscription);
       if (subscription.closedRecovery === "explicit") {

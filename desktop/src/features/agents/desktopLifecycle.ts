@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { relayClient } from "@/shared/api/relayClient";
+import type { LiveSubscriptionClosedRecovery } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import type { DesktopScope } from "./desktopList";
 import {
@@ -270,8 +271,10 @@ export async function receiveLifecycle(
   ipc = invoke,
   relay = relayClient,
   onReady: () => void = () => {},
+  onClosed?: (recovery: LiveSubscriptionClosedRecovery) => void,
 ) {
   let stopped = false;
+  let released = false;
   let stopSubscription = () => {};
   let synced = false;
   let subscriptionReady = false;
@@ -339,15 +342,20 @@ export async function receiveLifecycle(
       5000,
       {
         closedRecovery: "explicit",
-        onState: (readiness) => {
+        onState: (readiness, closed) => {
           if (!valid()) return;
           subscriptionReady = readiness === "eose";
           if (readiness === "closed") {
             stopped = true;
             stopSubscription();
-            onError(
-              "Desktop lifecycle receiver subscription closed. Retry the receiver to accept new requests.",
-            );
+            if (onClosed)
+              onClosed(
+                closed ?? { classification: "terminal", retryAfterMs: 0 },
+              );
+            else
+              onError(
+                "Desktop lifecycle receiver subscription closed. Retry the receiver to accept new requests.",
+              );
           } else if (readiness === "timeout") {
             onError(
               "Desktop lifecycle subscription readiness timed out. Delivery is unconfirmed.",
@@ -358,6 +366,8 @@ export async function receiveLifecycle(
     ),
   );
   const close = () => {
+    if (released) return;
+    released = true;
     stopped = true;
     // Unsubscribe may fail on a dead socket; it must not revive this receiver
     // or leave an unhandled promise. A retry always owns a new subscription.

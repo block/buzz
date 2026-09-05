@@ -123,16 +123,19 @@ function recoverLiveSubscriptionFromClosed({
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
 }) {
-  subscription.resolveReady?.("closed");
-  subscription.onState?.("closed");
-  subscription.resolveReady = undefined;
-
   const closedClass = classifyRelayClosed(message);
 
   if (closedClass === "rate-limited") {
     const hintSeconds = parseRateLimitHint(message);
     activateRateLimit(hintSeconds);
   }
+
+  subscription.resolveReady?.("closed");
+  subscription.onState?.("closed", {
+    classification: closedClass,
+    retryAfterMs: closedClass === "rate-limited" ? rateLimitRemainingMs() : 0,
+  });
+  subscription.resolveReady = undefined;
 
   if (subscription.closedRecovery === "explicit") {
     // Command receivers must not survive CLOSED into shared re-subscription.

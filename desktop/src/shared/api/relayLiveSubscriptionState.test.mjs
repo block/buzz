@@ -5,6 +5,8 @@ let fakeNow = 0;
 let nextTimerId = 1;
 const pendingTimers = new Map();
 const sentFrames = [];
+const sendAttempts = [];
+let failNextSend = false;
 
 globalThis.window = {
   setTimeout: (fn, ms) => {
@@ -15,7 +17,14 @@ globalThis.window = {
   clearTimeout: (id) => pendingTimers.delete(id),
   __TAURI_INTERNALS__: {
     invoke: async (command, args) => {
-      if (command === "plugin:websocket|send") sentFrames.push(args);
+      if (command === "plugin:websocket|send") {
+        sendAttempts.push(args);
+        if (failNextSend) {
+          failNextSend = false;
+          throw new Error("fixture first send failed");
+        }
+        sentFrames.push(args);
+      }
     },
   },
 };
@@ -30,6 +39,8 @@ function resetHarness() {
   nextTimerId = 1;
   pendingTimers.clear();
   sentFrames.length = 0;
+  sendAttempts.length = 0;
+  failNextSend = false;
   resetRateLimitGate();
 }
 
@@ -117,17 +128,21 @@ test("persistent state reports timeout, late EOSE, then CLOSED through RelayClie
   await close();
 });
 
-for (const [label, message] of [
-  ["terminal", "restricted: access revoked"],
-  ["retryable", "error: storage temporarily unavailable"],
+for (const [label, message, classification] of [
+  ["terminal", "restricted: access revoked", "terminal"],
+  ["retryable", "error: storage temporarily unavailable", "retryable"],
 ]) {
   test(`explicit recovery retires an EOSE-ready ${label} CLOSED without re-REQ`, async () => {
     resetHarness();
     const client = connectedClient();
     const states = [];
+    const recoveries = [];
     const { opened, subId } = await openLive(client, {
       closedRecovery: "explicit",
-      onState: (state) => states.push(state),
+      onState: (state, recovery) => {
+        states.push(state);
+        if (recovery) recoveries.push(recovery);
+      },
     });
     await deliver(client, ["EOSE", subId]);
     const close = await opened;
@@ -137,6 +152,7 @@ for (const [label, message] of [
     await Promise.resolve();
 
     assert.deepEqual(states, ["eose", "closed"]);
+    assert.deepEqual(recoveries, [{ classification, retryAfterMs: 0 }]);
     assert.equal(client.subscriptions.has(subId), false);
     assert.equal(sentProtocolFrames("REQ").length, 1);
     await close();
@@ -170,6 +186,112 @@ test("connection reset reports CLOSED and retires only explicit-recovery subscri
 
   await closeExplicit();
   await closeOrdinary();
+  client.disconnect();
+});
+
+test("disconnect reports terminal CLOSED before retiring an explicit subscription", async () => {
+  resetHarness();
+  const client = connectedClient();
+  const states = [];
+  const recoveries = [];
+  const explicit = await openLive(client, {
+    closedRecovery: "explicit",
+    onState: (state, recovery) => {
+      states.push(state);
+      if (recovery) recoveries.push(recovery);
+    },
+  });
+  await deliver(client, ["EOSE", explicit.subId]);
+  await explicit.opened;
+
+  client.disconnect();
+
+  assert.deepEqual(states, ["eose", "closed"]);
+  assert.deepEqual(recoveries, [
+    { classification: "terminal", retryAfterMs: 0 },
+  ]);
+  assert.equal(client.subscriptions.has(explicit.subId), false);
+});
+
+test("explicit rate-limited CLOSED exposes only classified recovery and gate delay", async () => {
+  resetHarness();
+  const client = connectedClient();
+  let recovery;
+  const explicit = await openLive(client, {
+    closedRecovery: "explicit",
+    onState: (state, detail) => {
+      if (state === "closed") recovery = detail;
+    },
+  });
+  await deliver(client, ["EOSE", explicit.subId]);
+  await explicit.opened;
+
+  await deliver(client, [
+    "CLOSED",
+    explicit.subId,
+    "rate-limited: private relay detail; retry in 4s",
+  ]);
+
+  assert.deepEqual(recovery, {
+    classification: "rate-limited",
+    retryAfterMs: 4_000,
+  });
+  assert.equal(
+    JSON.stringify(recovery).includes("private relay detail"),
+    false,
+    "raw relay payload must not cross the recovery contract",
+  );
+});
+
+test("explicit retirement during first send failure prevents a fresh ownerless REQ", async () => {
+  resetHarness();
+  const client = connectedClient();
+  let ensureCalls = 0;
+  client.ensureConnected = async () => {
+    ensureCalls++;
+    if (ensureCalls > 1) client.wsId = 8;
+    return client.connectionGeneration;
+  };
+  failNextSend = true;
+
+  await assert.rejects(
+    client.subscribeLive(
+      { kinds: [50182], authors: ["owner"], limit: 0 },
+      () => {},
+      undefined,
+      5_000,
+      { closedRecovery: "explicit" },
+    ),
+    /fixture first send failed/,
+  );
+
+  assert.equal(
+    ensureCalls,
+    1,
+    "retired subscription must not reconnect to retry",
+  );
+  assert.equal(sendAttempts.length, 1);
+  assert.equal(sentProtocolFrames("REQ").length, 0);
+  assert.equal(client.subscriptions.size, 0);
+});
+
+test("ordinary subscription still retries its first failed send", async () => {
+  resetHarness();
+  const client = connectedClient();
+  let ensureCalls = 0;
+  client.ensureConnected = async () => {
+    ensureCalls++;
+    if (ensureCalls > 1) client.wsId = 8;
+    return client.connectionGeneration;
+  };
+  failNextSend = true;
+
+  const close = await client.subscribeLive({ kinds: [9], limit: 0 }, () => {});
+
+  assert.equal(ensureCalls, 2);
+  assert.equal(sendAttempts.length, 2);
+  assert.equal(sentProtocolFrames("REQ").length, 1);
+  await close();
   client.disconnect();
 });
 
