@@ -78,16 +78,18 @@ a response in seconds. The maintainer sees a pre-processed report, not a raw inb
 They read the triage summary, confirm it's real, assign it. Thirty seconds of their
 time instead of five minutes.
 
-Someone picks up the bug. They create a branch. Buzz creates a channel:
-`#feat-auth-fix`. They work there. They push commits. The CI agent picks up the
-work — it's watching for pushes, it's just a member with compute — runs the tests,
+Someone picks up the bug. They create a branch. Buzz creates or reuses its
+canonical channel: `#feat-auth-fix`. The task and branch can be views of the same
+channel UUID, as defined in [VISION_CHANNELS.md](VISION_CHANNELS.md). They work there.
+They push commits. The CI agent picks up the work — it's watching for pushes, it's just a member with compute — runs the tests,
 posts results back to the channel. Green. The patch lands in the channel as a
 reviewable diff. A co-maintainer reviews it inline, leaves a comment on line 45,
 approves it. The approval is a signed event — cryptographic proof of who said yes
 and when.
 
 Merge. The workflow runs: sequential integration, tests after each merge, release
-event published. The channel archives. The conversation is now the permanent record
+event published. A finished branch-only channel archives; a shared channel stays active
+while its other work continues. The conversation is now the permanent record
 of why that code exists. Not a chat thread that scrolled away. Not a PR that might
 get deleted. The event log, on your relay, in your database. Someone reading that
 code in two years can pull up the channel and see exactly what was discussed, what

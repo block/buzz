@@ -23,6 +23,16 @@ against that direction. Scale validation to the change's risk and exercise the
 real workflow for user-visible or integration behavior when practical; green CI
 and runtime evidence answer different questions.
 
+### Channel and Object Model
+
+For changes involving projects, tasks, repositories, branches, documents, or
+channel navigation, read [VISION_CHANNELS.md](VISION_CHANNELS.md).
+
+A channel has one conversation and can have several object views. Each object has
+one canonical channel; a task and its branch can share the **same channel**. Do not
+create a second conversation merely to add a view. Apply this model consistently
+across desktop, web, mobile, CLI, and agents.
+
 ---
 
 ## Ecosystem
