@@ -433,53 +433,54 @@ void main() {
     expect(tester.widget<FilledButton>(editCanvas).onPressed, isNull);
   });
 
-  testWidgets('regular members can move channels but cannot edit metadata', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _modalApp(
-        channel: _channel(),
-        loadMembers: () async => [
-          ChannelMember(
-            pubkey: _currentPubkey,
-            role: 'member',
-            joinedAt: DateTime(2025),
-          ),
-        ],
-        createChannelActions: (ref) => _FakeChannelActions(ref),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Open actions'));
-    await tester.pumpAndSettle();
+  testWidgets(
+    'regular members can move channels but cannot edit metadata or canvas',
+    (tester) async {
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => [
+            ChannelMember(
+              pubkey: _currentPubkey,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
 
-    expect(find.text('Move to section…'), findsOneWidget);
-    await tester.tap(find.text('Manage channel'));
-    await tester.pumpAndSettle();
+      expect(find.text('Move to section…'), findsOneWidget);
+      await tester.tap(find.text('Manage channel'));
+      await tester.pumpAndSettle();
 
-    final nameField = find.byKey(const ValueKey('manage-channel-name'));
-    final descriptionField = find.byKey(
-      const ValueKey('manage-channel-description'),
-    );
-    expect(tester.widget<TextField>(nameField).enabled, isFalse);
-    expect(tester.widget<TextField>(descriptionField).enabled, isFalse);
-    expect(
-      tester
-          .widget<FilledButton>(
-            find.byKey(const ValueKey('manage-channel-save-details')),
-          )
-          .onPressed,
-      isNull,
-    );
-    expect(
-      tester
-          .widget<FilledButton>(
-            find.widgetWithText(FilledButton, 'Create canvas'),
-          )
-          .onPressed,
-      isNotNull,
-    );
-  });
+      final nameField = find.byKey(const ValueKey('manage-channel-name'));
+      final descriptionField = find.byKey(
+        const ValueKey('manage-channel-description'),
+      );
+      expect(tester.widget<TextField>(nameField).enabled, isFalse);
+      expect(tester.widget<TextField>(descriptionField).enabled, isFalse);
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('manage-channel-save-details')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.widgetWithText(FilledButton, 'Create canvas'),
+            )
+            .onPressed,
+        isNull,
+      );
+    },
+  );
 
   testWidgets('DM omits quick actions, then shows mute and copy rows', (
     tester,

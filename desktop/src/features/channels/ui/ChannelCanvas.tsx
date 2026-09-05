@@ -34,24 +34,48 @@ export function ChannelCanvas({
   );
   const [isEditing, setIsEditing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
+  const [editingBaseContent, setEditingBaseContent] = React.useState("");
+  const [editingRevision, setEditingRevision] = React.useState<string | null>(
+    null,
+  );
+  const [localError, setLocalError] = React.useState<string | null>(null);
 
   const canvasContent = canvasQuery.data?.content ?? null;
+  const mutationErrorMessage =
+    setCanvasMutation.error instanceof Error
+      ? setCanvasMutation.error.message
+      : null;
   // Defer the single large Markdown parse so opening the canvas commits the
   // surrounding chrome immediately and the heavy render reconciles after.
   const deferredCanvasContent = React.useDeferredValue(canvasContent);
 
   function handleStartEditing() {
     setDraft(canvasContent ?? "");
+    setEditingBaseContent(canvasContent ?? "");
+    setEditingRevision(canvasQuery.data?.eventId ?? null);
+    setLocalError(null);
     setIsEditing(true);
   }
 
   function handleCancelEditing() {
     setIsEditing(false);
     setDraft("");
+    setLocalError(null);
   }
 
   async function handleSave() {
-    await setCanvasMutation.mutateAsync(draft);
+    if ((canvasContent ?? "") !== editingBaseContent) {
+      setLocalError(
+        "This canvas changed while the editor was open. Cancel and reopen it before saving.",
+      );
+      return;
+    }
+    setLocalError(null);
+    await setCanvasMutation.mutateAsync({
+      content: draft,
+      enforceRevision: true,
+      expectedEventId: editingRevision,
+    });
     setIsEditing(false);
   }
 
@@ -108,9 +132,9 @@ export function ChannelCanvas({
             Cancel
           </Button>
         </div>
-        {setCanvasMutation.error instanceof Error ? (
+        {localError || mutationErrorMessage ? (
           <p className="text-sm text-destructive">
-            {setCanvasMutation.error.message}
+            {localError ?? mutationErrorMessage}
           </p>
         ) : null}
       </div>

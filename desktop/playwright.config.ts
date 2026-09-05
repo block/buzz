@@ -30,6 +30,7 @@ export default defineConfig({
         "**/exact-key-profile.spec.ts",
         "**/key-import-reveal.spec.ts",
         "**/navigation.spec.ts",
+        "**/magic-board.spec.ts",
         "**/channels.spec.ts",
         "**/channel-shared-header-backdrop.spec.ts",
         "**/auxiliary-pane-close-visibility.spec.ts",

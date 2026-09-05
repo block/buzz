@@ -9,6 +9,7 @@ import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDi
 import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { ChannelViewModeToggle } from "@/features/channels/ui/ChannelViewModeContext";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -19,6 +20,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
+import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   toggleTerminalPanel,
@@ -72,6 +74,8 @@ export function ChannelScreenHeader({
   onManageChannel,
   onToggleMembers,
 }: ChannelScreenHeaderProps) {
+  const isMobile = useIsMobile();
+  const resolvedActionsVariant = isMobile ? "compact" : actionsVariant;
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
     activeDmHeaderParticipants.length > 1;
@@ -90,6 +94,7 @@ export function ChannelScreenHeader({
         terminalPanel.mode === "closed" ? "Open Buzz Term" : "Hide Buzz Term"
       }
       onClick={toggleTerminalPanel}
+      className="hidden sm:inline-flex"
       size="icon"
       title="Buzz Term (⌘J)"
       type="button"
@@ -121,15 +126,16 @@ export function ChannelScreenHeader({
         onAddBotOpenChange={onAddBotOpenChange}
         onManageChannel={onManageChannel}
         onToggleMembers={onToggleMembers}
-        variant={actionsVariant}
+        variant={resolvedActionsVariant}
       />
     )
   ) : (
     headerEndActions
   );
   const actions =
-    terminalButton || channelActions ? (
+    activeChannel || terminalButton || channelActions ? (
       <div className="flex items-center gap-1">
+        {activeChannel ? <ChannelViewModeToggle /> : null}
         {terminalButton}
         {channelActions}
       </div>

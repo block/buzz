@@ -16,6 +16,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/canvas_board.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
@@ -13951,6 +13952,99 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+  });
+
+  group('mobile canvas board', () {
+    testWidgets('Dispatch defaults to Board and persists an explicit view', (
+      tester,
+    ) async {
+      final dispatch = _testChannel.copyWith(name: 'Dispatch');
+      await tester.pumpWidget(
+        _buildTestable(
+          channel: dispatch,
+          messages: const [],
+          canvasContent: '# Dispatch\n\n## Start here\n\nBring one seed.',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-canvas-board')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('channel-view-mode-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.ancestor(
+          of: find.text('Stream'),
+          matching: find.byType(CheckedPopupMenuItem<ChannelCanvasView>),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('channel-canvas-board')), findsNothing);
+      expect(
+        _testPrefs.getString(channelCanvasViewPreferenceKey(_channelId)),
+        ChannelCanvasView.stream.name,
+      );
+    });
+
+    testWidgets('a routed message intent temporarily forces Stream', (
+      tester,
+    ) async {
+      await _testPrefs.setString(
+        channelCanvasViewPreferenceKey(_channelId),
+        ChannelCanvasView.board.name,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          canvasContent: '# General\n\n## Start here\n\nBring one seed.',
+          initialMessageId: 'missing-message',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('channel-canvas-board')), findsNothing);
+      expect(
+        _testPrefs.getString(channelCanvasViewPreferenceKey(_channelId)),
+        ChannelCanvasView.board.name,
+      );
+    });
+
+    testWidgets('a linked card opens the native thread page', (tester) async {
+      final threadId = 'a' * 64;
+      final root = _textMsg(
+        id: threadId,
+        pubkey: 'alice',
+        content: 'Card work room',
+      );
+      await _testPrefs.setString(
+        channelCanvasViewPreferenceKey(_channelId),
+        ChannelCanvasView.board.name,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          canvasContent:
+              '# General\n\n## Talk here\n\n'
+              '<!-- buzz-board-card {"id":"talk","type":"conversation","status":"doing","thread":"$threadId"} -->\n\n'
+              'Keep this decision together.',
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          threadReplies: {threadId: const []},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-canvas-thread-talk')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
     });
   });
 }

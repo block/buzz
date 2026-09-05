@@ -370,6 +370,12 @@ type E2eConfig = {
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
     feedReadError?: string;
+    canvas?: {
+      author?: string | null;
+      content: string | null;
+      eventId?: string | null;
+      updatedAt?: number | null;
+    };
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
@@ -1545,6 +1551,7 @@ declare global {
       channelId: string;
       channelType?: "stream" | "forum" | "dm";
       description?: string;
+      name?: string;
       removeMemberPubkey?: string;
     }) => void;
     /**
@@ -11655,6 +11662,7 @@ export function maybeInstallE2eTauriMocks() {
     channelId,
     channelType,
     description,
+    name,
     removeMemberPubkey,
   }) => {
     const channel = mockChannels.find((ch) => ch.id === channelId);
@@ -11664,6 +11672,9 @@ export function maybeInstallE2eTauriMocks() {
     }
     if (description !== undefined) {
       channel.description = description;
+    }
+    if (name !== undefined) {
+      channel.name = name;
     }
     if (removeMemberPubkey !== undefined) {
       channel.members = channel.members.filter(
@@ -14743,15 +14754,42 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
-      case "set_canvas":
-        return { ok: true, event_id: mockEventId() };
+      case "set_canvas": {
+        const input = payload as {
+          content: string;
+          enforceRevision?: boolean;
+          expectedEventId?: string | null;
+        };
+        const currentEventId = activeConfig?.mock?.canvas?.eventId ?? null;
+        if (input.enforceRevision && input.expectedEventId !== currentEventId) {
+          throw new Error(
+            "Canvas revision conflict: the board changed before this save.",
+          );
+        }
+        const eventId = mockEventId();
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.canvas = {
+            author: identity?.pubkey ?? null,
+            content: input.content,
+            eventId,
+            updatedAt: Math.floor(Date.now() / 1_000),
+          };
+        }
+        return { ok: true, event_id: eventId };
+      }
       case "get_canvas": {
         const canvasReadError = activeConfig?.mock?.canvasReadError;
         if (canvasReadError) {
           throw new Error(canvasReadError);
         }
-        // Return the no-canvas success shape — content null means no canvas set.
-        return { content: null, updated_at: null, author: null };
+        const canvas = activeConfig?.mock?.canvas;
+        return {
+          content: canvas?.content ?? null,
+          event_id: canvas?.eventId ?? null,
+          updated_at: canvas?.updatedAt ?? null,
+          author: canvas?.author ?? null,
+        };
       }
       // ── Local-save archive ──────────────────────────────────────────────
       // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests

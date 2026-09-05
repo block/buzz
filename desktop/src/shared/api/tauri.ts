@@ -235,6 +235,7 @@ type RawListRelayMembersResponse = {
 
 type RawCanvasResponse = {
   content: string | null;
+  event_id: string | null;
   updated_at: number | null;
   author: string | null;
 };
@@ -406,6 +407,7 @@ export async function getCanvas(channelId: string): Promise<CanvasResponse> {
   });
   return {
     content: response.content,
+    eventId: response.event_id ?? null,
     // Normalize absent keys to null: ensureWelcomeCanvas treats null as
     // "no canvas yet", and `undefined !== null` would make every fresh
     // channel look already-seeded.
@@ -420,6 +422,8 @@ export async function setCanvas(
   const response = await invokeTauri<RawSetCanvasResult>("set_canvas", {
     channelId: input.channelId,
     content: input.content,
+    enforceRevision: input.enforceRevision ?? false,
+    expectedEventId: input.expectedEventId ?? null,
   });
   return {
     ok: response.ok,

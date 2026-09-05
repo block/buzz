@@ -46,6 +46,7 @@ function ForumPostRouteComponent() {
         autoSendDraftKey={null}
         channelId={channelId}
         searchHighlight={searchHighlight}
+        hasStreamRouteIntent={false}
         selectedPostId={postId}
         targetMessageId={null}
         targetReplyId={search.replyId ?? null}
