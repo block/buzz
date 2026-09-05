@@ -113,7 +113,8 @@ List<MentionCandidate> buildMentionCandidates({
         avatarUrl: profile?.avatarUrl,
         isAgent: true,
         isMember: false,
-        ownerPubkey: ownerByAgentPubkey[pk] ?? profile?.ownerPubkey,
+        ownerPubkey:
+            agent.ownerPubkey ?? ownerByAgentPubkey[pk] ?? profile?.ownerPubkey,
       ),
     );
   }
