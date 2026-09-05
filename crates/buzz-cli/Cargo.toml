@@ -23,7 +23,7 @@ clap = { version = "4", features = ["derive", "env"] }
 reqwest = { workspace = true, features = ["json"] }
 
 # Async runtime — tokio macros + multi-thread for reqwest
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 
 # Serialization — JSON body building and response passthrough
 serde = { workspace = true }
