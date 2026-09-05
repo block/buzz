@@ -935,11 +935,21 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
     let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
     let values = filter.generic_tags.get(&h_tag)?;
-    if values.len() != 1 {
-        return None;
+    let mut found: Option<uuid::Uuid> = None;
+    for val in values {
+        if let Ok(id) = val.parse::<uuid::Uuid>() {
+            match found {
+                Some(existing) if existing != id => {
+                    // Multiple distinct channel UUIDs — fall back to global so
+                    // apply_access_scope_to_query uses the caller's accessible
+                    // channel list instead of pinning to one arbitrary UUID.
+                    return None;
+                }
+                _ => found = Some(id),
+            }
+        }
     }
-
-    values.iter().next()?.parse::<uuid::Uuid>().ok()
+    found
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -2039,6 +2049,45 @@ mod tests {
             filter_with_channel(channel_id),
         ];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    #[test]
+    fn test_extract_channel_id_from_filter_single_channel() {
+        let channel_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            extract_channel_id_from_filter(&filter_with_channel(channel_id)),
+            Some(channel_id),
+        );
+    }
+
+    #[test]
+    fn test_extract_channel_id_from_filter_multi_value_returns_none() {
+        // A filter with multiple distinct #h values must return None so the
+        // caller falls back to the accessible-channel list instead of pinning
+        // to the lexicographically smallest UUID (the BTreeSet iteration order).
+        let channel_a = uuid::Uuid::from_u128(0xaaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa);
+        let channel_b = uuid::Uuid::from_u128(0xbbbb_bbbb_bbbb_bbbb_bbbb_bbbb_bbbb_bbbb);
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        let filter = Filter::new()
+            .custom_tag(h_tag, channel_a.to_string())
+            .custom_tag(h_tag, channel_b.to_string());
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
+    }
+
+    #[test]
+    fn test_extract_channel_id_from_filter_no_channel_returns_none() {
+        assert_eq!(extract_channel_id_from_filter(&Filter::new()), None);
+    }
+
+    #[test]
+    fn test_extract_channel_id_from_filter_duplicate_channel_returns_one() {
+        // The same UUID repeated in #h should still resolve to that channel.
+        let channel_id = uuid::Uuid::new_v4();
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        let filter = Filter::new()
+            .custom_tag(h_tag, channel_id.to_string())
+            .custom_tag(h_tag, channel_id.to_string());
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel_id));
     }
 
     #[test]
