@@ -287,6 +287,8 @@ check existing reply handlers for the pattern.
 (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`) are auto-injected
 by the ACP harness into managed agent subprocesses. In development, set
 `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` in your environment manually.
+Prefer `--private-key-file` / `--private-key-stdin` over `--private-key` on
+argv (shell history / `ps` leak — #4032).
 
 ### Building the CLI
 
