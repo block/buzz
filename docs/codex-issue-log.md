@@ -221,3 +221,11 @@
 - 处理：Windows 进程分类同时识别已验证 Desktop 进程树中的 `codex.exe app-server` 后代，并保留旧 Appx backend 路径匹配；监听 shared URL 的 backend 继续排除，独立 CLI app-server 也不会因路径相似被误判。这样 Start/Restart 会在创建 Agent worker 前触发现有接管确认。
 - 验证：Tauri `codex_desktop` 定向测试 11/11 通过，覆盖 LocalAppData Desktop 子进程、旧 Appx backend、shared listener 与无关 CLI backend。随后构建并在 Xiaoxin 安装 `0.5.18-local.1`：新版准确显示 1 个私有 app-server，Connect 前弹出 `Close and reconnect`，且确认前没有启动 `buzz-acp`；确认后旧私有 PID 消失，Codex Desktop 重开并复用原 shared PID `2596`。临时 Agent 经 DM 返回精确文本 `BUZZ_LOCK_LIVE_OK`，日志记录 5 秒后 lazy worker 回收且没有 writer conflict；Disconnect 后 harness 退出，Desktop 与 shared runtime 保持运行。
 - 版本/提交：PR 分支 `codex/detect-versioned-codex-desktop`；Xiaoxin 验收安装包基于原始测试提交 `9760ec38`，版本 `0.5.18-local.1_9760ec382776`。
+
+## 2026-09-05：Windows 退出登录被长期 shared app-server 日志锁阻塞
+
+- 现象：`59.77.33.59:6000` 的 Buzz 在用户点击退出登录并重启后挂住，持续保留 `.xyz.chemyibinjiang.buzz.codexlab.reset-pending`；stderr 报错为无法将整个 app-data 目录重命名为 `.reset-trash`，Windows 返回 `Access is denied (os error 5)`。
+- 定位：退出登录已经正确写入 reset sentinel，问题发生在下一次启动的两阶段清理。Buzz 有意让 Codex shared app-server 跨窗口退出继续运行，但旧版把该进程的 stdout/stderr 放在 app-data 下；现场独占锁探针确认只有 `agents/logs/codex-shared-runtime.stdout.log` 和 `codex-shared-runtime.stderr.log` 被长期 app-server 占用，因此 Windows 不允许重命名其父目录。shared backend 的生命周期策略正确，错误在于把电脑级服务日志放进了身份级 reset 边界。
+- 处理：Windows 新启动的 shared runtime 日志迁移到 app-data 同级的隐藏目录，避免长期进程锁住退出登录清理目标；错误诊断仍回退读取旧日志。为兼容已经运行旧 backend 的机器，整目录原子重命名失败时仅允许保留上述两个精确日志路径，其余数据先递归移动到 rollback trash，keychain 删除成功后清除，失败则完整恢复；任何其他锁定文件仍会失败并回滚。
+- 验证：新增 Windows 独占句柄回归测试，确认旧 shared-runtime 日志保持打开时身份数据仍被删除、sentinel 清除且 backend 无需退出；另一个测试确认 keychain 失败会恢复设置并保留 sentinel。reset 聚焦测试 16/16、Windows shared-runtime 聚焦测试 4/4 通过。
+- 版本/提交：分支 `codex/windows-signout-shared-runtime-logs`，待远端现场验收与提交。

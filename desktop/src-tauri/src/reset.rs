@@ -164,6 +164,177 @@ fn rename_to_trash(src: &Path) -> Result<PathBuf, String> {
     Ok(dst)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppDataResetMode {
+    Absent,
+    Renamed,
+    #[cfg(windows)]
+    StagedWithSharedRuntimeLogs,
+}
+
+#[cfg(windows)]
+const SHARED_RUNTIME_LOGS: [&str; 2] = [
+    "agents/logs/codex-shared-runtime.stdout.log",
+    "agents/logs/codex-shared-runtime.stderr.log",
+];
+
+#[cfg(windows)]
+fn is_preserved_shared_runtime_log(relative: &Path) -> bool {
+    SHARED_RUNTIME_LOGS
+        .iter()
+        .any(|path| relative == Path::new(path))
+}
+
+#[cfg(windows)]
+fn contains_preserved_shared_runtime_log(relative: &Path) -> bool {
+    SHARED_RUNTIME_LOGS
+        .iter()
+        .any(|path| Path::new(path).starts_with(relative))
+}
+
+/// Move resettable app data into the rollback trash while leaving only the
+/// two legacy shared-runtime logs that an intentionally detached Codex process
+/// may still hold open on Windows.
+#[cfg(windows)]
+fn stage_tree_except_shared_runtime_logs(
+    root: &Path,
+    trash: &Path,
+    relative: &Path,
+) -> Result<(), String> {
+    let current = root.join(relative);
+    let entries = std::fs::read_dir(&current)
+        .map_err(|e| format!("read reset directory {}: {e}", current.display()))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read reset entry {}: {e}", current.display()))?;
+        let child_relative = relative.join(entry.file_name());
+        if is_preserved_shared_runtime_log(&child_relative) {
+            continue;
+        }
+
+        let source = entry.path();
+        if entry
+            .file_type()
+            .map_err(|e| format!("read reset entry type {}: {e}", source.display()))?
+            .is_dir()
+            && contains_preserved_shared_runtime_log(&child_relative)
+        {
+            stage_tree_except_shared_runtime_logs(root, trash, &child_relative)?;
+            continue;
+        }
+
+        let destination = trash.join(&child_relative);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create reset trash {}: {e}", parent.display()))?;
+        }
+        std::fs::rename(&source, &destination).map_err(|e| {
+            format!(
+                "stage reset entry {} -> {}: {e}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restore_staged_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(destination)
+        .map_err(|e| format!("create restore directory {}: {e}", destination.display()))?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|e| format!("read restore directory {}: {e}", source.display()))?
+    {
+        let entry = entry.map_err(|e| format!("read restore entry {}: {e}", source.display()))?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(|e| format!("read restore entry type {}: {e}", from.display()))?
+            .is_dir()
+            && to.is_dir()
+        {
+            restore_staged_tree(&from, &to)?;
+        } else {
+            std::fs::rename(&from, &to).map_err(|e| {
+                format!(
+                    "restore reset entry {} -> {}: {e}",
+                    from.display(),
+                    to.display()
+                )
+            })?;
+        }
+    }
+    std::fs::remove_dir(source)
+        .map_err(|e| format!("remove restored directory {}: {e}", source.display()))
+}
+
+#[cfg(windows)]
+fn contains_only_shared_runtime_logs(root: &Path, relative: &Path) -> bool {
+    let current = root.join(relative);
+    let Ok(entries) = std::fs::read_dir(&current) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let child_relative = relative.join(entry.file_name());
+        let Ok(file_type) = entry.file_type() else {
+            return false;
+        };
+        if file_type.is_dir() {
+            if !contains_preserved_shared_runtime_log(&child_relative)
+                || !contains_only_shared_runtime_logs(root, &child_relative)
+            {
+                return false;
+            }
+        } else if !is_preserved_shared_runtime_log(&child_relative) {
+            return false;
+        }
+    }
+    true
+}
+
+fn prepare_app_data_reset(app_data_dir: &Path, trash: &Path) -> Result<AppDataResetMode, String> {
+    if !app_data_dir.exists() {
+        return Ok(AppDataResetMode::Absent);
+    }
+    match rename_to_trash(app_data_dir) {
+        Ok(_) => Ok(AppDataResetMode::Renamed),
+        Err(rename_error) => {
+            #[cfg(windows)]
+            {
+                if trash.exists() {
+                    std::fs::remove_dir_all(trash).map_err(|e| {
+                        format!("{rename_error}; clear reset trash {}: {e}", trash.display())
+                    })?;
+                }
+                if let Err(stage_error) =
+                    stage_tree_except_shared_runtime_logs(app_data_dir, trash, Path::new(""))
+                {
+                    let restore_error = restore_staged_tree(trash, app_data_dir).err();
+                    return Err(match restore_error {
+                        Some(restore_error) => format!(
+                            "{rename_error}; {stage_error}; rollback failed: {restore_error}"
+                        ),
+                        None => format!("{rename_error}; {stage_error}"),
+                    });
+                }
+                return Ok(AppDataResetMode::StagedWithSharedRuntimeLogs);
+            }
+            #[cfg(not(windows))]
+            {
+                Err(rename_error)
+            }
+        }
+    }
+}
+
 /// Core wipe logic — separated for testing.
 pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcome {
     let app_data_dir = ctx.app_data_dir;
@@ -171,15 +342,16 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
     // ── Step 1: rename app-data dir (atomic — sentinel survives the parent) ──
     let trash_app = trash_path(app_data_dir);
 
-    if app_data_dir.exists() {
-        if let Err(e) = rename_to_trash(app_data_dir) {
+    let app_data_reset_mode = match prepare_app_data_reset(app_data_dir, &trash_app) {
+        Ok(mode) => mode,
+        Err(e) => {
             eprintln!("buzz-desktop reset: {e}");
             return ResetOutcome {
                 completed: false,
                 failed: true,
             };
         }
-    }
+    };
 
     // ── Step 1b: rename legacy App Support dir (sprout import source) ────────
     let trash_legacy: Option<PathBuf> = ctx.legacy_app_data_dir.as_ref().map(|l| trash_path(l));
@@ -227,8 +399,15 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
         eprintln!("buzz-desktop reset: keychain delete: {e}");
         // Keychain failure is fatal: keep sentinel, signal failure.
         // Restore all three dirs so the app returns to a coherent pre-reset state.
-        if trash_app.exists() {
-            let _ = std::fs::rename(&trash_app, app_data_dir);
+        match app_data_reset_mode {
+            AppDataResetMode::Renamed if trash_app.exists() => {
+                let _ = std::fs::rename(&trash_app, app_data_dir);
+            }
+            #[cfg(windows)]
+            AppDataResetMode::StagedWithSharedRuntimeLogs => {
+                let _ = restore_staged_tree(&trash_app, app_data_dir);
+            }
+            _ => {}
         }
         if let Some(ref legacy) = ctx.legacy_app_data_dir {
             if let Some(ref tl) = trash_legacy {
@@ -266,7 +445,13 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
 
     // ── Step 6: verify ────────────────────────────────────────────────────────
     let keychain_ok = ctx.keychain.verify_fully_wiped();
-    let app_data_gone = !app_data_dir.exists();
+    let app_data_gone = match app_data_reset_mode {
+        AppDataResetMode::Absent | AppDataResetMode::Renamed => !app_data_dir.exists(),
+        #[cfg(windows)]
+        AppDataResetMode::StagedWithSharedRuntimeLogs => {
+            app_data_dir.exists() && contains_only_shared_runtime_logs(app_data_dir, Path::new(""))
+        }
+    };
     let legacy_gone = ctx
         .legacy_app_data_dir
         .as_ref()
@@ -863,5 +1048,75 @@ mod tests {
         let trash_legacy = app_support.join("xyz.block.sprout.app.reset-trash");
         assert!(!trash_app.exists(), "app trash must be cleaned");
         assert!(!trash_legacy.exists(), "legacy trash must be cleaned");
+    }
+
+    #[cfg(windows)]
+    fn open_locked_shared_runtime_logs(app_data: &Path) -> (std::fs::File, std::fs::File) {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let logs = app_data.join("agents").join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let open_locked = |name: &str| {
+            let path = logs.join(name);
+            std::fs::write(&path, b"runtime log").unwrap();
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(path)
+                .unwrap()
+        };
+        (
+            open_locked("codex-shared-runtime.stdout.log"),
+            open_locked("codex-shared-runtime.stderr.log"),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_locked_shared_runtime_logs_do_not_block_sign_out_reset() {
+        let tmp = TempDir::new().unwrap();
+        let app_data = make_app_data(&tmp);
+        let sensitive = app_data.join("identity.json");
+        std::fs::write(&sensitive, b"private identity").unwrap();
+        let (_stdout_lock, _stderr_lock) = open_locked_shared_runtime_logs(&app_data);
+        write_sentinel(&app_data).unwrap();
+
+        let kc = FakeKeychain::ok();
+        let outcome = run_boot_reset_with_keychain(make_ctx(&app_data, &kc, false));
+
+        assert!(
+            outcome.completed,
+            "reset should tolerate the two known logs"
+        );
+        assert!(!outcome.failed);
+        assert!(!sensitive.exists(), "identity data must be removed");
+        assert!(app_data
+            .join("agents/logs/codex-shared-runtime.stdout.log")
+            .exists());
+        assert!(app_data
+            .join("agents/logs/codex-shared-runtime.stderr.log")
+            .exists());
+        assert!(!sentinel_path(&app_data).exists());
+        assert!(!trash_path(&app_data).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_locked_shared_runtime_logs_preserve_rollback_on_keychain_failure() {
+        let tmp = TempDir::new().unwrap();
+        let app_data = make_app_data(&tmp);
+        let settings = app_data.join("settings.json");
+        std::fs::write(&settings, b"user settings").unwrap();
+        let (_stdout_lock, _stderr_lock) = open_locked_shared_runtime_logs(&app_data);
+        write_sentinel(&app_data).unwrap();
+
+        let kc = FakeKeychain::fail("keychain locked");
+        let outcome = run_boot_reset_with_keychain(make_ctx(&app_data, &kc, false));
+
+        assert!(outcome.failed);
+        assert!(!outcome.completed);
+        assert_eq!(std::fs::read(&settings).unwrap(), b"user settings");
+        assert!(sentinel_path(&app_data).exists());
+        assert!(!trash_path(&app_data).exists());
     }
 }

@@ -16,7 +16,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::codex_tasks::codex_shared_app_server_url;
@@ -463,13 +463,50 @@ fn append_shared_runtime_log_detail(error: String, log_path: &Path) -> String {
     )
 }
 
+#[cfg(windows)]
+fn shared_runtime_logs_dir_for_app_data(app_data_dir: &Path) -> PathBuf {
+    let bundle_id = app_data_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("buzz");
+    let directory_name = format!(".{bundle_id}.shared-runtime-logs");
+    app_data_dir
+        .parent()
+        .map(|parent| parent.join(&directory_name))
+        .unwrap_or_else(|| PathBuf::from(directory_name))
+}
+
+fn shared_runtime_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("failed to resolve app data dir: {error}"))?;
+        Ok(shared_runtime_logs_dir_for_app_data(&app_data_dir))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(managed_agents_base_dir(app)?.join("logs"))
+    }
+}
+
 fn shared_runtime_failure_detail(app: &AppHandle, error: String) -> String {
-    let Ok(base_dir) = managed_agents_base_dir(app) else {
+    if let Ok(logs_dir) = shared_runtime_logs_dir(app) {
+        let detail = append_shared_runtime_log_detail(
+            error.clone(),
+            &logs_dir.join("codex-shared-runtime.stderr.log"),
+        );
+        if detail != error {
+            return detail;
+        }
+    }
+    let Ok(legacy_base_dir) = managed_agents_base_dir(app) else {
         return error;
     };
     append_shared_runtime_log_detail(
         error,
-        &base_dir
+        &legacy_base_dir
             .join("logs")
             .join("codex-shared-runtime.stderr.log"),
     )
@@ -860,7 +897,7 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<u32, String>
     {
         use std::os::windows::process::CommandExt;
 
-        let logs_dir = managed_agents_base_dir(app)?.join("logs");
+        let logs_dir = shared_runtime_logs_dir(app)?;
         fs::create_dir_all(&logs_dir)
             .map_err(|error| format!("failed to create {}: {error}", logs_dir.display()))?;
         let stdout_log = logs_dir.join("codex-shared-runtime.stdout.log");
@@ -945,7 +982,7 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<u32, String>
 
     #[cfg(not(windows))]
     {
-        let logs_dir = managed_agents_base_dir(app)?.join("logs");
+        let logs_dir = shared_runtime_logs_dir(app)?;
         fs::create_dir_all(&logs_dir)
             .map_err(|error| format!("failed to create {}: {error}", logs_dir.display()))?;
         let stdout = fs::OpenOptions::new()
@@ -1571,6 +1608,22 @@ mod tests {
         let flags = windows_shared_runtime_creation_flags();
         assert_ne!(flags & WINDOWS_CREATE_NO_WINDOW, 0);
         assert_ne!(flags & WINDOWS_CREATE_NEW_PROCESS_GROUP, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shared_runtime_logs_live_outside_resettable_app_data() {
+        let root = tempfile::tempdir().unwrap();
+        let app_data = root.path().join("xyz.chemyibinjiang.buzz.codexlab");
+
+        let logs = shared_runtime_logs_dir_for_app_data(&app_data);
+
+        assert_eq!(
+            logs,
+            root.path()
+                .join(".xyz.chemyibinjiang.buzz.codexlab.shared-runtime-logs")
+        );
+        assert!(!logs.starts_with(&app_data));
     }
 
     #[test]
