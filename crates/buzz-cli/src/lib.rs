@@ -380,7 +380,7 @@ pub enum MessagesCmd {
         /// Channel UUID (from 'buzz channels list')
         #[arg(long)]
         channel: String,
-        /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
+        /// Message text — supports @mentions and markdown. Use '-' to read from stdin. `@everyone` or `@channel` notifies every current channel member (except you).
         #[arg(long)]
         content: String,
         /// Nostr event kind (default: channel default)
