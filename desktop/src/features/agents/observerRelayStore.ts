@@ -18,6 +18,11 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
+import {
+  EMPTY_AGENT_CAPABILITY_EVIDENCE,
+  type AgentCapabilityEvidence,
+  reduceAgentCapabilityEvidence,
+} from "@/features/agents/lib/capabilityManifest";
 import type {
   ConnectionState,
   ObserverEvent,
@@ -46,12 +51,14 @@ export type ObserverSnapshot = {
   connectionState: ConnectionState;
   errorMessage: string | null;
   events: ObserverEvent[];
+  capabilityEvidence: AgentCapabilityEvidence;
 };
 
 const IDLE_SNAPSHOT: ObserverSnapshot = {
   connectionState: "idle",
   errorMessage: null,
   events: [],
+  capabilityEvidence: EMPTY_AGENT_CAPABILITY_EVIDENCE,
 };
 
 const EMPTY_EVENTS: ObserverEvent[] = [];
@@ -66,6 +73,7 @@ type AgentObserverStoreListener = (update?: AgentObserverStoreUpdate) => void;
 
 const listeners = new Set<AgentObserverStoreListener>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
+const capabilityEvidenceByAgent = new Map<string, AgentCapabilityEvidence>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
 
@@ -288,6 +296,15 @@ function appendAgentEvents(
     ? sorted.slice(sorted.length - OBSERVER_EVENTS_LOW_WATER)
     : sorted;
   eventsByAgent.set(key, final);
+  const currentEvidence =
+    capabilityEvidenceByAgent.get(key) ?? EMPTY_AGENT_CAPABILITY_EVIDENCE;
+  let nextEvidence = currentEvidence;
+  for (const ev of sortedAdded) {
+    nextEvidence = reduceAgentCapabilityEvidence(nextEvidence, ev);
+  }
+  if (nextEvidence !== currentEvidence) {
+    capabilityEvidenceByAgent.set(key, nextEvidence);
+  }
 
   // Record the newest event this trim discarded as the agent's eviction floor.
   // It is the entry just below the retained window; the floor only advances,
@@ -755,6 +772,8 @@ export function getAgentObserverSnapshot(
     connectionState,
     errorMessage,
     events: eventsByAgent.get(key) ?? [],
+    capabilityEvidence:
+      capabilityEvidenceByAgent.get(key) ?? EMPTY_AGENT_CAPABILITY_EVIDENCE,
   };
   snapshotByAgent.set(key, snapshot);
   return snapshot;
@@ -932,6 +951,7 @@ export function resetAgentObserverStore() {
   startPromise = null;
   eventProcessingQueue = Promise.resolve();
   eventsByAgent.clear();
+  capabilityEvidenceByAgent.clear();
   transcriptByAgent.clear();
   evictionFloorByAgent.clear();
   snapshotByAgent.clear();
