@@ -88,7 +88,7 @@ where
             .expect("fan-out frame cache covers every recipient subscription id");
         if !state
             .conn_manager
-            .send_to_text_bytes(conn_id, Arc::clone(frame))
+            .send_fanout_frame(conn_id, Arc::clone(frame))
         {
             drop_count += 1;
         }
@@ -2119,6 +2119,88 @@ mod tests {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
             }
             conn_id
+        }
+
+        /// Register a connection and hand back its channel receivers so tests
+        /// can observe what fan-out actually delivered.
+        fn register_conn_with_buffers(
+            state: &AppState,
+            data_buffer: usize,
+            ctrl_buffer: usize,
+        ) -> (
+            Uuid,
+            mpsc::Receiver<axum::extract::ws::Message>,
+            mpsc::Receiver<axum::extract::ws::Message>,
+            CancellationToken,
+            Arc<AtomicU8>,
+        ) {
+            let conn_id = Uuid::new_v4();
+            let (tx, rx) = mpsc::channel(data_buffer);
+            let (ctrl_tx, ctrl_rx) = mpsc::channel(ctrl_buffer);
+            let cancel = CancellationToken::new();
+            let backpressure_count = Arc::new(AtomicU8::new(0));
+            state.conn_manager.register(
+                conn_id,
+                tx,
+                ctrl_tx,
+                None,
+                cancel.clone(),
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                Arc::clone(&backpressure_count),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+            );
+            (conn_id, rx, ctrl_rx, cancel, backpressure_count)
+        }
+
+        #[tokio::test]
+        async fn send_fanout_frames_drop_signals_sync_required_on_ctrl() {
+            // End-to-end through the real fan-out path: `send_fanout_frames`
+            // → `ConnectionManager::send_fanout_frame`. With a 1-slot data
+            // buffer the second recipient frame for this connection drops.
+            let state = test_state().await;
+            let (conn_id, mut rx, mut ctrl_rx, cancel, backpressure_count) =
+                register_conn_with_buffers(&state, 1, 8);
+
+            let event_json = r#"{"id":"abc"}"#;
+            let frames = crate::handlers::event::fanout_frame_cache(["sub-a", "sub-b"], event_json);
+
+            let drop_count = crate::handlers::event::send_fanout_frames(
+                &state,
+                [(conn_id, "sub-a"), (conn_id, "sub-b")],
+                &frames,
+            );
+            assert_eq!(drop_count, 1, "second frame drops on the full buffer");
+
+            // Gap signal queued on the priority control channel, exact bytes.
+            match ctrl_rx.try_recv().expect("gap signal on ctrl channel") {
+                axum::extract::ws::Message::Text(text) => assert_eq!(
+                    text.to_string(),
+                    r#"["BUZZ_SYNC_REQUIRED","backpressure"]"#,
+                    "exact machine frame contract"
+                ),
+                other => panic!("expected BUZZ_SYNC_REQUIRED text frame, got {other:?}"),
+            }
+            assert!(ctrl_rx.try_recv().is_err(), "exactly one gap signal");
+
+            // Data channel holds exactly the one delivered EVENT frame.
+            match rx.try_recv().expect("delivered EVENT frame") {
+                axum::extract::ws::Message::Text(text) => assert_eq!(
+                    text.to_string(),
+                    format!(r#"["EVENT","sub-a",{event_json}]"#)
+                ),
+                other => panic!("expected EVENT frame, got {other:?}"),
+            }
+            assert!(rx.try_recv().is_err(), "dropped frame must not reach data");
+
+            assert_eq!(
+                backpressure_count.load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            assert!(
+                !cancel.is_cancelled(),
+                "below the grace limit the socket stays live once the signal is queued"
+            );
         }
 
         fn channel_event(channel_id: Option<Uuid>) -> StoredEvent {
