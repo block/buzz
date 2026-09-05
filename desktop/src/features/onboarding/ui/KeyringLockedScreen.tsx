@@ -22,8 +22,8 @@ export function KeyringLockedScreen() {
   }, []);
 
   const handleImport = React.useCallback(
-    async (nsec: string, password?: string) => {
-      const identity = await importIdentity(nsec, password);
+    async (nsec: string, password?: string, recoverySecret?: string) => {
+      const identity = await importIdentity(nsec, password, recoverySecret);
       // Update the identity query cache so useIdentityQuery observers see
       // locked: false. The bootedLocked latch in hooks.ts will then route
       // to RelaunchRequiredScreen via bootedLocked && !identityLocked.

@@ -114,8 +114,24 @@ pub fn decrypt_ncryptsec(input: &str, password: &str) -> Result<Keys, String> {
 
 /// Recover identity keys from either an encrypted NIP-49 backup or the raw
 /// nsec/hex formats accepted before encrypted imports were added.
+#[allow(dead_code)] // Compatibility wrapper retained for NIP-49-focused tests and callers.
 pub fn recover_keys_from_input(input: &str, password: Option<&str>) -> Result<Keys, String> {
+    recover_keys_from_input_with_recovery(input, password, None)
+}
+
+/// Recover identity keys from a 2SKD backup, NIP-49 backup, or raw key.
+pub fn recover_keys_from_input_with_recovery(
+    input: &str,
+    password: Option<&str>,
+    recovery_secret: Option<&str>,
+) -> Result<Keys, String> {
     let trimmed = input.trim();
+    if crate::two_skd::is_two_skd_backup(trimmed) {
+        let password = password.ok_or_else(|| "key backup requires a password".to_string())?;
+        let recovery_secret = recovery_secret
+            .ok_or_else(|| "2SKD key backup requires a recovery code".to_string())?;
+        return crate::two_skd::decrypt_backup(trimmed, password, recovery_secret);
+    }
     let is_ncryptsec = trimmed
         .get(..NCRYPTSEC_HRP.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(NCRYPTSEC_HRP));
@@ -172,6 +188,22 @@ pub fn write_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), 
 /// the destination already exists. After writing, the file is synced and its
 /// persisted bytes are reread before success is reported.
 pub fn write_portable_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), String> {
+    write_portable_secret_file_with_label(path, ncryptsec.as_bytes(), "backup file")
+}
+
+/// Write secret-bearing bytes to an exclusively created, owner-only file.
+///
+/// This supports portable non-text artifacts such as recovery-sheet PDFs while
+/// preserving the save-panel and reread guarantees used for key backups.
+pub fn write_portable_secret_file(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
+    write_portable_secret_file_with_label(path, contents, "recovery sheet")
+}
+
+fn write_portable_secret_file_with_label(
+    path: &std::path::Path,
+    contents: &[u8],
+    label: &str,
+) -> Result<(), String> {
     use std::io::Write;
 
     let mut options = std::fs::OpenOptions::new();
@@ -184,29 +216,36 @@ pub fn write_portable_backup_file(path: &std::path::Path, ncryptsec: &str) -> Re
 
     let mut file = options.open(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
-            "backup file already exists; choose a new filename so the existing backup stays safe"
-                .to_string()
+            format!("{label} already exists; choose a new filename so the existing copy stays safe")
         } else {
-            format!("create portable backup file: {error}")
+            format!("create portable {label}: {error}")
         }
     })?;
 
     let write_result = file
-        .write_all(ncryptsec.as_bytes())
-        .map_err(|e| format!("write portable backup file: {e}"))
+        .write_all(contents)
+        .map_err(|e| format!("write portable {label}: {e}"))
         .and_then(|()| {
             file.sync_all()
-                .map_err(|e| format!("sync portable backup file: {e}"))
+                .map_err(|e| format!("sync portable {label}: {e}"))
         });
     drop(file);
 
-    let result = write_result.and_then(|()| verify_backup_file(path, ncryptsec));
+    let result = write_result.and_then(|()| verify_secret_file(path, contents, label));
     if result.is_err() {
         // This function created the destination exclusively, so cleanup cannot
         // clobber a backup that existed before the save attempt.
         let _ = std::fs::remove_file(path);
     }
     result
+}
+
+fn verify_secret_file(path: &std::path::Path, contents: &[u8], label: &str) -> Result<(), String> {
+    let on_disk = std::fs::read(path).map_err(|e| format!("reread {label}: {e}"))?;
+    if on_disk != contents {
+        return Err(format!("{label} verification failed: on-disk bytes differ"));
+    }
+    Ok(())
 }
 
 fn verify_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), String> {

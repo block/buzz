@@ -213,11 +213,13 @@ project runs as a community on shared infrastructure, isolated from every other
 tenant, same sovereignty, someone else handles the ops — but it's a cost either
 way, in time or money. Worth knowing before you start.
 
-Key management is harder than "sign in with Google." Losing your private key means
-losing your identity. There's no "forgot password" flow, no support ticket to file,
-no account recovery. Hardware keys help. Good practices help. But it's a real
-tradeoff and you should go in knowing it. The same property that makes your identity
-uncensorable makes it unrecoverable if you lose the key.
+Key management is harder than "sign in with Google." Without a backup, losing your
+private key means losing your identity. Buzz can create an optional 2SKD recovery
+kit: an encrypted backup plus a separately held random recovery code, with the
+user's password as the third required input. Buzz cannot reset the password or
+recreate the recovery code, so this is still self-custody rather than a support
+ticket recovery flow. Hardware keys help. Good practices help. But it remains a
+real tradeoff, and you should go in knowing it.
 
 The ecosystem is young. The tooling is good and getting better, but it's not a
 decade of polish. Some things will feel rough. Some integrations won't exist yet.
