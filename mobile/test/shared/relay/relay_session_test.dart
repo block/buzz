@@ -8,6 +8,8 @@ import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -1525,6 +1527,164 @@ void main() {
       isFalse,
       reason: 'only `rate-limited:` rejections signal back-pressure',
     );
+  });
+
+  test('equal session states compare equal', () {
+    // Built through a non-const path on purpose: identical const instances are
+    // canonicalized to one object, so a const pair would pass on identity even
+    // with no operator== at all.
+    SessionState reconnecting(int attempt) => SessionState(
+      status: SessionStatus.reconnecting,
+      reconnectAttempt: 0 + attempt,
+    );
+
+    final a = reconnecting(0);
+    final b = reconnecting(0);
+
+    expect(identical(a, b), isFalse);
+    expect(a, b);
+    expect(a.hashCode, b.hashCode);
+    expect(a, isNot(reconnecting(1)));
+    expect(
+      a,
+      isNot(SessionState(status: SessionStatus.connected, reconnectAttempt: 0)),
+    );
+  });
+
+  test('a reconnect attempt that changes nothing does not notify', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(
+            baseUrl: 'https://relay.example',
+            nsec: keychain.nsec,
+          ),
+        ),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+
+    final observed = <SessionState>[];
+    final subscription = container.listen(
+      relaySessionProvider,
+      (_, next) => observed.add(next),
+    );
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+
+    sockets.last.connectSuccessfully();
+    sockets.last.disconnectWith(Exception('connection lost'));
+    expect(session.state.status, SessionStatus.reconnecting);
+    expect(session.state.reconnectAttempt, 1);
+    final settled = observed.length;
+    final socketsBefore = sockets.length;
+
+    // The backoff timer fires _connect, which re-emits reconnecting at the same
+    // attempt: a distinct object carrying identical values. Watchers must not
+    // see it, or every reconnect rebuilds all 25 subtrees that watch this.
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+
+    expect(sockets, hasLength(socketsBefore + 1));
+    expect(session.state.status, SessionStatus.reconnecting);
+    expect(session.state.reconnectAttempt, 1);
+    expect(observed, hasLength(settled));
+
+    // A real reconnect still increments, and still notifies.
+    sockets.last.disconnectWith(Exception('connection lost'));
+    expect(session.state.reconnectAttempt, 2);
+    expect(observed, hasLength(settled + 1));
+  });
+
+  test('an unchanged relay config does not replace the socket', () async {
+    // The production loop this pins. RelayConfigNotifier rebuilds whenever the
+    // active community re-emits, and reservePushLeaseGeneration saves the
+    // community on every publish attempt. Without RelayConfig value equality
+    // each rebuild produced a new-but-identical config, and
+    // RelaySessionNotifier.build() disposes its socket and reconnects — so the
+    // publish tore down the very session it was publishing over.
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    var relayUrl = 'https://relay.example';
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+        activeCommunityProvider.overrideWith(
+          (ref) async => Community(
+            id: 'community-1',
+            name: 'Buzz',
+            relayUrl: relayUrl,
+            nsec: keychain.nsec,
+            addedAt: DateTime.utc(2026, 8, 5),
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await container.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(1));
+
+    // Rebuild the config from an unchanged community: no new socket.
+    container.invalidate(activeCommunityProvider);
+    await container.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(1));
+
+    // A genuine relay change must still reconnect.
+    relayUrl = 'https://other.example';
+    container.invalidate(activeCommunityProvider);
+    await container.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(2));
   });
 }
 

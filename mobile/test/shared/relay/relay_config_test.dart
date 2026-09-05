@@ -64,4 +64,40 @@ void main() {
       expect(config.wsUrl, 'wss://relay.example.com:8443');
     });
   });
+
+  group('RelayConfig value equality', () {
+    test('configs with the same origin and nsec compare equal', () {
+      final a = RelayConfig(baseUrl: 'https://relay.example', nsec: 'nsec1x');
+      final b = RelayConfig(baseUrl: 'https://relay.example', nsec: 'nsec1x');
+
+      expect(identical(a, b), isFalse);
+      expect(a, b);
+      expect(a.hashCode, b.hashCode);
+    });
+
+    test('a different origin or nsec is not equal', () {
+      final a = RelayConfig(baseUrl: 'https://relay.example', nsec: 'nsec1x');
+
+      expect(
+        a,
+        isNot(RelayConfig(baseUrl: 'https://other.example', nsec: 'nsec1x')),
+      );
+      expect(
+        a,
+        isNot(RelayConfig(baseUrl: 'https://relay.example', nsec: 'nsec1y')),
+      );
+      expect(a, isNot(RelayConfig(baseUrl: 'https://relay.example')));
+    });
+
+    test('equality compares the stored origin, not the canonical one', () {
+      // baseUrl folds wss:// to https://. Two configs that canonicalize alike
+      // but were stored differently must stay distinct, because storedOrigin
+      // keys identity-scoped preferences.
+      final stored = RelayConfig(baseUrl: 'wss://relay.example');
+      final canonical = RelayConfig(baseUrl: 'https://relay.example');
+
+      expect(stored.baseUrl, canonical.baseUrl);
+      expect(stored, isNot(canonical));
+    });
+  });
 }
