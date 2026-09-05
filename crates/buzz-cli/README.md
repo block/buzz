@@ -168,6 +168,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `repos` | `create` | Announce a git repository (NIP-34) |
 | | `get` | Get a repository announcement |
 | | `list` | List repository announcements |
+| | `delete` | Delete one of your repository announcements (verified tombstone) |
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |

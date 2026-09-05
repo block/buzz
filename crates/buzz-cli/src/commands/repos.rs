@@ -2,6 +2,7 @@ use buzz_core::{
     git_perms::{parse_protection_tag, parse_protection_tags, RefPattern},
     kind::KIND_GIT_REPO_ANNOUNCEMENT,
 };
+use buzz_sdk::build_delete_addressable;
 use nostr::{Event, EventBuilder, Tag, Timestamp};
 
 use crate::client::BuzzClient;
@@ -341,6 +342,47 @@ async fn current_repo(client: &BuzzClient, repo_id: &str) -> Result<Event, CliEr
         })
 }
 
+fn build_repo_delete(
+    existing: &Event,
+    pubkey_hex: &str,
+    relay_compatible_now: Timestamp,
+) -> Result<EventBuilder, CliError> {
+    let repo_id = repo_id_from_event(existing)?;
+    let after_head = existing
+        .created_at
+        .as_secs()
+        .checked_add(1)
+        .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    // Replacement events must dominate the observed head, but the relay also
+    // rejects timestamps outside its acceptance window. Use wall clock only as
+    // the lower bound; the post-submit readback remains the concurrency oracle.
+    let next_created_at = after_head.max(relay_compatible_now.as_secs());
+    build_delete_addressable(KIND_GIT_REPO_ANNOUNCEMENT, pubkey_hex, repo_id)
+        .map_err(|error| CliError::Other(format!("failed to build repository delete: {error}")))
+        .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
+}
+
+/// Delete the current identity's repository announcement and verify the head is absent.
+pub async fn cmd_delete_repo(client: &BuzzClient, repo_id: &str) -> Result<(), CliError> {
+    let head = current_repo(client, repo_id).await?;
+    let pubkey_hex = client.keys().public_key().to_hex();
+    let tombstone = build_repo_delete(&head, &pubkey_hex, Timestamp::now())?;
+    let event = client.sign_event(tombstone)?;
+    let raw = client.submit_event(event).await?;
+    parse_write_response(&raw, "repository delete was dominated; a newer head exists")?;
+    if let Some(survivor) = fetch_own_repo_announcement(client, repo_id).await? {
+        return Err(CliError::Conflict(format!(
+            "repository {repo_id:?} still exists (head at {}); a concurrent write raced the delete",
+            survivor.created_at.as_secs()
+        )));
+    }
+    println!(
+        "{}",
+        serde_json::json!({ "deleted": repo_id, "status": "ok" })
+    );
+    Ok(())
+}
+
 async fn cmd_protect_list(client: &BuzzClient, repo_id: &str) -> Result<(), CliError> {
     let event = current_repo(client, repo_id).await?;
     println!("{}", protection_rules_json(&event)?);
@@ -441,6 +483,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         }
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
+        ReposCmd::Delete { id } => cmd_delete_repo(client, &id).await,
         ReposCmd::Bind { id, channel } => cmd_bind_repo(client, &id, &channel).await,
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
@@ -475,9 +518,44 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     use super::{
-        build_create_announcement, build_protection_tag, build_updated_repo_announcement,
-        protection_rules_json, validate_write_response, RepoChange,
+        build_create_announcement, build_protection_tag, build_repo_delete,
+        build_updated_repo_announcement, protection_rules_json, validate_write_response,
+        RepoChange,
     };
+
+    #[test]
+    fn repository_delete_targets_exact_coordinate_after_observed_head() {
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let existing = signed_repo(vec![tag(&["d", "demo-repo"])], "", 100);
+        let deletion = build_repo_delete(&existing, &pubkey, Timestamp::from(50))
+            .expect("build repository deletion")
+            .sign_with_keys(&keys)
+            .expect("sign repository deletion");
+        assert_eq!(deletion.kind, Kind::Custom(5));
+        assert_eq!(deletion.created_at.as_secs(), 101);
+        assert_eq!(
+            deletion
+                .tags
+                .iter()
+                .next()
+                .expect("coordinate deletion tag")
+                .as_slice(),
+            ["a", &format!("30617:{pubkey}:demo-repo")]
+        );
+    }
+
+    #[test]
+    fn repository_delete_uses_wall_clock_when_it_is_later_than_head() {
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let existing = signed_repo(vec![tag(&["d", "demo-repo"])], "", 100);
+        let deletion = build_repo_delete(&existing, &pubkey, Timestamp::from(1_000))
+            .expect("build repository deletion")
+            .sign_with_keys(&keys)
+            .expect("sign repository deletion");
+        assert_eq!(deletion.created_at.as_secs(), 1_000);
+    }
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
         EventBuilder::new(Kind::Custom(30617), content)
