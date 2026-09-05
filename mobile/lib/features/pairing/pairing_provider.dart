@@ -6,13 +6,13 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/security/sensitive_action_authorizer.dart';
-import 'join_by_address.dart';
 import 'pairing_crypto.dart';
 import 'pairing_socket.dart';
 
@@ -130,10 +130,14 @@ class PairingNotifier extends Notifier<PairingState> {
 
     final trimmed = rawInput.trim();
     // JOIN BY ADDRESS: a bare wss:// URL is a whole invitation — the
-    // relay publishes the community's owner-signed join material (kind
-    // 34550), the key is minted in-pocket, and no desktop is involved.
+    // relay serves its own join flow at https://<host>/join/ (the same
+    // view watch.html embeds verbatim), so the app OPENS that flow
+    // rather than rebuilding it: the room and the in-pocket identity
+    // live at the relay's origin (localStorage, shared with the
+    // browser), join once and every surface — the door, watch.html,
+    // the app — is the same member.
     if (trimmed.startsWith('wss://') || trimmed.startsWith('ws://')) {
-      return _pairByAddress(trimmed);
+      return _joinByAddress(trimmed);
     }
     if (trimmed.startsWith('nostrpair://')) {
       return _pairNipAb(trimmed);
@@ -142,36 +146,30 @@ class PairingNotifier extends Notifier<PairingState> {
     return _pairLegacy(trimmed);
   }
 
-  /// Join a community from the relay address alone. Mirrors _pairLegacy's
-  /// shape: connect-materialize-store, then the app's normal session takes
-  /// over against the CANONICAL origin the material named.
-  Future<void> _pairByAddress(String wsUrl) async {
+  /// Open the relay's own join flow for a pasted address. The /join/ view
+  /// prefills itself when served by the relay (same-origin), fetches the
+  /// owner-signed join material (kind 34550) off the wire, mints the key
+  /// on-device, and joins — this app is a window onto that proven flow.
+  Future<void> _joinByAddress(String wsUrl) async {
     state = const PairingState(status: PairingStatus.connecting);
-    try {
-      final joined = await joinByAddress(wsUrl);
-      final community = Community.create(
-        name: joined.material.name,
-        relayUrl: 'wss://${joined.material.canonicalHost}',
-        pubkey: joined.pubkeyHex,
-        nsec: joined.nsec,
-      );
-      await ref
-          .read(authProvider.notifier)
-          .authenticateWithCommunity(community);
-      state = const PairingState(status: PairingStatus.success);
-    } on JoinByAddressException catch (e) {
+    final httpsOrigin = wsUrl
+        .replaceFirst(RegExp(r'^ws'), 'https')
+        .replaceAll(RegExp(r'/+$'), '');
+    final launched = await launchUrl(
+      Uri.parse('$httpsOrigin/join/'),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!launched) {
       state = PairingState(
         status: PairingStatus.error,
-        errorMessage: e.message,
+        errorMessage: 'Could not open $httpsOrigin/join/ — check the '
+            'address and try again.',
       );
-    } catch (e) {
-      state = PairingState(
-        status: PairingStatus.error,
-        errorMessage:
-            'Could not join at that address. Make sure it is the '
-            'community relay URL you were given.',
-      );
+      return;
     }
+    // The join completes in the relay's own flow; the pairing sheet closes
+    // so the member lands in the room (addingCommunity pops on success).
+    state = const PairingState(status: PairingStatus.success);
   }
 
   Future<bool> authorizeIdentityExport({required Community community}) async {
