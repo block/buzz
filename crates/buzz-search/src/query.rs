@@ -283,6 +283,19 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         }
     }
 
+    // NIP-IA: archived identities stay in message history but vanish from the
+    // people directory. Profile-search typeahead (kinds == [0]) is exactly that
+    // directory — pickers, mention candidates, invites — so exclude events
+    // authored by an archived pubkey. The events table keeps its rows, and
+    // non-profile search lanes are untouched.
+    if query.kinds.as_deref() == Some(&[0][..]) {
+        qb.push(
+            " AND NOT EXISTS (SELECT 1 FROM archived_identities ai \
+             WHERE ai.community_id = events.community_id \
+             AND ai.pubkey = encode(events.pubkey, 'hex'))",
+        );
+    }
+
     if let Some(ref authors) = query.authors {
         if !authors.is_empty() {
             qb.push(" AND pubkey = ANY(");

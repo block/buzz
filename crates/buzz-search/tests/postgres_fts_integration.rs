@@ -1512,3 +1512,120 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
 
     teardown(pool, &schema).await;
 }
+
+/// Hex-encode a 32-byte pubkey for `archived_identities.pubkey` (TEXT, lowercase hex).
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// NIP-IA: an archived identity's profile must vanish from kind-0 profile
+/// search (the people directory behind add-member pickers, mention candidates,
+/// and invites), while a non-archived control profile stays searchable and a
+/// kind-9 message authored by the same archived pubkey remains searchable.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_search_excludes_archived_identities() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "a.example").await;
+    let archived_pk = rand_bytes32();
+    let active_pk = rand_bytes32();
+
+    // Archived identity's profile + one message, and an active control profile.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        archived_pk,
+        0,
+        "display-name-ghost-xyz",
+        None,
+        1_700_000_000,
+    )
+    .await;
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        archived_pk,
+        9,
+        "ghost-chat-token-abc",
+        None,
+        1_700_000_100,
+    )
+    .await;
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        active_pk,
+        0,
+        "display-name-active-xyz",
+        None,
+        1_700_000_200,
+    )
+    .await;
+
+    sqlx::query(
+        "INSERT INTO archived_identities (community_id, pubkey, consent_path, actor, request_event_id) \
+         VALUES ($1, $2, 'owner', $3, $4)",
+    )
+    .bind(c.as_uuid())
+    .bind(hex_encode(&archived_pk))
+    .bind(hex_encode(&active_pk))
+    .bind("test-archive-request")
+    .execute(&pool)
+    .await
+    .expect("insert archived identity");
+
+    let svc = SearchService::new(pool.clone());
+
+    // Profile search: archived identity excluded, active control present.
+    let profiles = svc
+        .search(&SearchQuery {
+            community: c,
+            q: "display-name-".into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![0]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+            mode: buzz_search::SearchMode::Prefix,
+        })
+        .await
+        .expect("profile search ok");
+    let profile_pks: Vec<[u8; 32]> = profiles.hits.iter().map(|h| h.pubkey).collect();
+    assert!(
+        !profile_pks.contains(&archived_pk),
+        "archived identity's profile MUST NOT appear in kind-0 profile search"
+    );
+    assert!(
+        profile_pks.contains(&active_pk),
+        "non-archived control profile MUST remain searchable"
+    );
+
+    // Message history is unaffected: same archived pubkey's kind-9 still hits.
+    let messages = svc
+        .search(&SearchQuery {
+            community: c,
+            q: "ghost-chat-token-abc".into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![9]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+            mode: buzz_search::SearchMode::FullText,
+        })
+        .await
+        .expect("message search ok");
+    assert!(
+        messages.hits.iter().any(|h| h.pubkey == archived_pk),
+        "archived identity's messages MUST stay searchable (NIP-IA: archive is not a ban)"
+    );
+
+    teardown(pool, &schema).await;
+}
