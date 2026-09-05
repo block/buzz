@@ -122,11 +122,12 @@ pub(crate) struct ResumeTicket {
 }
 
 pub(crate) fn capture_resume(
-    app: &AppHandle,
+    app: &AppHandle<impl tauri::Runtime>,
     key: &ManagedAgentRuntimeKey,
+    community: &str,
     owner: &str,
 ) -> Result<ResumeTicket, String> {
-    let conn = connection(app, key, owner)?;
+    let conn = connection(app, community, owner)?;
     schema(&conn)?;
     let previous = conn
         .query_row(
@@ -140,12 +141,11 @@ pub(crate) fn capture_resume(
 }
 
 fn connection(
-    app: &AppHandle,
-    key: &ManagedAgentRuntimeKey,
+    app: &AppHandle<impl tauri::Runtime>,
+    community: &str,
     owner: &str,
 ) -> Result<Connection, String> {
-    let path =
-        scoped_retention_db_path(&super::managed_agents_base_dir(app)?, &key.relay_url, owner);
+    let path = scoped_retention_db_path(&super::managed_agents_base_dir(app)?, community, owner);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -155,8 +155,9 @@ fn connection(
 /// Every ordinary spawn passes here, including restore/config/reconcile.
 /// Caller holds the existing transition lock through child registration.
 pub(crate) fn check_launch(
-    app: &AppHandle,
+    app: &AppHandle<impl tauri::Runtime>,
     key: &ManagedAgentRuntimeKey,
+    community: &str,
     owner: Option<&str>,
     resume: Option<&ResumeTicket>,
 ) -> Result<(), String> {
@@ -165,18 +166,18 @@ pub(crate) fn check_launch(
     if owner != Some(current_owner.as_str()) {
         return Err("Desktop launch owner changed".into());
     }
-    let conn = connection(app, key, &current_owner)?;
+    let conn = connection(app, community, &current_owner)?;
     schema(&conn)?;
     let scope = super::retention::RetentionScope {
         db_path: scoped_retention_db_path(
             &super::managed_agents_base_dir(app)?,
-            &key.relay_url,
+            community,
             &current_owner,
         ),
-        relay_url: key.relay_url.clone(),
+        relay_url: community.to_owned(),
         owner_keys: state.signing_keys()?,
     };
-    let mut local_conn = connection(app, key, &current_owner)?;
+    let mut local_conn = connection(app, community, &current_owner)?;
     let host = crate::commands::desktop_stop::local_id(&mut local_conn, &scope)?;
     if super::placement::blocked(&conn, &key.pubkey, &host)?
         && (resume.is_none() || super::placement::has_start(&conn, &key.pubkey)?)
@@ -210,8 +211,9 @@ fn allow_launch(row: Option<&(String, bool)>, resume: Option<&ResumeTicket>) -> 
 /// A failed spawn must not unblock config/restore. Commit only after the child
 /// has its ordinary receipt and tracked handle, still under the transition lock.
 pub(crate) fn finish_resume(
-    app: &AppHandle,
+    app: &AppHandle<impl tauri::Runtime>,
     key: &ManagedAgentRuntimeKey,
+    community: &str,
     owner: Option<&str>,
     ticket: Option<&ResumeTicket>,
 ) -> Result<(), String> {
@@ -219,8 +221,8 @@ pub(crate) fn finish_resume(
         return Ok(());
     }
     let owner = owner.ok_or("Desktop launch owner unavailable")?;
-    check_launch(app, key, Some(owner), ticket)?;
-    connection(app, key, owner)?
+    check_launch(app, key, community, Some(owner), ticket)?;
+    connection(app, community, owner)?
         .execute(
             "UPDATE desktop_stop_fence SET blocked=0 WHERE agent=?1",
             [&key.pubkey],
@@ -250,6 +252,69 @@ mod tests {
             .sign_with_keys(keys)
             .unwrap()
     }
+    #[test]
+    fn launch_reads_receiver_fence_in_original_community_not_runtime_alias() {
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = format!("buzz-test-{}", uuid::Uuid::new_v4());
+        let state = crate::app_state::build_app_state();
+        let keys = state.signing_keys().unwrap();
+        let owner = keys.public_key().to_hex();
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .build(context)
+            .unwrap();
+        let root = app.path().app_data_dir().unwrap();
+        let community = "ws://localhost:3037";
+        let agent = Keys::generate().public_key().to_hex();
+        let key = ManagedAgentRuntimeKey::new(&agent, community).unwrap();
+        assert_ne!(key.relay_url, community);
+        let scope = super::super::retention::RetentionScope {
+            db_path: scoped_retention_db_path(&root.join("agents"), community, &owner),
+            relay_url: community.into(),
+            owner_keys: keys.clone(),
+        };
+        let mut conn = connection(app.handle(), community, &owner).unwrap();
+        let host = crate::commands::desktop_stop::local_id(&mut conn, &scope).unwrap();
+        let target = StopTarget {
+            v: 1,
+            community: community.into(),
+            desktop: host,
+            agent,
+        };
+        let stop = request(&keys, &target, 100);
+        receive(
+            &mut conn,
+            &stop,
+            &keys,
+            community,
+            &target.desktop,
+            true,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(check_launch(app.handle(), &key, community, Some(&owner), None).is_err());
+        // The numeric community is a different authority, even though the
+        // process bookkeeping key historically folds the two spellings.
+        assert!(check_launch(app.handle(), &key, &key.relay_url, Some(&owner), None).is_ok());
+        let resume = capture_resume(app.handle(), &key, community, &owner).unwrap();
+        assert!(check_launch(app.handle(), &key, community, Some(&owner), Some(&resume)).is_ok());
+        let newer = request(&keys, &target, 101);
+        receive(
+            &mut conn,
+            &newer,
+            &keys,
+            community,
+            &target.desktop,
+            true,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(check_launch(app.handle(), &key, community, Some(&owner), Some(&resume)).is_err());
+        drop(conn);
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn launch_fence_requires_explicit_start_and_rejects_delayed_preflight() {
         let stopped = ("stop-a".to_owned(), true);

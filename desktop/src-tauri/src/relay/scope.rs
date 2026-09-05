@@ -41,6 +41,12 @@ impl ScopedWorkspaceRelay {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Recheck a captured workspace after preflight without substituting a
+    /// runtime-normalized URL (which may alias distinct tenant authorities).
+    pub fn revalidate(self, workspace_relay_url: String) -> Result<Self, String> {
+        bind_expected_relay_scope(Some(self.as_str()), workspace_relay_url)
+    }
 }
 
 /// Validate a caller-captured relay scope against one workspace-relay read
@@ -118,6 +124,30 @@ mod tests {
         assert_expected_relay_scope, assert_expected_signer, bind_expected_relay_scope,
         bind_expected_signer,
     };
+
+    #[test]
+    fn preflight_revalidation_preserves_localhost_authority_not_runtime_alias() {
+        let relay = "ws://localhost:3037";
+        let captured = bind_expected_relay_scope(None, relay.into()).unwrap();
+        let runtime =
+            crate::managed_agents::ManagedAgentRuntimeKey::new("a".repeat(64), captured.as_str())
+                .unwrap();
+        assert_eq!(runtime.relay_url, "ws://127.0.0.1:3037");
+        assert_eq!(captured.revalidate(relay.into()).unwrap().as_str(), relay);
+    }
+
+    #[test]
+    fn preflight_revalidation_rejects_switch_even_to_same_runtime_alias() {
+        for changed in ["ws://127.0.0.1:3037", "wss://other.example"] {
+            let captured = bind_expected_relay_scope(None, "ws://localhost:3037".into()).unwrap();
+            assert!(captured.revalidate(changed.into()).is_err());
+        }
+        assert!(bind_expected_relay_scope(
+            Some("ws://localhost:3037"),
+            "ws://127.0.0.1:3037".into(),
+        )
+        .is_err());
+    }
 
     #[test]
     fn matching_scope_passes_across_ws_http_normalization() {
