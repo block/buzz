@@ -1,4 +1,8 @@
-import type { PersonaBehaviorInput, RespondToMode } from "@/shared/api/types";
+import type {
+  PermissionPolicy,
+  PersonaBehaviorInput,
+  RespondToMode,
+} from "@/shared/api/types";
 
 /**
  * Dialog-side draft of a definition's NIP-AP behavioral group.
@@ -15,12 +19,19 @@ export type PersonaBehaviorDraft = {
   respondToAllowlist: string[];
   /** Raw text; only `parseInt > 0` submits (legacy dialog parity). */
   parallelism: string;
+  /**
+   * Definition-level default permission policy — resolver tier 2. `null`
+   * means "no default" (defer to global/built-in). Local-only: it is never
+   * published, so it does not affect the definition's content hash.
+   */
+  permissionPolicy: PermissionPolicy | null;
 };
 
 export const emptyPersonaBehaviorDraft: PersonaBehaviorDraft = {
   respondTo: null,
   respondToAllowlist: [],
   parallelism: "",
+  permissionPolicy: null,
 };
 
 /** Seed the draft from a dialog-state behavior group (edit/duplicate). */
@@ -32,6 +43,7 @@ export function draftFromBehavior(
     respondToAllowlist: [...(behavior?.respondToAllowlist ?? [])],
     parallelism:
       behavior?.parallelism != null ? String(behavior.parallelism) : "",
+    permissionPolicy: behavior?.permissionPolicy ?? null,
   };
 }
 
@@ -56,9 +68,12 @@ function behaviorFromDraft(
     respondToAllowlist:
       draft.respondTo === "allowlist" ? draft.respondToAllowlist : undefined,
     parallelism: parallelism > 0 ? parallelism : undefined,
+    permissionPolicy: draft.permissionPolicy ?? undefined,
   };
   const isEmpty =
-    group.respondTo === undefined && group.parallelism === undefined;
+    group.respondTo === undefined &&
+    group.parallelism === undefined &&
+    group.permissionPolicy === undefined;
   return isEmpty ? undefined : group;
 }
 

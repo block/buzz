@@ -272,6 +272,7 @@ fn persona_with_provider(
     provider: Option<&str>,
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        permission_policy: None,
         description: None,
         id: id.to_string(),
         display_name: id.to_string(),
@@ -1012,8 +1013,7 @@ fn invalid_pubkey_resolves_no_pair_key() {
 //             Linux used an AND-gate (name + marker) — wrong for custom harnesses.
 // Fix: all platforms gate on `process_has_buzz_marker` alone; the receipt path
 //      is verified below via `valid_agent_runtime_receipt_with` (injectable),
-//      which no longer takes a name-check predicate at all — reinstating an
-//      AND-gate would be a signature change these tests would catch.
+//      which no longer takes a name-check predicate at all.
 
 // ── Collector-discriminating sweep tests (C-9 / Thufir F6) ──────────────────
 //

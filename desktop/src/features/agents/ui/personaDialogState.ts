@@ -81,14 +81,18 @@ export function duplicatePersonaDialogState(
 }
 
 /**
- * Seed a dialog behavior group from a stored persona. A quad-less persona
+ * Seed a dialog behavior group from a stored persona. A behavior-less persona
  * yields no `behavior` key at all, keeping initialValues byte-identical to
- * the pre-quad shape (spread-in entry, matching the namePool import pattern).
+ * the pre-behavior shape (spread-in entry, matching the namePool import pattern).
  */
 function behaviorEntry(
   persona: AgentPersona,
 ): { behavior: PersonaBehaviorInput } | Record<string, never> {
-  if (persona.respondTo == null && persona.parallelism == null) {
+  if (
+    persona.respondTo == null &&
+    persona.parallelism == null &&
+    persona.permissionPolicy == null
+  ) {
     return {};
   }
   return {
@@ -99,6 +103,7 @@ function behaviorEntry(
           ? persona.respondToAllowlist
           : undefined,
       parallelism: persona.parallelism ?? undefined,
+      permissionPolicy: persona.permissionPolicy ?? undefined,
     },
   };
 }

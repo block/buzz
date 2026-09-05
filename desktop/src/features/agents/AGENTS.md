@@ -257,6 +257,7 @@ with a TypeScript lookup table or an id comparison in a component.
    mid-conversation effort control without a plan ruling. The archived live-effort
    machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
 
+15. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
 15. **The persona `description` is public display metadata.** It is optional,
    capped at 280 characters, and validated through the shared visible-text
    policy (`validate_agent_description_text` in `definition_validation.rs`)
@@ -287,7 +288,6 @@ with a TypeScript lookup table or an id comparison in a component.
    The dialog field
    lives in `ui/AgentDescriptionField.tsx` (`AgentIdentityFields`), not
    inline in the over-1000-line dialogs.
-
 16. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
     The compiled owner-only capability applies when Desktop starts or deploys a
     managed agent. Independently operated relay agents with NIP-OA ownership
@@ -305,6 +305,49 @@ with a TypeScript lookup table or an id comparison in a component.
     clamp to either mention path. Local `agents-data-changed` events
     refresh only local persona/team/managed-agent caches; they must never
     invalidate the remote relay directory.
+16. **A remote deploy's permission policy has two truths: desired and applied.**
+   **The desired policy is live-resolved through a four-tier chain**
+   (`resolve_effective_permission_policy`), highest precedence first: the
+   per-instance record override (`source: agent`) → the linked definition's
+   default (`source: definition`) → the global config default
+   (`source: global_default`) → the built-in `ask` (`source: built_in`). The
+   definition tier is a lookup by `record.persona_id` against the same
+   `definitions` slice every spawn/summary/deploy path already loads, so a
+   linked instance and the spawn-env it launches with resolve identically —
+   **the resolver signature is total: every call site passes the definitions,
+   none shortcuts to `None`.** The definition default is a *live* tier, not
+   mint-copied: changing it moves every linked instance's desired policy on the
+   next summary (and lights the drift row on a deployed one), exactly like the
+   global default. **The editable control lives on the agent definition
+   (Create / Edit agent) via `PersonaAdvancedFields` → `personaBehaviorDraft` →
+   `apply_persona_behavior`**, replace-as-a-unit with the rest of the behavior
+   group; `null` clears the default so the resolver falls through. It is
+   **local-only — a definition default is an authority grant, never published to
+   the catalog (`persona_event_content` omits it) and never mint-copied onto
+   instances**, unlike `respond_to`/`parallelism`. The instance surface
+   (`AgentPermissionPolicyField`) is **display-only**: it never edits policy, it
+   shows the resolved value + source and the per-instance drift row. The
+   *desired* policy is recomputed on every summary from the mutable agent
+   record + linked definition + global config
+   (`resolve_effective_permission_policy`). The *applied*
+   policy is the byte-identical value that was sent to the provider at deploy
+   time, persisted on the record as `applied_permission_policy` and re-exposed on
+   the summary — never recomputed. Flipping the global default after a deploy
+   changes desired but not applied, so the remote worker keeps running the policy
+   it was launched with until a redeploy. **Stamp the applied value at the single
+   deploy choke point** (`deploy_to_provider`): `extract_applied_permission_policy`
+   reads it from `launch.policy_env.BUZZ_ACP_PERMISSION_POLICY` and **must run
+   before the provider is invoked** — a missing or unparseable value is a broken
+   payload invariant that fails the deploy, never a silent `None` (a silent `None`
+   would suppress the drift row and defeat the field). **A failed redeploy retains
+   the last confirmed applied value** (`record_deploy_failure` leaves it untouched)
+   — the old worker may still be running it, and `last_error` records the new
+   attempt; clearing it would destroy known truth. **Legacy fail-quiet:** a record
+   with `applied_permission_policy` absent (pre-feature, or provider-selected but
+   never deployed) shows no drift row. `AgentPermissionPolicyField` renders the
+   amber "applied X · desired Y — redeploy required" row only when the agent is
+   remotely deployed (`backend.type === "provider"` **and** `backendAgentId !==
+   null`) **and** applied is non-null **and** applied differs from desired.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
@@ -378,6 +421,26 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- Rust: `commands/agents_deploy.rs` tests pin the applied-policy deploy receipt —
+  `extract_applied_permission_policy` reads the exact sent value and errors on a
+  missing/unparseable one; `record_deploy_success` stamps it and a redeploy
+  updates it; `record_deploy_failure` retains the last confirmed value.
+- Rust: `managed_agents/permission_policy.rs` pins the four-tier resolver — the
+  instance override beats the definition default beats the global default beats
+  built-in `ask`, each stamping its own `PermissionPolicySource`; and the
+  resolver-level drift where a post-deploy global flip diverges desired from the
+  persisted applied receipt.
+- Rust: `managed_agents/types/requests.rs` pins `apply_persona_behavior` storing
+  the definition default as part of the behavior group, and
+  `persona_events` pins that the default never reaches the published
+  `PersonaEventContent` (local authority grant).
+- `ui/personaDialogState.test.mjs` — the definition default seeds into the
+  create/edit/duplicate behavior draft, including a policy-only persona.
+- `ui/AgentPermissionPolicyField.render.test.mjs` — the display-only instance
+  surface: the source label (including `definition` → "agent definition"), no
+  editable control, and the drift row shown for remote+drift with both values
+  and "redeploy required"; hidden when applied equals desired, when applied is
+  absent, for local agents, and for a provider-selected-but-undeployed agent.
 - Rust: `definition_validation` and inbound persona tests pin the shared
   Unicode/control-character policy at local, import, publish, and sync gates.
 

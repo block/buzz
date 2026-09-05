@@ -72,6 +72,8 @@ pub(crate) struct SpawnConfigInputs<'a> {
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
     pub provider: Option<&'a str>,
+    /// Resolved effective permission policy (per-agent > global > built-in).
+    pub permission_policy: super::permission_policy::PermissionPolicy,
     /// Compile-time distribution capability projected at this runtime boundary.
     /// The stored record remains portable; only effective spawned access is stamped.
     pub enforced_owner_only: bool,
@@ -132,6 +134,10 @@ pub(crate) struct SpawnConfigSnapshot {
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
+    /// Effective permission policy at spawn time. Reaches the harness via
+    /// `BUZZ_ACP_PERMISSION_POLICY`. Tracked in the snapshot so an edit shows
+    /// in the `needsRestart` diff.
+    pub permission_policy: String,
     /// The startup effort the harness will actually apply, resolved by
     /// [`effective_effort`]: the single effort key the harness-agnostic
     /// projection left in `descriptor.env` under the runtime's destination key.
@@ -189,6 +195,7 @@ impl SpawnConfigSnapshot {
             system_prompt,
             model,
             provider,
+            permission_policy,
             enforced_owner_only,
             session_policy,
         } = inputs;
@@ -252,6 +259,7 @@ impl SpawnConfigSnapshot {
             // pool and must badge. The diff surface consequently displays the
             // effective value — that is correct, it is what actually runs.
             parallelism: super::effective_parallelism(&descriptor.command, record.parallelism),
+            permission_policy: permission_policy.as_str().to_string(),
             // Sole effort representation — see the field doc and the `env`
             // strip above. Reads the single projected effort key the descriptor
             // resolver left in `descriptor.env`, so the badge compares exactly
@@ -348,6 +356,10 @@ pub(crate) fn prospective_spawn_config_snapshot(
         system_prompt: prompt.as_deref(),
         model: model.as_deref(),
         provider: provider.as_deref(),
+        permission_policy: super::permission_policy::resolve_effective_permission_policy(
+            record, personas, global,
+        )
+        .0,
         enforced_owner_only,
         session_policy,
     })

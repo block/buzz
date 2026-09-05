@@ -170,6 +170,7 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
 }
 fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        permission_policy: None,
         description: None,
         id: id.to_string(),
         display_name: id.to_string(),
@@ -205,13 +206,13 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 
-/// Minimal record for `record_agent_command` tests; only resolution inputs vary.
 fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
     override_cmd: Option<&str>,
 ) -> crate::managed_agents::types::ManagedAgentRecord {
     crate::managed_agents::types::ManagedAgentRecord {
+        definition_permission_policy: None,
         description: None,
         pubkey: String::new(),
         name: "r".to_string(),
@@ -268,6 +269,8 @@ fn record_with(
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
     }
 }
@@ -1366,8 +1369,7 @@ fn registry_warm_then_try_record_resolves_custom_id() {
 /// NOT silently fall back to buzz-agent.
 ///
 /// This test would fail if save/delete commands do not call
-/// warm_harness_registry_from_dir transactionally, or if try_record_agent_command
-/// silently falls back to default_agent_command() for dangling ids.
+/// warm_harness_registry_from_dir transactionally.
 #[test]
 fn registry_delete_then_try_record_returns_dangling_error() {
     use crate::managed_agents::custom_harnesses::{
@@ -1676,9 +1678,7 @@ fn builtin_catalog_entry_has_empty_definition_env() {
 // These drive `discover_acp_runtimes_from` itself and land a save/delete in
 // the window between its directory scan and its registry publish (via the
 // `pre_publish_test_hook` seam). They red if discovery's final line reverts
-// to publishing its pre-probe `loaded_defs` snapshot — the original bug —
-// unlike the `custom_harnesses` seam tests, which pin only the fresh-read
-// contract of `warm_harness_registry_locked`.
+// to publishing its pre-probe `loaded_defs` snapshot — the original bug.
 
 /// RAII guard: installs the pre-publish hook, clears it on drop (even on
 /// panic) so a failing test cannot poison later ones.

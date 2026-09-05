@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 fn member(id: &str) -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         id: id.to_string(),
         display_name: "One".to_string(),
         description: None,

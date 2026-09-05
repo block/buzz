@@ -82,6 +82,11 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // for same-session sweep decisions.
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
+    // Permission policy gate: Desktop resolves the effective policy
+    // (per-agent > global > built-in) and injects it here. A user-supplied
+    // override would make the running harness use a different policy than the
+    // saved/UI-visible setting — exactly the truthfulness failure #4938 fixes.
+    "BUZZ_ACP_PERMISSION_POLICY",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

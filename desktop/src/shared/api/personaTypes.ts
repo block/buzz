@@ -39,6 +39,8 @@ export type AgentPersona = {
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
   parallelism: number | null;
+  /** Definition-level default permission policy — tier 2 of the resolver (instance → this → global → built-in `ask`). Null = defer. Local-only. */
+  permissionPolicy: import("./permissionPolicy").PermissionPolicy | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -61,6 +63,8 @@ export type PersonaBehaviorInput = {
   respondTo?: RespondToMode;
   respondToAllowlist?: string[];
   parallelism?: number;
+  /** Definition-level default permission policy. Within a present behavior group it replaces the stored value as a unit: omitted clears the default. Never published. */
+  permissionPolicy?: import("./permissionPolicy").PermissionPolicy;
 };
 
 export type CreatePersonaInput = {

@@ -435,6 +435,7 @@ fn member_copy(
     now: &str,
 ) -> Result<AgentDefinition, String> {
     Ok(AgentDefinition {
+        permission_policy: None,
         id: Uuid::new_v4().to_string(),
         display_name: member.display_name.clone(),
         // Team catalog members carry no public description; an adopted copy

@@ -85,6 +85,9 @@ function publicationToPersona(
     respondTo: publication.agent.respondTo,
     respondToAllowlist: [],
     parallelism: publication.agent.parallelism,
+    // Local authority grant — never published, so a catalog entry never
+    // carries one. A copy added locally can gain one via its own edit.
+    permissionPolicy: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

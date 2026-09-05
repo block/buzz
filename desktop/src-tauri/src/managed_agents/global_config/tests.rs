@@ -267,6 +267,7 @@ fn roundtrip_serialization() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
         preferred_runtime: Some("claude".to_string()),
+        permission_policy: None,
     };
     let json = serde_json::to_string(&config).expect("serialize");
     let back: GlobalAgentConfig = serde_json::from_str(&json).expect("deserialize");
@@ -299,6 +300,7 @@ fn default_global_config_serializes_all_fields() {
 
 fn bare_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        definition_permission_policy: None,
         description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
@@ -351,6 +353,8 @@ fn bare_record() -> ManagedAgentRecord {
         catalog_source: None,
         team_catalog_source: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
@@ -361,6 +365,7 @@ fn bare_record() -> ManagedAgentRecord {
 
 fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         description: None,
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
@@ -598,6 +603,7 @@ fn populated_global_config_round_trips() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
         preferred_runtime: None,
+        permission_policy: None,
     };
     let json = serde_json::to_string(&original).expect("serialization must not fail");
     let decoded: GlobalAgentConfig =
@@ -624,6 +630,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     record.persona_id = Some("p1".to_string());
 
     let persona = AgentDefinition {
+        permission_policy: None,
         description: None,
         id: "p1".to_string(),
         display_name: "Goose persona".to_string(),

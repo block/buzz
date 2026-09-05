@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Child};
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendKind {
@@ -99,15 +98,17 @@ pub struct AgentDefinition {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// Definition-level default permission policy — tier 2 of the resolver
+    /// (`resolve_effective_permission_policy`). Local-only; not published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_policy: Option<super::permission_policy::PermissionPolicy>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl AgentDefinition {
-    /// Project this persona onto a key-less unified [`ManagedAgentRecord`]
-    /// (Phase 1A store fold). Identity fields stay empty — keys are minted on
-    /// first start. `AgentDefinition.id` becomes `slug`, preserving the 30175
-    /// event coordinate (`d_tag = slug`) across the fold.
+    /// Project this persona onto a key-less unified [`ManagedAgentRecord`] (Phase 1A store fold).
+    /// Identity fields are empty; keys are minted on first start.
     pub fn into_agent_record(self) -> ManagedAgentRecord {
         ManagedAgentRecord {
             pubkey: String::new(),
@@ -166,7 +167,10 @@ impl AgentDefinition {
             definition_respond_to: self.respond_to,
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
+            definition_permission_policy: self.permission_policy,
             relay_mesh: None,
+            permission_policy: None,
+            applied_permission_policy: None,
             effort_level: None,
         }
     }
@@ -204,6 +208,7 @@ impl ManagedAgentRecord {
             respond_to: self.definition_respond_to.clone(),
             respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
             parallelism: self.definition_parallelism,
+            permission_policy: self.definition_permission_policy,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         })
@@ -369,6 +374,10 @@ pub struct ManagedAgentRecord {
     /// Preserved across mode toggles so users don't lose state.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_policy: Option<super::permission_policy::PermissionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_permission_policy: Option<super::permission_policy::PermissionPolicy>,
     /// Optional display name distinct from the unique `name` handle. Absorbed
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -451,6 +460,10 @@ pub struct ManagedAgentRecord {
     pub definition_respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_parallelism: Option<u32>,
+    /// Definition-level default permission policy — a *definition*'s advertised
+    /// default (tier 2), distinct from the instance override above. Local-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_permission_policy: Option<super::permission_policy::PermissionPolicy>,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
@@ -554,16 +567,11 @@ pub struct ManagedAgentSummary {
     /// persona is gone, so there is nothing newer to drift toward).
     pub persona_out_of_date: bool,
     /// `true` when the agent was created from a persona that no longer exists.
-    /// Distinct from out-of-date: there is no current persona to respawn into.
-    /// An orphaned agent also cannot be (re)started — `spawn_agent_child`
-    /// refuses it (see `effective_config::resolve_effective_config`'s
-    /// `OrphanedInstance` arm via `require_resolved`) — so the UI
-    /// should surface that it's stuck, not merely stale.
+    /// `true` when the agent's linked persona no longer exists; no current
+    /// persona to respawn into and the agent cannot be (re)started.
     pub persona_orphaned: bool,
-    /// `true` when the running process's spawn config no longer matches
-    /// what a spawn would use today. Derived from `restart_diff` — lit
-    /// exactly when there is something to show. Always `false` for stopped,
-    /// orphaned, or `runtime_pid`-adopted agents.
+    /// `true` when the running process's spawn config no longer matches what
+    /// a spawn would use today. Always `false` for stopped/orphaned agents.
     pub needs_restart: bool,
     /// Fields that drifted since launch, redacted for display.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -586,6 +594,10 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    pub permission_policy: super::permission_policy::PermissionPolicy,
+    pub permission_policy_source: super::permission_policy::PermissionPolicySource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_permission_policy: Option<super::permission_policy::PermissionPolicy>,
 }
 
 #[derive(Debug, Serialize)]

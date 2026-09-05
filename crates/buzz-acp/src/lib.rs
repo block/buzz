@@ -951,7 +951,19 @@ impl ObserverPublishQueue {
         // Pre-trim at enqueue so (a) byte accounting reflects what will ship
         // and (b) one oversized leaf cannot force every frame it touches into
         // whole-envelope elision downstream.
+        //
+        // Authorization frames must not be leaf-trimmed (NIP-AO §3 requires
+        // byte-for-byte reproduction). `fit_observer_event_to_budget` returns
+        // without mutating them; if they are still over-cap after that guard,
+        // suppress entirely rather than enqueue an over-budget frame.
         fit_observer_event_to_budget(&mut event);
+        if event.authorization.is_some() && serialized_len(&event) > OBSERVER_MAX_PLAINTEXT_LEN {
+            tracing::warn!(
+                kind = %event.kind,
+                "suppressing authorized observer frame at enqueue: over-cap after fit"
+            );
+            return;
+        }
         let bytes = serialized_len(&event);
         self.pending_bytes += bytes;
         self.events.push_back((bytes, source_events, event));
@@ -1092,6 +1104,7 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         session_id: last.session_id.clone(),
         turn_id: last.turn_id.clone(),
         started_at: last.started_at.clone(),
+        authorization: None,
         payload: serde_json::json!({
             "events": serde_json::to_value(events).unwrap_or_default(),
         }),
@@ -1392,6 +1405,19 @@ fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
         return;
     }
 
+    // Authorization frames carry byte-for-byte raw ACP that must not be
+    // rewritten — NIP-AO §3 requires the payload to be reproduced exactly as
+    // received. If the annotated event is still over-cap after the early-return
+    // above, suppress it entirely rather than mutate the ACP bytes.
+    if event.authorization.is_some() {
+        tracing::warn!(
+            kind = %event.kind,
+            "dropping authorized observer frame: annotated size exceeds cap \
+             and payload must not be trimmed"
+        );
+        return;
+    }
+
     // Raw size of the payload we are about to trim, captured before mutation so
     // the stub's `originalBytes` reports source bytes discarded, not serialized
     // overflow — consistent with the per-leaf marker's raw byte count.
@@ -1561,7 +1587,13 @@ async fn publish_relay_observer_event(
 }
 
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
-const OBSERVER_CONTROL_FRESHNESS_SECS: i64 = 300;
+///
+/// Doubles as the observer-control subscription lookback (see
+/// [`crate::relay::build_observer_control_req`]): one constant drives both the
+/// admission window and the resubscribe `since` so they cannot drift. A frame
+/// signed just before a reconnect resubscribe stays inside both windows, and a
+/// retransmitted copy sent while the socket was down lands after reconnect.
+pub(crate) const OBSERVER_CONTROL_FRESHNESS_SECS: i64 = 300;
 
 fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
@@ -1614,6 +1646,9 @@ fn handle_relay_observer_control_event(
         }
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
+        }
+        Some("permission_decision") => {
+            handle_permission_decision_control(&payload, pool, observer);
         }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
@@ -1903,6 +1938,208 @@ fn handle_switch_model_control(
                 // Echo the correlator on the immediate ack so a `sent` /
                 // `turn_ending` / idle-path terminal frame matches the pick.
                 "requestId": request_id,
+            }),
+        );
+    }
+}
+
+/// Handle a `permission_decision` control frame.
+///
+/// Extracts `channelId`, `requestNonce`, and `optionId` from the payload and
+/// delivers a [`crate::acp::PermissionDecision`] to the in-flight read loop
+/// via the per-task `permission_decision_tx` mpsc channel.
+///
+/// **Fan-out routing (same-channel multi-thread safety):** The relay supports
+/// concurrent thread-scoped tasks in one channel. Finding only the first task
+/// by `channel_id` would let the wrong sibling consume-and-ignore a frame whose
+/// nonce belongs to a different thread, stranding that thread's decision until
+/// timeout. Instead this function fans out to **all** tasks whose `channel_id`
+/// matches — the nonce is unguessable, so every read loop that receives the
+/// decision drops it immediately when it has no matching pending entry (the
+/// `"no matching pending entry"` trace path in `acp.rs`), while the owning loop
+/// accepts it. Ownership signature validation was already performed upstream
+/// before this function is called.
+///
+/// If there is no in-flight task for the channel, or all senders are gone, the
+/// frame is dropped silently (the per-request 300s timeout will fail the entry
+/// closed on its own).
+fn handle_permission_decision_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let Some(channel_id) = payload
+        .get("channelId")
+        .and_then(|v| v.as_str())
+        .and_then(|v| v.parse::<Uuid>().ok())
+    else {
+        tracing::warn!("observer permission_decision control frame missing valid channelId");
+        return;
+    };
+
+    let Some(request_nonce) = payload
+        .get("requestNonce")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        tracing::warn!("observer permission_decision control frame missing requestNonce");
+        return;
+    };
+
+    let Some(option_id) = payload
+        .get("optionId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        tracing::warn!("observer permission_decision control frame missing optionId");
+        return;
+    };
+
+    let decision = crate::acp::PermissionDecision {
+        request_nonce: request_nonce.to_string(),
+        option_id: option_id.to_string(),
+    };
+
+    // Collect all same-channel tasks that have a permission_decision_tx
+    // installed. Fan out: every eligible read loop in the channel receives the
+    // decision and lets the nonce select the owning entry.
+    enum Delivery {
+        Sent,
+        Full,
+        Closed,
+        NoChannel,
+        NoTask,
+    }
+
+    // Gather delivery results for all matching tasks.
+    let deliveries: Vec<Delivery> = {
+        let matching: Vec<_> = pool
+            .task_map_mut()
+            .values_mut()
+            .filter(|m| m.channel_id == Some(channel_id))
+            .collect();
+
+        if matching.is_empty() {
+            vec![Delivery::NoTask]
+        } else {
+            matching
+                .into_iter()
+                .map(|meta| match &meta.permission_decision_tx {
+                    Some(tx) => match tx.try_send(decision.clone()) {
+                        Ok(()) => Delivery::Sent,
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Delivery::Full,
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Delivery::Closed,
+                    },
+                    None => Delivery::NoChannel,
+                })
+                .collect()
+        }
+    };
+
+    // Record the nonce and summarise into a single observer status.
+    //
+    // Correctness requirement (fan-out false-ack): a `permission_decision` is
+    // fanned out to all same-channel loops; each loop uses the nonce to select
+    // its own entry. The dispatcher cannot identify which task owns the nonce,
+    // so it must not report `sent` — stopping Desktop's retransmit loop — unless
+    // every loop that has a permission tx accepted the message. If any tx-equipped
+    // loop's queue returned `Full` or `Closed` (owner-queue saturated while a
+    // sibling accepted), the nonce-owning loop may not have received the decision,
+    // so we return a retryable status and leave Desktop's retry loop running.
+    let any_sent = deliveries.iter().any(|d| matches!(d, Delivery::Sent));
+    let any_full = deliveries.iter().any(|d| matches!(d, Delivery::Full));
+    // All tx-equipped loops accepted: no Full and no Closed among the deliveries.
+    let all_tx_accepted =
+        any_sent && !any_full && !deliveries.iter().any(|d| matches!(d, Delivery::Closed));
+
+    // Only suppress retransmits (record nonce) when every tx-equipped loop
+    // received the decision — a partial fan-out is not a confirmed delivery.
+    if all_tx_accepted {
+        pool.record_permission_decision(request_nonce);
+    }
+
+    // Summarise into a single status for the observer frame.
+    // all_tx_accepted → "sent" (Desktop retransmit stops, decision confirmed).
+    // any_sent + any_full → "channel_full" (transient queue saturation: Desktop
+    //   keeps the retransmit loop active and resends on the next tick; the owning
+    //   loop's first-wins dedup tolerates duplicate deliveries once the queue drains).
+    // No Sent → fall through to the existing priority ladder.
+    let status = if all_tx_accepted {
+        tracing::info!(
+            channel = %channel_id,
+            nonce = %request_nonce,
+            option_id = %option_id,
+            tasks_fanned = deliveries.len(),
+            "permission_decision delivered to all read loop(s)"
+        );
+        "sent"
+    } else if any_sent && any_full {
+        // Mixed: at least one sibling accepted but the owner queue was full.
+        // Reporting "sent" here would stop Desktop's retransmit loop while the
+        // nonce-owning read loop never received the decision. Return "channel_full"
+        // so Desktop keeps the retransmit loop active until the queue drains.
+        tracing::warn!(
+            channel = %channel_id,
+            nonce = %request_nonce,
+            "permission_decision: some loops sent, owner loop full — \
+             reporting channel_full to keep Desktop retransmitting"
+        );
+        "channel_full"
+    } else if deliveries.iter().any(|d| matches!(d, Delivery::Full)) {
+        tracing::warn!(
+            channel = %channel_id,
+            "permission_decision channel full — dropping (will timeout)"
+        );
+        "channel_full"
+    } else if deliveries.iter().any(|d| matches!(d, Delivery::Closed)) {
+        tracing::warn!(
+            channel = %channel_id,
+            "permission_decision channel closed — read loop already exited"
+        );
+        if pool.was_recently_decided(request_nonce) {
+            "already_decided"
+        } else {
+            "channel_closed"
+        }
+    } else if deliveries.iter().any(|d| matches!(d, Delivery::NoChannel)) {
+        tracing::warn!(
+            channel = %channel_id,
+            "permission_decision_tx not installed for in-flight task"
+        );
+        "no_channel"
+    } else {
+        // NoTask — no in-flight task at all.
+        if pool.was_recently_decided(request_nonce) {
+            tracing::debug!(
+                channel = %channel_id,
+                nonce = %request_nonce,
+                "permission_decision retransmit for an already-decided nonce — acking success-shaped"
+            );
+            "already_decided"
+        } else {
+            tracing::warn!(
+                channel = %channel_id,
+                "permission_decision control frame for channel with no in-flight task"
+            );
+            "no_active_turn"
+        }
+    };
+
+    if let Some(observer) = observer {
+        observer.emit(
+            "control_result",
+            None,
+            &observer::ObserverContext {
+                channel_id: Some(channel_id.to_string()),
+                session_id: None,
+                turn_id: None,
+                started_at: None,
+            },
+            serde_json::json!({
+                "type": "permission_decision",
+                "status": status,
+                "requestNonce": request_nonce,
+                "optionId": option_id,
             }),
         );
     }
@@ -2819,7 +3056,7 @@ async fn tokio_main() -> Result<()> {
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
-        permission_mode: config.permission_mode,
+        permission_config: config.permission_config.clone(),
         agent_keys: config.keys.clone(),
         agent_owner_pubkey: startup_owner
             .as_deref()
@@ -2827,6 +3064,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        relay_event_publisher: Some(relay.event_publisher()),
     });
 
     if !config.memory_enabled {
@@ -4526,6 +4764,17 @@ fn dispatch_pending(
         agent.acp.install_steer_rx(rx);
         let steer_tx = Some(tx);
 
+        // Permission decision channel: delivers `permission_decision` control
+        // frames into the read loop's decision arm (spec §4). Installed
+        // per-session (the receiver is taken by the read loop and dropped
+        // when the turn ends; the next turn installs a fresh pair). Capacity
+        // matches PERMISSION_MAP_CAP so each pending entry gets a slot.
+        let (perm_tx, perm_rx) = tokio::sync::mpsc::channel::<crate::acp::PermissionDecision>(
+            crate::acp::PERMISSION_MAP_CAP,
+        );
+        agent.acp.install_permission_decision_rx(perm_rx);
+        let permission_decision_tx = Some(perm_tx);
+
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
@@ -4555,6 +4804,7 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
+                permission_decision_tx,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -4984,6 +5234,10 @@ fn handle_prompt_result(
                     | acp::AcpError::WriteTimeout(_)
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
+                    // A poisoned process wrote a partial permission response
+                    // and must NOT be returned to the pool — the pipe state is
+                    // uncertain and re-use would corrupt the next turn's writes.
+                    | acp::AcpError::PermissionPoisoned
             );
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
@@ -5229,6 +5483,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
+            permission_decision_tx: None,
             successful_steer_deliveries: HashSet::new(),
         },
     );
@@ -6045,6 +6300,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -6091,6 +6347,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -8094,6 +8351,7 @@ mod observer_publish_queue_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            authorization: None,
             payload: serde_json::json!({ "seq": seq }),
         }
     }
@@ -8962,6 +9220,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            authorization: None,
             payload: serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -8990,6 +9249,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            authorization: None,
             payload: serde_json::json!({ "type": "turn_started" }),
         }
     }
@@ -9087,7 +9347,11 @@ mod build_mcp_servers_tests {
             model: None,
             effort_level: None,
             session_title: None,
-            permission_mode: config::PermissionMode::BypassPermissions,
+            permission_config: config::ResolvedPermissionConfig::resolve(
+                config::PermissionPolicy::Reject,
+                None,
+            )
+            .expect("test config"),
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
@@ -9313,7 +9577,11 @@ mod error_outcome_emission_tests {
             model: None,
             effort_level: None,
             session_title: None,
-            permission_mode: config::PermissionMode::BypassPermissions,
+            permission_config: config::ResolvedPermissionConfig::resolve(
+                config::PermissionPolicy::Reject,
+                None,
+            )
+            .expect("test config"),
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
@@ -9396,6 +9664,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: steer_event_id.into(),
@@ -9471,6 +9740,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: "stale-event".into(),
@@ -9593,6 +9863,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: "stale-event".into(),
@@ -9662,6 +9933,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -9742,6 +10014,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -9834,6 +10107,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: Some(batch),
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -9933,6 +10207,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_decision_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -10030,6 +10305,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_decision_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -10138,6 +10414,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_decision_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -10216,6 +10493,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10313,6 +10591,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10433,6 +10712,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10575,6 +10855,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10709,6 +10990,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                permission_decision_tx: None,
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -10863,6 +11145,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10951,6 +11234,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -11001,6 +11285,463 @@ mod error_outcome_emission_tests {
 }
 
 #[cfg(test)]
+mod permission_decision_control_tests {
+    //! Pins the A2 inbound-delivery dedup: a `permission_decision` control
+    //! frame is forwarded to the in-flight task's mpsc exactly once; a later
+    //! retransmit of the same nonce that lands after the deciding task has
+    //! ended is acked success-shaped (`already_decided`) rather than failing
+    //! the already-resolved card with `no_active_turn` / `channel_closed`.
+
+    use super::*;
+    use crate::observer::ObserverHandle;
+    use crate::pool::{AgentPool, TaskMeta};
+    use std::collections::HashSet;
+
+    fn decision_payload(channel_id: Uuid, nonce: &str) -> serde_json::Value {
+        serde_json::json!({
+            "channelId": channel_id.to_string(),
+            "requestNonce": nonce,
+            "optionId": "opt-allow",
+        })
+    }
+
+    /// Install an in-flight task for `channel_id` carrying a permission mpsc,
+    /// returning the receiver so the test can observe delivery.
+    fn install_task(
+        pool: &mut AgentPool,
+        channel_id: Uuid,
+    ) -> tokio::sync::mpsc::Receiver<crate::acp::PermissionDecision> {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: None,
+                turn_id: "test-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                permission_decision_tx: Some(tx),
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        rx
+    }
+
+    /// Drain the observer for the single `control_result` status string.
+    fn control_result_status(
+        rx: &mut tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
+    ) -> String {
+        loop {
+            let event = rx.try_recv().expect("a control_result event was emitted");
+            if event.kind == "control_result" {
+                return event.payload["status"].as_str().unwrap().to_string();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn decision_is_delivered_once_then_retransmit_is_already_decided() {
+        let observer = ObserverHandle::in_process();
+        let mut rx_obs = observer.subscribe();
+        let channel_id = Uuid::new_v4();
+        let nonce = "nonce-live";
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let mut rx_task = install_task(&mut pool, channel_id);
+
+        // (a) First delivery reaches the read loop's mpsc and records the nonce.
+        handle_permission_decision_control(
+            &decision_payload(channel_id, nonce),
+            &mut pool,
+            Some(&observer),
+        );
+        assert_eq!(control_result_status(&mut rx_obs), "sent");
+        let delivered = rx_task.try_recv().expect("decision delivered to read loop");
+        assert_eq!(delivered.request_nonce, nonce);
+        assert_eq!(delivered.option_id, "opt-allow");
+
+        // (b) The deciding task ends: drop its mpsc and remove it from the map,
+        // exactly as `handle_prompt_result` would on turn completion.
+        drop(rx_task);
+        pool.task_map_mut().clear();
+
+        // (c) A retransmit of the same nonce lands with no in-flight task. It
+        // must be recognized as an already-applied duplicate.
+        handle_permission_decision_control(
+            &decision_payload(channel_id, nonce),
+            &mut pool,
+            Some(&observer),
+        );
+        assert_eq!(
+            control_result_status(&mut rx_obs),
+            "already_decided",
+            "retransmit after the task ended must ack success-shaped, not fail the resolved card"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_nonce_with_no_task_is_no_active_turn() {
+        // Mutation guard: without the recently-decided record, a decision for a
+        // channel with no in-flight task falls through to `no_active_turn`.
+        // This is what a retransmit of a *never-delivered* nonce must still get,
+        // and what the `already_decided` path above would collapse into if
+        // `was_recently_decided` were stubbed to always-false.
+        let observer = ObserverHandle::in_process();
+        let mut rx_obs = observer.subscribe();
+        let channel_id = Uuid::new_v4();
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        handle_permission_decision_control(
+            &decision_payload(channel_id, "never-seen"),
+            &mut pool,
+            Some(&observer),
+        );
+        assert_eq!(control_result_status(&mut rx_obs), "no_active_turn");
+    }
+
+    #[tokio::test]
+    async fn closed_channel_for_decided_nonce_is_already_decided() {
+        // The read loop is still in the task map but its receiver was dropped
+        // (loop exited mid-turn). A retransmit of an already-delivered nonce on
+        // that closed channel must ack `already_decided`, not `channel_closed`.
+        let observer = ObserverHandle::in_process();
+        let mut rx_obs = observer.subscribe();
+        let channel_id = Uuid::new_v4();
+        let nonce = "nonce-closed";
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let rx_task = install_task(&mut pool, channel_id);
+
+        handle_permission_decision_control(
+            &decision_payload(channel_id, nonce),
+            &mut pool,
+            Some(&observer),
+        );
+        assert_eq!(control_result_status(&mut rx_obs), "sent");
+
+        // Read loop exits: its receiver drops, but the task_map entry (with the
+        // now-closed sender) is still present.
+        drop(rx_task);
+        handle_permission_decision_control(
+            &decision_payload(channel_id, nonce),
+            &mut pool,
+            Some(&observer),
+        );
+        assert_eq!(
+            control_result_status(&mut rx_obs),
+            "already_decided",
+            "closed channel for an already-delivered nonce acks success-shaped"
+        );
+    }
+
+    /// Routing hazard regression: two concurrent thread-scoped tasks in the
+    /// same channel. A `permission_decision` frame must be fanned out to BOTH
+    /// tasks so the correct owning read loop can accept the decision by nonce.
+    ///
+    /// **Scenario:**
+    ///  - Thread A and Thread B both have `permission_decision_tx` installed.
+    ///  - A decision arrives whose nonce belongs to Thread A.
+    ///  - The fix fans out to BOTH channels; Thread A receives it.
+    ///  - Thread B also receives it (fan-out), but its read loop drops it on
+    ///    nonce mismatch — that is correct and expected.
+    ///
+    /// **Mutation proof:** reverting the fan-out to a `.find()` (first-match
+    /// only) and running with Thread B installed first makes Thread A's channel
+    /// empty (`try_recv` returns an error), and the assertion on Thread A fails.
+    #[tokio::test]
+    async fn two_threads_same_channel_fan_out_routes_to_owning_thread() {
+        let observer = ObserverHandle::in_process();
+        let mut rx_obs = observer.subscribe();
+        let channel_id = Uuid::new_v4();
+        let nonce_a = "nonce-thread-a";
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+
+        // Install Thread B first — a `.find()`-only implementation would pick
+        // Thread B and deliver there, stranding Thread A's decision.
+        let mut rx_b = install_task(&mut pool, channel_id);
+        let mut rx_a = install_task(&mut pool, channel_id);
+
+        // Deliver a decision with Thread A's nonce.
+        handle_permission_decision_control(
+            &decision_payload(channel_id, nonce_a),
+            &mut pool,
+            Some(&observer),
+        );
+        assert_eq!(
+            control_result_status(&mut rx_obs),
+            "sent",
+            "decision must be delivered (status sent)"
+        );
+
+        // Thread A's channel MUST have received the decision.
+        let received_a = rx_a.try_recv();
+        assert!(
+            received_a.is_ok(),
+            "Thread A must receive the decision — fan-out failure would leave this empty; got: {received_a:?}"
+        );
+        assert_eq!(received_a.unwrap().request_nonce, nonce_a);
+
+        // Thread B also received it (fan-out). Its read loop would drop it on
+        // nonce mismatch; here we just confirm fan-out delivered to both.
+        let received_b = rx_b.try_recv();
+        assert!(
+            received_b.is_ok(),
+            "Thread B should also receive via fan-out (nonce mismatch handled by the read loop)"
+        );
+    }
+
+    /// Cross-thread isolation: a decision for Thread A must NOT strand Thread B.
+    ///
+    /// Both threads are running concurrently. After Thread A's decision is
+    /// applied (its entry resolved), Thread B can still receive its own
+    /// decision independently.
+    #[tokio::test]
+    async fn two_threads_same_channel_thread_b_not_stranded() {
+        let observer = ObserverHandle::in_process();
+        let mut rx_obs = observer.subscribe();
+        let channel_id = Uuid::new_v4();
+        let nonce_a = "nonce-strand-a";
+        let nonce_b = "nonce-strand-b";
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let mut rx_b = install_task(&mut pool, channel_id);
+        let mut rx_a = install_task(&mut pool, channel_id);
+
+        // Deliver Thread A's decision.
+        handle_permission_decision_control(
+            &decision_payload(channel_id, nonce_a),
+            &mut pool,
+            Some(&observer),
+        );
+        assert_eq!(control_result_status(&mut rx_obs), "sent");
+        // Drain both channels.
+        let _ = rx_a.try_recv();
+        let _ = rx_b.try_recv();
+
+        // Now deliver Thread B's decision.
+        let payload_b = serde_json::json!({
+            "channelId": channel_id.to_string(),
+            "requestNonce": nonce_b,
+            "optionId": "opt-deny",
+        });
+        handle_permission_decision_control(&payload_b, &mut pool, Some(&observer));
+        assert_eq!(control_result_status(&mut rx_obs), "sent");
+
+        // Thread B must receive its own decision.
+        let received_b_2 = rx_b.try_recv();
+        assert!(
+            received_b_2.is_ok(),
+            "Thread B must receive its own decision after Thread A's was handled: {received_b_2:?}"
+        );
+        assert_eq!(received_b_2.unwrap().request_nonce, nonce_b);
+    }
+
+    /// Fan-out false-ack: mixed-result (owner-Full + sibling-Sent) must NOT
+    /// report `sent` or record the nonce.
+    ///
+    /// Scenario (Carl's verbatim requirement):
+    ///   1. Two tasks share a channel — owner (rx_owner, capacity 4) and
+    ///      sibling (rx_sibling, capacity 4).  Owner's queue is saturated with
+    ///      4 unread messages; sibling's queue is kept clear.
+    ///   2. A permission decision for nonce N is fanned out: sibling receives
+    ///      it (`Sent`), owner queue returns `Full`.
+    ///   3. Expected: status == `channel_full` (Desktop keeps retransmitting),
+    ///      nonce N is NOT in `was_recently_decided` (no suppression yet).
+    ///   4. Owner queue is drained; decision is retransmitted.
+    ///      Expected: status == `sent`, nonce N recorded, owner receives it.
+    ///
+    /// **Mutation proof:** reverting the `all_tx_accepted` gate to the prior
+    /// `any_sent` semantics makes step 3 return `"sent"` and records the nonce,
+    /// causing the assertion `assert_ne!(status_mixed, "sent")` to fail.
+    #[tokio::test]
+    async fn mixed_result_owner_full_sibling_sent_reports_channel_full_not_sent() {
+        let observer = ObserverHandle::in_process();
+        let mut rx_obs = observer.subscribe();
+        let channel_id = Uuid::new_v4();
+        let nonce = "nonce-mixed-full";
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        // Install sibling first — fan-out visits it before the owner.
+        // Keep the sibling receiver so we can drain it between fill rounds.
+        let mut rx_sibling = install_task(&mut pool, channel_id);
+        let mut rx_owner = install_task(&mut pool, channel_id);
+
+        // Saturate the owner's queue (capacity 4) with four fill decisions.
+        // After each send we drain the sibling's queue so it never fills.
+        let fill_nonce = "nonce-fill";
+        for _ in 0..4 {
+            handle_permission_decision_control(
+                &decision_payload(channel_id, fill_nonce),
+                &mut pool,
+                Some(&observer),
+            );
+            // Observer drain — keeps it responsive.
+            let _ = control_result_status(&mut rx_obs);
+            // Drain sibling so its queue stays open for the critical decision.
+            while rx_sibling.try_recv().is_ok() {}
+        }
+        // Precondition: owner queue is full (4/4 unread), sibling queue is empty.
+        assert!(
+            rx_owner.try_recv().is_ok(),
+            "precondition: owner queue must have unread messages (fill worked)"
+        );
+        // We just popped one — push it back conceptually: re-fill the slot we
+        // accidentally drained by sending one more fill decision.
+        handle_permission_decision_control(
+            &decision_payload(channel_id, fill_nonce),
+            &mut pool,
+            Some(&observer),
+        );
+        let _ = control_result_status(&mut rx_obs);
+        while rx_sibling.try_recv().is_ok() {}
+        // Owner queue: 4/4 full again (we drained 1 then immediately refilled).
+
+        // Deliver the critical decision.
+        // Owner queue: Full.  Sibling queue: Sent.  → any_sent=true, any_full=true.
+        handle_permission_decision_control(
+            &decision_payload(channel_id, nonce),
+            &mut pool,
+            Some(&observer),
+        );
+        let status_mixed = control_result_status(&mut rx_obs);
+
+        assert_ne!(
+            status_mixed, "sent",
+            "mixed-result (owner Full, sibling Sent) must NOT report 'sent'"
+        );
+        assert_eq!(
+            status_mixed, "channel_full",
+            "mixed-result must report 'channel_full' to keep Desktop retransmitting"
+        );
+        assert!(
+            !pool.was_recently_decided(nonce),
+            "nonce must NOT be recorded when owner queue was Full — \
+             retransmit suppression must not activate"
+        );
+
+        // Drain the owner queue fully — makes room for the retransmit.
+        while rx_owner.try_recv().is_ok() {}
+        // Also drain the sibling's copy of the critical nonce so it won't be
+        // counted as full on the retransmit path either.
+        while rx_sibling.try_recv().is_ok() {}
+
+        // Retransmit.  Now both queues have capacity: all tx-equipped loops
+        // accept → must report `sent` and record the nonce.
+        handle_permission_decision_control(
+            &decision_payload(channel_id, nonce),
+            &mut pool,
+            Some(&observer),
+        );
+        let status_retry = control_result_status(&mut rx_obs);
+
+        assert_eq!(
+            status_retry, "sent",
+            "after drain, retransmitted decision must reach owner and report 'sent'"
+        );
+        assert!(
+            pool.was_recently_decided(nonce),
+            "nonce must be recorded after all-loops-accepted retransmit"
+        );
+        // Confirm the owner's queue actually received the retransmit.
+        let received = rx_owner.try_recv();
+        assert!(
+            received.is_ok(),
+            "owner loop must receive the retransmitted decision after drain: {received:?}"
+        );
+        assert_eq!(received.unwrap().request_nonce, nonce);
+    }
+
+    /// F4 outer signed-control path: `handle_relay_observer_control_event`
+    /// admits a valid owner-signed, NIP-44-encrypted kind-24200 frame and
+    /// delivers the enclosed `permission_decision` payload to the in-flight
+    /// task's mpsc — exactly the path the Desktop takes when submitting a
+    /// decision over the relay.
+    ///
+    /// This test proves the outer admission path (signature check, owner-pubkey
+    /// check, freshness window, NIP-44 decrypt, type dispatch) without a live
+    /// relay: we build and sign the event locally then call the handler directly.
+    ///
+    /// Mutation proof: if the `is_none()` → `true` first-wins guard is removed
+    /// the early_decision would be overwritten by a later allow → the wrong
+    /// option is applied. Pairing this signed-path admission test with the
+    /// existing `early_decision_first_wins_reject_then_allow_reject_applied`
+    /// inner-loop test (which uses the same first-wins mutation) closes the
+    /// gap between the outer signed path and the inner read loop.
+    #[tokio::test]
+    async fn signed_observer_control_event_delivers_permission_decision() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let observer = ObserverHandle::in_process();
+        let mut rx_obs = observer.subscribe();
+        let channel_id = Uuid::new_v4();
+        let nonce = "nonce-signed-outer";
+
+        // Generate agent keys (the recipient of the encrypted payload) and owner
+        // keys (the sender — the owner who clicked the card in Desktop).
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let mut rx_task = install_task(&mut pool, channel_id);
+
+        // Build the permission_decision payload and NIP-44 encrypt it from the
+        // owner to the agent, exactly as Desktop does.
+        let decision_payload_value = serde_json::json!({
+            "type": "permission_decision",
+            "channelId": channel_id.to_string(),
+            "requestNonce": nonce,
+            "optionId": "opt-reject",
+        });
+        let encrypted = buzz_core::observer::encrypt_observer_payload(
+            &owner_keys,
+            &agent_keys.public_key(),
+            &decision_payload_value,
+        )
+        .expect("encrypt permission_decision payload");
+
+        // Build a kind-24200 observer control frame signed by the owner.
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16),
+            &encrypted,
+        )
+        .tags([
+            Tag::parse(["p", &agent_keys.public_key().to_hex()]).unwrap(),
+            Tag::parse(["agent", &agent_keys.public_key().to_hex()]).unwrap(),
+            Tag::parse(["frame", buzz_core::observer::OBSERVER_FRAME_CONTROL]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .expect("sign observer control event");
+
+        // Call the outer admission handler: signature check, owner-pubkey guard,
+        // freshness check, NIP-44 decrypt, type dispatch → mpsc delivery.
+        handle_relay_observer_control_event(
+            &agent_keys,
+            event,
+            &mut pool,
+            Some(&observer),
+            &owner_keys.public_key().to_hex(),
+            RelayEventPublisher::test_pair_dead(),
+        );
+
+        // The handler is synchronous and delivers immediately.
+        assert_eq!(
+            control_result_status(&mut rx_obs),
+            "sent",
+            "signed outer-control path must deliver the decision and emit status: sent"
+        );
+        let delivered = rx_task
+            .try_recv()
+            .expect("decision must be delivered to the read loop");
+        assert_eq!(delivered.request_nonce, nonce);
+        assert_eq!(delivered.option_id, "opt-reject");
+    }
+}
+
+#[cfg(test)]
 mod observer_payload_trim_tests {
     use super::*;
 
@@ -11014,6 +11755,7 @@ mod observer_payload_trim_tests {
             session_id: Some("sess-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            authorization: None,
             payload,
         }
     }
@@ -11246,5 +11988,43 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+
+    /// Authorized observer frames must never be leaf-trimmed or stubbed.
+    /// `fit_observer_event_to_budget` must leave the payload untouched when
+    /// `authorization` is present, even if the serialized frame is over-cap.
+    #[test]
+    fn test_authorized_frame_payload_is_never_trimmed() {
+        // Build an over-cap authorized frame (big payload, authorization present).
+        let big = "x".repeat(OBSERVER_MAX_PLAINTEXT_LEN + 1000);
+        let mut event = event_with_payload(
+            "acp_read",
+            serde_json::json!({ "method": "session/request_permission", "body": big }),
+        );
+        event.authorization = Some(crate::observer::AuthorizationEnvelope {
+            request_nonce: "test-nonce".to_string(),
+            actionable: true,
+            reason: None,
+            expires_at: None,
+        });
+
+        let payload_before = event.payload.clone();
+        assert!(
+            serialized(&event).len() > OBSERVER_MAX_PLAINTEXT_LEN,
+            "precondition: authorized frame is over-cap"
+        );
+
+        fit_observer_event_to_budget(&mut event);
+
+        // Payload must be byte-for-byte identical — no leaf trim, no stub.
+        assert_eq!(
+            event.payload, payload_before,
+            "authorized frame payload must not be mutated by fit_observer_event_to_budget"
+        );
+        // Authorization envelope must still be present and intact.
+        assert!(
+            event.authorization.is_some(),
+            "authorization envelope must survive fit_observer_event_to_budget"
+        );
     }
 }

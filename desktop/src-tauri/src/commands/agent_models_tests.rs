@@ -453,9 +453,8 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
     assert_eq!(discovery.model.as_deref(), Some("persona-model"));
     assert_eq!(discovery.provider.as_deref(), Some("anthropic"));
 
-    // And the discovery env comes from the descriptor, whose layering also
-    // resolves through the definition — the derived model env var must carry
-    // the persona's model, not the stale record snapshot.
+    // And the discovery env comes from the descriptor, whose layering also resolves
+    // through the definition — the derived model env var must carry the persona's model.
     assert_eq!(
         discovery.env.get("GOOSE_MODEL").map(String::as_str),
         Some("persona-model")

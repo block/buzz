@@ -46,6 +46,7 @@ import { formatTime } from "@/features/messages/lib/dateFormatters";
 // can exercise the exact same source the renderer uses.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { isPermissionRequestSentinel } from "@/shared/lib/permissionRequest";
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
@@ -262,7 +263,12 @@ export function formatTimelineMessages(
   // the original (`h`, `p` mentions, etc.) stay untouched.
   const editsByTargetId = new Map<
     string,
-    { content: string; tags: string[][]; createdAt: number }
+    {
+      content: string;
+      tags: string[][];
+      createdAt: number;
+      signerPubkey: string;
+    }
   >();
   for (const event of events) {
     if (
@@ -283,6 +289,19 @@ export function formatTimelineMessages(
     ) {
       continue;
     }
+
+    // Sentinel-specific edit gate: permission-request sentinels may only be
+    // overlaid by an edit signed by the ORIGINAL AGENT (byte-equal to the
+    // target's signer). Owner-signed or attacker-signed edits of sentinels
+    // are silently dropped here so the authenticated pending card is preserved
+    // intact. Generic owner-edit behavior for non-sentinel messages is
+    // unchanged.
+    if (
+      isPermissionRequestSentinel(target.content) &&
+      normalizePubkey(event.pubkey) !== normalizePubkey(target.pubkey)
+    ) {
+      continue;
+    }
     if (hasLinkPreviewSuppression(event.tags)) {
       previewSuppressedTargetIds.add(targetId);
     }
@@ -293,6 +312,7 @@ export function formatTimelineMessages(
         content: event.content,
         tags: event.tags,
         createdAt: event.created_at,
+        signerPubkey: normalizePubkey(event.pubkey),
       });
     }
   }
@@ -504,6 +524,8 @@ export function formatTimelineMessages(
           : undefined,
       time: formatTime(event.created_at),
       body: edit ? edit.content : event.content,
+      editSignerPubkey: edit?.signerPubkey,
+      preEditBody: edit ? event.content : undefined,
       parentId: thread.parentId,
       rootId: thread.rootId,
       depth: getDepth(event),

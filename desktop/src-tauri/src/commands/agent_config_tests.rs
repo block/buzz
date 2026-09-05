@@ -69,6 +69,7 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
 
 fn agent_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        definition_permission_policy: None,
         description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
@@ -122,6 +123,8 @@ fn agent_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
         agent_command_override: None,
         persona_source_version: None,
@@ -131,6 +134,7 @@ fn agent_record() -> ManagedAgentRecord {
 
 fn persona_with_model(model: &str) -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         description: None,
         id: "persona-1".to_string(),
         display_name: "Persona".to_string(),

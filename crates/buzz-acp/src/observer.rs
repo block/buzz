@@ -30,6 +30,33 @@ pub struct ObserverContext {
     pub started_at: Option<String>,
 }
 
+/// Authorization envelope attached to permission-related observer events.
+///
+/// Present on the single `acp_read` emitted after a permission request passes
+/// the admission preflight, and on the corresponding `acp_write` after the
+/// response is confirmed written.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationEnvelope {
+    /// Single-use nonce bound to this request — delivered to the desktop and
+    /// consumed exactly once when the owner makes a decision.
+    pub request_nonce: String,
+    /// `true` when the owner can take action (policy=ask, preflight passed,
+    /// owner/observer available). `false` for auto-deny / fail-closed paths.
+    pub actionable: bool,
+    /// Human-readable reason when `actionable` is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Wire card-expiry (unix seconds) for an actionable card — the same value
+    /// stored in the kind-9 sentinel. The desktop bounds its
+    /// retransmit-until-acked loop by this deadline, so a decision published
+    /// while the harness socket is down keeps being resent until the card
+    /// expires (never past it). `None` on non-actionable / already-resolved
+    /// frames, where no owner decision is awaited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+}
+
 /// Handle used by the harness to publish local observer events.
 #[derive(Clone)]
 pub struct ObserverHandle {
@@ -54,7 +81,7 @@ fn new_observer_handle() -> ObserverHandle {
 }
 
 /// Event delivered through the in-process observer bus.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObserverEvent {
     /// Monotonic process-local sequence number.
@@ -74,6 +101,12 @@ pub struct ObserverEvent {
     /// RFC3339 timestamp at which the current turn began, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    /// Authorization envelope — present only on permission `acp_read` /
+    /// `acp_write` frames, and on the observer-only `permission_terminal` frame
+    /// (which carries `reason = "uncertain"` and is never sent on the ACP wire).
+    /// `None` on all other event kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<AuthorizationEnvelope>,
     /// Raw or semantic event payload.
     pub payload: serde_json::Value,
 }
@@ -108,6 +141,31 @@ impl ObserverHandle {
         context: &ObserverContext,
         payload: serde_json::Value,
     ) {
+        self.emit_inner(kind, agent_index, context, None, payload);
+    }
+
+    /// Emit a local observer event with an authorization envelope.
+    ///
+    /// Used for permission `acp_read` and `acp_write` frames.
+    pub fn emit_authorized(
+        &self,
+        kind: impl Into<String>,
+        agent_index: Option<usize>,
+        context: &ObserverContext,
+        authorization: AuthorizationEnvelope,
+        payload: serde_json::Value,
+    ) {
+        self.emit_inner(kind, agent_index, context, Some(authorization), payload);
+    }
+
+    fn emit_inner(
+        &self,
+        kind: impl Into<String>,
+        agent_index: Option<usize>,
+        context: &ObserverContext,
+        authorization: Option<AuthorizationEnvelope>,
+        payload: serde_json::Value,
+    ) {
         let event = ObserverEvent {
             seq: self.inner.seq.fetch_add(1, Ordering::Relaxed),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -117,6 +175,7 @@ impl ObserverHandle {
             session_id: context.session_id.clone(),
             turn_id: context.turn_id.clone(),
             started_at: context.started_at.clone(),
+            authorization,
             payload,
         };
 

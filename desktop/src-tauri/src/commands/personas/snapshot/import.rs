@@ -126,8 +126,7 @@ pub struct AgentSnapshotImportResult {
 ///
 /// This is the single authoritative selection path for all import-time
 /// allowlist and behavioral decisions. It is extracted as a pure, testable
-/// function so that unit tests exercise the exact production logic rather
-/// than a reconstruction of it.
+/// function so unit tests exercise the exact production logic.
 ///
 /// # UI contract
 ///
@@ -148,9 +147,8 @@ pub struct AgentSnapshotImportResult {
 /// and there is no coherent value to write.
 ///
 /// Non-allowlist + non-empty + Clear: preserve the source mode but empty the
-/// list.  Only allowlist-mode requires a mode downgrade on Clear, because
-/// `allowlist` without entries is an invalid state.  Non-allowlist modes
-/// remain valid with an empty list.
+/// list. Only allowlist-mode requires a mode downgrade on Clear, because
+/// `allowlist` without entries is an invalid state.
 pub(crate) fn resolve_snapshot_import_behavior(
     raw_respond_to: Option<&str>,
     raw_allowlist: &[String],
@@ -313,8 +311,7 @@ pub(crate) fn decode_snapshot_from_bytes(
 /// (the owner identity or the named local agent record).
 ///
 /// Returns the decoded manifest and whether it came from a locked envelope.
-/// When neither endpoint exists, fails closed with the locked-card refusal —
-/// never partial plaintext, never crypto details.
+/// When neither endpoint exists, fails closed with the locked-card refusal.
 pub(crate) fn decode_snapshot_for_import(
     file_bytes: &[u8],
     owner_keys: Option<&nostr::Keys>,
@@ -363,11 +360,10 @@ where
 /// envelope's two exact key endpoints; a card that cannot be unlocked fails
 /// with the locked-card refusal (shown directly to the user), never a
 /// partial preview. Identity-recovery mode is tolerated: owner keys are
-/// simply unavailable, so only the agent-record endpoint can unlock.
+/// unavailable, so only the agent-record endpoint can unlock.
 ///
-/// Returns an `AgentSnapshotImportPreview` or a descriptive error. Errors
-/// represent irrecoverable failures (corrupt / unsupported / locked-to-
-/// someone-else file) and are shown directly to the user.
+/// Returns an `AgentSnapshotImportPreview` or a descriptive error shown
+/// directly to the user (corrupt / unsupported / locked-to-someone-else).
 #[tauri::command]
 pub async fn preview_agent_snapshot_import(
     file_bytes: Vec<u8>,
@@ -446,8 +442,8 @@ pub(crate) fn build_agent_snapshot_import_preview(
 ///      via `sync_managed_agent_profile`.
 ///   4. Memory — for each opted-in entry, build a fresh `kind:30174` event
 ///      with `engram::build_event` under the new agent↔owner conversation
-///      key and POST it to the relay. Failures are collected and returned as
-///      `memory_errors`; the agent itself is already created.
+///      key and POST it. Failures are collected as `memory_errors`; the
+///      agent itself is already created.
 ///
 /// Importing the same file twice yields two distinct agents with different
 /// keypairs. No source identity material (pubkey, nsec, auth_tag, relay_url,
@@ -459,8 +455,7 @@ pub async fn confirm_agent_snapshot_import(
     state: State<'_, AppState>,
 ) -> Result<AgentSnapshotImportResult, String> {
     // ── Phase 1: validate (no writes) ────────────────────────────────────────
-    // Locked cards unlock only via this machine's exact key endpoints;
-    // anything else fails closed here, before key generation.
+    // Locked cards unlock only via this machine's exact key endpoints.
     let snapshot = {
         let owner_keys = state.signing_keys().ok();
         let records = {
@@ -585,6 +580,8 @@ pub async fn confirm_agent_snapshot_import(
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             parallelism: minted_parallelism,
+            // Definition policy is a local grant, never in a shared snapshot.
+            permission_policy: None,
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -659,10 +656,13 @@ pub async fn confirm_agent_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
+            definition_permission_policy: None,
             relay_mesh: None,
             effort_level: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
+            permission_policy: None,
+            applied_permission_policy: None,
         };
 
         records.push(record.clone());

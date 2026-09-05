@@ -7,9 +7,10 @@ use super::agent_env::idle_pool_sleep_env;
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        missing_command_message, normalize_agent_args, open_log_file,
+        permission_policy::resolve_effective_permission_policy, resolve_command, spawn_key_refusal,
+        KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -292,6 +293,9 @@ pub fn build_managed_agent_summary(
         .unwrap_or("")
         .to_string();
 
+    let (effective_permission_policy_summary, effective_permission_policy_source) =
+        resolve_effective_permission_policy(record, personas, global_config);
+
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
@@ -334,6 +338,9 @@ pub fn build_managed_agent_summary(
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        permission_policy: effective_permission_policy_summary,
+        permission_policy_source: effective_permission_policy_source,
+        applied_permission_policy: record.applied_permission_policy,
     })
 }
 
@@ -722,33 +729,24 @@ pub fn spawn_agent_child(
         command.env_remove(key);
     }
 
+    // Inject BUZZ_ACP_PERMISSION_POLICY, keeping the running process and the
+    // UI-visible setting in sync; the returned policy is stamped below.
+    let effective_permission_policy = super::permission_policy::inject_spawn_permission_policy(
+        &mut command,
+        record,
+        &personas,
+        &global,
+    );
+
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
     // Git credential helper: NIP-98 auth for Buzz relay git via git-credential-nostr.
-    // Ephemeral GIT_CONFIG_COUNT env vars scoped to relay HTTP URL; NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY.
-    if let Some(cred_helper) = resolve_command("git-credential-nostr") {
-        let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
-
-        command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
-        command.env("GIT_TERMINAL_PROMPT", "0");
-        command.env("GIT_CONFIG_COUNT", "2");
-        command.env(
-            "GIT_CONFIG_KEY_0",
-            format!("credential.{relay_http_url}/git.helper"),
-        );
-        let helper = cred_helper.to_string_lossy().replace('\\', "/");
-        command.env("GIT_CONFIG_VALUE_0", helper);
-        command.env(
-            "GIT_CONFIG_KEY_1",
-            format!("credential.{relay_http_url}/git.useHttpPath"),
-        );
-        command.env("GIT_CONFIG_VALUE_1", "true");
-    } else {
-        eprintln!(
-            "buzz-desktop: git-credential-nostr not found — agent {} will not have automatic Buzz git auth",
-            record.name,
-        );
-    }
+    super::agent_env::configure_git_credential_helper(
+        &mut command,
+        &effective_relay_url,
+        &record.private_key_nsec,
+        &record.name,
+    );
 
     // User env (descriptor.env): fully-layered floor→runtime→definition→global→persona→agent,
     // reserved-key filtered. Written last so user-explicit values win over Buzz-set env.
@@ -806,6 +804,7 @@ pub fn spawn_agent_child(
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),
             provider: effective_provider.as_deref(),
+            permission_policy: effective_permission_policy,
             enforced_owner_only: super::owner_only_access_build(),
             session_policy: acp_session_policy,
         },
