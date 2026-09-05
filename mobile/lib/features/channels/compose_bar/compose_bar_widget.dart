@@ -543,21 +543,26 @@ class ComposeBar extends HookConsumerWidget {
         );
 
         ensureAuthorizationCurrent();
-        // Mentioning humans outside the channel prompts "Invite" / "Do
-        // nothing" (send without inviting) — mirrors desktop's
-        // NonMemberMentionDialog. Agents keep the existing silent auto-add.
-        if (scan.humans.isNotEmpty) {
+        // Agents and humans both require deliberate invitation intent.
+        final nonMembers = [
+          ...scan.humans,
+          ...selectedMentions.where(
+            (candidate) =>
+                scan.agentPubkeys.contains(candidate.pubkey.toLowerCase()),
+          ),
+        ];
+        if (nonMembers.isNotEmpty) {
           if (!context.mounted) return;
           final choice = await _promptNonMemberMention(
             context,
-            names: [for (final candidate in scan.humans) candidate.label],
+            names: [for (final candidate in nonMembers) candidate.label],
             canInvite: scan.canAddMembers,
           );
           ensureAuthorizationCurrent();
           if (choice == null) {
             return; // Dismissed — keep the draft, send nothing.
           }
-          outgoing.resolveHumanChoice(choice, scan.humans);
+          outgoing.resolveChoice(choice, nonMembers);
         }
 
         final queuedAttachments = List<_PendingAttachment>.of(

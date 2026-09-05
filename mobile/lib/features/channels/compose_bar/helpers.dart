@@ -324,7 +324,7 @@ String _composeSendErrorMessage(Object error) {
   return error.toString().replaceFirst('Exception: ', '');
 }
 
-/// Ask whether to invite mentioned humans who aren't channel members, or
+/// Ask whether to invite mentioned identities who aren't channel members, or
 /// send without inviting them. Mirrors desktop's `NonMemberMentionDialog`.
 /// [canInvite] false (a private channel the sender doesn't own/administer)
 /// drops the Invite action — the relay rejects that add, so offering it would
@@ -338,7 +338,7 @@ Future<_NonMemberMentionChoice?> _promptNonMemberMention(
   return showBuzzDialog<_NonMemberMentionChoice>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: const Text('Mention people outside this channel?'),
+      title: const Text('Invite mentioned people or agents?'),
       content: Text(
         canInvite
             ? '${names.join(', ')} $verb not in this channel. Invite them to '
@@ -352,7 +352,7 @@ Future<_NonMemberMentionChoice?> _promptNonMemberMention(
           onPressed: () => Navigator.of(
             dialogContext,
           ).pop(_NonMemberMentionChoice.sendWithoutInviting),
-          child: Text(canInvite ? 'Do nothing' : 'Send anyway'),
+          child: const Text('Send without inviting'),
         ),
         if (canInvite)
           TextButton(
@@ -435,8 +435,8 @@ class _NonMemberAddOutcome {
 
 /// Adds mentioned non-members to the channel before a send.
 ///
-/// Agents are added silently with the `bot` role; humans are only passed here
-/// after they have been explicitly invited from the mention prompt.
+/// Agents use the `bot` role, humans the `member` role. Both require an explicit
+/// invitation choice before reaching this helper.
 ///
 /// A rejection is reported, never thrown: the send is fire-and-forget, so an
 /// escaping error would drop the message with nothing shown. [StateError] still
@@ -567,13 +567,13 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
 
 /// The p-tags and `mention` reference tags an outgoing message should carry.
 ///
-/// Anyone who ends up *not* added is demoted from a p-tag to a reference tag so
-/// their name still renders without notifying a non-member — mirrors desktop's
-/// `mergeOutgoingTagsWithReferenceMentions`.
+/// Only an explicit reference-only choice demotes p-tags. Failed invitation
+/// preparation must preserve intent and prevent publication.
 class _OutgoingMentions {
   List<String> pubkeys;
   final List<List<String>> referenceTags = [];
   List<String> _invitedHumanPubkeys = const [];
+  bool _inviteAgents = false;
 
   _OutgoingMentions(List<MentionCandidate> selectedMentions)
     : pubkeys = LinkedHashSet<String>.from(
@@ -593,22 +593,23 @@ class _OutgoingMentions {
   }
 
   /// Applies the mention prompt's outcome: invite them, or send without.
-  void resolveHumanChoice(
+  void resolveChoice(
     _NonMemberMentionChoice choice,
-    List<MentionCandidate> humans,
+    List<MentionCandidate> nonMembers,
   ) {
-    final humanPubkeys = [
-      for (final candidate in humans) candidate.pubkey.toLowerCase(),
-    ];
     switch (choice) {
       case _NonMemberMentionChoice.invite:
-        _invitedHumanPubkeys = humanPubkeys;
+        _inviteAgents = true;
+        _invitedHumanPubkeys = [
+          for (final candidate in nonMembers)
+            if (!candidate.isAgent) candidate.pubkey.toLowerCase(),
+        ];
       case _NonMemberMentionChoice.sendWithoutInviting:
-        demote(humanPubkeys);
+        demote(nonMembers.map((candidate) => candidate.pubkey));
     }
   }
 
-  /// Adds the scanned non-members, demoting and reporting whatever didn't land.
+  /// Adds explicitly invited non-members, failing the send on any refusal.
   Future<void> addNonMembers(
     ChannelActions channelActions, {
     required _NonMemberMentionScan scan,
@@ -618,16 +619,13 @@ class _OutgoingMentions {
     final outcome = await _addMentionedNonMembers(
       channelActions,
       channelId: scan.channelId,
-      agentPubkeys: scan.agentPubkeys,
+      agentPubkeys: _inviteAgents ? scan.agentPubkeys : const [],
       humanPubkeys: _invitedHumanPubkeys,
       canAddMembers: scan.canAddMembers,
       ensureCurrent: ensureCurrent,
     );
-    demote(outcome.notAdded);
-    if (outcome.errors.isNotEmpty) {
-      messenger?.showSnackBar(
-        SnackBar(content: Text(outcome.errors.join(' '))),
-      );
+    if (outcome.notAdded.isNotEmpty) {
+      throw Exception('Message not sent. ${outcome.errors.join(' ')}');
     }
   }
 }

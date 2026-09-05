@@ -32,6 +32,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/publication_tests.dart';
 part 'compose_bar_test/send_lifecycle_tests.dart';
+part 'compose_bar_test/invitation_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -585,6 +586,7 @@ class _RecordingRelaySocket extends RelaySocket {
   /// Invoked after an event is handed to the socket but before its relay
   /// acknowledgement is delivered. Tests may defer that acknowledgement.
   final Future<void> Function(Map<String, dynamic> event)? beforeAcknowledged;
+  final bool rejectAdds;
 
   /// Invoked after an event has been recorded and acknowledged, before the
   /// caller's `await` resumes. Lets a test interleave state changes (such as
@@ -595,6 +597,7 @@ class _RecordingRelaySocket extends RelaySocket {
     this.events,
     this.handleMessage, {
     this.beforeAcknowledged,
+    this.rejectAdds = false,
     this.onEventAcknowledged,
   }) : super(
          wsUrl: 'ws://localhost',
@@ -614,12 +617,22 @@ class _RecordingRelaySocket extends RelaySocket {
       final id = event['id'] as String;
       final pending = beforeAcknowledged?.call(event);
       if (pending == null) {
-        super.debugHandleOkForTest(['OK', id, true, '']);
+        super.debugHandleOkForTest([
+          'OK',
+          id,
+          !(rejectAdds && event['kind'] == 9000),
+          'test relay refusal',
+        ]);
         onEventAcknowledged?.call(event);
       } else {
         unawaited(
           pending.then((_) {
-            super.debugHandleOkForTest(['OK', id, true, '']);
+            super.debugHandleOkForTest([
+              'OK',
+              id,
+              !(rejectAdds && event['kind'] == 9000),
+              'test relay refusal',
+            ]);
             onEventAcknowledged?.call(event);
           }),
         );
@@ -663,6 +676,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 void main() {
   _publicationTests();
   sendLifecycleTests();
+  invitationTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -3141,6 +3155,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Invite'));
       await tester.pumpAndSettle();
 
       // The cancelled send must not reach the relay.
@@ -3284,6 +3301,9 @@ void main() {
             .text;
         await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.text('Invite'));
+        await tester.pump();
 
         expect(
           publishedEvents.where((event) => event['kind'] == 9000),
@@ -3312,6 +3332,8 @@ void main() {
           publishedEvents.where((event) => event['kind'] == 9000),
           isEmpty,
         );
+        await tester.tap(find.text('hello @Helper Bot'));
+        await tester.pumpAndSettle();
         expect(
           tester.widget<TextField>(find.byType(TextField)).controller!.text,
           submittedText,
@@ -4198,6 +4220,9 @@ void main() {
       );
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Invite'));
       await tester.pumpAndSettle();
 
       expect(sentContent, 'hello @Helper Bot');
@@ -4267,12 +4292,18 @@ void main() {
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Invite'));
+      await tester.pump();
 
       expect(
         publishedEvents.where((event) => event['kind'] == 9000),
         hasLength(1),
       );
 
+      await tester.tap(find.text('hello @Helper Bot'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       await tester.enterText(find.byType(TextField), 'newer draft');
       addMemberAcknowledgement.complete();
       await tester.pumpAndSettle();
@@ -4512,6 +4543,9 @@ void main() {
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.text('Invite'));
         await tester.pumpAndSettle();
 
         expect(didSend, isTrue);

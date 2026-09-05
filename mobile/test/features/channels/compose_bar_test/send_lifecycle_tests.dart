@@ -136,6 +136,9 @@ void sendLifecycleTests() {
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(LucideIcons.arrowUp));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Invite'));
+    await tester.pump();
     expect(events.where((e) => e['kind'] == 9000), hasLength(1));
     await tester.pumpWidget(build(thread: 'other'));
     await tester.pumpWidget(build());
@@ -143,6 +146,8 @@ void sendLifecycleTests() {
     await tester.pumpAndSettle();
     await tester.pump(const Duration(milliseconds: 300));
     expect(sends, 0);
+    await tester.tap(find.text('@Helper Bot @Other Bot'));
+    await tester.pumpAndSettle();
     expect(events.where((e) => e['kind'] == 9000), hasLength(1));
     expect(
       tester.widget<TextField>(find.byType(TextField)).controller!.text,
