@@ -48,6 +48,8 @@ use crate::scope::SessionScope;
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 
+const FINAL_TEXT_REPLY_SUBMIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
@@ -2827,6 +2829,10 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
+    let final_text_fallback_enabled = agent.acp.final_text_fallback_enabled();
+    agent
+        .acp
+        .set_final_text_capture(final_text_fallback_enabled && batch.is_some());
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
     let has_standing_context = match &source {
         PromptSource::Channel(_) => !standing.sections().is_empty(),
@@ -3030,6 +3036,14 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        if final_text_fallback_enabled {
+                            publish_final_text_reply(
+                                &ctx.rest_client,
+                                batch.as_ref(),
+                                agent.acp.take_final_text(),
+                            )
+                            .await;
+                        }
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -3104,6 +3118,17 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            if final_text_fallback_enabled
+                && matches!(&stop_reason, StopReason::EndTurn | StopReason::Refusal)
+            {
+                publish_final_text_reply(
+                    &ctx.rest_client,
+                    batch.as_ref(),
+                    agent.acp.take_final_text(),
+                )
+                .await;
+            }
 
             send_prompt_result(
                 &result_tx,
@@ -4604,6 +4629,84 @@ fn record_scope_delivery_success(
     );
 }
 
+/// Publish ACP final text for adapters that cannot post through `buzz`.
+///
+/// The harness owns the relay signer, while some ACP adapters deliberately
+/// isolate their tool subprocess environment from Buzz credentials. We retain
+/// the agent's `agent_message_chunk` text in [`AcpClient`] and publish it here
+/// only after a normal terminal turn. The adapter allowlist is the deduplication
+/// boundary: adapters that can post through the CLI do not capture or submit
+/// final text, so no reply-tag convention can cause a duplicate.
+async fn publish_final_text_reply(
+    rest: &RestClient,
+    batch: Option<&FlushBatch>,
+    final_text: Option<String>,
+) {
+    let (Some(batch), Some(final_text)) = (batch, final_text) else {
+        return;
+    };
+    let Some(triggering_event) = batch.events.last().map(|event| &event.event) else {
+        return;
+    };
+
+    let trigger_id = triggering_event.id.to_hex();
+    let thread_tags = crate::queue::parse_thread_tags(triggering_event);
+    let root_event_id = thread_tags
+        .root_event_id
+        .as_deref()
+        .and_then(|id| nostr::EventId::from_hex(id).ok())
+        .unwrap_or(triggering_event.id);
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id,
+        parent_event_id: triggering_event.id,
+    };
+    let builder = match buzz_sdk::build_message(
+        batch.channel_id,
+        &final_text,
+        Some(&thread_ref),
+        &[],
+        false,
+        &[],
+    ) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::warn!(
+                channel = %batch.channel_id,
+                "could not build ACP final-text fallback reply: {error}"
+            );
+            return;
+        }
+    };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(
+                channel = %batch.channel_id,
+                "could not sign ACP final-text fallback reply: {error}"
+            );
+            return;
+        }
+    };
+    match timeout(FINAL_TEXT_REPLY_SUBMIT_TIMEOUT, rest.submit_event(&event)).await {
+        Ok(Ok(_)) => tracing::info!(
+            channel = %batch.channel_id,
+            trigger = %trigger_id,
+            "published ACP final-text fallback reply"
+        ),
+        Ok(Err(error)) => tracing::warn!(
+            channel = %batch.channel_id,
+            trigger = %trigger_id,
+            "ACP final-text fallback reply failed: {error}"
+        ),
+        Err(_) => tracing::warn!(
+            channel = %batch.channel_id,
+            trigger = %trigger_id,
+            timeout_ms = FINAL_TEXT_REPLY_SUBMIT_TIMEOUT.as_millis() as u64,
+            "ACP final-text fallback reply timed out"
+        ),
+    }
+}
+
 //
 // Two-phase lifecycle visible to users:
 //   👀  "seen"    — event was queued and an agent will handle it
@@ -5239,6 +5342,143 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    fn final_text_batch(channel_id: Uuid, event: nostr::Event) -> FlushBatch {
+        FlushBatch {
+            channel_id,
+            scope: conv(channel_id),
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn final_text_fallback_posts_a_threaded_reply() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fallback server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (posted_tx, posted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept event submission");
+            let mut request = vec![0; 32 * 1024];
+            let read = socket.read(&mut request).await.expect("read request");
+            let request = String::from_utf8(request[..read].to_vec()).expect("utf8 request");
+            assert!(request.starts_with("POST /events "));
+            let body = request
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("event request body")
+                .to_owned();
+            posted_tx.send(body).expect("deliver submitted event");
+            let response_body = r#"{"accepted":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let agent_keys = Keys::generate();
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: agent_keys.clone(),
+            auth_tag_json: None,
+        };
+        let channel_id = Uuid::new_v4();
+        let root_event = EventBuilder::new(Kind::Custom(9), "thread root")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign root");
+        let root_id = root_event.id.to_hex();
+        let parent_event = EventBuilder::new(Kind::Custom(9), "thread parent")
+            .tags([Tag::parse(["e", &root_id, "", "root"]).expect("root tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign parent");
+        let parent_id = parent_event.id.to_hex();
+        let triggering_event = EventBuilder::new(Kind::Custom(9), "please reply")
+            .tags([
+                Tag::parse(["e", &root_id, "", "root"]).expect("root tag"),
+                Tag::parse(["e", &parent_id, "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign trigger");
+        let trigger_id = triggering_event.id.to_hex();
+        let batch = final_text_batch(channel_id, triggering_event);
+
+        publish_final_text_reply(&rest, Some(&batch), Some("Hermes reply".into())).await;
+
+        let body = posted_rx.await.expect("fallback event was submitted");
+        let event: nostr::Event = serde_json::from_str(&body).expect("submitted event");
+        server.await.expect("server completes");
+
+        assert_eq!(event.content, "Hermes reply");
+        assert_eq!(event.pubkey, agent_keys.public_key());
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags.iter().any(|tag| {
+            tag.first().is_some_and(|value| value == "h")
+                && tag
+                    .get(1)
+                    .is_some_and(|value| value == &channel_id.to_string())
+        }));
+        assert!(tags.iter().any(|tag| {
+            tag.first().is_some_and(|value| value == "e")
+                && tag.get(1).is_some_and(|value| value == &root_id)
+                && tag.get(3).is_some_and(|value| value == "root")
+        }));
+        assert!(tags.iter().any(|tag| {
+            tag.first().is_some_and(|value| value == "e")
+                && tag.get(1).is_some_and(|value| value == &trigger_id)
+                && tag.get(3).is_some_and(|value| value == "reply")
+        }));
+    }
+
+    #[tokio::test]
+    async fn final_text_fallback_does_not_submit_without_final_text() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind missing-text server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_ok()
+        });
+
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let batch = final_text_batch(
+            Uuid::new_v4(),
+            EventBuilder::new(Kind::Custom(9), "already answered")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign trigger"),
+        );
+
+        publish_final_text_reply(&rest, Some(&batch), None).await;
+
+        assert!(
+            !server.await.expect("server completes"),
+            "missing ACP final text must not send a fallback request"
+        );
     }
 
     #[test]
