@@ -219,7 +219,7 @@ pairingRelay:
   replicaCount: 1
   service:
     type: ClusterIP
-    port: 5000
+    port: 18765
     annotations: {}
   podAnnotations: {}
   podLabels: {}
