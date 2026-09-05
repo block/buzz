@@ -512,6 +512,10 @@ export const MessageActionBar = React.memo(function MessageActionBar({
         isReactionPickerOpen || isDropdownOpen
           ? "sm:pointer-events-auto sm:opacity-100"
           : "",
+        // Issue #4077: the hover action bar is chrome, not message content —
+        // it must not become part of the surrounding text selection when the
+        // user drag-selects across a message.
+        "select-none",
       )}
       data-testid={`message-action-bar-${message.id}`}
     >
