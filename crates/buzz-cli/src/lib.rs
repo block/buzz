@@ -470,10 +470,10 @@ pub enum MessagesCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
-        /// Maximum number of results to return
+        /// Maximum number of results to return [default: 50] [max: 200]
         #[arg(long)]
         limit: Option<u32>,
-        /// Unix timestamp — return messages before this time
+        /// Unix timestamp — return messages before this time (inclusive)
         #[arg(long)]
         before: Option<i64>,
         /// Unix timestamp — return messages after this time
@@ -497,7 +497,7 @@ pub enum MessagesCmd {
         /// Canonical buzz://message deep link; uses the configured relay and identity
         #[arg(long, conflicts_with_all = ["channel", "event"])]
         link: Option<String>,
-        /// Maximum number of results to return
+        /// Maximum number of replies to return [default: 100] [max: 500]
         #[arg(long)]
         limit: Option<u32>,
         /// Maximum reply nesting depth to include
@@ -515,10 +515,10 @@ pub enum MessagesCmd {
         /// Filter by author: 64-char hex pubkey, npub, or display name
         #[arg(long)]
         author: Option<String>,
-        /// Unix timestamp — return messages after this time
+        /// Unix timestamp — return messages after this time (inclusive)
         #[arg(long)]
         since: Option<i64>,
-        /// Maximum number of results to return
+        /// Maximum number of results to return [default: 20] [max: 100]
         #[arg(long)]
         limit: Option<u32>,
     },
