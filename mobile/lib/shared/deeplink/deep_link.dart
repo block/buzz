@@ -311,9 +311,10 @@ class EntityDeepLink extends BuzzDeepLink {
   });
 }
 
-/// Parse canonical `buzz://repo|pr|issue` permalinks for inline presentation.
+/// Parse canonical `buzz://repo|pr|issue|project` permalinks for inline presentation.
 EntityDeepLink? parseEntityDeepLink(Uri uri) {
-  if (uri.scheme != 'buzz' || !{'repo', 'pr', 'issue'}.contains(uri.host)) {
+  if (uri.scheme != 'buzz' ||
+      !{'repo', 'pr', 'issue', 'project'}.contains(uri.host)) {
     return null;
   }
   if (uri.path.isNotEmpty ||
@@ -322,12 +323,14 @@ EntityDeepLink? parseEntityDeepLink(Uri uri) {
       uri.hasPort) {
     return null;
   }
-  final allowed = uri.host == 'repo' ? {'owner', 'd'} : {'id', 'owner', 'd'};
+  final isCoordinateHost = uri.host == 'repo' || uri.host == 'project';
+  final required = isCoordinateHost ? {'owner', 'd'} : {'id', 'owner', 'd'};
+  final optional = uri.host == 'project' ? {'tab'} : <String>{};
   final queryParameters = uri.queryParametersAll;
   final parameterKeys = queryParameters.keys.toSet();
-  if (parameterKeys.difference(allowed).isNotEmpty ||
-      allowed.difference(parameterKeys).isNotEmpty ||
-      allowed.any((key) => queryParameters[key]?.length != 1)) {
+  if (parameterKeys.difference(required.union(optional)).isNotEmpty ||
+      required.difference(parameterKeys).isNotEmpty ||
+      parameterKeys.any((key) => queryParameters[key]?.length != 1)) {
     return null;
   }
   final owner = uri.queryParameters['owner'];
@@ -342,7 +345,7 @@ EntityDeepLink? parseEntityDeepLink(Uri uri) {
       repository.contains('..')) {
     return null;
   }
-  if (uri.host != 'repo' && (eventId == null || !hex.hasMatch(eventId))) {
+  if (!isCoordinateHost && (eventId == null || !hex.hasMatch(eventId))) {
     return null;
   }
   return EntityDeepLink(
