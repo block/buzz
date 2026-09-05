@@ -118,9 +118,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     // A failed global receiver must remain visible without entering the shell's
     // layout flow. This also forces the error to settle before measuring chrome.
     await expect(
-      page.getByText("Desktop lifecycle receiver is unavailable.", {
-        exact: true,
-      }),
+      page.getByText(/Desktop lifecycle receiver is unavailable/),
     ).toBeVisible();
 
     // Lock the native and webview placements together: removing this explicit

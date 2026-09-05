@@ -157,6 +157,8 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
   let closed = 0;
   let rejectLate;
   let delayed = false;
+  let storageAvailable = false;
+  let subscribed = 0;
   relayClient.fetchEvents = async () => {
     if (delayed)
       return new Promise((_, reject) => {
@@ -165,13 +167,16 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
     return [];
   };
   relayClient.subscribeLive = async (_filter, _event, onReadiness) => {
+    subscribed++;
     readiness = onReadiness;
+    onReadiness("eose");
     return () => {
       closed++;
     };
   };
   window.__TAURI_INTERNALS__ = {
     invoke: async () => {
+      if (storageAvailable) return;
       throw new Error("fixture: storage unavailable");
     },
   };
@@ -193,7 +198,7 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
     assert.equal(warnings().length, 1);
     assert.equal(
       warnings()[0].title,
-      "Desktop lifecycle receiver is unavailable.",
+      "Desktop lifecycle receiver is unavailable (projection: request failed).",
     );
     assert.equal(warnings()[0].duration, Infinity);
     assert.equal(warnings()[0].closeButton, true);
@@ -202,6 +207,16 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
       warnings().length,
       1,
       "repeated failures update one notification",
+    );
+    const retryAction = warnings()[0].action;
+    assert.equal(retryAction.label, "Retry receiver");
+    storageAvailable = true;
+    await React.act(async () => retryAction.onClick());
+    assert.equal(subscribed, 2, "explicit recovery starts a new live receiver");
+    assert.equal(
+      warnings().length,
+      0,
+      "successful recovery removes its warning",
     );
     await React.act(async () =>
       root.render(
@@ -227,7 +242,11 @@ test("receiver failure is a scope-owned notification, not pre-shell layout", asy
       0,
       "late startup rejection must not recreate the warning",
     );
-    assert.equal(closed, 2, "both failed subscriptions are released");
+    assert.equal(
+      closed,
+      3,
+      "failed, recovered and retired subscriptions are released",
+    );
   } finally {
     await React.act(async () => root.unmount());
     relayClient.fetchEvents = originals.fetch;
