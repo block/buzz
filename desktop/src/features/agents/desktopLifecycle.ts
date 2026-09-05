@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { relayClient } from "@/shared/api/relayClient";
+import type { LiveSubscriptionClosedRecovery } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import type { DesktopScope } from "./desktopList";
 import {
@@ -8,6 +9,11 @@ import {
   readStopOutcome,
   sendStop,
 } from "./desktopStop";
+
+import {
+  LifecycleReceiverError,
+  receiverStep,
+} from "./desktopLifecycleDiagnostics";
 
 export const DESKTOP_LIFECYCLE = 50182;
 export const DESKTOP_LIFECYCLE_RESULT = 50183;
@@ -99,27 +105,33 @@ export function lifecycleClient(
     let before_id: string | undefined;
     for (let page = 0; page < 64; page++) {
       check();
-      const events = await relay.fetchEvents({
-        kinds: [DESKTOP_STOP, DESKTOP_LIFECYCLE],
-        authors: [scope.owner],
-        limit: 256,
-        until,
-        before_id,
-      });
+      const events = await receiverStep("history", () =>
+        relay.fetchEvents({
+          kinds: [DESKTOP_STOP, DESKTOP_LIFECYCLE],
+          authors: [scope.owner],
+          limit: 256,
+          until,
+          before_id,
+        }),
+      );
       check();
       // No effects while a partial page could still hide a dominating Start.
-      await ipc("observe_desktop_placement", {
-        ...scope,
-        events,
-        reconcile: false,
-      });
+      await receiverStep("projection", () =>
+        ipc("observe_desktop_placement", {
+          ...scope,
+          events,
+          reconcile: false,
+        }),
+      );
       check();
       if (events.length < 256) {
-        await ipc("observe_desktop_placement", {
-          ...scope,
-          events: [],
-          reconcile: true,
-        });
+        await receiverStep("reconciliation", () =>
+          ipc("observe_desktop_placement", {
+            ...scope,
+            events: [],
+            reconcile: true,
+          }),
+        );
         check();
         return;
       }
@@ -250,14 +262,23 @@ export function lifecycleClient(
 }
 
 /** Subscribe first, then project history; live commands wait for complete
- * initialization. Reconnect gets a new client epoch and never replays history. */
+ * initialization. Explicit receiver retry starts a fresh live-only subscription,
+ * never retries an operation or executes historical commands. */
 export async function receiveLifecycle(
   scope: DesktopScope,
   active: () => boolean,
   onError: (message: string) => void,
   ipc = invoke,
   relay = relayClient,
+  onReady: () => void = () => {},
+  onClosed?: (recovery: LiveSubscriptionClosedRecovery) => void,
 ) {
+  let stopped = false;
+  let released = false;
+  let stopSubscription = () => {};
+  let synced = false;
+  let subscriptionReady = false;
+  const valid = () => active() && !stopped;
   let client: ReturnType<typeof lifecycleClient>;
   let initialized: () => void = () => {};
   const ready = new Promise<void>((resolve) => {
@@ -265,70 +286,110 @@ export async function receiveLifecycle(
   });
   let chain = Promise.resolve();
   let pending = 0;
-  const close = await relay.subscribeLive(
-    {
-      kinds: [DESKTOP_LIFECYCLE, DESKTOP_STOP],
-      authors: [scope.owner],
-      limit: 0,
-    },
-    (event) => {
-      if (!active()) return;
-      if (pending >= 16) {
-        onError("Desktop lifecycle receiver is busy; outcome is unconfirmed.");
-        return;
-      }
-      pending++;
-      chain = chain
-        .then(async () => {
-          await ready;
-          client.check();
-          await ipc("observe_desktop_placement", {
-            ...scope,
-            events: [event],
-            reconcile: true,
-          });
-          client.check();
-          const result = await ipc<RelayEvent | null>(
-            event.kind === DESKTOP_STOP
-              ? "receive_desktop_stop"
-              : "receive_desktop_lifecycle",
-            { ...scope, event },
+  const unsubscribe = await receiverStep("subscription", () =>
+    relay.subscribeLive(
+      {
+        kinds: [DESKTOP_LIFECYCLE, DESKTOP_STOP],
+        authors: [scope.owner],
+        limit: 0,
+      },
+      (event) => {
+        if (!valid()) return;
+        if (pending >= 16) {
+          onError(
+            "Desktop lifecycle receiver is busy; outcome is unconfirmed.",
           );
-          client.check();
-          if (result)
-            await relay.publishEvent(
-              result,
-              "Result delivery unconfirmed",
-              "Result delivery failed",
-              client.check,
+          return;
+        }
+        pending++;
+        chain = chain
+          .then(async () => {
+            await ready;
+            if (!valid()) return;
+            client.check();
+            await ipc("observe_desktop_placement", {
+              ...scope,
+              events: [event],
+              reconcile: true,
+            });
+            client.check();
+            const result = await ipc<RelayEvent | null>(
+              event.kind === DESKTOP_STOP
+                ? "receive_desktop_stop"
+                : "receive_desktop_lifecycle",
+              { ...scope, event },
             );
-        })
-        .catch(() => {
-          if (active())
+            client.check();
+            if (result)
+              await relay.publishEvent(
+                result,
+                "Result delivery unconfirmed",
+                "Result delivery failed",
+                client.check,
+              );
+          })
+          .catch(() => {
+            if (valid())
+              onError(
+                "Desktop lifecycle result is unconfirmed. No automatic operation retry.",
+              );
+          })
+          .finally(() => {
+            pending--;
+          });
+      },
+      undefined,
+      5000,
+      {
+        closedRecovery: "explicit",
+        onState: (readiness, closed) => {
+          if (!valid()) return;
+          subscriptionReady = readiness === "eose";
+          if (readiness === "closed") {
+            stopped = true;
+            stopSubscription();
+            if (onClosed)
+              onClosed(
+                closed ?? { classification: "terminal", retryAfterMs: 0 },
+              );
+            else
+              onError(
+                "Desktop lifecycle receiver subscription closed. Retry the receiver to accept new requests.",
+              );
+          } else if (readiness === "timeout") {
             onError(
-              "Desktop lifecycle result is unconfirmed. No automatic operation retry.",
+              "Desktop lifecycle subscription readiness timed out. Delivery is unconfirmed.",
             );
-        })
-        .finally(() => {
-          pending--;
-        });
-    },
-    (readiness) => {
-      if (active() && readiness !== "eose")
-        onError("Desktop lifecycle receiver is unavailable.");
-    },
+          } else if (synced) onReady();
+        },
+      },
+    ),
   );
-  client = lifecycleClient(scope, active, ipc, relay);
+  const close = () => {
+    if (released) return;
+    released = true;
+    stopped = true;
+    // Unsubscribe may fail on a dead socket; it must not revive this receiver
+    // or leave an unhandled promise. A retry always owns a new subscription.
+    void Promise.resolve()
+      .then(unsubscribe)
+      .catch(() => {});
+  };
+  stopSubscription = close;
+  client = lifecycleClient(scope, valid, ipc, relay);
   try {
+    if (stopped) throw new LifecycleReceiverError("subscription", "closed");
     await client.sync();
     client.check();
+    synced = true;
     initialized();
+    if (subscriptionReady) onReady();
   } catch (error) {
     close();
-    // Release queued callbacks into a permanently invalidated client.
-    client = lifecycleClient(scope, () => false, ipc, relay);
     initialized();
-    throw error;
+    throw error instanceof LifecycleReceiverError
+      ? error
+      : new LifecycleReceiverError("initialization", error);
   }
   return close;
 }

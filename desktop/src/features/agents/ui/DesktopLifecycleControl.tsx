@@ -3,11 +3,8 @@ import { toast } from "sonner";
 import { Button } from "@/shared/ui/button";
 import type { RelayEvent } from "@/shared/api/types";
 import type { DesktopRow, DesktopScope } from "../desktopList";
-import {
-  lifecycleClient,
-  receiveLifecycle,
-  type LifecycleOutcome,
-} from "../desktopLifecycle";
+import { lifecycleClient, type LifecycleOutcome } from "../desktopLifecycle";
+import { ownLifecycleReceiver } from "../desktopLifecycleReceiver";
 import { useRelayAgentsQuery } from "../hooks";
 
 export function DesktopLifecycleReceiver({
@@ -16,10 +13,11 @@ export function DesktopLifecycleReceiver({
   scope: DesktopScope | null;
 }) {
   const { owner, community } = scope ?? {};
+  const [attempt, retry] = useState(0);
   useEffect(() => {
     if (!owner || !community) return;
     let active = true;
-    let close: (() => void) | undefined;
+    let stop = () => {};
     let notification: string | number | undefined;
     const reportError = (message: string) => {
       if (!active) return;
@@ -30,22 +28,26 @@ export function DesktopLifecycleReceiver({
         id: notification,
         duration: Infinity,
         closeButton: true,
+        action: {
+          label: "Retry receiver",
+          onClick: () => {
+            if (!active) return;
+            active = false;
+            stop();
+            retry(attempt + 1);
+          },
+        },
       });
     };
-    void receiveLifecycle({ owner, community }, () => active, reportError)
-      .then((fn) => {
-        if (active) close = fn;
-        else fn();
-      })
-      .catch(() => {
-        reportError("Desktop lifecycle receiver is unavailable.");
-      });
+    stop = ownLifecycleReceiver({ owner, community }, reportError, () => {
+      if (active && notification !== undefined) toast.dismiss(notification);
+    });
     return () => {
       active = false;
-      close?.();
+      stop();
       if (notification !== undefined) toast.dismiss(notification);
     };
-  }, [owner, community]);
+  }, [owner, community, attempt]);
   return null;
 }
 function message(outcome: LifecycleOutcome) {
