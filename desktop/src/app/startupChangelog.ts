@@ -8,6 +8,22 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
   {
+    date: "2026-09-05",
+    items: [
+      "【主要更新】兼容新版 Codex Desktop 的版本化 backend 路径，连接 task 前可以正确检测并接管已有私有 app-server。",
+      "修复 Buzz 退出后 shared Codex runtime 锁住 Codex 更新目录的问题，并恢复 Windows Agent 停止与清理行为。",
+      "Codex Code Mode host 未安装时自动降级，不再输出误导性的运行时警告。",
+    ],
+  },
+  {
+    date: "2026-09-02",
+    items: [
+      "修复登录或重连后 Inbox 线程根消息、父消息及部分上下文无法加载的问题。",
+      "桌面端会保留提前到达的 Relay 认证 challenge，降低登录阶段的连接竞态。",
+      "移动端支持通过配对继承 LAN Relay，并改善内网媒体上传、预览和连接切换。",
+    ],
+  },
+  {
     date: "2026-08-30",
     items: [
       "【主要更新】修复内网 LAN Relay 认证协议不匹配：内网连接现在可以正常完成 NIP-42 登录。",
