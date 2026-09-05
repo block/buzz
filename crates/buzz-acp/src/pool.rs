@@ -3255,7 +3255,16 @@ pub async fn run_prompt_task(
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
-            if !matches!(e, AcpError::AgentError { .. }) {
+            //
+            // Exception (#4369): -32603 "Internal error" from `session/prompt`
+            // means the underlying agent child process died out-of-band. The
+            // session is dead, not healthy — invalidate so the retry misses
+            // the session cache and create_session_and_apply_model builds a
+            // fresh session on the next attempt. False positives are cheap
+            // (one extra session/new); false negatives wedge the channel.
+            let is_dead_session =
+                matches!(e, AcpError::AgentError { code: -32603, .. });
+            if is_dead_session || !matches!(e, AcpError::AgentError { .. }) {
                 agent.state.invalidate(&source);
             }
             let usage = agent.acp.take_turn_usage();
