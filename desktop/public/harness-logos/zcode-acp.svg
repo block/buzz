@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <!-- Original, attribution-free placeholder mark for the zcode-acp preset.
+       Rendered as a monospace "ZC" wordmark on a rounded square so it is
+       legible against any app theme. Replace with an official mark if/when
+       Z.ai grants redistribution. -->
+  <rect x="6" y="6" width="108" height="108" rx="22" fill="#111827" />
+  <text x="60" y="78" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="52" font-weight="700" text-anchor="middle" fill="#f9fafb">ZC</text>
+</svg>
