@@ -21,13 +21,13 @@ function RoleSpecimen({ role }: { role: TypeRole }) {
         {role.mono ? "createChannel(name, members)" : "Bring your agents in"}
       </p>
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <code className="text-code text-accent">{role.token}</code>
-        <span className="text-meta text-tertiary">{role.pointsAt}</span>
-        <span className="text-meta text-tertiary">
+        <code className="text-mono text-accent">{role.token}</code>
+        <span className="text-body-sm text-tertiary">{role.pointsAt}</span>
+        <span className="text-body-sm text-tertiary">
           {role.size} / {role.lineHeight} / {role.tracking} / {role.weight}
         </span>
       </div>
-      <p className="max-w-xl text-caption text-secondary">{role.use}</p>
+      <p className="max-w-xl text-body-sm text-secondary">{role.use}</p>
     </div>
   );
 }
@@ -48,14 +48,14 @@ export function TypographyPage() {
           {TYPE_FAMILIES.map((family) => (
             <div key={family.token} className="flex flex-col gap-1.5">
               <p
-                className={`text-subheading text-primary ${
+                className={`text-heading text-primary ${
                   family.token === "font-mono" ? "font-mono" : "font-sans"
                 }`}
               >
                 {family.name}
               </p>
-              <code className="text-code text-accent">{family.token}</code>
-              <p className="max-w-xl text-caption text-secondary">
+              <code className="text-mono text-accent">{family.token}</code>
+              <p className="max-w-xl text-body-sm text-secondary">
                 {family.use}
               </p>
             </div>
@@ -80,13 +80,13 @@ export function TypographyPage() {
             {ramp.steps.map((step) => (
               <Row key={`${ramp.id}-${step.step}`}>
                 <div className="flex flex-wrap items-baseline gap-x-4">
-                  <code className="w-28 shrink-0 text-code text-primary">
+                  <code className="w-28 shrink-0 text-mono text-primary">
                     {ramp.id} {step.step}
                   </code>
-                  <span className="w-20 shrink-0 text-caption text-secondary">
+                  <span className="w-20 shrink-0 text-body-sm text-secondary">
                     {step.value}
                   </span>
-                  <span className="text-caption text-tertiary">{step.job}</span>
+                  <span className="text-body-sm text-tertiary">{step.job}</span>
                 </div>
               </Row>
             ))}
@@ -100,10 +100,10 @@ export function TypographyPage() {
       >
         <Rows>
           <Row>
-            <p className="text-label text-primary">
+            <p className="text-body text-primary">
               Every size is relative. Never px.
             </p>
-            <p className="mt-1.5 max-w-xl text-caption text-secondary">
+            <p className="mt-1.5 max-w-xl text-body-sm text-secondary">
               Fixed pixel text freezes against keyboard zoom and ignores the
               person's font-size preference. The current client shipped a
               message-timeline regression from exactly this and now has a CI
@@ -112,13 +112,13 @@ export function TypographyPage() {
             </p>
           </Row>
           <Row>
-            <p className="text-label text-primary">
+            <p className="text-body text-primary">
               No all-caps, and no tracked-out labels.
             </p>
-            <p className="mt-1.5 max-w-xl text-caption text-secondary">
+            <p className="mt-1.5 max-w-xl text-body-sm text-secondary">
               A capitalised label is harder to read than the sentence-case
               version and reads as enterprise chrome. Section labels earn their
-              quietness from size and colour — text-meta on text-tertiary —
+              quietness from size and colour — text-body-sm on text-tertiary —
               rather than from being shouted. There is no uppercase utility in
               this system.
             </p>

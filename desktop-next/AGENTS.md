@@ -40,8 +40,21 @@ pnpm biome check --write .   # auto-fix
 
 `scripts/check-type.mjs` enforces four things the type system cannot express as
 a token: no arbitrary text sizes (px **or** rem), no `uppercase`, no
-hand-applied `tracking-*`, and no size role paired with a weight or leading
-utility. Each one is a defect the existing client already paid for.
+hand-applied `tracking-*`, and no font weight outside 400 and 600. Each one is a
+defect the existing client already paid for.
+
+**Weight is two values, not a ramp.** 400 is content, 600 is structure and
+emphasis, and `font-semibold` is what bold means here. Bold body text is
+`text-body font-semibold` — composed, because the size is the paragraph's
+decision and the weight is the phrase's. 500 does not read as intent at body
+size; 700 is louder than anything here needs. State (selected, active, unread)
+is said with colour, a fill, or a dot — never weight.
+
+Every rule has a named escape hatch in `OVERRIDES`, keyed `path:matchedText`
+with a reason. **Adding one is a normal edit.** The guard exists because an
+agent has no basis for preferring `font-medium` to `font-semibold` and will
+otherwise pick either; it is not there to stop a designer who has looked at the
+screen. Stale overrides are reported so the list cannot rot.
 
 `scripts/check-contrast.mjs` measures every text role against every surface it
 can sit on, in both modes, and fails the build below its **APCA** target (Lc 60
@@ -61,6 +74,7 @@ consequence: a pairing can pass WCAG AA and still fail here, which is the point.
 | **Tailwind v4** | Tokens are defined in CSS via `@theme`; the CSS *is* the config. No JS config file. |
 | **Own colour tokens** | Not shadcn. Its vocabulary — `muted-foreground`, `secondary-foreground` — is what made colour illegible in the existing client. |
 | **TanStack Router** | File-based routes, same as the existing client. |
+| **Tabler Icons** | The only icon set for product UI. Do not add or use Lucide icons. |
 
 Astryx is a **reference** for token architecture and the agent-docs idea. Not a
 dependency.
@@ -84,10 +98,18 @@ letter spacing, and weight together — never pair a size role with a separate
 `font-medium` or `leading-*`, because that is how two supposedly identical labels
 drift apart.
 
-Ten roles: `text-display`, `text-title`, `text-heading`, `text-subheading`,
-`text-body-lg`, `text-body`, `text-label`, `text-caption`, `text-meta`,
-`text-code`. Two faces: `font-sans` (Inter Variable) and `font-mono`
-(JetBrains Mono) — both already shipped in every current Buzz client.
+Nine roles. Sans: `text-display` 32, `text-title` 24, `text-heading` 16/600,
+`text-body-lg` 16, `text-body` 14, `text-body-sm` 12. Mono: `text-mono-lg` 15,
+`text-mono` 13, `text-mono-sm` 11 — each one step below its sans partner, because
+at equal size a monospace face reads larger than Inter.
+
+The ramp is short on purpose: across 73 real Buzz screens 90% of text is one size,
+and 16/18/20/22 together were 1.5%. There is nothing between 16 and 24, and
+**12px is the floor** for anything readable. `text-heading` and `text-body-lg` are
+the same size, separated by weight alone.
+
+Two faces: `font-sans` (Inter Variable) and `font-mono` (JetBrains Mono) — both
+already shipped in every current Buzz client.
 
 Hard rules:
 

@@ -18,9 +18,9 @@ export function ElevationPage() {
                 className="flex h-24 w-44 items-center justify-center rounded-xl bg-panel"
                 style={{ boxShadow: `var(${level.variable})` }}
               >
-                <code className="text-meta text-primary">{level.token}</code>
+                <code className="text-body-sm text-primary">{level.token}</code>
               </div>
-              <span className="max-w-44 text-caption text-secondary">
+              <span className="max-w-44 text-body-sm text-secondary">
                 {level.use}
               </span>
             </div>

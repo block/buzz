@@ -25,18 +25,18 @@ function RoleRow({ role }: { role: Role }) {
       />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex flex-wrap items-center gap-2">
-          <code className="text-label text-primary">{role.token}</code>
-          <span className="text-caption text-tertiary">{role.pointsAt}</span>
+          <code className="text-body text-primary">{role.token}</code>
+          <span className="text-body-sm text-tertiary">{role.pointsAt}</span>
           {role.status !== "core" ? (
-            <span className="rounded-full bg-warning-tint px-2 py-0.5 text-meta text-warning">
+            <span className="rounded-full bg-warning-tint px-2 py-0.5 text-body-sm text-warning">
               {role.status}
               {role.owner ? ` · ${role.owner}` : ""}
             </span>
           ) : null}
         </div>
-        <p className="text-caption text-secondary">{role.use}</p>
+        <p className="text-body-sm text-secondary">{role.use}</p>
         {role.exception ? (
-          <p className="text-caption text-tertiary">
+          <p className="text-body-sm text-tertiary">
             Exception: {role.exception}
           </p>
         ) : null}
@@ -61,8 +61,8 @@ export function ColourPage() {
           {RAMPS.map((ramp) => (
             <div key={ramp.id} className="flex flex-col gap-3">
               <div className="flex flex-col gap-1">
-                <h3 className="text-label text-primary">{ramp.name}</h3>
-                <p className="max-w-2xl text-caption text-secondary">
+                <h3 className="text-body text-primary">{ramp.name}</h3>
+                <p className="max-w-2xl text-body-sm text-secondary">
                   {ramp.description}
                 </p>
               </div>
@@ -96,8 +96,8 @@ export function ColourPage() {
           {ROLE_GROUPS.map((group) => (
             <div key={group.id} className="flex flex-col gap-2">
               <div className="flex flex-col gap-1">
-                <h3 className="text-label text-primary">{group.name}</h3>
-                <p className="max-w-2xl text-caption text-secondary">
+                <h3 className="text-body text-primary">{group.name}</h3>
+                <p className="max-w-2xl text-body-sm text-secondary">
                   {group.description}
                 </p>
               </div>
@@ -121,8 +121,8 @@ export function ColourPage() {
         <div className="flex flex-col gap-5">
           {EXCEPTIONS.map((exception) => (
             <div key={exception.name} className="flex flex-col gap-1">
-              <code className="text-code text-accent">{exception.name}</code>
-              <p className="max-w-2xl text-caption text-secondary">
+              <code className="text-mono text-accent">{exception.name}</code>
+              <p className="max-w-2xl text-body-sm text-secondary">
                 {exception.why}
               </p>
             </div>

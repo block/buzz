@@ -21,14 +21,14 @@ export function VocabularyPage() {
               key={group.group}
               className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-b border-tertiary py-3 last:border-b-0"
             >
-              <span className="w-24 shrink-0 text-label text-tertiary">
+              <span className="w-24 shrink-0 text-body text-tertiary">
                 {group.group}
               </span>
               <div className="flex min-w-0 flex-1 flex-wrap gap-x-2 gap-y-1">
                 {group.words.map((word) => (
                   <code
                     key={word}
-                    className="rounded bg-inset px-1.5 py-0.5 text-caption text-primary"
+                    className="rounded bg-inset px-1.5 py-0.5 text-body-sm text-primary"
                   >
                     {word}
                   </code>
@@ -44,21 +44,21 @@ export function VocabularyPage() {
         description="A name reads property, then role, then modifier, then material, then state. The order is fixed, so an agent writing a hover for a glass surface produces the same name every time instead of two equally plausible ones."
       >
         <div className="rounded-lg bg-inverse px-5 py-4">
-          <code className="text-label text-on-inverse">{GRAMMAR}</code>
+          <code className="text-body text-on-inverse">{GRAMMAR}</code>
         </div>
         <div className="flex flex-col gap-3 sm:flex-row">
           <div className="flex-1 rounded-xl bg-success-tint px-5 py-4">
-            <p className="mb-1.5 text-label text-success">Legal</p>
+            <p className="mb-1.5 text-body text-success">Legal</p>
             {GRAMMAR_EXAMPLES.legal.map((example) => (
-              <code key={example} className="block text-caption text-success">
+              <code key={example} className="block text-body-sm text-success">
                 {example}
               </code>
             ))}
           </div>
           <div className="flex-1 rounded-xl bg-danger-tint px-5 py-4">
-            <p className="mb-1.5 text-label text-danger">Illegal</p>
+            <p className="mb-1.5 text-body text-danger">Illegal</p>
             {GRAMMAR_EXAMPLES.illegal.map((example) => (
-              <code key={example} className="block text-caption text-danger">
+              <code key={example} className="block text-body-sm text-danger">
                 {example}
               </code>
             ))}

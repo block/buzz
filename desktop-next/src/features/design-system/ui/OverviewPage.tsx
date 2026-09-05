@@ -26,13 +26,13 @@ export function OverviewPage() {
         <div className="flex flex-col gap-2 rounded-xl bg-inset px-6 py-5">
           {LAYERS.map(([layer, what, why]) => (
             <div key={layer} className="flex flex-wrap items-baseline gap-x-4">
-              <span className="w-16 shrink-0 text-label text-tertiary">
+              <span className="w-16 shrink-0 text-body text-tertiary">
                 {layer}
               </span>
-              <code className="min-w-0 flex-1 text-caption text-primary">
+              <code className="min-w-0 flex-1 text-body-sm text-primary">
                 {what}
               </code>
-              <span className="text-caption text-secondary">{why}</span>
+              <span className="text-body-sm text-secondary">{why}</span>
             </div>
           ))}
         </div>
@@ -40,9 +40,9 @@ export function OverviewPage() {
 
       <Section title="The grammar">
         <div className="rounded-lg bg-inverse px-5 py-4">
-          <code className="text-label text-on-inverse">{GRAMMAR}</code>
+          <code className="text-body text-on-inverse">{GRAMMAR}</code>
         </div>
-        <p className="text-caption text-secondary">
+        <p className="text-body-sm text-secondary">
           The order is fixed, so there is one correct spelling. See{" "}
           <Link to="/design/vocabulary" className="text-accent underline">
             the vocabulary
@@ -58,7 +58,7 @@ export function OverviewPage() {
         <div className="flex flex-wrap gap-2">
           <Link
             to="/design/color"
-            className="rounded-lg bg-accent px-4 py-2 text-label text-on-accent transition-opacity hover:opacity-90"
+            className="rounded-lg bg-accent px-4 py-2 text-body text-on-accent transition-opacity hover:opacity-90"
           >
             Color
           </Link>

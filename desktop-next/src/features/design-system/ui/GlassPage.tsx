@@ -18,7 +18,7 @@ function ChromePill() {
           type="button"
           className={
             selected
-              ? "elevate-xs rounded-full bg-chrome-selected px-5 py-2 text-label text-primary"
+              ? "elevate-xs rounded-full bg-chrome-selected px-5 py-2 text-body text-primary"
               : "rounded-full px-5 py-2 text-body text-secondary transition-colors hover:bg-chrome-glass-hover hover:text-primary"
           }
         >
@@ -44,7 +44,7 @@ export function GlassPage() {
         <div className="texture-dots flex items-center justify-center rounded-xl bg-app px-8 py-12">
           <ChromePill />
         </div>
-        <div className="flex flex-col gap-1 text-caption text-secondary">
+        <div className="flex flex-col gap-1 text-body-sm text-secondary">
           <span>
             container <code className="text-primary">bg-chrome-glass</code> +{" "}
             <code className="text-primary">rim-glass</code> +{" "}
@@ -84,8 +84,8 @@ export function GlassPage() {
               className="flex flex-col items-center gap-2 rounded-lg bg-chrome-glass px-6 py-5"
               style={{ backdropFilter: `blur(${blur.value})` }}
             >
-              <code className="text-meta text-primary">{blur.token}</code>
-              <span className="text-caption text-tertiary">{blur.value}</span>
+              <code className="text-body-sm text-primary">{blur.token}</code>
+              <span className="text-body-sm text-tertiary">{blur.value}</span>
             </div>
           ))}
         </div>
@@ -96,7 +96,7 @@ export function GlassPage() {
         description="A deliberate exception: two literal values, not a ramp step and not one of the numbered gradients. Those are background treatments; this is a material detail. Real glass catches light along one edge and falls away on the opposite one, so the rim is a directional pair from one fixed light direction that every glass surface shares."
       >
         <div className="rounded-lg bg-inverse px-5 py-4">
-          <code className="whitespace-pre text-caption text-on-inverse">
+          <code className="whitespace-pre text-body-sm text-on-inverse">
             {`box-shadow:\n  inset 0  1px 0 var(--rim-lit),\n  inset 0 -1px 0 var(--rim-shade);`}
           </code>
         </div>

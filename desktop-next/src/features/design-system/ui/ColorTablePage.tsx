@@ -138,13 +138,13 @@ function TokenTable({
       </colgroup>
       <thead>
         <tr className="border-tertiary border-b">
-          <th scope="col" className="py-2 pr-4 text-label text-tertiary">
+          <th scope="col" className="py-2 pr-4 text-body text-tertiary">
             Token
           </th>
-          <th scope="col" className="py-2 pr-4 text-label text-tertiary">
+          <th scope="col" className="py-2 pr-4 text-body text-tertiary">
             Base
           </th>
-          <th scope="col" className="py-2 text-label text-tertiary">
+          <th scope="col" className="py-2 text-body text-tertiary">
             Value
           </th>
         </tr>
@@ -163,7 +163,7 @@ function TokenTable({
                   <th
                     scope="colgroup"
                     colSpan={3}
-                    className="pt-6 pb-1 text-meta text-tertiary"
+                    className="pt-6 pb-1 text-body-sm text-tertiary"
                   >
                     {headingRow}
                   </th>
@@ -171,17 +171,17 @@ function TokenTable({
               ) : null}
               <tr className="border-tertiary border-b">
                 <td className="py-2.5 pr-4 align-top">
-                  <code className="break-words text-code text-primary">
+                  <code className="break-words text-mono text-primary">
                     {row.token}
                   </code>
                 </td>
                 <td className="py-2.5 pr-4 align-top">
                   {token?.pointsAtVariable ? (
-                    <code className="break-words text-code text-secondary">
+                    <code className="break-words text-mono text-secondary">
                       {humanizeVariable(token.pointsAtVariable)}
                     </code>
                   ) : (
-                    <span className="text-caption text-tertiary">—</span>
+                    <span className="text-body-sm text-tertiary">—</span>
                   )}
                 </td>
                 <td className="py-2.5 align-top">
@@ -193,11 +193,11 @@ function TokenTable({
                       {/* `break-all`, not `break-words`: a gradient literal is
                             one unbroken token with no spaces to break at, so
                             word-boundary wrapping would overflow the column. */}
-                      <code className="break-all text-code text-secondary">
+                      <code className="break-all text-mono text-secondary">
                         {token?.value ?? "…"}
                       </code>
                       {token && !isHex(token.value) ? (
-                        <span className="text-meta text-tertiary">
+                        <span className="text-body-sm text-tertiary">
                           {describeValueKind(token.value)}
                         </span>
                       ) : null}

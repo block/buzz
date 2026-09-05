@@ -1,8 +1,8 @@
 @import "tailwindcss";
-@import "@fontsource-variable/inter";
-@import "@fontsource/jetbrains-mono";
 @import "./tokens.css";
 @import "./typography.css";
+@import "./product.css";
+@import "./agents.css";
 
 @layer base {
   body {

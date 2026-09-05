@@ -33,7 +33,7 @@ export function PageHeader({
 
 export function StatusPill({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded-full bg-warning-tint px-2.5 py-1 text-meta text-warning">
+    <span className="rounded-full bg-warning-tint px-2.5 py-1 text-body-sm text-warning">
       {children}
     </span>
   );
@@ -63,7 +63,7 @@ export function Section({
 
 export function Note({ children }: { children: ReactNode }) {
   return (
-    <p className="max-w-2xl rounded-xl bg-inset px-5 py-4 text-caption text-secondary">
+    <p className="max-w-2xl rounded-xl bg-inset px-5 py-4 text-body-sm text-secondary">
       {children}
     </p>
   );
@@ -74,10 +74,10 @@ export function Stub({ what, decide }: { what: string; decide: string[] }) {
     <div className="flex max-w-2xl flex-col gap-4 rounded-xl bg-inset px-6 py-5">
       <p className="text-body text-secondary">{what}</p>
       <div className="flex flex-col gap-2">
-        <p className="text-label text-tertiary">Still to decide</p>
+        <p className="text-body text-tertiary">Still to decide</p>
         <ul className="flex list-disc flex-col gap-1.5 pl-4">
           {decide.map((item) => (
-            <li key={item} className="text-caption text-secondary">
+            <li key={item} className="text-body-sm text-secondary">
               {item}
             </li>
           ))}
@@ -141,9 +141,9 @@ export function Swatch({
         }`}
         style={{ background: `var(${variable})` }}
       />
-      <code className="truncate text-code text-primary">{label}</code>
+      <code className="truncate text-mono text-primary">{label}</code>
       {sublabel ? (
-        <span className="text-caption text-tertiary">{sublabel}</span>
+        <span className="text-body-sm text-tertiary">{sublabel}</span>
       ) : null}
     </div>
   );

@@ -655,6 +655,79 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     FEATURES=(); [[ -n "{{mesh}}" ]] && FEATURES=(--features mesh-llm)
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
+
+# Run desktop-next in dev mode with the same local relay, services, ports, and identity as `dev`.
+desktop-next-dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
+    bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
+    relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
+    health_port="${BUZZ_HEALTH_PORT:-8080}"
+    metrics_port="${BUZZ_METRICS_PORT:-9102}"
+    if command -v lsof >/dev/null 2>&1; then
+        for spec in "relay:$relay_port" "health:$health_port" "metrics:$metrics_port"; do
+            name="${spec%%:*}"; port="${spec##*:}"
+            if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+                echo "Error: $name port $port is already in use; refusing to launch desktop against a stale relay." >&2
+                lsof -nP -iTCP:"$port" -sTCP:LISTEN >&2 || true
+                echo "Stop the process above (often a stale buzz-relay) and rerun: just dev" >&2
+                exit 1
+            fi
+        done
+    fi
+    cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    # Docker Desktop's forwarded MinIO port can stall under the deployment
+    # probe's 32 concurrent writers. Keep the gate enabled in local dev, using
+    # the bounded profile already used by the relay test launcher.
+    export BUZZ_GIT_PROBE_WRITERS="${BUZZ_GIT_PROBE_WRITERS:-8}"
+    export BUZZ_GIT_PROBE_ROUNDS="${BUZZ_GIT_PROBE_ROUNDS:-2}"
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    "${TARGET_DIR}/debug/buzz-relay" &
+    RELAY_PID=$!
+    cleanup() {
+        [[ -n "${INSTANCE_ID:-}" ]] && ../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true
+        kill "$RELAY_PID" 2>/dev/null || true
+    }
+    trap cleanup EXIT
+    relay_ready=false
+    for _ in $(seq 1 120); do
+        if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+            echo "Error: buzz-relay exited during startup; refusing to launch desktop." >&2
+            wait "$RELAY_PID" || true
+            exit 1
+        fi
+        if curl --silent --fail --max-time 1 "http://127.0.0.1:${health_port}/_readiness" >/dev/null; then
+            relay_ready=true
+            break
+        fi
+        sleep 0.5
+    done
+    if [[ "$relay_ready" != true ]]; then
+        echo "Error: buzz-relay did not become healthy within 60 seconds; refusing to launch desktop." >&2
+        exit 1
+    fi
+    [[ -d desktop/node_modules ]] || pnpm --dir desktop install
+    [[ -d desktop-next/node_modules ]] || pnpm --dir desktop-next install
+    cd {{desktop_dir}}
+    source ../scripts/instance-env.sh
+    # Keep instance-env's worktree-specific identifier, ports, icon, reset URL,
+    # and identity, but point the native runtime at the independent client.
+    export BUZZ_TAURI_CONFIG=$(node -e '
+      const config = JSON.parse(process.env.BUZZ_TAURI_CONFIG);
+      config.productName = `Buzz Sessions (${process.env.BUZZ_WORKTREE_LABEL ?? "Dev"})`;
+      config.build.devUrl = `http://localhost:${process.env.BUZZ_VITE_PORT}${process.env.BUZZ_RESET_WEBVIEW_STATE === "1" ? "?resetDevState=1" : ""}`;
+      config.build.beforeDevCommand = `exec pnpm --dir ../desktop-next exec vite --port ${process.env.BUZZ_VITE_PORT} --strictPort`;
+      console.log(JSON.stringify(config));
+    ')
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    echo "Starting desktop-next on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    FEATURES=(); [[ -n "{{mesh}}" ]] && FEATURES=(--features mesh-llm)
+    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+
 # Run only the desktop app. No relay, database, Docker, migrations, or .env are needed.
 # The app opens normally and asks for a community before making a relay connection.
 desktop-standalone *ARGS: _ensure-sidecar-stubs

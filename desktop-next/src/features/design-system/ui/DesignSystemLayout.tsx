@@ -49,10 +49,10 @@ function NavLink({
     <Link
       to={to}
       activeOptions={exact ? { exact: true } : undefined}
-      className="block rounded-lg px-3 py-2 text-label text-secondary transition-colors hover:bg-hover hover:text-primary"
+      className="block rounded-lg px-3 py-2 text-body text-secondary transition-colors hover:bg-hover hover:text-primary"
       activeProps={{
         className:
-          "block rounded-lg px-3 py-2 text-label bg-accent-tint text-accent",
+          "block rounded-lg px-3 py-2 text-body bg-accent-tint text-accent",
       }}
     >
       {children}
@@ -73,10 +73,10 @@ export function DesignSystemLayout() {
         className="flex shrink-0 flex-col gap-8 px-4 py-8 lg:sticky lg:top-0 lg:h-screen lg:w-64 lg:overflow-y-auto"
       >
         <div className="px-3">
-          <Link to="/design" className="text-label text-primary">
+          <Link to="/design" className="text-body text-primary">
             Buzz Design System
           </Link>
-          <p className="mt-1 text-caption text-tertiary">
+          <p className="mt-1 text-body-sm text-tertiary">
             Rendered from the tokens themselves
           </p>
         </div>
@@ -84,11 +84,11 @@ export function DesignSystemLayout() {
         <div className="flex flex-1 flex-col gap-6 lg:gap-7">
           {SECTIONS.map((section) => (
             <div key={section.heading} className="flex flex-col gap-1">
-              <h2 className="px-3 pb-1.5 text-meta text-tertiary">
+              <h2 className="px-3 pb-1.5 text-body-sm text-tertiary">
                 {section.heading}
               </h2>
               {section.items.length === 0 ? (
-                <p className="max-w-prose px-3 py-1 text-caption text-tertiary">
+                <p className="max-w-prose px-3 py-1 text-body-sm text-tertiary">
                   None yet — the primitive layer gets built one component at a
                   time, as the product repeats something.
                 </p>
@@ -121,7 +121,7 @@ export function DesignSystemLayout() {
           type="button"
           onClick={toggle}
           aria-label={`Switch to ${scheme === "light" ? "dark" : "light"} mode`}
-          className="mx-3 self-start rounded-lg bg-inset px-3 py-2 text-label text-secondary transition-colors hover:bg-hover hover:text-primary"
+          className="mx-3 self-start rounded-lg bg-inset px-3 py-2 text-body text-secondary transition-colors hover:bg-hover hover:text-primary"
         >
           {scheme === "light" ? "Dark mode" : "Light mode"}
         </button>
