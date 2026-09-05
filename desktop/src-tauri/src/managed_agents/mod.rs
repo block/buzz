@@ -79,6 +79,7 @@ pub(crate) use definition_validation::{
 };
 pub use discovery::*;
 pub use env_vars::*;
+pub(crate) use env_vars::set_agent_args_env;
 #[cfg(windows)]
 pub(crate) use git_bash::git_bash_available;
 pub(crate) use git_bash::{discover_git_bash, GitBashPrerequisite};

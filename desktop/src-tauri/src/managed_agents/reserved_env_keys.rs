@@ -40,6 +40,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // binaries/args as the agent process.
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
+    "BUZZ_ACP_AGENT_ARGS_JSON",
     "BUZZ_ACP_MCP_COMMAND",
     // pi-acp's executable override is reserved for Buzz's generated launcher,
     // which injects the managed system prompt and skills.

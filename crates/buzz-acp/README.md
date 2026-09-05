@@ -109,13 +109,42 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_PRIVATE_KEY` | **yes** | — | Agent's Nostr private key (`nsec1...`). Used for relay auth and agent identity. |
 | `BUZZ_RELAY_URL` | no | `ws://localhost:3000` | Relay WebSocket URL. |
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
-| `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
+| `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). Legacy behavior — entries are not shell-split. |
+| `BUZZ_ACP_AGENT_ARGS_JSON` | no | — | Structured agent arguments as a JSON array of strings. Takes precedence over `BUZZ_ACP_AGENT_ARGS` when set. Preserves arguments containing spaces, backslashes, and quotes without shell reinterpretation. Example: `["-m","my-model","--reasoning","low"]` |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 
-**Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
+**Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. Each comma-delimited entry is
+preserved as-is — no shell splitting is applied. For arguments containing
+spaces, backslashes, or quotes, use `BUZZ_ACP_AGENT_ARGS_JSON` instead:
+
+```bash
+# Legacy comma-separated (no spaces in values):
+export BUZZ_ACP_AGENT_ARGS='-c,key=value'
+
+# Structured JSON (handles spaces, backslashes, quotes):
+export BUZZ_ACP_AGENT_ARGS_JSON='["-m","my-model","--reasoning","low"]'
+
+# Single argument containing a space:
+export BUZZ_ACP_AGENT_ARGS_JSON='["--label=hello world"]'
+
+# Windows path with backslashes:
+export BUZZ_ACP_AGENT_ARGS_JSON='["--config=C:\\Program Files\\Agent\\config.toml"]'
+```
+
+When both `BUZZ_ACP_AGENT_ARGS_JSON` and a non-default `BUZZ_ACP_AGENT_ARGS` are
+set, startup fails with an error explaining the conflict. Invalid JSON also
+fails startup — the agent does not launch with ambiguous arguments.
+
+**Producer behavior:** Desktop and the Kubernetes backend automatically select
+the appropriate transport. When no argument contains a comma, they write
+`BUZZ_ACP_AGENT_ARGS` (comma-joined). When any argument contains a comma, they
+serialize the argument list as JSON into `BUZZ_ACP_AGENT_ARGS_JSON` and set
+`BUZZ_ACP_AGENT_ARGS` to the default `"acp"`, which the harness treats as
+"not configured." This is transparent to the user — no manual env var
+configuration is needed.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 

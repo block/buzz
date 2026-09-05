@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::{
     display_invalid_key, is_derived_provider_model_key, is_reserved_env_key,
-    is_well_formed_env_key, merged_user_env, validate_user_env_keys,
+    is_well_formed_env_key, merged_user_env, set_agent_args_env, validate_user_env_keys,
     DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
 
@@ -197,6 +197,7 @@ fn reserved_keys_include_code_execution_surface() {
     for key in [
         "BUZZ_ACP_AGENT_COMMAND",
         "BUZZ_ACP_AGENT_ARGS",
+        "BUZZ_ACP_AGENT_ARGS_JSON",
         "BUZZ_ACP_MCP_COMMAND",
     ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");
@@ -519,4 +520,41 @@ fn deploy_model_precedence_none_when_both_absent() {
 
     let effective = persona_model.clone().or(record_model.clone());
     assert_eq!(effective, None);
+}
+
+// ── set_agent_args_env: JSON transport for comma-containing args ────
+
+#[test]
+fn agent_args_env_comma_safe_args_use_legacy_transport() {
+    let (legacy, json) = super::agent_args_env(&[
+        "-m".into(),
+        "my-model".into(),
+        "--reasoning".into(),
+        "low".into(),
+    ]);
+    assert_eq!(legacy, "-m,my-model,--reasoning,low");
+    assert_eq!(json, None);
+}
+
+#[test]
+fn agent_args_env_empty_args_use_legacy_transport() {
+    let (legacy, json) = super::agent_args_env(&[]);
+    assert_eq!(legacy, "");
+    assert_eq!(json, None);
+}
+
+#[test]
+fn agent_args_env_comma_in_arg_switches_to_json_transport() {
+    let (legacy, json) = super::agent_args_env(&["--config=a,b".into(), "--safe".into(), "on".into()]);
+    assert_eq!(legacy, "acp");
+    let json = json.expect("JSON transport should be used when an arg contains a comma");
+    assert_eq!(json, r#"["--config=a,b","--safe","on"]"#);
+}
+
+#[test]
+fn agent_args_env_multiple_commas_in_one_arg() {
+    let (legacy, json) = super::agent_args_env(&["a,b,c".into()]);
+    assert_eq!(legacy, "acp");
+    let json = json.expect("JSON transport for comma-containing arg");
+    assert_eq!(json, r#"["a,b,c"]"#);
 }
