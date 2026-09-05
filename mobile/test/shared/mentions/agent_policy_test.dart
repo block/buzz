@@ -33,6 +33,9 @@ class PolicySession extends RelaySessionNotifier {
   final bool failPolicy;
   final queries = <NostrFilter>[];
   @override
+  Future<String> fetchRelaySelf() async =>
+      events.firstWhere((e) => e.kind == 39002).pubkey;
+  @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -94,9 +97,24 @@ void main() {
     bool failPolicy = false,
     void Function(PolicySession)? inspect,
   }) async {
-    final session = PolicySession(events, failPolicy: failPolicy);
+    final session = PolicySession([
+      ...events,
+      signed(
+        owner,
+        39002,
+        '',
+        tags: [
+          ['d', 'channel'],
+          ['p', owner.public],
+          ['p', agent.public, '', 'bot'],
+        ],
+      ),
+    ], failPolicy: failPolicy);
     final container = ProviderContainer(
-      overrides: [relaySessionProvider.overrideWith(() => session)],
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        myPubkeyProvider.overrideWithValue(owner.public),
+      ],
     );
     try {
       final result = await container.read(agentDirectoryProvider.future);
