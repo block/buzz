@@ -53,6 +53,8 @@ mod unread_catch_up;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
+#[cfg(target_os = "windows")]
+mod windows_tray;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 #[doc(hidden)]
@@ -123,6 +125,11 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance launches.
+            // On Windows that window may be hidden in the tray, so relaunching
+            // Buzz has to unhide it rather than focus something invisible.
+            #[cfg(target_os = "windows")]
+            windows_tray::show_main_window(app);
+            #[cfg(not(target_os = "windows"))]
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
             }
@@ -241,6 +248,8 @@ pub fn run() {
                 tray_menu::init(&app_handle)?;
                 macos_notifications::init(&app_handle)?;
             }
+            #[cfg(target_os = "windows")]
+            windows_tray::init(&app_handle)?;
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
@@ -890,6 +899,23 @@ pub fn run() {
             ..
         } if label == "main" => {
             // Keep the webview alive so Buzz can be reopened from its tray menu.
+            api.prevent_close();
+            if let Some(window) = app_handle.get_webview_window("main") {
+                if let Err(error) = window.hide() {
+                    eprintln!("buzz-desktop: failed to hide main window: {error}");
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "main" => {
+            // Agent sessions run as `buzz-acp` children of this process, so
+            // letting the close proceed kills every in-flight turn. Hide the
+            // window the way macOS does above; `windows_tray` puts Buzz in the
+            // notification area, which is how it is reopened and quit.
             api.prevent_close();
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(error) = window.hide() {
