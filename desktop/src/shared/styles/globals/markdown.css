@@ -382,3 +382,34 @@
 .dark .code-line-diff-remove {
   background-color: hsl(0 60% 50% / 0.12);
 }
+
+/*
+ * Bidirectional text support (issue #4330).
+ *
+ * Message bodies may contain Hebrew/Arabic (RTL) intermixed with Latin (LTR)
+ * at any nesting level. Without a bidi hint, neutral characters at run
+ * boundaries (periods, parens, quotes) take the paragraph direction (LTR)
+ * instead of the surrounding text's direction, rendering at the wrong edge.
+ *
+ * `unicode-bidi: plaintext` resolves each block's base direction from the
+ * first strong character, which is the correct behavior for a client
+ * carrying mixed LTR/RTL content. LTR-only messages are unaffected.
+ *
+ * Code blocks are deliberately excluded: `pre` and `code` stay LTR so source
+ * code reads left-to-right regardless of surrounding prose. `MESSAGE_MARKDOWN_CLASS`
+ * is applied both to rendered message bodies and to the composer, so the same
+ * rule fixes reading and typing.
+ */
+.message-markdown p,
+.message-markdown li,
+.message-markdown blockquote,
+.message-markdown h1,
+.message-markdown h2,
+.message-markdown h3,
+.message-markdown h4,
+.message-markdown h5,
+.message-markdown h6,
+.message-markdown td,
+.message-markdown th {
+  unicode-bidi: plaintext;
+}
