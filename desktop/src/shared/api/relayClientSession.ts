@@ -56,12 +56,14 @@ import {
 } from "@/shared/api/relayReconnectPolicy";
 import { RelayReconnectWaiters } from "@/shared/api/relayReconnectWaiters";
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
+import { connectWebSocketWithTimeout } from "@/shared/api/relayConnectTimeout";
 import {
   AUTH_TIMEOUT_MS,
   BACKOFF_RESET_STABLE_MS,
   EVENT_BATCH_MS,
   HISTORY_TIMEOUT_MS,
   RECONNECT_BASE_DELAY_MS,
+  RECONNECT_INVOKE_TIMEOUT_MS,
   RECONNECT_MAX_DELAY_MS,
   STALL_CHECK_INTERVAL_MS,
   STALL_IDLE_TIMEOUT_MS,
@@ -547,11 +549,12 @@ export class RelayClient {
       if (!this.relayUrl) {
         this.relayUrl = await getRelayWsUrl();
       }
-      const wsId = await invoke<number>("plugin:websocket|connect", {
-        url: this.relayUrl,
-        onMessage: this.onMessageChannel,
-        config: {},
-      });
+      const wsId = await connectWebSocketWithTimeout(
+        invoke,
+        this.relayUrl,
+        this.onMessageChannel,
+        RECONNECT_INVOKE_TIMEOUT_MS,
+      );
       if (generation !== this.connectionGeneration) {
         void closeWebSocket(wsId, "stale connection attempt");
         throw new Error("Relay connection attempt was superseded.");
