@@ -877,6 +877,7 @@ dependencies = [
  "hex",
  "nostr 0.44.7",
  "rustls",
+ "serde",
  "serde_json",
  "sqlx",
  "tokio",

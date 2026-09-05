@@ -196,6 +196,10 @@ pub struct Config {
     pub health_port: u16,
     /// TCP port for the Prometheus metrics exporter (`GET /metrics`).
     pub metrics_port: u16,
+    /// Interval between read-only partition catalog audits.
+    pub partition_audit_interval: Duration,
+    /// Whether the partition manager may create uncovered monthly partitions.
+    pub partition_manager_create_enabled: bool,
 
     /// When true, NIP-42 pubkey-only authentication (no API token) is
     /// restricted to pubkeys in the `pubkey_allowlist` table. Users with valid
@@ -825,6 +829,18 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
 
+        // Catalog-only and cheap, but clamp operator mistakes away from a hot
+        // loop or a multi-day observability gap.
+        let partition_audit_interval = Duration::from_secs(
+            std::env::var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(15 * 60)
+                .clamp(60, 24 * 60 * 60),
+        );
+        let partition_manager_create_enabled =
+            parse_bool("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", true)?;
+
         let s3_addressing_style = match std::env::var("BUZZ_S3_ADDRESSING_STYLE") {
             Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
             Err(std::env::VarError::NotPresent) => buzz_media::config::S3AddressingStyle::default(),
@@ -1224,6 +1240,8 @@ impl Config {
             uds_path,
             health_port,
             metrics_port,
+            partition_audit_interval,
+            partition_manager_create_enabled,
             pubkey_allowlist_enabled,
             require_relay_membership,
             huddle_audio_available,
@@ -1346,6 +1364,8 @@ mod tests {
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
+        assert_eq!(config.partition_audit_interval, Duration::from_secs(900));
+        assert!(config.partition_manager_create_enabled);
         assert!(config.slow_client_grace_limit > 0);
         assert!(
             !config.pubkey_allowlist_enabled,
@@ -1742,6 +1762,65 @@ mod tests {
             std::env::set_var("RELAY_OWNER_PUBKEY", v);
         }
         assert_eq!(config.relay_owner_pubkey, Some(valid));
+    }
+
+    #[test]
+    fn partition_manager_config_has_bounded_interval_and_create_kill_switch() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_interval = std::env::var_os("BUZZ_PARTITION_AUDIT_INTERVAL_SECS");
+        let previous_create = std::env::var_os("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+
+        std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", "1");
+        std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", "false");
+        let minimum = Config::from_env().expect("minimum config");
+        std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", "999999");
+        let maximum = Config::from_env().expect("maximum config");
+
+        if let Some(value) = previous_interval {
+            std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS");
+        }
+        if let Some(value) = previous_create {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+        }
+
+        assert_eq!(minimum.partition_audit_interval, Duration::from_secs(60));
+        assert!(!minimum.partition_manager_create_enabled);
+        assert_eq!(
+            maximum.partition_audit_interval,
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert!(!maximum.partition_manager_create_enabled);
+    }
+
+    #[test]
+    fn partition_manager_create_kill_switch_parses_false_values_strictly() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+
+        for value in ["FALSE", "off", "  false  "] {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+            let config = Config::from_env().expect("recognized false value");
+            assert!(!config.partition_manager_create_enabled, "value: {value:?}");
+        }
+
+        std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", "disable-maybe");
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+        }
+
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PARTITION_MANAGER_CREATE_ENABLED")
+        ));
     }
 
     #[test]
