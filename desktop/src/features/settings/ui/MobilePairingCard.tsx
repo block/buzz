@@ -50,7 +50,13 @@ function pairingErrorMessage(error: unknown) {
 }
 
 function isPairingSessionTimeout(message: string) {
-  return message.toLowerCase().includes("session timed out");
+  const normalized = message.toLowerCase();
+  // Sidecar closes the socket at 120s before the desktop "session timed out"
+  // path; treat that the same as expiry (matches IdentityRecoveryPairing).
+  return (
+    normalized.includes("session timed out") ||
+    normalized.includes("relay connection closed")
+  );
 }
 
 function PairingStepIndicator({
