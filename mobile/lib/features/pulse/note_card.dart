@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/text/initial.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../channels/channel_detail_page.dart';
@@ -70,7 +71,7 @@ class NoteCard extends HookConsumerWidget {
               radius: 18,
               backgroundColor: context.colors.primaryContainer,
               fallback: Text(
-                (profile?.initial ?? displayName[0]).toUpperCase(),
+                profile?.initial ?? avatarInitial(displayName),
                 style: context.textTheme.labelMedium?.copyWith(
                   color: context.colors.onPrimaryContainer,
                 ),
