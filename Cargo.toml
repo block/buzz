@@ -11,6 +11,7 @@ members = [
     "crates/buzz-search",
     "crates/buzz-audit",
     "crates/buzz-acp",
+    "crates/buzz-ifc",
     "crates/buzz-agent",
     "crates/sprig",
     "crates/buzz-test-client",
@@ -138,6 +139,7 @@ schemars = { version = "1", default-features = false }
 
 # Internal crates
 buzz-core = { path = "crates/buzz-core" }
+buzz-ifc = { path = "crates/buzz-ifc" }
 buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-deletion = { path = "crates/buzz-deletion" }
