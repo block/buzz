@@ -15,6 +15,20 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await testInfo.attach("outgoing-diagnostic", {
+      body: JSON.stringify(
+        await page.evaluate(() => ({
+          events: window.__BUZZ_E2E_SIGNED_EVENTS__,
+          commands: window.__BUZZ_E2E_COMMAND_LOG__,
+        })),
+      ),
+      contentType: "application/json",
+    });
+  }
+});
+
 const IN_CHANNEL_MANAGED_AGENT_PUBKEY =
   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY =
@@ -34,11 +48,44 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
 const HUDDLE_EPHEMERAL_CHANNEL_ID = "3f9f2c4e-8b7a-4b1c-9d2e-5a6f7c8d9e0f";
+const ELROND_PUBKEY = "31".repeat(32);
+const LEGOLAS_PUBKEY = "32".repeat(32);
+const GIMLI_PUBKEY = "33".repeat(32);
+const GANDALF_PUBKEY = "34".repeat(32);
+const STANDARD_GROUPED_ARRIVAL_ACTOR = {
+  pubkey: "10".repeat(32),
+  displayName: "Alice Chen",
+};
+const STANDARD_GROUPED_ARRIVAL_TARGETS = [
+  { pubkey: "11".repeat(32), displayName: "Erica Chapman" },
+  { pubkey: "12".repeat(32), displayName: "Peter Griffin" },
+  { pubkey: "13".repeat(32), displayName: "Marcia Thomas" },
+  { pubkey: "14".repeat(32), displayName: "Jordan Lee" },
+  { pubkey: "15".repeat(32), displayName: "Olivia Park" },
+  { pubkey: "16".repeat(32), displayName: "Sam Rivera" },
+];
+const JOIN_COLLAPSE_PROFILES = [
+  { pubkey: ELROND_PUBKEY, displayName: "Elrond" },
+  { pubkey: LEGOLAS_PUBKEY, displayName: "Legolas" },
+  { pubkey: GIMLI_PUBKEY, displayName: "Gimli" },
+  { pubkey: GANDALF_PUBKEY, displayName: "Gandalf" },
+];
+const JOIN_COLLAPSE_CHANNEL_NAME = "random";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
 const DM_THREAD_MEMBERS_LOADING_ERROR_TEXT =
   "Checking conversation members. Try again in a moment.";
+const JOIN_COLLAPSE_SPLIT_TEXTS = [
+  "Elrond added by you",
+  "Legolas added by Elrond, along with Gimli",
+  "Gandalf added by you",
+];
+const JOIN_COLLAPSE_GROUPED_TEXT =
+  "Elrond was added along with Legolas, Gimli, and Gandalf";
+const JOIN_COLLAPSE_CAPTURE_WIDTH = 560;
+const JOIN_COLLAPSE_CAPTURE_HEIGHT = 260;
+const JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING = 24;
 
 /** Locator scoped to the mention autocomplete dropdown inside the composer. */
 function autocomplete(page: import("@playwright/test").Page) {
@@ -234,6 +281,91 @@ async function waitForMockLiveSubscription(
 // freshly-sent content so the assertion does not race the deferred commit.
 async function waitForTimelineSettled(page: import("@playwright/test").Page) {
   await expect(page.locator("[data-render-pending]")).toHaveCount(0);
+}
+
+function normalizeVisibleText(text: string) {
+  return text.replace(/\s+,/g, ",").replace(/\s+/g, " ").trim();
+}
+
+function findDuplicateFixturePubkeys(
+  profiles: Array<{ pubkey: string; displayName: string }>,
+) {
+  const namesByPubkey = new Map<string, string[]>();
+
+  for (const profile of profiles) {
+    const names = namesByPubkey.get(profile.pubkey) ?? [];
+    names.push(profile.displayName);
+    namesByPubkey.set(profile.pubkey, names);
+  }
+
+  return [...namesByPubkey.entries()]
+    .filter(([, names]) => names.length > 1)
+    .map(([pubkey, displayNames]) => ({ pubkey, displayNames }));
+}
+
+async function collectJoinCollapseRows(page: import("@playwright/test").Page) {
+  const rows = page.getByTestId("system-message-row").filter({
+    hasText: /Elrond|Legolas|Gimli|Gandalf/,
+  });
+  const texts: string[] = [];
+  const count = await rows.count();
+  for (let index = 0; index < count; index += 1) {
+    texts.push(normalizeVisibleText(await rows.nth(index).innerText()));
+  }
+  return { rows, texts };
+}
+
+async function maybeCaptureJoinCollapseTimeline(
+  page: import("@playwright/test").Page,
+) {
+  const capturePath = process.env.JOIN_COLLAPSE_CAPTURE_PATH;
+  if (!capturePath) return;
+  await waitForAnimations(page);
+  const timeline = page.getByTestId("message-timeline");
+  const timelineBox = await timeline.boundingBox();
+  const { rows } = await collectJoinCollapseRows(page);
+  const rowBoxes = await Promise.all(
+    Array.from({ length: await rows.count() }, (_, index) =>
+      rows.nth(index).boundingBox(),
+    ),
+  );
+  const visibleRowBoxes = rowBoxes.filter(
+    (box): box is NonNullable<typeof box> => box !== null,
+  );
+  if (!timelineBox || visibleRowBoxes.length === 0) {
+    throw new Error("Join-collapse screenshot target is not visible");
+  }
+  const minRowY = Math.min(...visibleRowBoxes.map((box) => box.y));
+  const maxRowY = Math.max(...visibleRowBoxes.map((box) => box.y + box.height));
+  const minRowX = Math.min(...visibleRowBoxes.map((box) => box.x));
+  const maxRowX = Math.max(...visibleRowBoxes.map((box) => box.x + box.width));
+  const desiredTop = minRowY - JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING;
+  const desiredBottom = maxRowY + JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING;
+  const desiredCenter = (desiredTop + desiredBottom) / 2;
+  const desiredHorizontalCenter = (minRowX + maxRowX) / 2;
+  const viewportHeight = page.viewportSize()?.height ?? 720;
+  const clip = {
+    x: Math.max(
+      Math.round(timelineBox.x),
+      Math.min(
+        Math.round(desiredHorizontalCenter - JOIN_COLLAPSE_CAPTURE_WIDTH / 2),
+        Math.round(
+          timelineBox.x + timelineBox.width - JOIN_COLLAPSE_CAPTURE_WIDTH,
+        ),
+      ),
+    ),
+    y: Math.max(
+      0,
+      Math.min(
+        Math.round(desiredCenter - JOIN_COLLAPSE_CAPTURE_HEIGHT / 2),
+        viewportHeight - JOIN_COLLAPSE_CAPTURE_HEIGHT,
+      ),
+    ),
+    width: JOIN_COLLAPSE_CAPTURE_WIDTH,
+    height: JOIN_COLLAPSE_CAPTURE_HEIGHT,
+  };
+  await page.screenshot({ path: capturePath, clip });
+  console.log(`JOIN_COLLAPSE_CAPTURE_PATH=${capturePath}`);
 }
 
 async function expectOwnedAgentProfileActions(
@@ -454,6 +586,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     // In-channel selections send immediately without opening the prompt.
   }
   await expect
+    // Sending the first root message clears its draft-local label reservation.
     .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
     .toEqual([relayPubkey]);
 
@@ -991,6 +1124,14 @@ test("selecting a person mention inserts @Name into input", async ({
     ),
   );
   expect(iconMask).toContain("data:image/svg+xml");
+  expect(
+    await mentionChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("inline-block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "@" }),
+  ).toHaveCSS("opacity", "0");
   await expect(mentionChip).toHaveCSS("line-height", "18px");
   const scrollViewport = page.getByTestId("message-input-scroll");
   const paintedBounds = await mentionChip.evaluate((element) => {
@@ -1293,6 +1434,14 @@ test("channel references keep caret movement through the channel name", async ({
     ),
   );
   expect(iconMask).toContain("data:image/svg+xml");
+  expect(
+    await channelChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("inline-block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "#" }),
+  ).toHaveCSS("opacity", "0");
 
   await input.focus();
   await input.press("ArrowLeft");
@@ -1334,6 +1483,14 @@ test("selecting a managed agent mention inserts @Name into input", async ({
   await expect(agentMentionChip).toHaveText("alice");
   await expect(agentMentionChip).toHaveCSS("display", "inline");
   await expect(agentMentionChip).toHaveCSS("border-top-width", "0px");
+  expect(
+    await agentMentionChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("inline-block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "@" }),
+  ).toHaveCSS("opacity", "0");
 });
 
 test("selecting a persona mention creates a channel agent before sending and starts it detached", async ({
@@ -1715,6 +1872,25 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
   await page.getByRole("button", { name: "Start a new post..." }).click();
 
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels", channelId, "members"],
+      });
+    },
+    {
+      channelId: "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11",
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
   await page.getByTestId("mention-autocomplete").getByText("quinn").click();
@@ -1745,12 +1921,11 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   await expect(input).not.toContainText("later edit");
 
   const outgoingContent = `@quinn hello\n[forum-race.pdf](https://mock.relay/media/${"f".repeat(64)}.pdf)`;
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toContainText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, outgoingContent)).toBeNull();
 });
 
 test("managed agents use the channel roster for membership labels", async ({
@@ -2025,16 +2200,15 @@ test("targeted revocation before send causes no agent side effects", async ({
   const baselineCommands = await readCommandLog(page);
   await page.getByTestId("send-message").click();
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
   const commands = await readCommandLog(page);
   // Admission pass plus the unconditional publish-boundary pass.
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
-    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
   );
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
@@ -2055,7 +2229,7 @@ test("deferred-upload sends revalidate agent authorization at the publish bounda
   page,
 }) => {
   // A background media upload can hold the publish open for arbitrarily long —
-  // authorization revoked during that window must still strip the p tag. This
+  // authorization revoked during that window must block publication. This
   // pins the publish-boundary revalidation on the deferred path.
   await installMockBridge(page, {
     deferredComposerUploads: true,
@@ -2140,15 +2314,20 @@ test("deferred-upload sends revalidate agent authorization at the publish bounda
   });
 
   const outgoingContent = `@quinn hello\n![video](https://mock.relay/media/${"c".repeat(64)}.mp4)`;
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText("Could not authorize a mentioned agent.", { exact: false }),
+  ).toBeVisible();
+  expect(await readOutgoingMentionPubkeys(page, outgoingContent)).toBeNull();
+  await expect(input).toHaveText("@quinn hello");
+  await expect(
+    page.getByTestId("composer-queued-media-attachment"),
+  ).toBeVisible();
   const commands = await readCommandLog(page);
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
     commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
+  expect(commandCount(commands, "start_managed_agent")).toBe(
+    commandCount(baselineCommands, "start_managed_agent"),
   );
 });
 
@@ -2157,7 +2336,7 @@ test("sends that attach a mentioned agent revalidate at the publish boundary", a
 }) => {
   // The awaited membership write for a non-member managed agent is a relay
   // round-trip between the pre-side-effect authorization pass and the publish
-  // — authorization revoked during that window must still strip the p tag.
+  // — authorization revoked during that window must block publication.
   await installMockBridge(page, {
     managedAgents: [
       {
@@ -2236,15 +2415,13 @@ test("sends that attach a mentioned agent revalidate at the publish boundary", a
     window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [pubkey];
   }, ALLOWLIST_RELAY_AGENT_PUBKEY);
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn @fizz hello"))
-    .not.toBeNull();
-  const outgoingPubkeys = await readOutgoingMentionPubkeys(
-    page,
-    "@quinn @fizz hello",
-  );
-  expect(outgoingPubkeys).toContain(OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY);
-  expect(outgoingPubkeys).not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText("Could not authorize a mentioned agent.", { exact: false }),
+  ).toBeVisible();
+  expect(
+    await readOutgoingMentionPubkeys(page, "@quinn @fizz hello"),
+  ).toBeNull();
+  await expect(input).toHaveText("@quinn @fizz hello");
   const commands = await readCommandLog(page);
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
     commandCount(baselineCommands, "revalidate_relay_agents") + 2,
@@ -2253,6 +2430,9 @@ test("sends that attach a mentioned agent revalidate at the publish boundary", a
   // relay round-trip holding the publish open for the revocation to land in.
   expect(commandCount(commands, "update_managed_agent")).toBe(
     commandCount(baselineCommands, "update_managed_agent"),
+  );
+  expect(commandCount(commands, "start_managed_agent")).toBe(
+    commandCount(baselineCommands, "start_managed_agent"),
   );
 });
 
@@ -2328,7 +2508,7 @@ test("a send held open by a no-write step still revalidates at the publish bound
   // here the only thing separating the authorization pass from the publish is
   // the huddle sync — which with no active huddle writes nothing to the relay
   // — and the revocation is released with zero further hold. A revocation
-  // landing in any admission-to-publish gap must strip the p tag; this is the
+  // landing in any admission-to-publish gap must block publication; this is the
   // reviewer's sub-threshold probe of the since-removed elapsed-time bound,
   // which deliberately accepted this very staleness.
   await installMockBridge(page, {
@@ -2402,12 +2582,11 @@ test("a send held open by a no-write step still revalidates at the publish bound
     )
     .toBeGreaterThan(0);
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText("Could not authorize a mentioned agent.", { exact: false }),
+  ).toBeVisible();
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
+  await expect(input).toHaveText("@quinn hello");
 
   const commands = await readCommandLog(page);
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
@@ -2518,12 +2697,11 @@ test("selected relay agents revoked after the invite prompt cause no side effect
   const baselineCommands = await readCommandLog(page);
   await inviteButton.click();
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
   const commands = await readCommandLog(page);
   for (const command of [
     "add_channel_members",
@@ -2573,12 +2751,11 @@ test("selected relay agents revoked during send emit no p tag", async ({
     );
   });
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
 });
 
 test("owner-only builds admit cross-owner relay agents authorized by allowlist", async ({
@@ -2901,7 +3078,9 @@ test("a second mention while the first wake is in flight does not start the agen
   await input.fill("Hey @fizz");
   await expect(dropdown.getByText("fizz")).toBeVisible();
   await input.press("Enter");
-  await page.keyboard.type(" do X");
+  await expect(input.locator(".mention-chip")).toHaveText("fizz");
+  await page.keyboard.type("do X");
+  await expect(input).toHaveText("Hey @fizz do X");
   await page.getByTestId("send-message").click();
   await expect(
     page.getByTestId("message-row").filter({ hasText: "do X" }),
@@ -2915,7 +3094,9 @@ test("a second mention while the first wake is in flight does not start the agen
   await input.fill("Hey @fizz");
   await expect(dropdown.getByText("fizz")).toBeVisible();
   await input.press("Enter");
-  await page.keyboard.type(" also Y");
+  await expect(input.locator(".mention-chip")).toHaveText("fizz");
+  await page.keyboard.type("also Y");
+  await expect(input).toHaveText("Hey @fizz also Y");
   await page.getByTestId("send-message").click();
 
   // The second message publishes on its own — suppression is of the wake, not
@@ -2923,6 +3104,12 @@ test("a second mention while the first wake is in flight does not start the agen
   await expect(
     page.getByTestId("message-row").filter({ hasText: "also Y" }),
   ).toBeVisible();
+  expect(await readOutgoingMentionPubkeys(page, "Hey @fizz do X")).toContain(
+    IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+  );
+  expect(await readOutgoingMentionPubkeys(page, "Hey @fizz also Y")).toContain(
+    IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+  );
   // One wake serves both messages: its replay floor predates the first
   // message, and the floor is a lower bound, so one harness boot covers both.
   expect(commandCount(await readCommandLog(page), "start_managed_agent")).toBe(
@@ -3611,14 +3798,14 @@ test("system add rows use plain names while remove rows retain agent mention sty
     ],
   });
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
 
   await page.evaluate(
     ({ actorPubkey, kind, targetPubkey }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
+        channelName: "random",
         content: JSON.stringify({
           type: "member_joined",
           actor: actorPubkey,
@@ -3627,7 +3814,7 @@ test("system add rows use plain names while remove rows retain agent mention sty
         kind,
       });
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
+        channelName: "random",
         content: JSON.stringify({
           type: "member_removed",
           actor: actorPubkey,
@@ -3664,32 +3851,22 @@ test("system add rows use plain names while remove rows retain agent mention sty
 test("groups contiguous arrival activity with hidden names in the standard tooltip", async ({
   page,
 }) => {
-  const actor = {
-    pubkey: "10".repeat(32),
-    displayName: "Alice Chen",
-  };
-  const targets = [
-    { pubkey: "11".repeat(32), displayName: "Erica Chapman" },
-    { pubkey: "12".repeat(32), displayName: "Peter Griffin" },
-    { pubkey: "13".repeat(32), displayName: "Marcia Thomas" },
-    { pubkey: "14".repeat(32), displayName: "Jordan Lee" },
-    { pubkey: "15".repeat(32), displayName: "Olivia Park" },
-    { pubkey: "16".repeat(32), displayName: "Sam Rivera" },
-  ];
+  const actor = STANDARD_GROUPED_ARRIVAL_ACTOR;
+  const targets = STANDARD_GROUPED_ARRIVAL_TARGETS;
   await installMockBridge(page, {
     searchProfiles: [actor, ...targets],
   });
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
 
   await page.evaluate(
     ({ actorPubkey, addedTargets, kind }) => {
       const createdAt = Math.floor(Date.now() / 1_000);
       for (const [index, target] of addedTargets.entries()) {
         window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-          channelName: "general",
+          channelName: "random",
           content: JSON.stringify({
             type: "member_joined",
             actor: actorPubkey,
@@ -3753,16 +3930,119 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await expect(avatarStack.locator("..")).toHaveCSS("align-items", "center");
 });
 
+test("keeps deterministic grouped-arrival fixture pubkeys unique", () => {
+  expect(
+    findDuplicateFixturePubkeys([
+      STANDARD_GROUPED_ARRIVAL_ACTOR,
+      ...STANDARD_GROUPED_ARRIVAL_TARGETS,
+      ...JOIN_COLLAPSE_PROFILES,
+    ]),
+  ).toEqual([]);
+});
+
+test("collapses contiguous mixed join arrivals into one actor-neutral cohort", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: JOIN_COLLAPSE_PROFILES,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText(
+    JOIN_COLLAPSE_CHANNEL_NAME,
+  );
+  await waitForMockLiveSubscription(
+    page,
+    JOIN_COLLAPSE_CHANNEL_NAME,
+    SYSTEM_MESSAGE_KIND,
+  );
+
+  await page.evaluate(
+    ({ channelName, currentUser, elrond, legolas, gimli, gandalf, kind }) => {
+      const createdAt = Math.floor(Date.now() / 1_000);
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName,
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: currentUser,
+          target: elrond,
+        }),
+        createdAt,
+        kind,
+        pubkey: currentUser,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName,
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: elrond,
+          target: legolas,
+        }),
+        createdAt: createdAt + 1,
+        kind,
+        pubkey: elrond,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName,
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: elrond,
+          target: gimli,
+        }),
+        createdAt: createdAt + 2,
+        kind,
+        pubkey: elrond,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName,
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: currentUser,
+          target: gandalf,
+        }),
+        createdAt: createdAt + 3,
+        kind,
+        pubkey: currentUser,
+      });
+    },
+    {
+      channelName: JOIN_COLLAPSE_CHANNEL_NAME,
+      currentUser: MOCK_VIEWER_PUBKEY,
+      elrond: ELROND_PUBKEY,
+      legolas: LEGOLAS_PUBKEY,
+      gimli: GIMLI_PUBKEY,
+      gandalf: GANDALF_PUBKEY,
+      kind: SYSTEM_MESSAGE_KIND,
+    },
+  );
+  await waitForTimelineSettled(page);
+  await page.getByTestId("message-timeline").evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await waitForAnimations(page);
+
+  const { rows, texts } = await collectJoinCollapseRows(page);
+  console.log(`JOIN_COLLAPSE_VISIBLE_TEXTS=${JSON.stringify(texts)}`);
+  if (process.env.JOIN_COLLAPSE_EXPECT_SPLIT === "1") {
+    expect(texts).toEqual(JOIN_COLLAPSE_SPLIT_TEXTS);
+  }
+  await maybeCaptureJoinCollapseTimeline(page);
+
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText(JOIN_COLLAPSE_GROUPED_TEXT);
+});
+
 test("system agent profile exposes owned agent actions", async ({ page }) => {
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
 
   await page.evaluate(
     ({ actorPubkey, kind, targetPubkey }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
+        channelName: "random",
         content: JSON.stringify({
           type: "member_joined",
           actor: actorPubkey,
@@ -3825,8 +4105,7 @@ test("system agent activity avatar stack is decorative", async ({ page }) => {
 
   const joinedRow = page
     .getByTestId("system-message-row")
-    .filter({ hasText: "mira" })
-    .filter({ hasText: "joined the channel" });
+    .filter({ has: page.getByText("mira", { exact: true }) });
   const avatarStack = joinedRow.getByTestId("system-message-avatar-stack");
   await expect(avatarStack.getByTestId("system-message-avatar")).toHaveCount(1);
   await expect(avatarStack.locator("button")).toHaveCount(0);
@@ -3871,6 +4150,57 @@ test("membership activity folds a member joining then leaving", async ({
   await expect(lifecycleRow.getByTestId("system-message-avatar")).toHaveCount(
     1,
   );
+});
+
+test("membership activity folds duplicate self-joins then leaving into one row", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
+
+  // The relay re-emits `member_joined` on each PUT_USER, so a member can arrive
+  // twice before leaving. Both arrivals group with the departure; describing
+  // only a 2-event pair dropped the departure and left the member rendered as
+  // still present.
+  await page.evaluate(
+    ({ alicePubkey, kind }) => {
+      const createdAt = Math.floor(Date.now() / 1_000);
+      const join = {
+        type: "member_joined",
+        actor: alicePubkey,
+        target: alicePubkey,
+      };
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify(join),
+        createdAt,
+        kind,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify(join),
+        createdAt: createdAt + 1,
+        kind,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify({ type: "member_left", actor: alicePubkey }),
+        createdAt: createdAt + 2,
+        kind,
+      });
+    },
+    { alicePubkey: TEST_IDENTITIES.alice.pubkey, kind: SYSTEM_MESSAGE_KIND },
+  );
+  await waitForTimelineSettled(page);
+
+  const aliceRows = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "alice" });
+  await expect(aliceRows).toHaveCount(1);
+  await expect(aliceRows).toHaveText(/joined, then left the channel/);
+  await expect(aliceRows.getByTestId("system-message-avatar")).toHaveCount(1);
 });
 
 test("profile-only agent author hides actions without agent access", async ({
@@ -3937,8 +4267,7 @@ test("system member-joined rows render the joined person as a plain profile name
 
   const joinedRow = page
     .getByTestId("system-message-row")
-    .filter({ hasText: "bob" })
-    .filter({ hasText: "joined the channel" });
+    .filter({ has: page.getByText("bob", { exact: true }) });
   const joinedPersonName = joinedRow.getByText("bob", { exact: true });
 
   await expect(joinedPersonName).toBeVisible();

@@ -139,6 +139,13 @@ for (const agentListDelayMs of [0, 6_000]) {
     ).toBeVisible();
     const chip = article.locator("[data-mention]");
     await expect(chip.locator("svg.lucide-cloud")).toBeVisible();
+    const leading = chip.locator(".inline-chip-leading-fragment");
+    await expect(leading).toHaveText("Remot");
+    expect(
+      await leading.evaluate(
+        (element) => getComputedStyle(element, "::before").display,
+      ),
+    ).toBe("block");
     await waitForAnimations(page);
     await article.screenshot({
       path: testInfo.outputPath("cloud-author-chip.png"),

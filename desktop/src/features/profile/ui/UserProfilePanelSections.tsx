@@ -712,7 +712,7 @@ function ProfileHero({
           <p className="text-sm text-muted-foreground">{profile.nip05Handle}</p>
         ) : null}
 
-        {userStatus ? (
+        {userStatus && (userStatus.text || userStatus.emoji) ? (
           <p className="text-sm text-muted-foreground">
             {userStatus.emoji ? (
               <StatusEmoji

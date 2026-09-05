@@ -90,6 +90,11 @@ run_unit_tests() {
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
 
+  # Keep the relay-to-agent trust-boundary regressions in the fallback path
+  # when cargo-nextest is unavailable.
+  run_test_step "buzz-acp tests" \
+    cargo test -p buzz-acp -- --nocapture
+
   # buzz-db migrator/lint unit tests (no infra): guard the embedded-migrator
   # invariant (exactly the consolidated 0001; cutover/backfill stays an operator
   # script, not startup state) and the tenant-scoping lints. The Postgres-backed
@@ -125,6 +130,18 @@ run_unit_tests() {
   # step with `just test-unit`; ignored lifecycle tests run elsewhere.
   run_test_step "buzz-acp unit tests" \
     cargo test -p buzz-acp --lib -- --nocapture
+
+  # Mirror the three infra-free relay handler modules in `just test-unit`'s
+  # nextest expression. Keep the side-effects filter pinned to `::tests::` so
+  # it does not select the sibling Postgres-backed test module.
+  run_test_step "buzz-relay channel authorization tests" \
+    cargo test -p buzz-relay --lib handlers::channel_authz:: -- --nocapture
+
+  run_test_step "buzz-relay moderation authorization tests" \
+    cargo test -p buzz-relay --lib handlers::moderation_authz:: -- --nocapture
+
+  run_test_step "buzz-relay side-effects helper tests" \
+    cargo test -p buzz-relay --lib handlers::side_effects::tests:: -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

@@ -60,6 +60,7 @@ import {
 import {
   useSetUserStatusMutation,
   useUserStatusQuery,
+  visibleUserStatus,
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
@@ -894,9 +895,7 @@ export function AppShell() {
                           onSetPresenceStatus={(status) =>
                             presenceSession.setStatus(status)
                           }
-                          onSetUserStatus={(text, emoji) =>
-                            setUserStatusMutation.mutate({ text, emoji })
-                          }
+                          onSetUserStatus={setUserStatusMutation.mutate}
                           onClearUserStatus={() =>
                             setUserStatusMutation.mutate({
                               text: "",
@@ -909,14 +908,17 @@ export function AppShell() {
                           }
                           selfUserStatus={
                             deferredPubkey
-                              ? (selfStatusQuery.data?.[
-                                  deferredPubkey.toLowerCase()
-                                ] ?? undefined)
+                              ? (visibleUserStatus(
+                                  selfStatusQuery.data?.[
+                                    deferredPubkey.toLowerCase()
+                                  ],
+                                ) ?? undefined)
                               : undefined
                           }
                           selectedChannelId={selectedChannelId}
                           selectedView={selectedView}
                           unreadChannelIds={unreadChannelIds}
+                          {...{ highPriorityUnreadChannelIds }}
                           previewActivityChannelIds={unreadThreadChannelIds}
                           unreadChannelCounts={unreadChannelCounts}
                           mutedChannelIds={mutedChannelIds}

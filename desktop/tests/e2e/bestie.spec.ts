@@ -223,6 +223,12 @@ test("assigns from an agent profile, reopens, drags, and offers the message acti
   await expect(page.getByTestId("bestie-activity-dot").last()).toBeVisible();
   await page.getByRole("button", { name: "Close Bestie" }).click();
   await waitForAnimations(page);
+  // The Motion close morph can outlive the CSS/Web animations above. Wait for
+  // the closed, untranslated shell before measuring the drag's starting point.
+  const closedBloom = floatingAvatar.getByTestId("bestie-bloom-container");
+  await expect(closedBloom).toHaveCSS("width", "48px");
+  await expect(closedBloom).toHaveCSS("height", "48px");
+  await expect(closedBloom).toHaveCSS("transform", "matrix(1, 0, 0, 1, 0, 0)");
   const beforeDrag = await floatingAvatar.boundingBox();
   const collapsedAvatar = floatingAvatar.getByTestId("bestie-trigger-avatar");
   const collapsedAvatarBeforeDrag = await collapsedAvatar.boundingBox();

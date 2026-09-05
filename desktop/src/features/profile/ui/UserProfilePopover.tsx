@@ -21,7 +21,10 @@ import {
 } from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
-import { useUserStatusQuery } from "@/features/user-status/hooks";
+import {
+  useUserStatusQuery,
+  visibleUserStatus,
+} from "@/features/user-status/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
@@ -333,7 +336,9 @@ function UserProfilePopoverBody({
     showHumanProfileActions || showMessageAction || showHuddleAction;
   const canViewActivity =
     isBotProfile && viewerIsOwner && canOpenAgentActivity(pubkey);
-  const userStatus = userStatusQuery.data?.[pubkey.toLowerCase()];
+  const userStatus = visibleUserStatus(
+    userStatusQuery.data?.[pubkey.toLowerCase()],
+  );
   const userStatusText = userStatus?.text.trim() ?? "";
   const hasUserStatus = Boolean(userStatusText || userStatus?.emoji);
   const profileDescription = profile?.about?.trim() ?? "";

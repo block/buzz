@@ -14,6 +14,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
+import { MessageAuthorWithIndicators } from "@/features/messages/ui/MessageAuthorWithIndicators";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
@@ -48,7 +49,6 @@ import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import {
   MessageAuthorText,
-  MessageAuthorIdentity,
   MessageHeaderRow,
   MessageMetaSegments,
 } from "./MessageHeader";
@@ -57,9 +57,7 @@ import { ProjectedThreadContextLine } from "./ProjectedThreadContextLine";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { getAgentAddressMentionPubkeys } from "@/features/messages/lib/agentAddressMention.mjs";
-import { getVisibleAgentAddressPubkeys } from "@/features/messages/lib/getVisibleAgentAddressPubkeys";
-import { MessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
+import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
 import type {
   MessageRowProps,
   ThreadDepthGuideAction,
@@ -189,8 +187,8 @@ export const MessageRow = React.memo(
       [currentPubkey, onSendToChannel, profiles],
     );
     const { mentionNames, mentionPubkeysByName } = React.useMemo(
-      () => resolveMentionProps(message.tags, profiles),
-      [profiles, message.tags],
+      () => resolveMentionProps(message.tags, profiles, message.body),
+      [profiles, message.tags, message.body],
     );
     // "Is this pubkey an agent" = the community-scoped baseline every surface
     // shares (managed ∪ relay) plus the pubkey's own profile `isAgent` flag from this surface's lookup. Both are per-pubkey
@@ -226,20 +224,14 @@ export const MessageRow = React.memo(
       }
       return Object.keys(values).length > 0 ? values : undefined;
     }, [isKnownAgentPubkey, mentionPubkeysByName]);
-    const addressedAgentPubkeys = React.useMemo(() => {
-      return getVisibleAgentAddressPubkeys(
-        message.body,
-        getAgentAddressMentionPubkeys(message.tags).filter(isKnownAgentPubkey),
-        mentionPubkeysByName,
-      );
-    }, [isKnownAgentPubkey, mentionPubkeysByName, message.body, message.tags]);
-    const agentAddressPrefix =
-      addressedAgentPubkeys.length > 0 ? (
-        <MessageAgentAddressPrefix
-          profiles={profiles}
-          pubkeys={addressedAgentPubkeys}
-        />
-      ) : undefined;
+    const agentAddressPrefix = useMessageAgentAddressPrefix({
+      profiles,
+      body: message.body,
+      tags: message.tags,
+      mentionNames,
+      mentionPubkeysByName,
+      isKnownAgentPubkey,
+    });
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
       [message.tags],
@@ -544,6 +536,7 @@ export const MessageRow = React.memo(
               : undefined
           }
           onUnfollowThread={onUnfollowThread}
+          profiles={profiles}
           reactionErrorMessage={reactionErrorMessage}
           reactions={reactions}
         />
@@ -596,14 +589,18 @@ export const MessageRow = React.memo(
 
     const headerNode = isDisplayedAsContinuation ? null : (
       <MessageHeaderRow>
-        <MessageAuthorIdentity
-          pubkey={message.pubkey}
-          ownerPubkey={message.ownerPubkey}
-          role={profilePopoverRole}
-          displayName={message.author}
-        >
-          {authorNode}
-        </MessageAuthorIdentity>
+        {message.pubkey ? (
+          <MessageAuthorWithIndicators
+            authorName={message.author}
+            ownerPubkey={message.ownerPubkey}
+            pubkey={message.pubkey}
+            role={profilePopoverRole}
+          >
+            {authorNode}
+          </MessageAuthorWithIndicators>
+        ) : (
+          authorNode
+        )}
         {/* Author is not a segment: "Alice 9:53 AM" needs no divider. */}
         <MessageMetaSegments
           segments={[

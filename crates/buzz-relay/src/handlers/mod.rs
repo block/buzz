@@ -2,6 +2,8 @@
 pub mod admin_action_worker;
 pub mod admin_outbox_worker;
 pub mod auth;
+/// Pure NIP-29 channel membership-authority decisions (kinds 9000/9001/9022).
+pub mod channel_authz;
 /// Subscription close (CLOSE) handler.
 pub mod close;
 /// Command executor — transactional processing for command kinds.
