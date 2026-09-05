@@ -259,9 +259,13 @@ class ComposeBar extends HookConsumerWidget {
       '\u0000',
     );
     useEffect(() {
+      controller.setMentionPubkeys({
+        for (final entry in mentionMap.value.entries)
+          entry.key.toLowerCase(): entry.value.pubkey,
+      });
       controller.setAgentMentionNames(agentMentionLabels);
       return null;
-    }, [controller, agentMentionLabelsKey]);
+    }, [controller, agentMentionLabelsKey, mentionMap.value]);
     useEffect(
       () {
         final memberList = channelMembersForAutocomplete(

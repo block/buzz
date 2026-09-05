@@ -11,6 +11,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/agent_provenance.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
@@ -149,6 +150,7 @@ class UserProfileSheet extends HookConsumerWidget {
                             child: FractionallySizedBox(
                               widthFactor: 0.5,
                               child: _ProfileAvatar(
+                                pubkey: pubkey,
                                 avatarUrl: avatarUrl,
                                 initial: initial,
                                 isAgent: profile?.isAgent == true,
@@ -378,11 +380,13 @@ class _ProfilePresenceChip extends StatelessWidget {
 }
 
 class _ProfileAvatar extends HookWidget {
+  final String pubkey;
   final String? avatarUrl;
   final String initial;
   final bool isAgent;
 
   const _ProfileAvatar({
+    required this.pubkey,
     required this.avatarUrl,
     required this.initial,
     required this.isAgent,
@@ -418,12 +422,24 @@ class _ProfileAvatar extends HookWidget {
                     imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
                     fallback: _AvatarFallback(initial: initial),
                   );
-            if (!isAgent) return ClipOval(child: avatar);
-            return ClipRRect(
-              borderRadius: BorderRadius.circular(
-                constraints.biggest.shortestSide * 0.3,
-              ),
-              child: avatar,
+            final shaped = !isAgent
+                ? ClipOval(child: avatar)
+                : ClipRRect(
+                    borderRadius: BorderRadius.circular(
+                      constraints.biggest.shortestSide * 0.3,
+                    ),
+                    child: avatar,
+                  );
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                shaped,
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  child: AgentProvenance(pubkey: pubkey, size: 24),
+                ),
+              ],
             );
           },
         ),

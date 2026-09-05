@@ -43,6 +43,7 @@ class _MentionSuggestions extends StatelessWidget {
               dense: true,
               visualDensity: VisualDensity.compact,
               leading: AvatarImage(
+                pubkey: candidate.pubkey,
                 imageUrl: avatarUrl,
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,

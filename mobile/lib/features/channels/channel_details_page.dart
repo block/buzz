@@ -668,6 +668,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
 
     return AppListRowRaw(
       leading: AvatarImage(
+        pubkey: member.pubkey,
         imageUrl: avatarUrl,
         radius: 20,
         backgroundColor: context.colors.primaryContainer,

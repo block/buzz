@@ -43,6 +43,7 @@ class AgentActivityCard extends HookConsumerWidget {
                 Stack(
                   children: [
                     AvatarImage(
+                      pubkey: group.pubkey,
                       imageUrl: profile?.avatarUrl,
                       radius: 18,
                       backgroundColor: context.colors.primaryContainer,

@@ -7,6 +7,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../animated_avatar.dart';
+import 'agent_provenance.dart';
 import '../community/community_provider.dart';
 import '../emoji/emoji_avatar.dart';
 import '../emoji/native_emoji_glyph.dart';
@@ -24,6 +25,7 @@ class AvatarImage extends StatelessWidget {
   final Color? backgroundColor;
   final Widget fallback;
   final bool isAgent;
+  final String? pubkey;
 
   const AvatarImage({
     super.key,
@@ -32,10 +34,23 @@ class AvatarImage extends StatelessWidget {
     required this.fallback,
     this.backgroundColor,
     this.isAgent = false,
+    this.pubkey,
   });
 
   @override
   Widget build(BuildContext context) {
+    final avatar = _buildAvatar(context);
+    if (pubkey == null) return avatar;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        avatar,
+        Positioned(right: 0, top: 0, child: AgentProvenance(pubkey: pubkey)),
+      ],
+    );
+  }
+
+  Widget _buildAvatar(BuildContext context) {
     final animatedAvatar = parseAnimatedAvatarUrl(imageUrl);
     final color = animatedAvatar == null ? backgroundColor : Colors.transparent;
     final content = SizedBox.square(
