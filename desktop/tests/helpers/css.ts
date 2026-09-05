@@ -100,6 +100,30 @@ export async function expectSmoothCorners(
     .toBe(true);
 }
 
+export async function expectOpenAvatarBadgeNotch(locator: Locator) {
+  const extrema = await locator.evaluate((element) => {
+    const clipPath = window.getComputedStyle(element).clipPath;
+    const points = Array.from(
+      clipPath.matchAll(/(-?\d+(?:\.\d+)?)%\s+(-?\d+(?:\.\d+)?)%/g),
+      (match) => ({ x: Number(match[1]), y: Number(match[2]) }),
+    );
+
+    return {
+      clipPath,
+      maxX: Math.max(...points.map(({ x }) => x)),
+      maxY: Math.max(...points.map(({ y }) => y)),
+      pointCount: points.length,
+    };
+  });
+
+  expect(extrema.clipPath).toMatch(/^polygon\(/);
+  expect(extrema.pointCount).toBeGreaterThan(0);
+  // An open bottom-right notch deliberately samples the cutout beyond the
+  // avatar box. A folded-closed polygon stays entirely at or below 100%.
+  expect(extrema.maxX).toBeGreaterThan(100);
+  expect(extrema.maxY).toBeGreaterThan(100);
+}
+
 /** Wait for the Buzz overrides to be installed in Emoji Mart's shadow root. */
 export async function expectEmojiMartStylesInstalled(picker: Locator) {
   await expect

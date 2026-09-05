@@ -34,16 +34,19 @@ export function DirectMessageIntroAvatarStack({
           <span
             className={index > 0 ? "-ml-5" : ""}
             data-testid="message-dm-intro-avatar-stack-participant"
-            style={{ zIndex: index + 1 }}
+            style={{
+              zIndex: index + 1,
+              ...(index < stackItemCount - 1 && {
+                mask: "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
+                WebkitMask:
+                  "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
+              }),
+            }}
           >
             <UserAvatar
               accent={participant.isAgent === true}
               avatarUrl={participant.avatarUrl}
-              className={
-                index < stackItemCount - 1
-                  ? "h-[60px] w-[60px] text-base ring-2 ring-background"
-                  : "h-[60px] w-[60px] text-base"
-              }
+              className="h-[60px] w-[60px] text-base"
               displayName={participant.displayName}
               shape={participant.isAgent ? "squircle" : "circle"}
               size="md"

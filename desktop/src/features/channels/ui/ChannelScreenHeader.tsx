@@ -249,16 +249,19 @@ function DmHeaderParticipantStack({
           <span
             className={index > 0 ? "-ml-2" : ""}
             data-testid="chat-header-dm-avatar-stack-participant"
-            style={{ zIndex: index + 1 }}
+            style={{
+              zIndex: index + 1,
+              ...(index < stackItemCount - 1 && {
+                mask: "radial-gradient(circle 18px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
+                WebkitMask:
+                  "radial-gradient(circle 18px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
+              }),
+            }}
           >
             <UserAvatar
               accent={participant.isAgent === true}
               avatarUrl={participant.avatarUrl}
-              className={
-                index < stackItemCount - 1
-                  ? "h-8 w-8 text-xs ring-2 ring-background"
-                  : "h-8 w-8 text-xs"
-              }
+              className="h-8 w-8 text-xs"
               displayName={participant.displayName}
               shape={participant.isAgent ? "squircle" : "circle"}
               size="sm"

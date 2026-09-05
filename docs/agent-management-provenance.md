@@ -14,9 +14,11 @@ predicate. Profile ownership can supplement the shared directory evidence.
 
 Pickers, member cards, authors, markdown mention chips, address controls, hover
 cards, profile headers/hero/subviews, new-message recipients and DM headers/sidebar
-rows use the same glyph and accessible label. The marker grants no membership,
-mention eligibility, availability or local management capability. This change does
-not change profile navigation, presence, native discovery or invitation/routing.
+rows use the same glyph and accessible label. Compact DM sidebar rows place it
+beside the name's status adornments rather than in the trailing status/action
+area. The marker grants no membership, mention eligibility, availability or local
+management capability. This change does not change profile navigation, presence,
+native discovery or invitation/routing.
 
 Regression gates: `otherSetupAgent.test.mjs`, `useKnownAgentPubkeys.test.mjs`,
 `buildMentionCandidates.test.mjs`, `MentionAutocomplete.test.mjs`, and

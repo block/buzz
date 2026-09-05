@@ -3903,6 +3903,15 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   const avatarStack = groupedRow.getByTestId("system-message-avatar-stack");
   await expect(avatarStack).toHaveCount(1);
   await expect(avatarStack.getByTestId("system-message-avatar")).toHaveCount(5);
+  const stackedAvatars = avatarStack.getByTestId("system-message-avatar");
+  await expect(stackedAvatars.first().locator(":scope > span")).not.toHaveCSS(
+    "mask-image",
+    "none",
+  );
+  await expect(stackedAvatars.last().locator(":scope > span")).toHaveCSS(
+    "mask-image",
+    "none",
+  );
   await expect(
     groupedRow.locator("p").filter({ hasText: "added by Alice Chen" }),
   ).toHaveCSS("text-align", "left");

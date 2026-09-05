@@ -49,7 +49,14 @@ export function ChannelMemberAvatarStack({
             className={index > 0 ? "-ml-2" : ""}
             data-testid="channel-management-member-avatar"
             key={normalizedPubkey}
-            style={{ zIndex: index + 1 }}
+            style={{
+              ...(index < visibleMembers.length - 1 && {
+                mask: "radial-gradient(circle 18px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
+                WebkitMask:
+                  "radial-gradient(circle 18px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
+              }),
+              zIndex: index + 1,
+            }}
           >
             <UserAvatar
               avatarUrl={profile?.avatarUrl ?? null}

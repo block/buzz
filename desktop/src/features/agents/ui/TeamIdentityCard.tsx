@@ -135,7 +135,12 @@ function TeamAvatarRow({
         role="img"
       >
         {visiblePersonas.map((persona, index) => (
-          <TeamAvatarItem index={index} key={persona.id} persona={persona} />
+          <TeamAvatarItem
+            index={index}
+            isFollowedByAnother={index < stackItemCount - 1}
+            key={persona.id}
+            persona={persona}
+          />
         ))}
         {overflowCount > 0 ? (
           <div
@@ -154,9 +159,11 @@ function TeamAvatarRow({
 
 function TeamAvatarItem({
   index,
+  isFollowedByAnother,
   persona,
 }: {
   index: number;
+  isFollowedByAnother: boolean;
   persona: AgentPersona;
 }) {
   const avatarUrl = persona.avatarUrl?.trim() ?? null;
@@ -167,6 +174,11 @@ function TeamAvatarItem({
       data-team-member-avatar="avatar"
       style={{
         zIndex: index + 1,
+        ...(isFollowedByAnother && {
+          mask: "radial-gradient(circle 32px at calc(100% + 8px) 50%, transparent 99%, #fff 100%)",
+          WebkitMask:
+            "radial-gradient(circle 32px at calc(100% + 8px) 50%, transparent 99%, #fff 100%)",
+        }),
       }}
     >
       <div className="relative z-10 h-full w-full">

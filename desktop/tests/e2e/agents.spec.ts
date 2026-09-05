@@ -650,13 +650,13 @@ test("team cards use the thread-style overlapping avatar stack", async ({
   );
   expect(overlapStyles).toEqual([
     {
-      maskImage: "none",
+      maskImage: expect.stringContaining("radial-gradient"),
       outlineBackground: "rgb(255, 255, 255)",
       outlineBorderRadius: "calc(30% + 2px)",
       outlineInset: "-2px",
     },
     {
-      maskImage: "none",
+      maskImage: expect.stringContaining("radial-gradient"),
       outlineBackground: "rgb(255, 255, 255)",
       outlineBorderRadius: "calc(30% + 2px)",
       outlineInset: "-2px",

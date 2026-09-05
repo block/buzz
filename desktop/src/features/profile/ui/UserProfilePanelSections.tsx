@@ -132,6 +132,14 @@ const PROFILE_HERO_PRESENCE_BADGE = {
     width: PROFILE_HERO_SPACING["6"],
   },
 } as const;
+const PROFILE_HERO_AGENT_PRESENCE_BADGE = {
+  cutout: { ...PROFILE_HERO_PRESENCE_BADGE.cutout, cx: 64, cy: 64 },
+  shell: {
+    ...PROFILE_HERO_PRESENCE_BADGE.shell,
+    bottom: 4,
+    right: 4,
+  },
+} as const;
 
 export function ProfileSummaryView({
   activityAgent,
@@ -648,11 +656,19 @@ function ProfileHero({
             </span>
           ) : null
         }
-        badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
+        badgeBox={
+          isBot
+            ? PROFILE_HERO_AGENT_PRESENCE_BADGE.shell
+            : PROFILE_HERO_PRESENCE_BADGE.shell
+        }
         className="h-20 w-20"
         cornerRadius={isBot ? 24 : undefined}
         curve={STATUS_DOT_MASK_CURVE}
-        cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
+        cutout={
+          isBot
+            ? PROFILE_HERO_AGENT_PRESENCE_BADGE.cutout
+            : PROFILE_HERO_PRESENCE_BADGE.cutout
+        }
         size={80}
       >
         <ProfileAvatar

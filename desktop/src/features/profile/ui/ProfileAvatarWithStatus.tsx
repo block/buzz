@@ -25,6 +25,7 @@ type ProfileAvatarWithStatusProps = {
   shape?: "circle" | "squircle";
   size: number;
   status?: PresenceStatus;
+  statusClipTestId?: string;
   statusTestId?: string;
   testId?: string;
 };
@@ -50,6 +51,21 @@ export function scaleProfileAvatarStatusGeometry(
   };
 }
 
+const SQUIRCLE_STATUS_INSET_RATIO = 0.05;
+
+export function insetProfileAvatarStatusGeometry(
+  geometry: ProfileAvatarStatusGeometry,
+  size: number,
+): ProfileAvatarStatusGeometry {
+  const inset = size * SQUIRCLE_STATUS_INSET_RATIO;
+
+  return {
+    ...geometry,
+    centerX: geometry.centerX - inset,
+    centerY: geometry.centerY - inset,
+  };
+}
+
 export function ProfileAvatarWithStatus({
   avatarClassName,
   avatarUrl,
@@ -60,12 +76,20 @@ export function ProfileAvatarWithStatus({
   shape = "circle",
   size,
   status,
+  statusClipTestId,
   statusTestId,
   testId,
 }: ProfileAvatarWithStatusProps) {
+  const badgeGeometry =
+    shape === "squircle"
+      ? insetProfileAvatarStatusGeometry(geometry, size)
+      : geometry;
   const statusLabel = status ? getPresenceLabel(status) : null;
   const cutout = status
     ? {
+        // Keep the opening anchored at the avatar edge for both shapes. Only
+        // the squircle's visible dot moves inward; insetting the cutout too
+        // closes the notch and makes the badge look painted over the avatar.
         cx: geometry.centerX,
         cy: geometry.centerY,
         r: geometry.cutoutSize / 2,
@@ -73,10 +97,10 @@ export function ProfileAvatarWithStatus({
     : undefined;
   const badgeBox = status
     ? {
-        bottom: size - geometry.centerY - geometry.dotSize / 2,
-        height: geometry.dotSize,
-        right: size - geometry.centerX - geometry.dotSize / 2,
-        width: geometry.dotSize,
+        bottom: size - badgeGeometry.centerY - badgeGeometry.dotSize / 2,
+        height: badgeGeometry.dotSize,
+        right: size - badgeGeometry.centerX - badgeGeometry.dotSize / 2,
+        width: badgeGeometry.dotSize,
       }
     : undefined;
 
@@ -98,7 +122,9 @@ export function ProfileAvatarWithStatus({
         ) : undefined
       }
       badgeBox={badgeBox}
+      badgeCenter={{ cx: badgeGeometry.centerX, cy: badgeGeometry.centerY }}
       className={cn("inline-flex", className)}
+      clipTestId={statusClipTestId}
       cornerRadius={shape === "squircle" ? size * 0.3 : undefined}
       curve={STATUS_DOT_MASK_CURVE}
       cutout={cutout}

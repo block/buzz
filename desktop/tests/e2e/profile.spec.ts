@@ -1203,6 +1203,28 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   const agentPresenceBadge = page.getByTestId("user-profile-presence-badge");
   await expect(agentPresenceBadge).toBeVisible();
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
+  const [agentAvatarBox, agentPresenceBox] = await Promise.all([
+    page.getByTestId("user-profile-avatar").boundingBox(),
+    agentPresenceBadge.boundingBox(),
+  ]);
+  expect(agentAvatarBox).not.toBeNull();
+  expect(agentPresenceBox).not.toBeNull();
+  expect(
+    Math.abs(
+      (agentAvatarBox?.x ?? 0) +
+        (agentAvatarBox?.width ?? 0) -
+        ((agentPresenceBox?.x ?? 0) + (agentPresenceBox?.width ?? 0)) -
+        4,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      (agentAvatarBox?.y ?? 0) +
+        (agentAvatarBox?.height ?? 0) -
+        ((agentPresenceBox?.y ?? 0) + (agentPresenceBox?.height ?? 0)) -
+        4,
+    ),
+  ).toBeLessThanOrEqual(1);
   const headerEditAgent = page.getByTestId("user-profile-header-edit-agent");
   await expect(headerEditAgent).toHaveText("Edit");
   await expect(headerEditAgent.locator("svg")).toHaveCount(0);

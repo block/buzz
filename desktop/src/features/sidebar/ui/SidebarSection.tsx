@@ -203,6 +203,7 @@ function DmChannelIcon({
           shape={primaryParticipant.isAgent ? "squircle" : "circle"}
           size={DM_AVATAR_SIZE}
           status={presenceStatus}
+          statusClipTestId={`channel-presence-clip-${channelName}`}
           statusTestId={`channel-presence-${channelName}`}
         />
       </span>
@@ -318,11 +319,18 @@ export function ChannelMenuButton({
         {channel.channelType === "dm" &&
         (channel.participantPubkeys.length === 2 ||
           dmParticipants?.length === 1) ? (
-          <UserNameIndicators
-            className="ml-1"
-            pubkey={dmParticipants?.[0]?.pubkey}
-            size="dm"
-          />
+          <>
+            <UserNameIndicators
+              className="ml-1"
+              pubkey={dmParticipants?.[0]?.pubkey}
+              size="dm"
+            />
+            <AgentManagementMarker
+              className="ml-1"
+              pubkey={dmParticipants?.[0]?.pubkey}
+              testId={`channel-agent-provenance-${channel.id}`}
+            />
+          </>
         ) : null}
       </span>
       {showsEphemeralBadge && ephemeralDisplay ? (
@@ -330,12 +338,6 @@ export function ChannelMenuButton({
           display={ephemeralDisplay}
           testId={`channel-ephemeral-${channel.name}`}
           variant="sidebar"
-        />
-      ) : null}
-      {channel.channelType === "dm" && dmParticipants?.length === 1 ? (
-        <AgentManagementMarker
-          pubkey={dmParticipants[0].pubkey}
-          testId={`channel-agent-provenance-${channel.id}`}
         />
       ) : null}
       {activeWorking ? (

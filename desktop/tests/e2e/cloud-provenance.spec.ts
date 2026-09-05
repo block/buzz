@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, openNewMessagePage } from "../helpers/bridge";
+import { expectOpenAvatarBadgeNotch } from "../helpers/css";
 
 const OWNER = "deadbeef".repeat(8);
 const REMOTE = "ed".repeat(32);
@@ -170,7 +171,20 @@ for (const agentListDelayMs of [0, 6_000]) {
         .getByTestId(`channel-agent-provenance-${dm.id}`)
         .locator("svg.lucide-cloud"),
     ).toBeVisible();
-    await page.locator(`[data-channel-id="${dm.id}"]`).click();
+    const dmRow = page.locator(`[data-channel-id="${dm.id}"]`);
+    const dmNameAdornments = dmRow.locator("[data-sidebar-row-label]");
+    await expect(
+      dmNameAdornments.getByTestId(`channel-agent-provenance-${dm.id}`),
+    ).toBeVisible();
+    await expectOpenAvatarBadgeNotch(
+      dmRow.getByTestId("channel-presence-clip-DM"),
+    );
+    await expect(
+      dmRow.locator(
+        `:scope > [data-testid="channel-agent-provenance-${dm.id}"]`,
+      ),
+    ).toHaveCount(0);
+    await dmRow.click();
     await expect(
       page
         .getByTestId("chat-header-agent-provenance")

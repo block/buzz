@@ -199,14 +199,20 @@ export function MembershipAvatarStack({
             key={pubkey}
             style={{ zIndex: index + 1 }}
           >
-            <span className="block">
+            <span
+              className="block"
+              style={{
+                ...(index < visiblePubkeys.length - 1 && {
+                  mask: "radial-gradient(circle 14px at calc(100% + 6px) 50%, transparent 99%, #fff 100%)",
+                  WebkitMask:
+                    "radial-gradient(circle 14px at calc(100% + 6px) 50%, transparent 99%, #fff 100%)",
+                }),
+              }}
+            >
               <UserAvatar
                 accent={isAgent}
                 avatarUrl={resolveAvatarUrl(pubkey, profiles)}
-                className={cn(
-                  "h-6 w-6 text-2xs",
-                  index < visiblePubkeys.length - 1 && "ring-2 ring-background",
-                )}
+                className="h-6 w-6 text-2xs"
                 displayName={label}
                 shape={isAgent ? "squircle" : "circle"}
                 size="sm"

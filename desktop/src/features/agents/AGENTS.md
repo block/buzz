@@ -219,7 +219,11 @@ with a TypeScript lookup table or an id comparison in a component.
    The shared cloud marker means “Not managed on this device” only
    after ownership and successful local inventory are known. It does not imply
    hosting location, availability, or permission. Keep all identity surfaces on
-   the shared provenance context, without per-row directory subscriptions. See
+   the shared provenance context, without per-row directory subscriptions.
+   Picker, member, author, and DM-row surfaces may expose the same fact through
+   the shared profile popover instead of repeating the cloud in a trailing row
+   status slot. When a compact row keeps the glyph, place it beside the name's
+   status adornments so it does not compete with actions or unread state. See
    [the provenance contract](../../../../docs/agent-management-provenance.md).
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
