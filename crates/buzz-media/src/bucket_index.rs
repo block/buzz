@@ -202,7 +202,7 @@ pub struct CommunityStorage {
 /// The full computed sweep result: fleet physical/logical totals,
 /// per-community logical breakdown, and anomaly/visibility gauges. Pure
 /// data — no I/O, cheap to clone into a cached snapshot.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketSnapshot {
     /// Every listed object, every class (kind=physical).
     pub physical_bytes: u64,
@@ -212,6 +212,8 @@ pub struct BucketSnapshot {
     pub logical_bytes: u64,
     pub logical_objects: u64,
     pub per_community: HashMap<Uuid, CommunityStorage>,
+    /// Whether `per_community` was computed. False means omitted, not empty.
+    pub community_breakdown_available: bool,
     /// Blob shas with zero sidecar binding in any community.
     pub orphan_blob_bytes: u64,
     pub orphan_blob_count: u64,
@@ -223,6 +225,26 @@ pub struct BucketSnapshot {
     pub multi_variant_bytes: u64,
     pub unknown_key_bytes: u64,
     pub unknown_key_objects: u64,
+}
+
+impl Default for BucketSnapshot {
+    fn default() -> Self {
+        Self {
+            physical_bytes: 0,
+            physical_objects: 0,
+            logical_bytes: 0,
+            logical_objects: 0,
+            per_community: HashMap::new(),
+            community_breakdown_available: true,
+            orphan_blob_bytes: 0,
+            orphan_blob_count: 0,
+            orphan_sidecar_count: 0,
+            multi_variant_shas: 0,
+            multi_variant_bytes: 0,
+            unknown_key_bytes: 0,
+            unknown_key_objects: 0,
+        }
+    }
 }
 
 /// Pure, incremental fold over classified bucket keys. Never retains a full
@@ -275,6 +297,16 @@ impl BucketAggregate {
 
     /// Compute the final snapshot from everything folded so far.
     pub fn finish(self) -> BucketSnapshot {
+        self.finish_inner(true)
+    }
+
+    /// Compute fleet totals and anomaly counts without allocating a
+    /// community-indexed result map.
+    pub fn finish_totals(self) -> BucketSnapshot {
+        self.finish_inner(false)
+    }
+
+    fn finish_inner(self, include_per_community: bool) -> BucketSnapshot {
         let bound_shas: std::collections::HashSet<&str> = self
             .sidecar_bindings
             .keys()
@@ -304,6 +336,8 @@ impl BucketAggregate {
             .count() as u64;
 
         let mut per_community: HashMap<Uuid, CommunityStorage> = HashMap::new();
+        let mut logical_bytes = 0u64;
+        let mut logical_objects = 0u64;
         for (community, sha256) in self.sidecar_bindings.keys() {
             let blob_bytes: u64 = self
                 .blob_variant_bytes
@@ -311,12 +345,15 @@ impl BucketAggregate {
                 .map(|v| v.iter().sum())
                 .unwrap_or(0);
             let thumb_bytes = self.thumb_bytes.get(sha256).copied().unwrap_or(0);
-            let entry = per_community.entry(*community).or_default();
-            entry.bytes += blob_bytes + thumb_bytes;
-            entry.objects += 1;
+            let binding_bytes = blob_bytes + thumb_bytes;
+            logical_bytes += binding_bytes;
+            logical_objects += 1;
+            if include_per_community {
+                let entry = per_community.entry(*community).or_default();
+                entry.bytes += binding_bytes;
+                entry.objects += 1;
+            }
         }
-        let logical_bytes = per_community.values().map(|c| c.bytes).sum();
-        let logical_objects = per_community.values().map(|c| c.objects).sum();
 
         BucketSnapshot {
             physical_bytes: self.physical_bytes,
@@ -324,6 +361,7 @@ impl BucketAggregate {
             logical_bytes,
             logical_objects,
             per_community,
+            community_breakdown_available: include_per_community,
             orphan_blob_bytes,
             orphan_blob_count,
             orphan_sidecar_count,
@@ -376,6 +414,31 @@ pub struct Page {
 /// [`crate::storage::MediaStorage`], tests close over canned [`Page`]s.
 pub async fn fold_bucket_listing<F, Fut>(
     cap: u64,
+    fetch_page: F,
+) -> Result<BucketSnapshot, SweepError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<Page, MediaError>>,
+{
+    fold_bucket_listing_inner(cap, true, fetch_page).await
+}
+
+/// Fold an entire paginated bucket listing into fleet totals without
+/// allocating the final per-community result map.
+pub async fn fold_bucket_listing_totals<F, Fut>(
+    cap: u64,
+    fetch_page: F,
+) -> Result<BucketSnapshot, SweepError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<Page, MediaError>>,
+{
+    fold_bucket_listing_inner(cap, false, fetch_page).await
+}
+
+async fn fold_bucket_listing_inner<F, Fut>(
+    cap: u64,
+    include_per_community: bool,
     mut fetch_page: F,
 ) -> Result<BucketSnapshot, SweepError>
 where
@@ -407,7 +470,11 @@ where
         }
     }
 
-    Ok(aggregate.finish())
+    Ok(if include_per_community {
+        aggregate.finish()
+    } else {
+        aggregate.finish_totals()
+    })
 }
 
 #[cfg(test)]
@@ -539,6 +606,38 @@ mod tests {
     fn empty_listing_yields_zero_snapshot() {
         let snapshot = BucketAggregate::default().finish();
         assert_eq!(snapshot, BucketSnapshot::default());
+    }
+
+    #[test]
+    fn totals_only_omits_community_map_without_changing_fleet_values() {
+        let s = sha(0x42);
+        let c = community(42);
+        let mut full = BucketAggregate::default();
+        full.fold(&format!("{s}.png"), 100);
+        full.fold(&format!("{s}.thumb.jpg"), 10);
+        full.fold(&format!("_meta/{c}/{s}.json"), 5);
+
+        let mut totals = BucketAggregate::default();
+        totals.fold(&format!("{s}.png"), 100);
+        totals.fold(&format!("{s}.thumb.jpg"), 10);
+        totals.fold(&format!("_meta/{c}/{s}.json"), 5);
+
+        let full = full.finish();
+        let totals = totals.finish_totals();
+        assert!(full.community_breakdown_available);
+        assert!(!totals.community_breakdown_available);
+        assert!(totals.per_community.is_empty());
+        assert_eq!(totals.physical_bytes, full.physical_bytes);
+        assert_eq!(totals.physical_objects, full.physical_objects);
+        assert_eq!(totals.logical_bytes, full.logical_bytes);
+        assert_eq!(totals.logical_objects, full.logical_objects);
+        assert_eq!(totals.orphan_blob_bytes, full.orphan_blob_bytes);
+        assert_eq!(totals.orphan_blob_count, full.orphan_blob_count);
+        assert_eq!(totals.orphan_sidecar_count, full.orphan_sidecar_count);
+        assert_eq!(totals.multi_variant_shas, full.multi_variant_shas);
+        assert_eq!(totals.multi_variant_bytes, full.multi_variant_bytes);
+        assert_eq!(totals.unknown_key_bytes, full.unknown_key_bytes);
+        assert_eq!(totals.unknown_key_objects, full.unknown_key_objects);
     }
 
     #[test]
