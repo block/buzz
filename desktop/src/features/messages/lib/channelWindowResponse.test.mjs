@@ -58,6 +58,26 @@ test("partitions flat rows, summaries, aux, and authoritative bounds", () => {
   );
   assert.deepEqual(page.nextCursor, { createdAt: 100, eventId: root.id });
   assert.equal(page.hasMore, true);
+  assert.equal(page.threadRepliesInChannel, false);
+});
+
+test("parses thread-reply projection mode from bounds", () => {
+  const root = event("a", 9, 100);
+  const bounds = event(
+    "b",
+    39006,
+    200,
+    JSON.stringify({
+      has_more: false,
+      next_cursor: null,
+      thread_replies_in_channel: true,
+    }),
+    [["d", "channel:head"]],
+  );
+
+  const page = parseChannelWindowResponse([bounds, root], "channel", null);
+
+  assert.equal(page.threadRepliesInChannel, true);
 });
 
 test("metadata timestamps never influence row cursor math", () => {

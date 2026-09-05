@@ -10,7 +10,11 @@ import { isWelcomeExperienceChannel } from "@/features/onboarding/welcome";
 
 type ChannelPaneMessagesOptions = Pick<
   ChannelPaneProps,
-  "activeChannel" | "messages" | "profiles" | "threadSummaries"
+  | "activeChannel"
+  | "messages"
+  | "profiles"
+  | "threadRepliesInChannel"
+  | "threadSummaries"
 > & {
   isHuddleTranscript: boolean;
 };
@@ -20,6 +24,7 @@ export function useChannelPaneMessages({
   isHuddleTranscript,
   messages,
   profiles,
+  threadRepliesInChannel,
   threadSummaries,
 }: ChannelPaneMessagesOptions) {
   const visibleMessages = React.useMemo(() => {
@@ -34,18 +39,23 @@ export function useChannelPaneMessages({
       : withoutWelcomeSetup;
   }, [activeChannel, isHuddleTranscript, messages]);
 
-  const mainTimelineEntries = React.useMemo(
-    () =>
-      isHuddleTranscript
-        ? visibleMessages.map((message) => ({ message, summary: null }))
-        : buildMainTimelineEntries(
-            visibleMessages,
-            new Set(),
-            threadSummaries,
-            profiles,
-          ),
-    [isHuddleTranscript, profiles, threadSummaries, visibleMessages],
-  );
+  const mainTimelineEntries = React.useMemo(() => {
+    return isHuddleTranscript
+      ? visibleMessages.map((message) => ({ message, summary: null }))
+      : buildMainTimelineEntries(
+          visibleMessages,
+          new Set(),
+          threadSummaries,
+          profiles,
+          { threadRepliesInChannel },
+        );
+  }, [
+    isHuddleTranscript,
+    profiles,
+    threadRepliesInChannel,
+    threadSummaries,
+    visibleMessages,
+  ]);
 
   const recentMentionPubkeys = React.useMemo(
     () => getRecentMentionPubkeys(messages, activeChannel?.channelType),

@@ -607,9 +607,11 @@ pub async fn get_thread_summary(
     }))
 }
 
-/// Fetch one channel window: top-level rows (depth = 0, missing metadata, or
-/// broadcast depth-1 replies) in `(created_at DESC, id ASC)` keyset order,
-/// with thread summaries joined in, plus the server-side `has_more` fact.
+/// Fetch one channel window in `(created_at DESC, id ASC)` keyset order, with
+/// thread summaries joined in, plus the server-side `has_more` fact. By
+/// default rows are top-level messages (depth = 0 or missing metadata) plus
+/// broadcast depth-1 replies. When `include_thread_replies` is true, all
+/// thread replies are returned as channel rows for display projection.
 ///
 /// `cursor` is the composite `(created_at, id)` of the last retained row from
 /// the previous page — there is no timestamp-only fallback on this path (the
@@ -626,6 +628,7 @@ pub async fn get_channel_window(
     limit: u32,
     cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
+    include_thread_replies: bool,
 ) -> Result<ChannelWindow> {
     let mut conn = crate::observability::acquire_writer(
         pool,
@@ -639,6 +642,7 @@ pub async fn get_channel_window(
         limit,
         cursor,
         kind_filter,
+        include_thread_replies,
     )
     .await
 }
@@ -655,6 +659,7 @@ pub(crate) async fn get_channel_window_on(
     limit: u32,
     cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
+    include_thread_replies: bool,
 ) -> Result<ChannelWindow> {
     let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
     let mut sql = String::from(
@@ -680,13 +685,20 @@ pub(crate) async fn get_channel_window_on(
         WHERE e.community_id = $1
           AND e.channel_id = $2
           AND e.deleted_at IS NULL
+        "#,
+    );
+
+    if !include_thread_replies {
+        sql.push_str(
+            r#"
           AND (
                 tm.depth IS NULL
              OR tm.depth = 0
              OR (tm.depth = 1 AND tm.broadcast = true)
           )
         "#,
-    );
+        );
+    }
 
     if cursor.is_some() {
         // Composite keyset: with ORDER BY created_at DESC, id ASC, the page
@@ -1054,10 +1066,18 @@ impl Db {
         limit: u32,
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
+        include_thread_replies: bool,
     ) -> Result<crate::thread::ChannelWindow> {
-        self.get_channel_window_with_session(community_id, channel_id, limit, cursor, kind_filter)
-            .await
-            .map(|(window, _session)| window)
+        self.get_channel_window_with_session(
+            community_id,
+            channel_id,
+            limit,
+            cursor,
+            kind_filter,
+            include_thread_replies,
+        )
+        .await
+        .map(|(window, _session)| window)
     }
 
     /// [`Db::get_channel_window`], additionally returning the session that
@@ -1094,6 +1114,7 @@ impl Db {
         limit: u32,
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
+        include_thread_replies: bool,
     ) -> Result<(crate::thread::ChannelWindow, ReadSession)> {
         let path: &'static str = if cursor.is_some() {
             "channel_cursor"
@@ -1116,6 +1137,7 @@ impl Db {
                     limit,
                     cursor.clone(),
                     kind_filter,
+                    include_thread_replies,
                 )
                 .await
                 {
@@ -1156,6 +1178,7 @@ impl Db {
             limit,
             cursor,
             kind_filter,
+            include_thread_replies,
         )
         .await?;
         Ok((
@@ -1881,6 +1904,36 @@ mod postgres_tests {
         .expect("insert reply event");
     }
 
+    /// Insert a nested reply under `parent`, retaining `root` as the thread head.
+    async fn insert_nested_reply(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        root: &nostr::Event,
+        parent: &nostr::Event,
+        reply: &nostr::Event,
+    ) {
+        insert_event_with_thread_metadata(
+            pool,
+            community,
+            reply,
+            Some(channel_id),
+            Some(ThreadMetadataParams {
+                event_id: reply.id.as_bytes(),
+                event_created_at: event_created_at(reply),
+                channel_id,
+                parent_event_id: Some(parent.id.as_bytes()),
+                parent_event_created_at: Some(event_created_at(parent)),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(event_created_at(root)),
+                depth: 2,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert nested reply event");
+    }
+
     /// The window's top-level predicate: roots (depth 0), events with no
     /// thread metadata at all (pre-metadata legacy rows), and broadcast
     /// depth-1 replies are rows; ordinary replies never are. This is the
@@ -1917,8 +1970,18 @@ mod postgres_tests {
 
         let quiet_reply = make_stream_event(&author, "quiet reply");
         insert_reply(&pool, community, channel.id, &root, &quiet_reply, false).await;
+        let nested_reply = make_stream_event(&author, "nested reply");
+        insert_nested_reply(
+            &pool,
+            community,
+            channel.id,
+            &root,
+            &quiet_reply,
+            &nested_reply,
+        )
+        .await;
 
-        let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+        let window = get_channel_window(&pool, community, channel.id, 50, None, None, false)
             .await
             .expect("fetch window");
 
@@ -1940,8 +2003,29 @@ mod postgres_tests {
             !ids.contains(&quiet_reply.id.to_hex()),
             "ordinary reply must never be a channel row"
         );
+        assert!(
+            !ids.contains(&nested_reply.id.to_hex()),
+            "nested ordinary reply must not be a channel row by default"
+        );
         assert!(!window.has_more);
         assert!(window.next_cursor.is_none());
+
+        let projected = get_channel_window(&pool, community, channel.id, 50, None, None, true)
+            .await
+            .expect("fetch projected window");
+        let projected_ids: Vec<String> = projected
+            .rows
+            .iter()
+            .map(|r| r.stored_event.event.id.to_hex())
+            .collect();
+        assert!(
+            projected_ids.contains(&quiet_reply.id.to_hex()),
+            "ordinary replies are channel rows when projection is enabled"
+        );
+        assert!(
+            projected_ids.contains(&nested_reply.id.to_hex()),
+            "nested replies are channel rows when projection is enabled"
+        );
     }
 
     /// Same-second top-level rows must paginate by the composite
@@ -1983,7 +2067,7 @@ mod postgres_tests {
         let mut collected: Vec<Vec<u8>> = Vec::new();
         let mut cursor: Option<(DateTime<Utc>, Vec<u8>)> = None;
         loop {
-            let window = get_channel_window(&pool, community, channel.id, 2, cursor, None)
+            let window = get_channel_window(&pool, community, channel.id, 2, cursor, None, false)
                 .await
                 .expect("fetch window page");
             for row in &window.rows {
@@ -2033,14 +2117,14 @@ mod postgres_tests {
             insert_root(&pool, community, channel.id, &event).await;
         }
 
-        let page1 = get_channel_window(&pool, community, channel.id, 2, None, None)
+        let page1 = get_channel_window(&pool, community, channel.id, 2, None, None, false)
             .await
             .expect("fetch page 1");
         assert_eq!(page1.rows.len(), 2);
         assert!(page1.has_more, "two more rows exist past page 1");
         let cursor = page1.next_cursor.expect("has_more implies next_cursor");
 
-        let page2 = get_channel_window(&pool, community, channel.id, 2, Some(cursor), None)
+        let page2 = get_channel_window(&pool, community, channel.id, 2, Some(cursor), None, false)
             .await
             .expect("fetch page 2");
         assert_eq!(page2.rows.len(), 2, "final page is exactly full");
@@ -2082,7 +2166,7 @@ mod postgres_tests {
             insert_reply(&pool, community, channel.id, &discussed, &reply, false).await;
         }
 
-        let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+        let window = get_channel_window(&pool, community, channel.id, 50, None, None, false)
             .await
             .expect("fetch window");
 

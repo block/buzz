@@ -76,6 +76,23 @@ test("computeChannelUnreadMarker_threadRepliesExcluded_onlyTopLevelCounted", () 
   assert.equal(marker.unreadCount, 1);
 });
 
+test("computeChannelUnreadMarker_threadRepliesIncluded_whenProjectedIntoChannel", () => {
+  const messages = [
+    topLevel("root", 10),
+    reply("r1", 25, "root"),
+    topLevel("b", 30),
+  ];
+  const marker = computeChannelUnreadMarker(
+    messages,
+    15,
+    false,
+    undefined,
+    true,
+  );
+  assert.equal(marker.firstUnreadMessageId, "r1");
+  assert.equal(marker.unreadCount, 2);
+});
+
 test("computeChannelUnreadMarker_unreadAfterReadReplies_picksTopLevel", () => {
   // A newer reply does not become the divider target even if it is unread.
   const messages = [topLevel("a", 10), topLevel("b", 20), reply("r1", 50, "a")];

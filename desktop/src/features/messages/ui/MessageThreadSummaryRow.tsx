@@ -5,7 +5,7 @@ import type {
   TimelineThreadSummaryParticipant,
 } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
-import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow";
+import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow.types";
 import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFormatters";
 import {
   getThreadReplyAvatarCenterRem,
@@ -54,6 +54,7 @@ function ParticipantAvatar({
 }
 
 export function MessageThreadSummaryRow({
+  actionLabel = "View thread",
   collapseDepthGuideActions,
   depth = 0,
   depthGuideDepths,
@@ -62,11 +63,14 @@ export function MessageThreadSummaryRow({
   onCollapseDepthGuide,
   onCollapseDepthGuideHoverChange,
   onOpenThread,
+  onSecondaryAction,
+  secondaryActionLabel,
   showDepthGuides = true,
   summary,
   summaryIndentOffsetRem = 0,
   unreadCount,
 }: {
+  actionLabel?: string;
   collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
   depth?: number;
   depthGuideDepths?: ReadonlyArray<number>;
@@ -78,6 +82,8 @@ export function MessageThreadSummaryRow({
     hovered: boolean,
   ) => void;
   onOpenThread: (message: TimelineMessage) => void;
+  onSecondaryAction?: (message: TimelineMessage) => void;
+  secondaryActionLabel?: string;
   showDepthGuides?: boolean;
   summary: TimelineThreadSummary;
   summaryIndentOffsetRem?: number;
@@ -95,8 +101,8 @@ export function MessageThreadSummaryRow({
   )})`;
   const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
   const summaryAriaLabel = summary.lastReplyAt
-    ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
-    : `View thread with ${summary.replyCount} ${replyLabel}`;
+    ? `${actionLabel} with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
+    : `${actionLabel} with ${summary.replyCount} ${replyLabel}`;
   const guideDepths = depthGuideDepths
     ? [...depthGuideDepths]
     : Array.from({ length: Math.max(0, depth - 1) }, (_, index) => index + 1);
@@ -266,7 +272,7 @@ export function MessageThreadSummaryRow({
                     className="col-start-1 row-start-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
                     data-testid="message-thread-summary-hover-action"
                   >
-                    View thread
+                    {actionLabel}
                   </span>
                 </span>
               </>
@@ -274,6 +280,17 @@ export function MessageThreadSummaryRow({
           </div>
         </div>
       </button>
+      {onSecondaryAction && secondaryActionLabel ? (
+        <button
+          className="ml-1 inline-flex h-[1.875rem] max-w-full items-center rounded-full px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+          data-thread-head-id={message.id}
+          data-testid="message-thread-summary-secondary"
+          onClick={() => onSecondaryAction(message)}
+          type="button"
+        >
+          {secondaryActionLabel}
+        </button>
+      ) : null}
     </div>
   );
 }

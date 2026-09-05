@@ -28,6 +28,10 @@ export type TimelineThreadSummary = {
 export type MainTimelineEntry = {
   message: TimelineMessage;
   summary: TimelineThreadSummary | null;
+  projectedThread?: {
+    rootId: string;
+    rootMessage: TimelineMessage | null;
+  };
 };
 
 export type ThreadDescendantStats = {
@@ -73,19 +77,19 @@ function normalizeHeadMessage(message: TimelineMessage): TimelineMessage {
 // Keyed on the source `reply` reference via a WeakMap: a new `timelineMessages`
 // set produces new reply objects (genuine recompute), and stale entries are
 // collected automatically when the old message set is dropped.
-const normalizedInlineReplyCache = new WeakMap<
+const normalizedThreadReplyCache = new WeakMap<
   TimelineMessage,
   Map<number, TimelineMessage>
 >();
 
-function normalizeInlineReplyMessage(
+function normalizeThreadReplyMessage(
   message: TimelineMessage,
   depth: number,
 ): TimelineMessage {
-  let byDepth = normalizedInlineReplyCache.get(message);
+  let byDepth = normalizedThreadReplyCache.get(message);
   if (!byDepth) {
     byDepth = new Map<number, TimelineMessage>();
-    normalizedInlineReplyCache.set(message, byDepth);
+    normalizedThreadReplyCache.set(message, byDepth);
   }
 
   const cached = byDepth.get(depth);
@@ -98,6 +102,27 @@ function normalizeInlineReplyMessage(
     depth,
   };
   byDepth.set(depth, normalized);
+  return normalized;
+}
+
+const normalizedProjectedReplyCache = new WeakMap<
+  TimelineMessage,
+  TimelineMessage
+>();
+
+function normalizeProjectedReplyMessage(message: TimelineMessage) {
+  if (message.depth === 0) {
+    return message;
+  }
+  const cached = normalizedProjectedReplyCache.get(message);
+  if (cached) {
+    return cached;
+  }
+  const normalized = {
+    ...message,
+    depth: 0,
+  };
+  normalizedProjectedReplyCache.set(message, normalized);
   return normalized;
 }
 
@@ -345,7 +370,7 @@ function appendExpandedReplies(params: {
   for (const reply of directReplies) {
     const isExpanded = expandedReplyIds.has(reply.id);
     entries.push({
-      message: normalizeInlineReplyMessage(reply, depth),
+      message: normalizeThreadReplyMessage(reply, depth),
       summary: isExpanded
         ? null
         : buildSummaryForDirectReplies(reply.id, descendantStatsByMessageId),
@@ -443,18 +468,36 @@ export function buildMainTimelineEntries(
   unreadReplyIds: ReadonlySet<string> = new Set(),
   relaySummaries: ReadonlyMap<string, ChannelWindowThreadSummary> = new Map(),
   profiles?: UserProfileLookup,
+  options: { threadRepliesInChannel?: boolean } = {},
 ): MainTimelineEntry[] {
-  const { descendantStatsByMessageId } = buildThreadPanelIndex(
+  const { descendantStatsByMessageId, messageById } = buildThreadPanelIndex(
     messages,
     unreadReplyIds,
   );
+  const threadRepliesInChannel = options.threadRepliesInChannel ?? false;
 
   return messages
     .filter(
       (message) =>
-        message.parentId == null || isBroadcastReply(message.tags ?? []),
+        threadRepliesInChannel ||
+        message.parentId == null ||
+        isBroadcastReply(message.tags ?? []),
     )
     .map((message) => {
+      const projectedRootId =
+        threadRepliesInChannel && message.parentId
+          ? (message.rootId ?? message.parentId)
+          : null;
+      if (projectedRootId) {
+        return {
+          message: normalizeProjectedReplyMessage(message),
+          projectedThread: {
+            rootId: projectedRootId,
+            rootMessage: messageById.get(projectedRootId) ?? null,
+          },
+          summary: null,
+        };
+      }
       const relaySummary = relaySummaries.get(message.id);
       return {
         message,

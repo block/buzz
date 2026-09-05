@@ -16,7 +16,6 @@ import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment"
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { MessageAuthorWithIndicators } from "@/features/messages/ui/MessageAuthorWithIndicators";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
@@ -42,7 +41,6 @@ import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
-import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
 import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
@@ -55,18 +53,18 @@ import {
   MessageMetaSegments,
 } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { ProjectedThreadContextLine } from "./ProjectedThreadContextLine";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
+import type {
+  MessageRowProps,
+  ThreadDepthGuideAction,
+} from "./MessageRow.types";
+
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
-export type ThreadDepthGuideAction = {
-  active?: boolean;
-  depth: number;
-  label: string;
-  message: TimelineMessage;
-};
 export const MessageRow = React.memo(
   function MessageRow({
     channelId = null,
@@ -103,64 +101,15 @@ export const MessageRow = React.memo(
     onSendToChannel,
     onEntranceComplete,
     playEntrance = false,
+    projectedThreadRootAuthor,
+    onOpenProjectedThread,
     onUnfollowThread,
     profiles,
     searchQuery,
     showDepthGuides = true,
     videoReviewCommentRootId,
     videoReviewContext,
-  }: {
-    channelId?: string | null;
-    currentPubkey?: string;
-    collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
-    connectDescendants?: boolean;
-    depthGuideDepths?: ReadonlyArray<number>;
-    highlighted?: boolean;
-    highlightDescendantRail?: boolean;
-    highlightReplyConnector?: boolean;
-    highlightThreadLineDepths?: ReadonlyArray<number>;
-    hoverBackground?: boolean;
-    huddleMemberPubkeys?: readonly string[];
-    huddleMemberPubkeysPending?: boolean;
-    hideAgentAccessBadge?: boolean;
-    actionBarPlacement?: "floating" | "inside";
-    collapseDescendantsLabel?: string;
-    isFollowingThread?: boolean;
-    isContinuation?: boolean;
-    isUnread?: boolean;
-    layoutVariant?: "default" | "thread-reply";
-    message: TimelineMessage;
-    onCollapseDepthGuide?: (message: TimelineMessage) => void;
-    onCollapseDepthGuideHoverChange?: (
-      message: TimelineMessage,
-      hovered: boolean,
-    ) => void;
-    onCollapseDescendants?: (message: TimelineMessage) => void;
-    onCollapseDescendantsHoverChange?: (
-      message: TimelineMessage,
-      hovered: boolean,
-    ) => void;
-    onDelete?: (message: TimelineMessage) => void;
-    onEdit?: (message: TimelineMessage) => void;
-    onFollowThread?: (message: TimelineMessage) => void;
-    onMarkUnread?: (message: TimelineMessage) => void;
-    onMarkRead?: (message: TimelineMessage) => void;
-    onToggleReaction?: (
-      message: TimelineMessage,
-      emoji: string,
-      remove: boolean,
-    ) => Promise<void>;
-    onReply?: (message: TimelineMessage) => void;
-    onSendToChannel?: (message: TimelineMessage) => Promise<void>;
-    onUnfollowThread?: (message: TimelineMessage) => void;
-    onEntranceComplete?: (messageId: string) => void;
-    playEntrance?: boolean;
-    profiles?: UserProfileLookup;
-    searchQuery?: string;
-    showDepthGuides?: boolean;
-    videoReviewCommentRootId?: string;
-    videoReviewContext?: VideoReviewContext;
-  }) {
+  }: MessageRowProps) {
     // Keep the transient send state with its timestamp rather than collapsing
     // it into a grouped message row with no header.
     const isDisplayedAsContinuation = isContinuation && !message.pending;
@@ -668,6 +617,11 @@ export const MessageRow = React.memo(
 
     const messageBodyNode = (
       <>
+        <ProjectedThreadContextLine
+          message={message}
+          onOpenThread={onOpenProjectedThread}
+          rootAuthor={projectedThreadRootAuthor}
+        />
         <SentFromThreadLine channelId={channelId} tags={message.tags} />
         {renderBody()}
         {continuationMetadataNode}
@@ -977,6 +931,8 @@ export const MessageRow = React.memo(
       next.onCollapseDescendantsHoverChange &&
     prev.onEntranceComplete === next.onEntranceComplete &&
     prev.playEntrance === next.playEntrance &&
+    prev.projectedThreadRootAuthor === next.projectedThreadRootAuthor &&
+    prev.onOpenProjectedThread === next.onOpenProjectedThread &&
     prev.onSendToChannel === next.onSendToChannel &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&

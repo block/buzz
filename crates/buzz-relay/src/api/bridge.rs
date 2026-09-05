@@ -565,6 +565,11 @@ async fn handle_channel_window_filter(
         .kinds
         .as_ref()
         .map(|ks| ks.iter().map(|k| k.as_u16() as u32).collect());
+    let thread_replies_in_channel = state
+        .db
+        .get_community_thread_replies_in_channel(tenant.community())
+        .await
+        .map_err(|e| internal_error(&format!("workspace profile error: {e}")))?;
 
     let (window, mut session) = state
         .db
@@ -574,6 +579,7 @@ async fn handle_channel_window_filter(
             limit,
             cursor.clone(),
             kind_filter.as_deref(),
+            thread_replies_in_channel,
         )
         .await
         .map_err(|e| internal_error(&format!("channel window error: {e}")))?;
@@ -679,6 +685,7 @@ async fn handle_channel_window_filter(
             "created_at": ts.timestamp(),
             "id": hex::encode(id),
         })),
+        "thread_replies_in_channel": thread_replies_in_channel,
     });
     let tags = vec![parse_tag(["d", &d_val])?, parse_tag(["h", &ch_hex])?];
     let overlay = sign_overlay(KIND_WINDOW_BOUNDS, tags, content.to_string())?;
