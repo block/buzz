@@ -292,7 +292,7 @@ impl RunCtx<'_> {
         let write_total = base
             .cache_write_tokens
             .merge_session(*self.turn_cache_write_tokens);
-        let payload = wire::usage_update_payload(
+        let payload = wire::usage_update_payload_with_context(
             base.input_tokens
                 .merge_session(*self.turn_input_tokens)
                 .exact_value(),
@@ -307,6 +307,8 @@ impl RunCtx<'_> {
             self.turn_pricing_identity
                 .as_ref()
                 .and_then(|inner| inner.as_ref()),
+            *self.last_request_input_tokens,
+            Some(self.cfg.max_context_tokens),
         );
         wire::send(
             self.wire,

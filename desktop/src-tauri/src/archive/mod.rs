@@ -734,6 +734,89 @@ pub async fn read_archived_events(
         .await
 }
 
+// ── get_latest_agent_metric_snapshots ────────────────────────────────────────
+
+/// Synchronous SQLite core for the latest durable NIP-AM snapshot per agent.
+/// Backfill and orphan repair mirror the existing usage-series read path.
+fn latest_agent_metric_snapshots(
+    conn: &Connection,
+    identity_pk: &str,
+    relay_url: &str,
+    request: &agent_usage::LatestAgentMetricSnapshotsRequest,
+) -> Result<Vec<agent_usage::LatestAgentMetricSnapshot>, String> {
+    use buzz_core_pkg::agent_turn_metric::AgentTurnMetricPayload;
+
+    let agent_pubkeys = agent_usage::validate_snapshot_request(request)?;
+    metric_store::backfill_agent_metric_index(conn, identity_pk, relay_url)?;
+    metric_store::repair_orphaned_metric_index_rows(conn, identity_pk, relay_url)?;
+
+    let candidates = metric_store::load_latest_metric_payload_candidates(
+        conn,
+        identity_pk,
+        relay_url,
+        agent_pubkeys.as_ref(),
+    )?;
+    let mut snapshot_indexes = std::collections::HashMap::<String, usize>::new();
+    let mut snapshots = Vec::new();
+    for candidate in candidates {
+        let Ok(payload) = serde_json::from_str::<AgentTurnMetricPayload>(&candidate.raw_json) else {
+            continue;
+        };
+        if payload.validate().is_err()
+            || chrono::DateTime::parse_from_rfc3339(&payload.timestamp).is_err()
+        {
+            continue;
+        }
+
+        if let Some(&index) = snapshot_indexes.get(&candidate.agent_pubkey) {
+            let snapshot = &mut snapshots[index];
+            if snapshot.context_used_tokens.is_none()
+                && snapshot.context_limit_tokens.is_none()
+                && payload.context_used_tokens.is_some()
+                && payload.context_limit_tokens.is_some()
+            {
+                snapshot.context_used_tokens =
+                    payload.context_used_tokens.map(|value| value.to_string());
+                snapshot.context_limit_tokens =
+                    payload.context_limit_tokens.map(|value| value.to_string());
+            }
+            if snapshot.account_usage_windows.is_empty()
+                && !payload.account_usage_windows.is_empty()
+            {
+                snapshot.account_usage_windows = payload.account_usage_windows;
+            }
+            continue;
+        }
+
+        let mut snapshot =
+            agent_usage::latest_snapshot_from_payload(candidate.agent_pubkey.clone(), payload);
+        if snapshot.context_used_tokens.is_none() || snapshot.context_limit_tokens.is_none() {
+            snapshot.context_used_tokens = None;
+            snapshot.context_limit_tokens = None;
+        }
+        snapshot_indexes.insert(candidate.agent_pubkey, snapshots.len());
+        snapshots.push(snapshot);
+    }
+    Ok(snapshots)
+}
+
+/// Return the newest valid decrypted NIP-AM payload for each requested agent
+/// under the active identity + relay `owner_p` archive scope.
+#[tauri::command]
+pub async fn get_latest_agent_metric_snapshots(
+    state: State<'_, AppState>,
+    request: agent_usage::LatestAgentMetricSnapshotsRequest,
+) -> Result<Vec<agent_usage::LatestAgentMetricSnapshot>, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            latest_agent_metric_snapshots(conn, &identity_pk, &relay_url, &request)
+        })
+        .await
+}
+
 // ── get_agent_usage_series ───────────────────────────────────────────────────
 
 /// Compute the locally archived NIP-AM usage series for one identity/relay.

@@ -15,6 +15,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use buzz_core_pkg::agent_turn_metric::{AccountUsageWindow, AgentTurnMetricPayload};
+
 use super::metric_store::AgentMetricIndexRow;
 
 // ── Request ──────────────────────────────────────────────────────────────────
@@ -32,6 +34,29 @@ pub struct AgentUsageSeriesRequest {
     pub agent_pubkey: Option<String>,
 }
 
+/// Request for the latest durable NIP-AM snapshot per agent. An omitted
+/// filter returns every archived agent; an explicit empty list returns none.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestAgentMetricSnapshotsRequest {
+    pub agent_pubkeys: Option<Vec<String>>,
+}
+
+/// Latest valid decrypted NIP-AM status payload for one agent. Full-range
+/// token counters cross IPC as decimal strings to avoid JavaScript precision
+/// loss.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestAgentMetricSnapshot {
+    pub agent_pubkey: String,
+    pub context_used_tokens: Option<String>,
+    pub context_limit_tokens: Option<String>,
+    pub account_usage_windows: Vec<AccountUsageWindow>,
+    pub timestamp: String,
+    pub model: Option<String>,
+    pub harness: String,
+}
+
 /// Widest interval NIP-AM query validation admits (A9): wide enough to admit
 /// every real civil-day transition (ordinary DST, 30-minute-offset zones,
 /// historical calendar skips) while still rejecting arbitrary bins.
@@ -47,6 +72,14 @@ const MAX_BOUNDARIES: usize = 367;
 /// Smallest boundary count that describes a real window: 2 boundaries =
 /// 1 bucket, the `1d` case.
 const MIN_BOUNDARIES: usize = 2;
+
+/// Validate one agent pubkey and normalize it for indexed lookup.
+fn normalize_agent_pubkey(pk: &str) -> Result<String, String> {
+    if pk.len() != 64 || !pk.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("agent_pubkey must be exactly 64 hex characters".to_string());
+    }
+    Ok(pk.to_lowercase())
+}
 
 /// Validate a request per the frozen contract + A9 (drops the 23–25h band
 /// for a `> 0 && <= 48h` sanity band) and A13 pubkey normalization.
@@ -84,17 +117,40 @@ pub(super) fn validate_request(req: &AgentUsageSeriesRequest) -> Result<Option<S
         }
     }
 
-    let normalized_pubkey = match &req.agent_pubkey {
-        None => None,
-        Some(pk) => {
-            if pk.len() != 64 || !pk.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err("agent_pubkey must be exactly 64 hex characters".to_string());
-            }
-            Some(pk.to_lowercase())
-        }
-    };
+    req.agent_pubkey
+        .as_deref()
+        .map(normalize_agent_pubkey)
+        .transpose()
+}
 
-    Ok(normalized_pubkey)
+/// Validate, normalize, and deduplicate the optional latest-snapshot filter.
+pub(super) fn validate_snapshot_request(
+    req: &LatestAgentMetricSnapshotsRequest,
+) -> Result<Option<HashSet<String>>, String> {
+    req.agent_pubkeys
+        .as_ref()
+        .map(|pubkeys| {
+            pubkeys
+                .iter()
+                .map(|pk| normalize_agent_pubkey(pk))
+                .collect()
+        })
+        .transpose()
+}
+
+pub(super) fn latest_snapshot_from_payload(
+    agent_pubkey: String,
+    payload: AgentTurnMetricPayload,
+) -> LatestAgentMetricSnapshot {
+    LatestAgentMetricSnapshot {
+        agent_pubkey,
+        context_used_tokens: payload.context_used_tokens.map(|value| value.to_string()),
+        context_limit_tokens: payload.context_limit_tokens.map(|value| value.to_string()),
+        account_usage_windows: payload.account_usage_windows,
+        timestamp: payload.timestamp,
+        model: payload.model,
+        harness: payload.harness,
+    }
 }
 
 // ── Wire types ───────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ fn make_turn_metric_event(owner_keys: &Keys, agent_keys: &Keys) -> Event {
         harness: "test-harness".to_string(),
         model: Some("test-model".to_string()),
         channel_id: None,
+        thread_root_id: None,
         session_id: Some("sess-1".to_string()),
         turn_id: Some("turn-1".to_string()),
         turn_seq: Some(1),
@@ -34,6 +35,9 @@ fn make_turn_metric_event(owner_keys: &Keys, agent_keys: &Keys) -> Event {
         cumulative: None,
         delta_reliable: true,
         stop_reason: None,
+        context_used_tokens: None,
+        context_limit_tokens: None,
+        account_usage_windows: Vec::new(),
         pricing_identity: None,
     };
     let ciphertext =
@@ -408,4 +412,192 @@ fn test_agent_usage_series_backfills_unindexed_row_before_reading() {
         series.coverage.report_count, 1,
         "backfill must index the pre-existing row before the window read"
     );
+}
+
+// ── get_latest_agent_metric_snapshots integration ────────────────────────────
+
+fn insert_metric_snapshot_fixture(
+    conn: &Connection,
+    identity: &str,
+    relay: &str,
+    agent: &str,
+    id: &str,
+    timestamp: &str,
+    context_used_tokens: Option<u64>,
+    include_usage_windows: bool,
+) {
+    let mut payload = serde_json::json!({
+        "harness": format!("harness-{id}"),
+        "model": format!("model-{id}"),
+        "timestamp": timestamp,
+    });
+    if let Some(used) = context_used_tokens {
+        payload["contextUsedTokens"] = serde_json::json!(used);
+        payload["contextLimitTokens"] = serde_json::json!(200_000);
+    }
+    if include_usage_windows {
+        payload["accountUsageWindows"] = serde_json::json!([{
+            "label": "Session",
+            "usedPercent": 12.5,
+            "resetAt": "2026-07-02T01:00:00Z",
+        }]);
+    }
+    let raw_json = serde_json::to_string(&payload).unwrap();
+    store::upsert_archived_event(
+        conn, identity, relay, id, 44200, agent, 100, &raw_json, 200,
+    )
+    .unwrap();
+    store::upsert_event_scope(conn, identity, relay, id, "owner_p", identity, 200).unwrap();
+    let row = metric_store::AgentMetricIndexRow::from_payload(&raw_json, id, agent, 100, 200);
+    metric_store::insert_metric_index_row(conn, identity, relay, &row).unwrap();
+}
+
+#[test]
+fn test_latest_agent_metric_snapshots_returns_newest_valid_payload_per_agent() {
+    let conn = in_memory();
+    let identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let relay = "wss://relay.example";
+    let agent_a = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let agent_b = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    insert_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        agent_a,
+        "old-a",
+        "2026-07-01T00:00:00Z",
+        Some(10_000),
+        true,
+    );
+    insert_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        agent_a,
+        "exact-a",
+        "2026-07-01T01:00:00Z",
+        Some(25_000),
+        false,
+    );
+    insert_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        agent_a,
+        "new-a",
+        "2026-07-01T02:00:00Z",
+        None,
+        true,
+    );
+    insert_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        agent_b,
+        "only-b",
+        "2026-07-01T00:30:00Z",
+        Some(7_500),
+        true,
+    );
+
+    let snapshots = latest_agent_metric_snapshots(
+        &conn,
+        identity,
+        relay,
+        &agent_usage::LatestAgentMetricSnapshotsRequest { agent_pubkeys: None },
+    )
+    .unwrap();
+
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].agent_pubkey, agent_a);
+    assert_eq!(snapshots[0].context_used_tokens.as_deref(), Some("25000"));
+    assert_eq!(snapshots[0].context_limit_tokens.as_deref(), Some("200000"));
+    assert_eq!(snapshots[0].timestamp, "2026-07-01T02:00:00Z");
+    assert_eq!(snapshots[0].model.as_deref(), Some("model-new-a"));
+    assert_eq!(snapshots[0].harness, "harness-new-a");
+    assert_eq!(snapshots[0].account_usage_windows.len(), 1);
+    assert_eq!(snapshots[0].account_usage_windows[0].label, "Session");
+    assert_eq!(snapshots[1].agent_pubkey, agent_b);
+}
+
+#[test]
+fn test_latest_agent_metric_snapshots_filters_agents_and_keeps_owner_scope() {
+    let conn = in_memory();
+    let identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let other_identity = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let relay = "wss://relay.example";
+    let target = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let other = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    insert_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        target,
+        "target",
+        "2026-07-01T01:00:00Z",
+        Some(10),
+        true,
+    );
+    insert_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        other,
+        "other",
+        "2026-07-01T02:00:00Z",
+        Some(20),
+        true,
+    );
+    insert_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        target,
+        "wrong-owner-scope",
+        "2026-07-01T04:00:00Z",
+        Some(40),
+        true,
+    );
+    conn.execute(
+        "UPDATE archived_event_scopes SET scope_value = ?1 WHERE id = 'wrong-owner-scope'",
+        [other_identity],
+    )
+    .unwrap();
+    insert_metric_snapshot_fixture(
+        &conn,
+        other_identity,
+        relay,
+        target,
+        "foreign-owner",
+        "2026-07-01T03:00:00Z",
+        Some(30),
+        true,
+    );
+
+    let snapshots = latest_agent_metric_snapshots(
+        &conn,
+        identity,
+        relay,
+        &agent_usage::LatestAgentMetricSnapshotsRequest {
+            agent_pubkeys: Some(vec![target.to_uppercase()]),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].agent_pubkey, target);
+    assert_eq!(snapshots[0].context_used_tokens.as_deref(), Some("10"));
+}
+
+#[test]
+fn test_latest_agent_metric_snapshots_rejects_invalid_agent_filter() {
+    let conn = in_memory();
+    let request = agent_usage::LatestAgentMetricSnapshotsRequest {
+        agent_pubkeys: Some(vec!["not-a-pubkey".to_string()]),
+    };
+
+    let error = latest_agent_metric_snapshots(&conn, "identity", "relay", &request).unwrap_err();
+    assert!(error.contains("64 hex"));
 }

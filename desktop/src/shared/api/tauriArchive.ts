@@ -99,6 +99,30 @@ export type AgentUsageSeriesRequest = {
   agentPubkey?: string;
 };
 
+export type AgentAccountUsageWindow = {
+  label: string;
+  usedPercent: number;
+  resetAt?: string;
+};
+
+/** Latest durable decrypted NIP-AM status payload for one agent. */
+export type LatestAgentMetricSnapshot = {
+  agentPubkey: string;
+  /** Decimal `u64` string; use `BigInt(...)`, never `Number(...)`. */
+  contextUsedTokens: string | null;
+  /** Decimal `u64` string; use `BigInt(...)`, never `Number(...)`. */
+  contextLimitTokens: string | null;
+  accountUsageWindows: AgentAccountUsageWindow[];
+  timestamp: string;
+  model: string | null;
+  harness: string;
+};
+
+export type LatestAgentMetricSnapshotsRequest = {
+  /** Omit for all agents. An explicit empty array returns no snapshots. */
+  agentPubkeys?: string[];
+};
+
 // ── Wire-shape types (raw Tauri responses) ───────────────────────────────────
 
 /**
@@ -512,6 +536,19 @@ export async function getAgentUsageSeries(
   request: AgentUsageSeriesRequest,
 ): Promise<AgentUsageSeries> {
   return invokeTauri<AgentUsageSeries>("get_agent_usage_series", { request });
+}
+
+/**
+ * Read the newest valid, decrypted, locally archived NIP-AM status payload for
+ * each agent under the active identity + relay owner scope.
+ */
+export async function getLatestAgentMetricSnapshots(
+  request: LatestAgentMetricSnapshotsRequest = {},
+): Promise<LatestAgentMetricSnapshot[]> {
+  return invokeTauri<LatestAgentMetricSnapshot[]>(
+    "get_latest_agent_metric_snapshots",
+    { request },
+  );
 }
 
 /**

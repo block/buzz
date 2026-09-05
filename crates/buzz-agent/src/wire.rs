@@ -305,13 +305,42 @@ pub fn usage_update_payload(
     model: &str,
     pricing_identity: Option<&crate::types::PricingIdentity>,
 ) -> Value {
+    usage_update_payload_with_context(
+        accumulated_input_tokens,
+        accumulated_output_tokens,
+        accumulated_cached_input_tokens,
+        accumulated_cache_write_tokens,
+        accumulated_total,
+        model,
+        pricing_identity,
+        Some(
+            accumulated_input_tokens
+                .unwrap_or(0)
+                .saturating_add(accumulated_output_tokens.unwrap_or(0)),
+        ),
+        None,
+    )
+}
+
+/// Build a usage update with a point-in-time context-window snapshot.
+pub fn usage_update_payload_with_context(
+    accumulated_input_tokens: Option<u64>,
+    accumulated_output_tokens: Option<u64>,
+    accumulated_cached_input_tokens: Option<u64>,
+    accumulated_cache_write_tokens: Option<u64>,
+    accumulated_total: crate::types::TurnTotalState,
+    model: &str,
+    pricing_identity: Option<&crate::types::PricingIdentity>,
+    context_used_tokens: Option<u64>,
+    context_limit_tokens: Option<u64>,
+) -> Value {
     let mut update = json!({
         "sessionUpdate": "usage_update",
         // used: total tokens as a context-usage proxy; saturate when either
         // side is absent or poisoned (display-only, ACP treats it as dead code).
         // contextLimit: 0 (buzz-agent has no context limit tracking).
-        "used": accumulated_input_tokens.unwrap_or(0).saturating_add(accumulated_output_tokens.unwrap_or(0)),
-        "contextLimit": 0u64,
+        "used": context_used_tokens.unwrap_or(0),
+        "contextLimit": context_limit_tokens.unwrap_or(0),
         "model": model,
     });
     // accumulatedInputTokens / accumulatedOutputTokens: omitted (never null,
@@ -554,6 +583,23 @@ mod tests {
         assert_eq!(pi_wire["model"], serde_json::json!("claude-opus-4-5"));
         // cacheClass absent when None (skip_serializing_if)
         assert!(pi_wire.get("cacheClass").is_none() || pi_wire["cacheClass"].is_null());
+    }
+
+    #[test]
+    fn usage_update_payload_with_context_uses_last_request_snapshot() {
+        let payload = usage_update_payload_with_context(
+            Some(50_000),
+            Some(2_000),
+            None,
+            None,
+            crate::types::TurnTotalState::Unseen,
+            "claude-sonnet-4-5",
+            None,
+            Some(42_000),
+            Some(200_000),
+        );
+        assert_eq!(payload["used"], serde_json::json!(42_000));
+        assert_eq!(payload["contextLimit"], serde_json::json!(200_000));
     }
 
     /// When `pricing_identity` is `None` (unproven: custom endpoint, mixed

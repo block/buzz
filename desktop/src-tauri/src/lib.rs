@@ -853,6 +853,7 @@ pub fn run() {
             archive::read_archived_observer_events_for_channel,
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
+            archive::get_latest_agent_metric_snapshots,
             archive::get_agent_usage_series,
             archive::get_observer_retention_days,
             archive::set_observer_retention_days,

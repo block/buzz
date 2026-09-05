@@ -618,6 +618,70 @@ pub(super) fn has_archived_evidence(
     Ok(exists.is_some())
 }
 
+/// Plaintext payload candidate for the latest-snapshot query. Rows are ordered
+/// newest-first within each agent so the caller can skip a corrupt candidate
+/// and fall back to the next valid archived payload.
+pub(super) struct AgentMetricPayloadCandidate {
+    pub agent_pubkey: String,
+    pub raw_json: String,
+}
+
+/// Load valid indexed NIP-AM payloads in newest-first order per agent. The
+/// canonical event must still belong to this identity's `owner_p` scope;
+/// identity/relay index keys alone are not treated as authorization evidence.
+pub(super) fn load_latest_metric_payload_candidates(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    agent_pubkeys: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<AgentMetricPayloadCandidate>, String> {
+    if agent_pubkeys.is_some_and(std::collections::HashSet::is_empty) {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT ami.agent_pubkey, ae.raw_json
+             FROM agent_metric_index ami
+             INNER JOIN archived_events ae
+                ON ae.identity_pubkey = ami.identity_pubkey
+               AND ae.relay_url = ami.relay_url
+               AND ae.id = ami.id
+             WHERE ami.identity_pubkey = ?1
+               AND ami.relay_url = ?2
+               AND ami.parse_status = 'valid'
+               AND ae.kind = 44200
+               AND EXISTS (
+                   SELECT 1 FROM archived_event_scopes aes
+                   WHERE aes.identity_pubkey = ami.identity_pubkey
+                     AND aes.relay_url = ami.relay_url
+                     AND aes.id = ami.id
+                     AND aes.scope_type = 'owner_p'
+                     AND aes.scope_value = ?1
+               )
+             ORDER BY ami.agent_pubkey ASC, ami.reported_at DESC, ami.id DESC",
+        )
+        .map_err(|e| format!("prepare load_latest_metric_payload_candidates: {e}"))?;
+    let rows = stmt
+        .query_map(params![identity_pubkey, relay_url], |row| {
+            Ok(AgentMetricPayloadCandidate {
+                agent_pubkey: row.get(0)?,
+                raw_json: row.get(1)?,
+            })
+        })
+        .map_err(|e| format!("query load_latest_metric_payload_candidates: {e}"))?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let candidate =
+            row.map_err(|e| format!("read load_latest_metric_payload_candidates row: {e}"))?;
+        if agent_pubkeys.is_none_or(|filter| filter.contains(&candidate.agent_pubkey)) {
+            candidates.push(candidate);
+        }
+    }
+    Ok(candidates)
+}
+
 fn stmt_prepare<'a>(conn: &'a Connection, sql: &str) -> Result<rusqlite::Statement<'a>, String> {
     conn.prepare(sql)
         .map_err(|e| format!("prepare failed: {e} — sql: {sql}"))

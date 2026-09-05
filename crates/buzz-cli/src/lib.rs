@@ -237,6 +237,9 @@ enum Cmd {
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
+    /// Publish encrypted agent usage/context snapshots (NIP-AM)
+    #[command(subcommand)]
+    Metrics(MetricsCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
@@ -261,6 +264,15 @@ impl RespondToArg {
         }
         .to_string()
     }
+}
+
+#[derive(Subcommand)]
+pub enum MetricsCmd {
+    /// Encrypt and publish one NIP-AM payload; use '-' to read JSON from stdin
+    Publish {
+        #[arg(long)]
+        payload: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2123,6 +2135,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
+        Cmd::Metrics(sub) => commands::metrics::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }

@@ -81,6 +81,7 @@ The `content` field decrypts to a UTF-8 JSON object:
   "harness":   "goose",                  // REQUIRED: harness identifier
   "model":     "claude-sonnet-4-5",      // model id, or null if unknown
   "channelId": "<channel_uuid>" | null,
+  "threadRootId": "<64-char event id>",   // omit outside a thread-scoped session
   "sessionId": "<session_id>"  | null,   // REQUIRED when "cumulative" is present
   "turnId":    "<turn_id>"     | null,
   "turnSeq":   17 | null,                // REQUIRED when "cumulative" is present
@@ -110,6 +111,19 @@ The `content` field decrypts to a UTF-8 JSON object:
   // "turn" object unreliable for this event.
   "deltaReliable": true,
 
+  // Point-in-time context snapshot from the last successful model request in
+  // this turn. Omit unknown/zero values. This is not cumulative usage.
+  "contextUsedTokens": 15392,
+  "contextLimitTokens": 272000,
+
+  // Optional encrypted provider-account quota gauges. A producer may publish
+  // whichever windows its authenticated provider exposes. No credential or
+  // bearer token may be included.
+  "accountUsageWindows": [
+    { "label": "Session", "usedPercent": 12.5, "resetAt": "2026-07-02T01:00:00Z" },
+    { "label": "Weekly",  "usedPercent": 41.0, "resetAt": "2026-07-07T00:00:00Z" }
+  ],
+
   // Billing identity, present only when the publisher can prove applicability
   // from the actual endpoint (official provider API) and the actually-requested
   // model for the usage represented. Omit this field when applicability cannot
@@ -132,6 +146,14 @@ The `content` field decrypts to a UTF-8 JSON object:
 nullable, except as constrained below: `pricingIdentity` is optional but not
 nullable (omit it entirely rather than set it to null). Consumers MUST ignore
 unknown fields (forward compatibility).
+
+`contextUsedTokens` and `contextLimitTokens` describe the input-side context
+of the final successful provider request in the turn. Publishers omit either
+field when its value is unknown or zero. `contextUsedTokens` MAY exceed the
+limit; consumers clamp progress bars but retain the reported values.
+`accountUsageWindows` is a last-write-wins display snapshot scoped to the
+publishing agent account. Each `usedPercent` MUST be finite and non-negative;
+`resetAt`, when present, is RFC 3339. Labels are provider-facing text.
 
 ### Ordering and delta recomputation
 

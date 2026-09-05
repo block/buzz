@@ -120,6 +120,11 @@ pub struct AgentTurnMetricPayload {
     /// Channel UUID the turn served, encrypted inside the payload.
     pub channel_id: Option<String>,
 
+    /// Canonical thread-root event id when the turn used a thread-scoped
+    /// session. Omitted for channel-wide conversations, DMs, and heartbeats.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_root_id: Option<String>,
+
     /// Session identifier. REQUIRED when `cumulative` is present.
     pub session_id: Option<String>,
 
@@ -150,6 +155,23 @@ pub struct AgentTurnMetricPayload {
     /// Why the turn ended. Unrecognized values MUST be treated as `Unknown`.
     pub stop_reason: Option<StopReason>,
 
+    /// Input-side context tokens in the last successful model request of this
+    /// turn. This is a point-in-time context-window snapshot, not cumulative
+    /// session usage. Omitted when unknown or reported as zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_used_tokens: Option<u64>,
+
+    /// Configured context-window capacity corresponding to
+    /// `context_used_tokens`. Omitted when unknown or reported as zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_limit_tokens: Option<u64>,
+
+    /// Provider-account rate-limit windows reported by the agent runtime.
+    /// The payload is encrypted; credentials and bearer tokens never belong
+    /// here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub account_usage_windows: Vec<AccountUsageWindow>,
+
     /// Billing identity, present only when the publisher can prove it from the
     /// actual endpoint (official provider API) and the actually-requested model.
     ///
@@ -157,6 +179,19 @@ pub struct AgentTurnMetricPayload {
     /// treat omission as "price unknown".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing_identity: Option<PricingIdentity>,
+}
+
+/// A provider-account quota window for a native usage gauge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUsageWindow {
+    /// Provider-facing label such as `Session`, `Weekly`, or `Sonnet week`.
+    pub label: String,
+    /// Percentage consumed. Consumers clamp this only for visual rendering.
+    pub used_percent: f64,
+    /// Provider-reported RFC 3339 reset instant, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
 }
 
 fn default_delta_reliable() -> bool {
@@ -185,6 +220,14 @@ impl AgentTurnMetricPayload {
         }
         if let Some(c) = &self.cumulative {
             check_cost(c.cost_usd, "cumulative.costUsd")?;
+        }
+        for window in &self.account_usage_windows {
+            if !window.used_percent.is_finite() || window.used_percent < 0.0 {
+                return Err(ObserverPayloadError::InvalidPayload(format!(
+                    "accountUsageWindows.usedPercent must be finite and non-negative (got {})",
+                    window.used_percent
+                )));
+            }
         }
         Ok(())
     }
@@ -233,6 +276,7 @@ mod tests {
             harness: "goose".to_string(),
             model: Some("claude-sonnet-4-5".to_string()),
             channel_id: Some("12345678-1234-1234-1234-123456789abc".to_string()),
+            thread_root_id: None,
             session_id: Some("sess-abc".to_string()),
             turn_id: Some("turn-1".to_string()),
             turn_seq: Some(1),
@@ -255,6 +299,9 @@ mod tests {
             }),
             delta_reliable: true,
             stop_reason: Some(StopReason::EndTurn),
+            context_used_tokens: None,
+            context_limit_tokens: None,
+            account_usage_windows: Vec::new(),
             pricing_identity: None,
         }
     }
@@ -312,6 +359,59 @@ mod tests {
             payload.delta_reliable,
             "deltaReliable should default to true"
         );
+    }
+
+    #[test]
+    fn context_snapshot_and_thread_scope_use_optional_camel_case_fields() {
+        let json = r#"{
+            "harness":"goose",
+            "timestamp":"2026-07-01T20:11:03Z",
+            "contextUsedTokens":210000,
+            "contextLimitTokens":200000,
+            "accountUsageWindows":[
+                {"label":"Session","usedPercent":12.5,"resetAt":"2026-07-02T01:00:00Z"},
+                {"label":"Weekly","usedPercent":41.0}
+            ],
+            "threadRootId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }"#;
+        let payload: AgentTurnMetricPayload = serde_json::from_str(json).expect("parse");
+
+        assert_eq!(payload.context_used_tokens, Some(210_000));
+        assert_eq!(payload.context_limit_tokens, Some(200_000));
+        assert_eq!(payload.account_usage_windows.len(), 2);
+        assert_eq!(payload.account_usage_windows[0].label, "Session");
+        assert_eq!(payload.account_usage_windows[0].used_percent, 12.5);
+        assert_eq!(
+            payload.account_usage_windows[0].reset_at.as_deref(),
+            Some("2026-07-02T01:00:00Z")
+        );
+        assert_eq!(
+            payload.thread_root_id.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+
+        let encoded = serde_json::to_value(payload).expect("serialize");
+        assert_eq!(encoded["contextUsedTokens"], 210_000);
+        assert_eq!(encoded["contextLimitTokens"], 200_000);
+        assert_eq!(
+            encoded["threadRootId"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn legacy_payload_omits_new_optional_context_and_thread_fields() {
+        let json = r#"{"harness":"goose","timestamp":"2026-07-01T20:11:03Z"}"#;
+        let payload: AgentTurnMetricPayload = serde_json::from_str(json).expect("parse");
+
+        assert_eq!(payload.context_used_tokens, None);
+        assert_eq!(payload.context_limit_tokens, None);
+        assert_eq!(payload.thread_root_id, None);
+
+        let encoded = serde_json::to_value(payload).expect("serialize");
+        assert!(encoded.get("contextUsedTokens").is_none());
+        assert!(encoded.get("contextLimitTokens").is_none());
+        assert!(encoded.get("threadRootId").is_none());
     }
 
     #[test]
@@ -386,6 +486,7 @@ mod tests {
             harness: "test".to_string(),
             model: None,
             channel_id: None,
+            thread_root_id: None,
             session_id: None,
             turn_id: None,
             turn_seq: None,
@@ -401,6 +502,9 @@ mod tests {
             cumulative: None,
             delta_reliable: true,
             stop_reason: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
+            account_usage_windows: Vec::new(),
             pricing_identity: None,
         }
     }
@@ -410,6 +514,7 @@ mod tests {
             harness: "test".to_string(),
             model: None,
             channel_id: None,
+            thread_root_id: None,
             session_id: None,
             turn_id: None,
             turn_seq: None,
@@ -425,6 +530,9 @@ mod tests {
             }),
             delta_reliable: true,
             stop_reason: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
+            account_usage_windows: Vec::new(),
             pricing_identity: None,
         }
     }

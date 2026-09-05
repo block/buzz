@@ -76,6 +76,7 @@ import {
   useSidebar,
 } from "@/shared/ui/sidebar";
 import { useProtectedVisibleDirectMessages } from "@protected-feature-components";
+import { PermanentAgentStatusSidebarPanel } from "@/features/agents/status/AgentStatusDisplay";
 
 export function AppSidebar({
   addCommunityPrefill,
@@ -832,6 +833,7 @@ export function AppSidebar({
           ) : null}
 
           <SidebarFooter>
+            <PermanentAgentStatusSidebarPanel />
             {relayConnectionCard.showSidebarRelayConnectionCard &&
             (isMobile ? openMobile : sidebarOpen) ? (
               <SidebarRelayConnectionCard
