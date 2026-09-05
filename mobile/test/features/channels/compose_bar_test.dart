@@ -193,6 +193,7 @@ Widget _buildComposeBar({
   ValueChanged<VoidCallback>? onFocusRestorerChanged,
   AppLifecycleNotifier Function()? appLifecycle,
   String composeBarKey = 'compose-bar',
+  String? threadHeadId,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
 }) {
@@ -256,6 +257,7 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
+                  threadHeadId: threadHeadId,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
