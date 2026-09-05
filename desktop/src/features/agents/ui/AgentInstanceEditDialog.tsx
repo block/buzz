@@ -53,6 +53,7 @@ import {
 } from "./relayMeshModelPicker";
 import {
   computeEditAgentFormValidity,
+  computeRespondToWirePatch,
   envVarsEqual,
   isEditAgentProviderSaveValid,
   resolveAgentCommandUpdate,
@@ -733,18 +734,18 @@ export function AgentInstanceEditDialog({
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,
-        respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
-        // The allowlist is preserved across mode toggles in local UI state
-        // (so a user can flip away from allowlist and back without losing
-        // their entries), but we only send it on the wire when (a) it
-        // actually changed, AND (b) the saved mode will need it. Sending
-        // an allowlist while switching to a non-allowlist mode would be
-        // harmless server-side, but it's noise in the persisted record.
-        respondToAllowlist:
-          respondTo === "allowlist" &&
-          respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
-            ? respondToAllowlist
-            : undefined,
+        // The respond-to pair is computed via the canonical wire-shape helper
+        // so every transition shape — mode flip, payload edit, or both —
+        // produces the exact patch the harness layer consumes on the local
+        // record (#2501). The helper owns the "flip to allowlist must re-send
+        // the payload even when unchanged" contract; see
+        // `computeRespondToWirePatch` for the full semantics.
+        ...computeRespondToWirePatch({
+          currentMode: agent.respondTo,
+          currentAllowlist: agent.respondToAllowlist,
+          submitMode: respondTo,
+          submitAllowlist: respondToAllowlist,
+        }),
       };
 
       // Resolve effort before the update so access-change restarts can
