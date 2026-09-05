@@ -4,20 +4,21 @@
 //! the pusher's pubkey, repo ID, and ref updates. This endpoint:
 //!
 //! 1. Validates HMAC signature + 30s TTL (fail-closed)
-//! 2. Resolves kind:30617 → protection rules
-//! 3. Grants owner authority to the repo key or its verified managed-agent owner
-//! 4. Otherwise resolves the pusher's channel role via buzz-channel binding
-//! 5. Promotes Bot → Member (bots in a channel push as members)
+//! 2. Resolves kind:30617 → protection rules and optional explicit grants
+//! 3. Resolves repo-owner or channel membership authority
+//! 4. Requires actor/ref/expiry coverage for repositories in explicit-grant mode
+//! 5. Promotes Bot → Member only for legacy repositories
 //! 6. Calls `buzz_core::git_perms::evaluate_push()`
 //! 7. Returns 200 (allow) or 403 (deny with reasons)
 //!
 //! # Bot Role Model
 //!
 //! Bots are intentionally added to channels by members/admins. For git push,
-//! they're promoted to Member — protection rules still apply. Bot is a
-//! designation (what it is), not a permission tier (what it can do). The
-//! promotion is scoped to this module; the core `MemberRole::Bot` hierarchy
-//! is unchanged.
+//! they're promoted to Member on legacy repositories — protection rules still
+//! apply. Repositories using explicit grants require a current actor/ref grant
+//! for bots just like every other pusher. Bot is a designation (what it is),
+//! not a permission tier (what it can do). The legacy promotion is scoped to
+//! this module; the core `MemberRole::Bot` hierarchy is unchanged.
 //!
 //! # Security invariants
 //!
@@ -43,7 +44,8 @@ use uuid::Uuid;
 
 use buzz_core::channel::MemberRole;
 use buzz_core::git_perms::{
-    evaluate_push, parse_protection_tags, Denial, RefUpdate, UpdateKind,
+    evaluate_git_push_capabilities, evaluate_push, parse_git_capability_policy,
+    parse_protection_tags, Denial, GitCapabilityDecision, RefUpdate, UpdateKind,
     GIT_NO_CHANNEL_BINDING_BODY,
 };
 use buzz_db::EventQuery;
@@ -300,6 +302,14 @@ pub async fn hook_policy_check(
         }
     };
 
+    let capability_policy = match parse_git_capability_policy(&tags) {
+        Ok(policy) => policy,
+        Err(error) => {
+            warn!(repo = %req.repo_id, error = %error, "hook callback: malformed Git capability policy");
+            return (StatusCode::FORBIDDEN, "malformed Git capability policy").into_response();
+        }
+    };
+
     // 6. Resolve channel binding via the shared resolver (same first-tag,
     // fail-closed semantics as the read gate) and check archived state
     // (applies to ALL pushers including owner).
@@ -400,15 +410,7 @@ pub async fn hook_policy_check(
         }
     };
 
-    // 8. Effective git role: bots intentionally added to a channel push as members.
-    // Protection rules (push:admin, no-force-push, require-patch, etc.) still apply.
-    // Bot is a designation (what it is), not a permission tier (what it can do).
-    let git_role = match role {
-        MemberRole::Bot => MemberRole::Member,
-        other => other,
-    };
-
-    // 9. Classify ref updates and evaluate policy.
+    // 8. Classify ref updates before capability and protection evaluation.
     let updates: Vec<RefUpdate> = req
         .ref_updates
         .iter()
@@ -419,6 +421,34 @@ pub async fn hook_policy_check(
             new_oid: r.new_oid.clone(),
         })
         .collect();
+
+    // 9. Explicit mode requires every pusher (including repo/managed-agent
+    // owners) and every ref to have a current grant. A covered push is treated
+    // as Owner only for the role threshold; non-role protection remains in
+    // force below. Legacy mode preserves the existing Bot → Member behavior.
+    let capability_decision = match evaluate_git_push_capabilities(
+        &capability_policy,
+        &req.pusher_pubkey,
+        &updates,
+        repo_event.event.created_at.as_secs(),
+        now,
+    ) {
+        Ok(decision) => decision,
+        Err(denials) => {
+            let response = HookCallbackResponse {
+                allowed: false,
+                denials: denials.into_iter().map(DenialResponse::from).collect(),
+            };
+            return (StatusCode::FORBIDDEN, Json(response)).into_response();
+        }
+    };
+    let git_role = match capability_decision {
+        GitCapabilityDecision::Legacy => match role {
+            MemberRole::Bot => MemberRole::Member,
+            other => other,
+        },
+        GitCapabilityDecision::ExplicitGrant => MemberRole::Owner,
+    };
 
     match evaluate_push(&updates, git_role, &rules) {
         Ok(()) => Json(HookCallbackResponse {
@@ -912,6 +942,62 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
         hook_policy_check(State(Arc::clone(state)), Json(req)).await
     }
 
+    async fn insert_repo_announcement(
+        state: &Arc<AppState>,
+        community: buzz_core::CommunityId,
+        owner_keys: &nostr::Keys,
+        repo_id: &str,
+        created_at: u64,
+        tags: Vec<nostr::Tag>,
+    ) {
+        use nostr::{EventBuilder, Kind, Tag, Timestamp};
+
+        let mut announcement_tags = vec![Tag::parse(["d", repo_id]).unwrap()];
+        announcement_tags.extend(tags);
+        let event = EventBuilder::new(Kind::Custom(30617), "")
+            .tags(announcement_tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(owner_keys)
+            .expect("sign 30617");
+        state
+            .db
+            .insert_event(community, &event, None)
+            .await
+            .expect("insert 30617");
+    }
+
+    async fn actor_push_response(
+        state: &Arc<AppState>,
+        community: buzz_core::CommunityId,
+        owner_keys: &nostr::Keys,
+        repo_id: &str,
+        pusher_keys: &nostr::Keys,
+        ref_updates: Vec<HookRefUpdate>,
+        timestamp: u64,
+    ) -> axum::response::Response {
+        let mut req = HookCallbackRequest {
+            repo_id: repo_id.to_string(),
+            repo_owner: owner_keys.public_key().to_hex(),
+            community_id: community.as_uuid().to_string(),
+            pusher_pubkey: pusher_keys.public_key().to_hex(),
+            ref_updates,
+            timestamp,
+            signature: String::new(),
+        };
+        let secret = state.config.git_hook_hmac_secret.clone();
+        sign_request(&mut req, secret.as_bytes());
+        hook_policy_check(State(Arc::clone(state)), Json(req)).await
+    }
+
+    fn create_ref(ref_name: &str) -> HookRefUpdate {
+        HookRefUpdate {
+            old_oid: "0".repeat(40),
+            new_oid: "2".repeat(40),
+            ref_name: ref_name.to_string(),
+            is_ancestor: false,
+        }
+    }
+
     async fn body_string(response: axum::response::Response) -> (StatusCode, String) {
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -982,6 +1068,241 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             status,
             StatusCode::OK,
             "owner push to a never-bound repo must remain allowed (got body: {body})"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn explicit_git_grants_isolate_two_actors_and_deny_role_bypasses() {
+        use nostr::{Keys, Tag};
+
+        let state = policy_test_state().await;
+        let host = format!("capability-{}.example", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let repo_owner = Keys::generate();
+        let managed_owner = Keys::generate();
+        let actor_a = Keys::generate();
+        let actor_b = Keys::generate();
+        let plain_member = Keys::generate();
+        let bot = Keys::generate();
+        let creator = Keys::generate();
+
+        let repo_owner_bytes = repo_owner.public_key().to_bytes().to_vec();
+        let managed_owner_bytes = managed_owner.public_key().to_bytes().to_vec();
+        let actor_a_bytes = actor_a.public_key().to_bytes().to_vec();
+        let actor_b_bytes = actor_b.public_key().to_bytes().to_vec();
+        let plain_member_bytes = plain_member.public_key().to_bytes().to_vec();
+        let bot_bytes = bot.public_key().to_bytes().to_vec();
+        let creator_bytes = creator.public_key().to_bytes().to_vec();
+        for pubkey in [
+            &repo_owner_bytes,
+            &managed_owner_bytes,
+            &actor_a_bytes,
+            &actor_b_bytes,
+            &plain_member_bytes,
+            &bot_bytes,
+            &creator_bytes,
+        ] {
+            state.db.ensure_user(community, pubkey).await.expect("user");
+        }
+        state
+            .db
+            .set_agent_owner(community, &repo_owner_bytes, &managed_owner_bytes)
+            .await
+            .expect("managed owner binding");
+
+        let channel = uuid::Uuid::new_v4();
+        state
+            .db
+            .create_channel_with_id(
+                community,
+                channel,
+                &format!("capability-{}", channel.simple()),
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                &creator_bytes,
+                None,
+            )
+            .await
+            .expect("channel");
+        for (pubkey, role) in [
+            (&actor_a_bytes, MemberRole::Member),
+            (&actor_b_bytes, MemberRole::Member),
+            (&plain_member_bytes, MemberRole::Member),
+            (&bot_bytes, MemberRole::Bot),
+        ] {
+            state
+                .db
+                .add_member(community, channel, pubkey, role, Some(&creator_bytes))
+                .await
+                .expect("channel member");
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let issued_at = now.saturating_sub(1);
+        let expires_at = now + 3_600;
+        let repo_id = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let actor_a_hex = actor_a.public_key().to_hex();
+        let actor_b_hex = actor_b.public_key().to_hex();
+        insert_repo_announcement(
+            &state,
+            community,
+            &repo_owner,
+            &repo_id,
+            issued_at,
+            vec![
+                Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+                Tag::parse(["buzz-protect", "refs/**", "push:owner"]).unwrap(),
+                Tag::parse(["buzz-git-policy", "explicit-grants-v1"]).unwrap(),
+                Tag::parse([
+                    "buzz-git-grant",
+                    &actor_a_hex,
+                    "refs/heads/agent/a/**",
+                    "push",
+                    &expires_at.to_string(),
+                ])
+                .unwrap(),
+                Tag::parse([
+                    "buzz-git-grant",
+                    &actor_b_hex,
+                    "refs/heads/agent/b/**",
+                    "push",
+                    &expires_at.to_string(),
+                ])
+                .unwrap(),
+            ],
+        )
+        .await;
+
+        for (pusher, ref_name) in [
+            (&actor_a, "refs/heads/agent/a/task-1"),
+            (&actor_b, "refs/heads/agent/b/task-1"),
+        ] {
+            let response = actor_push_response(
+                &state,
+                community,
+                &repo_owner,
+                &repo_id,
+                pusher,
+                vec![create_ref(ref_name)],
+                now,
+            )
+            .await;
+            let (status, body) = body_string(response).await;
+            assert_eq!(status, StatusCode::OK, "allowed ref {ref_name}: {body}");
+        }
+
+        for (pusher, ref_name) in [
+            (&actor_a, "refs/heads/main"),
+            (&actor_a, "refs/heads/agent/b/task-1"),
+            (&plain_member, "refs/heads/agent/a/task-1"),
+            (&bot, "refs/heads/agent/a/task-1"),
+            (&repo_owner, "refs/heads/agent/a/task-1"),
+            (&managed_owner, "refs/heads/agent/a/task-1"),
+        ] {
+            let response = actor_push_response(
+                &state,
+                community,
+                &repo_owner,
+                &repo_id,
+                pusher,
+                vec![create_ref(ref_name)],
+                now,
+            )
+            .await;
+            let (status, body) = body_string(response).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "ungranted actor/ref must be denied: {body}"
+            );
+        }
+
+        let response = actor_push_response(
+            &state,
+            community,
+            &repo_owner,
+            &repo_id,
+            &actor_a,
+            vec![
+                create_ref("refs/heads/agent/a/task-2"),
+                create_ref("refs/heads/main"),
+            ],
+            now,
+        )
+        .await;
+        let (status, _) = body_string(response).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "mixed push is atomic");
+
+        let expired_repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        insert_repo_announcement(
+            &state,
+            community,
+            &repo_owner,
+            &expired_repo,
+            issued_at,
+            vec![
+                Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+                Tag::parse(["buzz-protect", "refs/**", "push:owner"]).unwrap(),
+                Tag::parse(["buzz-git-policy", "explicit-grants-v1"]).unwrap(),
+                Tag::parse([
+                    "buzz-git-grant",
+                    &actor_a_hex,
+                    "refs/heads/agent/a/**",
+                    "push",
+                    &issued_at.to_string(),
+                ])
+                .unwrap(),
+            ],
+        )
+        .await;
+        let response = actor_push_response(
+            &state,
+            community,
+            &repo_owner,
+            &expired_repo,
+            &actor_a,
+            vec![create_ref("refs/heads/agent/a/task-3")],
+            now,
+        )
+        .await;
+        let (status, _) = body_string(response).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "expired grant is denied");
+
+        let legacy_repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        insert_repo_announcement(
+            &state,
+            community,
+            &repo_owner,
+            &legacy_repo,
+            issued_at,
+            vec![Tag::parse(["buzz-channel", &channel.to_string()]).unwrap()],
+        )
+        .await;
+        let response = actor_push_response(
+            &state,
+            community,
+            &repo_owner,
+            &legacy_repo,
+            &actor_a,
+            vec![create_ref("refs/heads/legacy-task")],
+            now,
+        )
+        .await;
+        let (status, body) = body_string(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "legacy member behavior changed: {body}"
         );
     }
 }

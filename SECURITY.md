@@ -62,12 +62,30 @@ REST endpoints authenticate via
 the client signs a `kind:27235` event containing the request URL and method.
 The relay verifies the Schnorr signature and extracts the pubkey.
 
-### Authorization — Channel Membership as the Gate
+Git Smart HTTP is a deliberate exception to per-request method and payload
+binding. The Git credential protocol reuses one repository-root NIP-98 token
+across ref discovery and pack requests, so Git tokens are URL-bound and valid
+only inside the 60-second timestamp window, but are not event-ID deduplicated
+or bound to an individual pack body. Production Git transport therefore
+requires HTTPS; a stolen token can otherwise be replayed against the same
+repository while that short window and the actor's current authorization are
+both still valid.
 
-Channel membership is the **only** access control mechanism. There are no
-separate ACL lists or capability taxonomies. If a principal (human or agent)
-is a member of a channel, they can read and write to it. If they are not a
-member, the relay rejects their requests — even if they are authenticated.
+### Authorization — Channel Membership as the Foundational Gate
+
+Channel membership is the foundational access control mechanism. If a
+principal (human or agent) is not a member of a channel, the relay rejects its
+channel requests even when it is authenticated. Channel roles may further
+constrain writes.
+
+Git repositories may opt in to an explicit push-capability policy signed into
+their kind:30617 announcement. That policy binds an authenticated Nostr actor
+to an expiring Git ref pattern and becomes the write-authorization gate for
+matching pushes. A current grant satisfies role-based push thresholds for its
+matching refs, including the built-in update-role minimum; non-role protections
+such as `require-patch`, `no-force-push`, and `no-delete` still apply. The
+policy cannot grant channel membership or read access. Repositories without
+the opt-in keep the legacy channel-role behavior.
 
 Private channels are invisible to non-members: they do not appear in channel
 listings, and subscription filters for private channel events return nothing
