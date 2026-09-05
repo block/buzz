@@ -918,3 +918,49 @@ fn inbound_definition_less_agent_accepts_visible_multiline_prompt() {
 
     assert!(validate_inbound_managed_agent_definition(&inbound).is_ok());
 }
+
+// ── Inbound team definition gate ─────────────────────────────────────────
+//
+// Team `instructions` are runtime-layered into every member deployment, so an
+// inbound kind:30176 carries executable text. It is now parsed and validated
+// alongside persona and managed-agent content -- before retention -- so an
+// unsafe team stays out of both the retention database and the local store.
+
+#[test]
+fn inbound_team_with_concealed_instructions_is_rejected() {
+    let mut content = team_content("Release Team");
+    content.instructions = Some(Some("Ship it.\u{200B}".to_string()));
+
+    let error = validate_inbound_team_definition(&content).unwrap_err();
+    assert!(
+        error.starts_with("Inbound team definition is unsafe"),
+        "{error}"
+    );
+    assert!(error.contains("U+200B"), "{error}");
+}
+
+#[test]
+fn inbound_team_with_a_concealed_name_is_rejected() {
+    let content = team_content("Release\u{202E} Team");
+    assert!(validate_inbound_team_definition(&content).is_err());
+}
+
+#[test]
+fn an_ordinary_inbound_team_is_accepted() {
+    assert!(validate_inbound_team_definition(&team_content("Release Team")).is_ok());
+}
+
+#[test]
+fn inbound_team_omitting_instructions_carries_no_text_to_validate() {
+    // Absent means "publisher predates always-publish, preserve local" and
+    // `null` means "explicitly cleared". Neither delivers text, and neither may
+    // be rejected as if it had.
+    assert!(
+        validate_inbound_team_definition(&team_content_omitting_optional_fields("Release Team"))
+            .is_ok()
+    );
+
+    let mut cleared = team_content("Release Team");
+    cleared.instructions = Some(None);
+    assert!(validate_inbound_team_definition(&cleared).is_ok());
+}
