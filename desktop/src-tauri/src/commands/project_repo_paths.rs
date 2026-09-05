@@ -3,6 +3,7 @@
 //! Shared by the project git commands (snapshots, sync status, push) and the
 //! project terminal launcher.
 
+pub(crate) use super::project_repo_discovery::discover_local_repo_dirs;
 use crate::managed_agents::nest_dir;
 use url::Url;
 
@@ -122,9 +123,12 @@ pub(crate) fn find_local_repo_dir(
     clone_url: Option<&str>,
 ) -> Result<Option<std::path::PathBuf>, String> {
     let repos_roots = canonical_repos_roots(repos_dir)?;
+    let candidates = local_repo_candidates(project_dtag, clone_url);
 
     for repos_root in repos_roots {
-        for candidate in local_repo_candidates(project_dtag, clone_url) {
+        // Preserve the fast path for the conventional `<repos_root>/<repo>`
+        // layout before walking nested organization/group directories.
+        for candidate in &candidates {
             let candidate_path = repos_root.join(candidate);
             let Ok(candidate_path) = candidate_path.canonicalize() else {
                 continue;
@@ -138,6 +142,23 @@ pub(crate) fn find_local_repo_dir(
                     .unwrap_or(true)
             {
                 return Ok(Some(candidate_path));
+            }
+        }
+
+        let discovered = discover_local_repo_dirs(&repos_root)?;
+        for candidate in &candidates {
+            for candidate_path in &discovered {
+                if candidate_path.file_name().and_then(|name| name.to_str())
+                    != Some(candidate.as_str())
+                {
+                    continue;
+                }
+                if clone_url
+                    .map(|url| checkout_origin_matches(candidate_path, &repos_root, url))
+                    .unwrap_or(true)
+                {
+                    return Ok(Some(candidate_path.clone()));
+                }
             }
         }
     }
@@ -206,8 +227,12 @@ pub(crate) fn canonical_repos_roots(
 
 #[cfg(test)]
 mod tests {
-    use super::default_repos_root_candidates_for;
-    use std::path::PathBuf;
+    use super::{default_repos_root_candidates_for, discover_local_repo_dirs, find_local_repo_dir};
+    use std::path::{Path, PathBuf};
+
+    fn create_repo(path: &Path) {
+        std::fs::create_dir_all(path.join(".git")).expect("create test repository");
+    }
 
     #[test]
     fn production_keeps_the_legacy_repo_fallback() {
@@ -232,5 +257,21 @@ mod tests {
                 vec![nest.join("REPOS")]
             );
         }
+    }
+
+    #[test]
+    fn discovers_repositories_in_nested_group_directories() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let repos_root = temp.path().join("code");
+        let nested_repo = repos_root.join("client").join("web-app");
+        create_repo(&nested_repo);
+
+        let discovered = discover_local_repo_dirs(&repos_root).expect("discover repositories");
+
+        assert_eq!(discovered, vec![nested_repo.canonicalize().unwrap()]);
+        assert_eq!(
+            find_local_repo_dir(Some(repos_root.to_str().unwrap()), "web-app", None,).unwrap(),
+            Some(nested_repo.canonicalize().unwrap())
+        );
     }
 }
