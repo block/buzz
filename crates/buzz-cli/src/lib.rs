@@ -867,6 +867,12 @@ pub enum DmsCmd {
 
 #[derive(Subcommand)]
 pub enum UsersCmd {
+    /// Print the CLI identity derived from BUZZ_PRIVATE_KEY (no relay round-trip)
+    ///
+    /// External agents (OpenClaw, custom bridges) hold a private key but often
+    /// need their own pubkey without embedding secp256k1. Refs #2663 gap #1.
+    #[command(name = "me", alias = "whoami")]
+    Me,
     /// Look up user profiles by pubkey or name
     Get {
         /// User pubkey(s) to look up (64-char hex). Omit for your own profile
