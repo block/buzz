@@ -54,9 +54,9 @@ fn catalog(app: &AppHandle, state: &AppState) -> Result<AgentVoiceCatalog, Strin
     })
 }
 
-fn stable_voice_index(agent_pubkey: &str, huddle_generation: u64, len: usize) -> usize {
+fn stable_voice_index(agent_pubkey: &str, len: usize) -> usize {
     let hash = agent_pubkey.bytes().fold(
-        0xcbf2_9ce4_8422_2325_u64 ^ huddle_generation,
+        0xcbf2_9ce4_8422_2325_u64,
         |hash, byte| hash.wrapping_mul(0x0000_0100_0000_01b3) ^ u64::from(byte),
     );
     (hash as usize) % len
@@ -107,10 +107,8 @@ pub(crate) fn sync_agent_voice_assignments(
             } else {
                 &unused_alternates
             };
-            (!candidates.is_empty()).then(|| {
-                candidates[stable_voice_index(pubkey, huddle.huddle_generation, candidates.len())]
-                    .clone()
-            })
+            (!candidates.is_empty())
+                .then(|| candidates[stable_voice_index(pubkey, candidates.len())].clone())
         };
         if let Some(voice_key) = preferred {
             used.insert(voice_key.clone());
