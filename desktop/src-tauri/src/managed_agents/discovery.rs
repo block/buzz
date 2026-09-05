@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use crate::managed_agents::{
     buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
-    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
-    HarnessSource,
+    buzz_node_bin_dir_override_is_set, AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus,
+    CommandAvailabilityInfo, HarnessSource,
 };
 mod auth_status_cache;
 mod bounded_command;
@@ -1014,13 +1014,13 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
         | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
     };
 
-    // node_required now means Buzz cannot provide npm for this platform.
-    // On supported desktop platforms, Buzz downloads a private Node/npm
-    // runtime into app data before running npm-backed adapter installs.
+    // A configured override stays in the install flow so invalid values surface
+    // their specific error instead of an unrelated nodejs.org link.
     let node_required = matches!(
         availability,
         AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
     ) && runtime_needs_npm(runtime)
+        && !buzz_node_bin_dir_override_is_set()
         && buzz_managed_node_bin_dir().is_none()
         && resolve("npm").is_none()
         && resolve("node").is_none();
