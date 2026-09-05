@@ -198,6 +198,7 @@ fn reserved_keys_include_code_execution_surface() {
         "BUZZ_ACP_AGENT_COMMAND",
         "BUZZ_ACP_AGENT_ARGS",
         "BUZZ_ACP_MCP_COMMAND",
+        "BUZZ_ACP_EXTRA_MCP_COMMANDS",
     ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");
     }

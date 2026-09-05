@@ -34,7 +34,7 @@ use buzz_core::observer::{
 };
 use clap::Parser;
 use config::{
-    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
+    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, ConfigError, DedupMode, ModelsArgs,
     MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
@@ -2803,7 +2803,7 @@ async fn tokio_main() -> Result<()> {
     }
 
     let ctx = Arc::new(PromptContext {
-        mcp_servers: build_mcp_servers(&config),
+        mcp_servers: build_mcp_servers(&config)?,
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
@@ -5843,11 +5843,11 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+fn build_mcp_servers(config: &Config) -> Result<Vec<McpServer>, ConfigError> {
     if config.mcp_command.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
-    vec![McpServer {
+    let mut servers = vec![McpServer {
         name: std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -5897,7 +5897,97 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             }
             env
         },
-    }]
+        trusted: true,
+    }];
+
+    // Append extra MCP servers from BUZZ_ACP_EXTRA_MCP_COMMANDS.
+    // Each entry is shell-split into command + args using shlex, so quoted
+    // paths and arguments with spaces are preserved. Malformed entries cause
+    // startup to fail closed — the error identifies the entry index without
+    // echoing the command, which may contain an embedded API key.
+    // Extra servers do not receive Buzz relay credentials or auth tags —
+    // they are third-party tools, not Buzz-native MCP servers.
+    let mut seen_names: std::collections::HashSet<String> =
+        std::collections::HashSet::from_iter([servers[0].name.clone()]);
+    for (idx, extra) in config.extra_mcp_commands.iter().enumerate() {
+        let trimmed = extra.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts = match shlex::split(trimmed) {
+            Some(p) if !p.is_empty() => p,
+            Some(_) => continue,
+            None => {
+                return Err(ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_EXTRA_MCP_COMMANDS entry {} has malformed shell quoting; \
+                     fix the quoting or remove the entry and restart",
+                    idx + 1
+                )));
+            }
+        };
+        let command = parts[0].clone();
+        let args: Vec<String> = parts[1..].to_vec();
+        // Derive a name from the executable stem, then disambiguate so
+        // two wrappers like `npx -y first-mcp` and `npx -y second-mcp`
+        // don't both become `npx` and trip McpRegistry's duplicate check.
+        let raw_stem = std::path::Path::new(&command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("extra-mcp");
+        let base_name = sanitize_mcp_name(raw_stem);
+        let name = if seen_names.contains(&base_name) {
+            // Append a numeric suffix until we find a unique name.
+            let mut i = 2;
+            loop {
+                let candidate = format!("{base_name}-{i}");
+                if !seen_names.contains(&candidate) {
+                    break candidate;
+                }
+                i += 1;
+            }
+        } else {
+            base_name
+        };
+        seen_names.insert(name.clone());
+        servers.push(McpServer {
+            name,
+            command,
+            args,
+            env: vec![],
+            trusted: false,
+        });
+    }
+
+    Ok(servers)
+}
+
+/// Sanitize a raw executable stem into a name that satisfies the downstream
+/// `McpRegistry` validator: ASCII alphanumeric and hyphens only, ≤128 bytes.
+/// Non-conforming characters are replaced with hyphens; leading/trailing
+/// hyphens are stripped. An empty result falls back to `"extra-mcp"`.
+fn sanitize_mcp_name(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let truncated = if sanitized.len() > 128 {
+        sanitized[..=128].to_string()
+    } else {
+        sanitized
+    };
+    if truncated.is_empty() {
+        "extra-mcp".to_string()
+    } else {
+        truncated
+    }
 }
 
 #[cfg(test)]
@@ -9061,6 +9151,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            extra_mcp_commands: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -9107,7 +9198,7 @@ mod build_mcp_servers_tests {
     #[test]
     fn session_new_mcp_server_has_required_fields() {
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
         assert_eq!(server.name, "test-mcp-server");
@@ -9128,7 +9219,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         std::env::remove_var("BUZZ_AUTH_TAG");
 
         let server = &servers[0];
@@ -9145,7 +9236,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         std::env::remove_var("BUZZ_AUTH_TAG");
 
         let server = &servers[0];
@@ -9158,7 +9249,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         let entry = servers[0]
@@ -9177,7 +9268,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
 
         // Absent, not empty-valued: dev-mcp distinguishes the two and only
         // falls back to the npub when the key is missing or blank.
@@ -9195,7 +9286,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         assert!(
@@ -9211,7 +9302,7 @@ mod build_mcp_servers_tests {
     fn empty_mcp_command_returns_no_servers() {
         let mut config = test_config();
         config.mcp_command = "".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         assert!(
             servers.is_empty(),
             "empty mcp_command should produce no MCP servers"
@@ -9222,7 +9313,7 @@ mod build_mcp_servers_tests {
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
         config.mcp_command = "/opt/bin/my-mcp-server".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "my-mcp-server");
     }
@@ -9243,12 +9334,158 @@ mod build_mcp_servers_tests {
 
         // Confirm a non-empty command with no stem (e.g. just a dot) also falls back.
         config.mcp_command = ".".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
+    }
+
+    #[test]
+    fn extra_mcp_commands_append_additional_servers() {
+        let mut config = test_config();
+        config.extra_mcp_commands =
+            vec!["npx -y mcp-remote https://mcp.tavily.com/mcp/?tavilyApiKey=test-key".into()];
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers.len(), 2, "primary + 1 extra = 2 servers");
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "npx");
+        assert_eq!(servers[1].command, "npx");
+        assert_eq!(
+            servers[1].args,
+            vec![
+                "-y",
+                "mcp-remote",
+                "https://mcp.tavily.com/mcp/?tavilyApiKey=test-key"
+            ]
+        );
+        // Extra servers should not receive Buzz relay credentials.
+        let env_names: Vec<&str> = servers[1].env.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !env_names.contains(&"BUZZ_RELAY_URL"),
+            "extra MCP servers should not get BUZZ_RELAY_URL"
+        );
+        assert!(
+            !env_names.contains(&"BUZZ_PRIVATE_KEY"),
+            "extra MCP servers should not get BUZZ_PRIVATE_KEY"
+        );
+    }
+
+    #[test]
+    fn multiple_extra_mcp_commands_append_in_order() {
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![
+            "brave-search-mcp".into(),
+            "npx -y mcp-remote https://mcp.tavily.com/mcp/".into(),
+        ];
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers.len(), 3, "primary + 2 extra = 3 servers");
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "brave-search-mcp");
+        assert_eq!(servers[2].name, "npx");
+    }
+
+    #[test]
+    fn empty_extra_mcp_commands_are_skipped() {
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![
+            "valid-server".into(),
+            "".into(),
+            "   ".into(),
+            "another-server arg1".into(),
+        ];
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(
+            servers.len(),
+            3,
+            "primary + 2 valid extras (empty and whitespace-only skipped)"
+        );
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "valid-server");
+        assert_eq!(servers[1].args.len(), 0);
+        assert_eq!(servers[2].name, "another-server");
+        assert_eq!(servers[2].args, vec!["arg1"]);
+    }
+
+    #[test]
+    fn extra_mcp_commands_with_empty_mcp_command_returns_no_servers() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        config.extra_mcp_commands = vec!["some-extra-server".into()];
+        let servers = build_mcp_servers(&config).unwrap();
+        assert!(
+            servers.is_empty(),
+            "empty primary mcp_command should still short-circuit even with extras"
+        );
+    }
+
+    #[test]
+    fn extra_mcp_commands_disambiguate_duplicate_names() {
+        // Two npx-based wrappers must not both become "npx" — that would
+        // trip McpRegistry's duplicate-name check at spawn.
+        let mut config = test_config();
+        config.extra_mcp_commands = vec!["npx -y first-mcp".into(), "npx -y second-mcp".into()];
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers.len(), 3, "primary + 2 extra = 3 servers");
+        assert_eq!(servers[1].name, "npx");
+        assert_eq!(servers[2].name, "npx-2");
+    }
+
+    #[test]
+    fn extra_mcp_commands_shell_split_quoted_paths() {
+        // Quoted paths with spaces must be preserved as a single argv element.
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![r#""my server" --port 8080"#.into()];
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[1].command, "my server");
+        assert_eq!(servers[1].args, vec!["--port", "8080"]);
+    }
+
+    #[test]
+    fn extra_mcp_commands_fail_closed_on_malformed_quoting() {
+        // Malformed quoting must fail startup, not silently skip the entry.
+        // The error must not echo the command (it may contain an API key).
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![
+            "valid-server".into(),
+            "'unmatched-quote".into(),
+            "another-server".into(),
+        ];
+        let result = build_mcp_servers(&config);
+        assert!(result.is_err(), "malformed quoting must fail closed");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("entry 2"),
+            "error should identify the entry index"
+        );
+        assert!(
+            !err_msg.contains("unmatched-quote"),
+            "error must not echo the raw command"
+        );
+    }
+
+    #[test]
+    fn extra_mcp_commands_sanitized_names() {
+        // Names with underscores, spaces, or punctuation must be sanitized
+        // to the McpRegistry ASCII alphanumeric/hyphen contract.
+        let mut config = test_config();
+        config.extra_mcp_commands = vec!["my_server --port 8080".into()];
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[1].name, "my-server");
+    }
+
+    #[test]
+    fn extra_mcp_commands_trusted_flag() {
+        // The primary server must be trusted; extras must not be.
+        let mut config = test_config();
+        config.extra_mcp_commands = vec!["some-extra-server".into()];
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers.len(), 2);
+        assert!(servers[0].trusted, "primary MCP server must be trusted");
+        assert!(!servers[1].trusted, "extra MCP servers must not be trusted");
     }
 }
 
@@ -9287,6 +9524,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            extra_mcp_commands: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
