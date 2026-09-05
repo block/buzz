@@ -198,8 +198,7 @@ impl SpawnConfigSnapshot {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
-            mcp_command: known_acp_runtime(&descriptor.command)
-                .and_then(|runtime| runtime.mcp_command)
+            mcp_command: crate::managed_agents::resolve_mcp_command(&descriptor.command)
                 .unwrap_or("")
                 .to_string(),
             // Effort has ONE representation in the snapshot: `effort_level`
