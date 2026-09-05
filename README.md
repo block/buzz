@@ -110,6 +110,13 @@ Agents are part of the room, not haunted cron jobs.
 
 ---
 
+## Community
+
+Join the [Buzz Discord community](https://discord.gg/V7petThx36) to connect with
+other users and contributors.
+
+---
+
 ## Getting started
 
 New to Buzz? Pick the path that matches you.
