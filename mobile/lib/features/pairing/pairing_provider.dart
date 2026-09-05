@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/crypto/ecdh.dart';
@@ -128,11 +129,47 @@ class PairingNotifier extends Notifier<PairingState> {
     }
 
     final trimmed = rawInput.trim();
+    // JOIN BY ADDRESS: a bare wss:// URL is a whole invitation — the
+    // relay serves its own join flow at https://<host>/join/ (the same
+    // view watch.html embeds verbatim), so the app OPENS that flow
+    // rather than rebuilding it: the room and the in-pocket identity
+    // live at the relay's origin (localStorage, shared with the
+    // browser), join once and every surface — the door, watch.html,
+    // the app — is the same member.
+    if (trimmed.startsWith('wss://') || trimmed.startsWith('ws://')) {
+      return _joinByAddress(trimmed);
+    }
     if (trimmed.startsWith('nostrpair://')) {
       return _pairNipAb(trimmed);
     }
     // Legacy buzz:// flow.
     return _pairLegacy(trimmed);
+  }
+
+  /// Open the relay's own join flow for a pasted address. The /join/ view
+  /// prefills itself when served by the relay (same-origin), fetches the
+  /// owner-signed join material (kind 34550) off the wire, mints the key
+  /// on-device, and joins — this app is a window onto that proven flow.
+  Future<void> _joinByAddress(String wsUrl) async {
+    state = const PairingState(status: PairingStatus.connecting);
+    final httpsOrigin = wsUrl
+        .replaceFirst(RegExp(r'^ws'), 'https')
+        .replaceAll(RegExp(r'/+$'), '');
+    final launched = await launchUrl(
+      Uri.parse('$httpsOrigin/join/'),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!launched) {
+      state = PairingState(
+        status: PairingStatus.error,
+        errorMessage: 'Could not open $httpsOrigin/join/ — check the '
+            'address and try again.',
+      );
+      return;
+    }
+    // The join completes in the relay's own flow; the pairing sheet closes
+    // so the member lands in the room (addingCommunity pops on success).
+    state = const PairingState(status: PairingStatus.success);
   }
 
   Future<bool> authorizeIdentityExport({required Community community}) async {
