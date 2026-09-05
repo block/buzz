@@ -26,6 +26,7 @@ import {
 } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 import { AvatarCustomColorPanel } from "@/features/profile/ui/AvatarCustomColorPanel";
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
+import { downscaleSquareImageToDataUrl } from "@/features/profile/lib/downscaleSquareImage";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
@@ -53,7 +54,7 @@ export function AgentCreationPreview({
   onCommitAvatar,
   onUploadPendingChange,
   onSelectAvatar,
-  processImage,
+  processImage = downscaleSquareImageToDataUrl,
   shape = "circle",
   testIdPrefix = "agent-avatar",
   variant = "default",
