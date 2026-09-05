@@ -30,6 +30,8 @@ import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+part 'compose_bar_test/exact_mention_tests.dart';
+
 final _pngBytes = Uint8List.fromList([
   0x89,
   0x50,
@@ -641,6 +643,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  exactMentionTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {

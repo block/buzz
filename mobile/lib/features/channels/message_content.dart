@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -159,6 +160,7 @@ class MessageContent extends HookConsumerWidget {
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
     final resolvedMentionNames = mentionNames;
+    final mentionBindings = renderedMentionBindings(content, mentionNames);
     final resolvedAgentMentionPubkeys = {
       ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
     };
@@ -236,14 +238,15 @@ class MessageContent extends HookConsumerWidget {
           mentionBuf.write('`${mentionParts[i]}`');
         } else {
           var segment = mentionParts[i];
-          for (final name in resolvedMentionNames.values) {
-            if (name.contains(' ')) {
-              final normalizedName = _markdownMentionName(name);
-              segment = segment.replaceAllMapped(
-                RegExp('@${RegExp.escape(name)}', caseSensitive: false),
-                (m) => '@$normalizedName',
-              );
-            }
+          for (final range in mentionOccurrences(
+            segment,
+            mentionBindings.keys,
+          ).reversed) {
+            segment = segment.replaceRange(
+              range.start,
+              range.end,
+              '@${_markdownMentionName(range.label)}',
+            );
           }
           mentionBuf.write(segment);
         }
@@ -286,6 +289,14 @@ class MessageContent extends HookConsumerWidget {
         inlineComponents: [
           _MentionMd(
             mentionNames: resolvedMentionNames,
+            bindings: mentionBindings,
+            displayLabels: {
+              for (final range in mentionOccurrences(
+                content,
+                mentionBindings.keys,
+              ))
+                range.label: content.substring(range.start + 1, range.end),
+            },
             agentMentionPubkeys: resolvedAgentMentionPubkeys,
             onMentionTap: onMentionTap,
           ),
@@ -807,16 +818,20 @@ class _MessageCodeBlock extends HookWidget {
 }
 
 class _MentionMd extends InlineMd {
+  final Map<String, Set<String>> bindings;
+  final Map<String, String> displayLabels;
   final Map<String, String> mentionNames;
   final Set<String> agentMentionPubkeys;
   final void Function(String pubkey)? onMentionTap;
   late final RegExp _exp = _buildPrefixPattern(
     prefix: '@',
-    knownNames: _mentionAliases(mentionNames.values),
+    knownNames: bindings.keys.map(_markdownMentionName),
     genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
   );
 
   _MentionMd({
+    required this.bindings,
+    required this.displayLabels,
     required this.mentionNames,
     required this.agentMentionPubkeys,
     this.onMentionTap,
@@ -837,22 +852,25 @@ class _MentionMd extends InlineMd {
     }
 
     final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
-    String? displayName;
-    String? pubkey;
-    for (final entry in mentionNames.entries) {
-      final entryName = entry.value.toLowerCase();
-      final firstName = entryName.split(RegExp(r'\s+')).first;
-      if (entryName == name || firstName == name) {
-        displayName = entry.value;
-        pubkey = entry.key;
-        break;
-      }
+    final matches = bindings[name] ?? const <String>{};
+    final pubkey = matches.length == 1 ? matches.single : null;
+    if (bindings.containsKey(name) && matches.length != 1) {
+      return TextSpan(text: text, style: config.style);
     }
+    final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
+        ? displayLabels[name]
+        : mentionNames[pubkey];
 
     final isAgent =
         pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
+    final fullLabel = displayName ?? raw.substring(1);
+    final visibleLabel = fullLabel.replaceAllMapped(
+      RegExp(r'\(([0-9a-f]{64})\)'),
+      (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
+    );
     final pill = _MentionPill(
-      label: displayName ?? raw.substring(1),
+      label: visibleLabel,
+      semanticsLabel: fullLabel,
       isAgent: isAgent,
       textStyle: config.style,
     );
@@ -861,7 +879,7 @@ class _MentionMd extends InlineMd {
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
       child: pubkey != null && onMentionTap != null
-          ? GestureDetector(onTap: () => onMentionTap!(pubkey!), child: pill)
+          ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
           : pill,
     );
   }
@@ -869,11 +887,13 @@ class _MentionMd extends InlineMd {
 
 class _MentionPill extends StatelessWidget {
   final String label;
+  final String? semanticsLabel;
   final bool isAgent;
   final TextStyle? textStyle;
 
   const _MentionPill({
     required this.label,
+    this.semanticsLabel,
     required this.isAgent,
     this.textStyle,
   });
@@ -920,7 +940,7 @@ class _MentionPill extends StatelessWidget {
               offset: const Offset(0, -Grid.quarter),
               child: Text('@', style: style),
             ),
-          Text(label, style: style),
+          Text(label, style: style, semanticsLabel: semanticsLabel),
         ],
       ),
     );
@@ -928,15 +948,3 @@ class _MentionPill extends StatelessWidget {
 }
 
 String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');
-
-Iterable<String> _mentionAliases(Iterable<String> mentionNames) sync* {
-  for (final name in mentionNames) {
-    final trimmed = name.trim();
-    if (trimmed.isEmpty) continue;
-    yield _markdownMentionName(trimmed);
-    final firstName = trimmed.split(RegExp(r'\s+')).first;
-    if (firstName.isNotEmpty) {
-      yield firstName;
-    }
-  }
-}
