@@ -1,375 +1,156 @@
+// Compact mutes lane adapter contract.
+// Full merge-lane storage invariants are in mergeLaneStorage.shared.test.mjs.
+// This file proves mutes-specific wiring PLUS duplicated mutes algebra not in the stars-based shared suite.
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  boundMuteStore,
   MAX_CHANNEL_MUTE_ENTRIES,
-  parseMutePayload,
+  boundMuteStore,
+  isMutesStoreSubsumedBy,
   mergeStores,
   mutedChannelIdsFromStore,
+  parseMutePayload,
+  storageKey,
 } from "./channelMutesStorage.ts";
 
-// ── parseMutePayload ──────────────────────────────────────────────────────────
-
-test("parseMutePayload: valid payload with channels returns store", () => {
-  const payload = {
+test("mutes adapter: value field is 'muted', key prefix is buzz-channel-mutes.v1", () => {
+  const raw = {
     version: 1,
-    channels: {
-      "chan-1": { muted: true, updatedAt: 1000 },
-      "chan-2": { muted: false, updatedAt: 2000 },
-    },
+    channels: { a: { muted: true, updatedAt: 100, rev: 1 } },
   };
-  const result = parseMutePayload(payload);
-  assert.deepEqual(result, {
-    version: 1,
-    channels: {
-      "chan-1": { muted: true, updatedAt: 1000 },
-      "chan-2": { muted: false, updatedAt: 2000 },
-    },
-  });
-});
-
-test("parseMutePayload: missing version returns null", () => {
+  const parsed = parseMutePayload(raw);
+  assert.ok(parsed !== null, "valid mutes payload parses");
+  assert.equal(parsed.channels.a.muted, true, "muted field preserved");
   assert.equal(
-    parseMutePayload({ channels: { "chan-1": { muted: true, updatedAt: 1 } } }),
-    null,
+    storageKey("pk1"),
+    "buzz-channel-mutes.v1:pk1",
+    "storage key prefix",
   );
 });
 
-test("parseMutePayload: wrong version returns null", () => {
-  assert.equal(
-    parseMutePayload({
-      version: 2,
-      channels: { "chan-1": { muted: true, updatedAt: 1 } },
-    }),
-    null,
-  );
-});
-
-test("parseMutePayload: null input returns null", () => {
-  assert.equal(parseMutePayload(null), null);
-});
-
-test("parseMutePayload: non-object input returns null", () => {
-  assert.equal(parseMutePayload("string"), null);
-  assert.equal(parseMutePayload(42), null);
-  assert.equal(parseMutePayload(true), null);
-});
-
-test("parseMutePayload: malformed channel entries missing muted/updatedAt are filtered out", () => {
-  const payload = {
+test("mutes adapter: idsFromStore projects muted=true entries", () => {
+  const store = {
     version: 1,
     channels: {
-      "no-muted": { updatedAt: 1000 },
-      "no-updated-at": { muted: true },
-      valid: { muted: false, updatedAt: 500 },
-      "muted-wrong-type": { muted: "yes", updatedAt: 1000 },
-      "updated-at-wrong-type": { muted: true, updatedAt: "now" },
-      null: null,
+      a: { muted: true, updatedAt: 1, rev: 0 },
+      b: { muted: false, updatedAt: 2, rev: 0 },
     },
   };
-  const result = parseMutePayload(payload);
-  assert.deepEqual(result, {
-    version: 1,
-    channels: {
-      valid: { muted: false, updatedAt: 500 },
-    },
-  });
+  const ids = mutedChannelIdsFromStore(store);
+  assert.ok(ids.has("a"), "muted channel in set");
+  assert.ok(!ids.has("b"), "unmuted channel excluded");
 });
 
-test("parseMutePayload: NaN/Infinity/negative updatedAt entries are filtered out", () => {
-  const payload = {
+test("mutes adapter: wrong value field (starred) is rejected by parser", () => {
+  const starPayload = {
     version: 1,
-    channels: {
-      nan: { muted: true, updatedAt: NaN },
-      inf: { muted: true, updatedAt: Infinity },
-      "neg-inf": { muted: true, updatedAt: -Infinity },
-      neg: { muted: true, updatedAt: -1 },
-      valid: { muted: true, updatedAt: 100 },
-    },
+    channels: { a: { starred: true, updatedAt: 100, rev: 1 } },
   };
-  const result = parseMutePayload(payload);
-  assert.deepEqual(result, {
-    version: 1,
-    channels: { valid: { muted: true, updatedAt: 100 } },
-  });
-});
-
-test("parseMutePayload: empty channels returns store with empty channels", () => {
-  const result = parseMutePayload({ version: 1, channels: {} });
-  assert.deepEqual(result, { version: 1, channels: {} });
-});
-
-test("parseMutePayload: version 1 with no channels key returns store with empty channels", () => {
-  const result = parseMutePayload({ version: 1 });
-  assert.deepEqual(result, { version: 1, channels: {} });
-});
-
-// ── mergeStores ───────────────────────────────────────────────────────────────
-
-test("mergeStores: non-overlapping channels returns union of both", () => {
-  const local = {
-    version: 1,
-    channels: { "chan-a": { muted: true, updatedAt: 100 } },
-  };
-  const remote = {
-    version: 1,
-    channels: { "chan-b": { muted: false, updatedAt: 200 } },
-  };
-  const result = mergeStores(local, remote);
-  assert.deepEqual(result, {
-    version: 1,
-    channels: {
-      "chan-a": { muted: true, updatedAt: 100 },
-      "chan-b": { muted: false, updatedAt: 200 },
-    },
-  });
-});
-
-test("mergeStores: overlapping channel with remote newer takes remote", () => {
-  const local = {
-    version: 1,
-    channels: { "chan-a": { muted: false, updatedAt: 100 } },
-  };
-  const remote = {
-    version: 1,
-    channels: { "chan-a": { muted: true, updatedAt: 200 } },
-  };
-  const result = mergeStores(local, remote);
-  assert.deepEqual(result.channels["chan-a"], { muted: true, updatedAt: 200 });
-});
-
-test("mergeStores: overlapping channel with local newer takes local", () => {
-  const local = {
-    version: 1,
-    channels: { "chan-a": { muted: true, updatedAt: 300 } },
-  };
-  const remote = {
-    version: 1,
-    channels: { "chan-a": { muted: false, updatedAt: 100 } },
-  };
-  const result = mergeStores(local, remote);
-  assert.deepEqual(result.channels["chan-a"], { muted: true, updatedAt: 300 });
-});
-
-test("mergeStores: overlapping channel with same updatedAt local wins", () => {
-  const local = {
-    version: 1,
-    channels: { "chan-a": { muted: true, updatedAt: 500 } },
-  };
-  const remote = {
-    version: 1,
-    channels: { "chan-a": { muted: false, updatedAt: 500 } },
-  };
-  const result = mergeStores(local, remote);
-  assert.deepEqual(result.channels["chan-a"], { muted: true, updatedAt: 500 });
-});
-
-test("mergeStores: unmute with higher updatedAt overrides mute", () => {
-  const local = {
-    version: 1,
-    channels: { "chan-a": { muted: true, updatedAt: 100 } },
-  };
-  const remote = {
-    version: 1,
-    channels: { "chan-a": { muted: false, updatedAt: 999 } },
-  };
-  const result = mergeStores(local, remote);
-  assert.deepEqual(result.channels["chan-a"], { muted: false, updatedAt: 999 });
-});
-
-test("mergeStores: empty local returns remote entries", () => {
-  const local = { version: 1, channels: {} };
-  const remote = {
-    version: 1,
-    channels: { "chan-b": { muted: true, updatedAt: 42 } },
-  };
-  const result = mergeStores(local, remote);
-  assert.deepEqual(result.channels, {
-    "chan-b": { muted: true, updatedAt: 42 },
-  });
-});
-
-test("mergeStores: empty remote returns local entries", () => {
-  const local = {
-    version: 1,
-    channels: { "chan-a": { muted: false, updatedAt: 10 } },
-  };
-  const remote = { version: 1, channels: {} };
-  const result = mergeStores(local, remote);
-  assert.deepEqual(result.channels, {
-    "chan-a": { muted: false, updatedAt: 10 },
-  });
-});
-
-test("mergeStores: both empty returns empty", () => {
-  const result = mergeStores(
-    { version: 1, channels: {} },
-    { version: 1, channels: {} },
+  const result = parseMutePayload(starPayload);
+  assert.deepEqual(
+    result?.channels ?? {},
+    {},
+    "starred entry filtered as malformed",
   );
-  assert.deepEqual(result, { version: 1, channels: {} });
+});
+// These laws hold in channelStarsStorage too (exercised by mergeLaneStorage.shared),
+// but the implementations are independent — a mute-specific copy-paste error
+// cannot be caught by the stars suite.
+
+function muteStore(channels) {
+  return { version: 1, channels };
+}
+function muteEntry(muted, updatedAt, rev = 0) {
+  return { muted, updatedAt, rev };
+}
+
+test("mutes mergeStores: winner selection algebra (all cases also verify commutativity)", () => {
+  const check = (a, b, expected) => {
+    assert.deepEqual(mergeStores(a, b).channels, expected, "a∪b");
+    assert.deepEqual(mergeStores(b, a).channels, expected, "b∪a");
+  };
+  check(
+    muteStore({ ch: muteEntry(true, 100, 0) }),
+    muteStore({ ch: muteEntry(false, 200, 0) }),
+    { ch: muteEntry(false, 200, 0) },
+  );
+  check(
+    muteStore({ ch: muteEntry(true, 100, 1) }),
+    muteStore({ ch: muteEntry(false, 100, 2) }),
+    { ch: muteEntry(false, 100, 2) },
+  );
+  check(
+    muteStore({ ch: muteEntry(false, 100, 1) }),
+    muteStore({ ch: muteEntry(true, 100, 1) }),
+    { ch: muteEntry(true, 100, 1) },
+  );
+  check(
+    muteStore({ ch: muteEntry(true, 100, 0) }),
+    muteStore({ ch: muteEntry(false, 100, 1) }),
+    { ch: muteEntry(false, 100, 1) },
+  );
+  check(
+    muteStore({ ch: muteEntry(true, 100, 3) }),
+    muteStore({ ch: muteEntry(false, 200, 1) }),
+    { ch: muteEntry(false, 200, 1) },
+  );
 });
 
-test("boundMuteStore: retains newest entries regardless of muted value", () => {
+test("mutes boundMuteStore: caps at MAX_CHANNEL_MUTE_ENTRIES, retains newest", () => {
   const channels = Object.fromEntries(
-    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
-      `active-${index}`,
-      { muted: true, updatedAt: index + 1 },
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES + 2 }, (_, i) => [
+      `ch${String(i).padStart(4, "0")}`,
+      muteEntry(true, i, 0),
     ]),
   );
-  channels["old-false"] = { muted: false, updatedAt: 0 };
-  channels["new-false"] = { muted: false, updatedAt: 9999 };
-
-  const result = boundMuteStore({ version: 1, channels });
-
-  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
-  assert.equal(result.channels["old-false"], undefined);
-  assert.deepEqual(result.channels["new-false"], {
-    muted: false,
-    updatedAt: 9999,
-  });
-  assert.equal(result.channels["active-0"], undefined);
-  assert.deepEqual(result.channels["active-1"], { muted: true, updatedAt: 2 });
-});
-
-test("boundMuteStore: uses channel ID as an updatedAt tie-breaker", () => {
-  const channels = Object.fromEntries(
-    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES + 1 }, (_, index) => [
-      `channel-${String(MAX_CHANNEL_MUTE_ENTRIES - index).padStart(3, "0")}`,
-      { muted: true, updatedAt: 1 },
-    ]),
-  );
-
-  const result = boundMuteStore({ version: 1, channels });
-
-  assert.equal(result.channels["channel-000"], undefined);
-  assert.deepEqual(result.channels["channel-500"], {
-    muted: true,
-    updatedAt: 1,
-  });
-});
-
-test("boundMuteStore: preserves a same-second mute mutation by key", () => {
-  const channels = Object.fromEntries(
-    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
-      `z-channel-${String(index).padStart(3, "0")}`,
-      { muted: true, updatedAt: 1 },
-    ]),
-  );
-  channels["a-target"] = { muted: true, updatedAt: 1 };
-
-  const result = boundMuteStore({ version: 1, channels }, "a-target");
-
-  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
-  assert.deepEqual(result.channels["a-target"], {
-    muted: true,
-    updatedAt: 1,
-  });
-  assert.equal(result.channels["z-channel-000"], undefined);
-});
-
-test("boundMuteStore: preserves a same-second unmute mutation by key", () => {
-  const channels = Object.fromEntries(
-    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
-      `z-channel-${String(index).padStart(3, "0")}`,
-      { muted: true, updatedAt: 1 },
-    ]),
-  );
-  channels["a-target"] = { muted: false, updatedAt: 1 };
-
-  const result = boundMuteStore({ version: 1, channels }, "a-target");
-
-  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
-  assert.deepEqual(result.channels["a-target"], {
-    muted: false,
-    updatedAt: 1,
-  });
-  assert.equal(result.channels["z-channel-000"], undefined);
-});
-
-test("mergeStores: a fresh at-capacity unmute defeats an older remote mute", () => {
-  const channels = Object.fromEntries(
-    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
-      `active-${index}`,
-      { muted: true, updatedAt: index + 1 },
-    ]),
-  );
-  channels["unmuted"] = { muted: false, updatedAt: 9999 };
   const bounded = boundMuteStore({ version: 1, channels });
-
-  const result = mergeStores(bounded, {
-    version: 1,
-    channels: { unmuted: { muted: true, updatedAt: 9998 } },
-  });
-
-  assert.deepEqual(result.channels.unmuted, {
-    muted: false,
-    updatedAt: 9999,
-  });
+  assert.equal(
+    Object.keys(bounded.channels).length,
+    MAX_CHANNEL_MUTE_ENTRIES,
+    "capped at limit",
+  );
+  // Oldest two (updatedAt 0 and 1) should be evicted.
+  assert.ok(!bounded.channels["ch0000"], "oldest evicted");
+  assert.ok(!bounded.channels["ch0001"], "second-oldest evicted");
 });
 
-test("mergeStores: evicted remote ID re-enters and the oldest state is re-trimmed", () => {
-  const localChannels = Object.fromEntries(
-    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
-      `active-${index}`,
-      { muted: true, updatedAt: index + 10 },
+test("mutes boundMuteStore: preserved key survives even when oldest", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES + 1 }, (_, i) => [
+      `ch${String(i).padStart(4, "0")}`,
+      muteEntry(true, i, 0),
     ]),
   );
-  const result = mergeStores(
-    { version: 1, channels: localChannels },
-    {
-      version: 1,
-      channels: {
-        "evicted-id": { muted: true, updatedAt: 9999 },
-        "active-0": { muted: false, updatedAt: 9998 },
-      },
-    },
+  const preservedKey = "ch0000"; // updatedAt=0, would normally be evicted
+  const bounded = boundMuteStore({ version: 1, channels }, preservedKey);
+  assert.ok(bounded.channels[preservedKey], "preserved key always retained");
+  assert.equal(
+    Object.keys(bounded.channels).length,
+    MAX_CHANNEL_MUTE_ENTRIES,
+    "still capped at limit",
   );
-
-  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
-  assert.deepEqual(result.channels["evicted-id"], {
-    muted: true,
-    updatedAt: 9999,
-  });
-  assert.deepEqual(result.channels["active-0"], {
-    muted: false,
-    updatedAt: 9998,
-  });
-  assert.equal(result.channels["active-1"], undefined);
-  assert.deepEqual(result.channels["active-2"], { muted: true, updatedAt: 12 });
 });
 
-// ── mutedChannelIdsFromStore ──────────────────────────────────────────────────
-
-test("mutedChannelIdsFromStore: returns set of IDs where muted=true", () => {
-  const store = {
-    version: 1,
-    channels: {
-      "chan-a": { muted: true, updatedAt: 100 },
-      "chan-b": { muted: true, updatedAt: 200 },
-      "chan-c": { muted: false, updatedAt: 300 },
-    },
-  };
-  const result = mutedChannelIdsFromStore(store);
-  assert.equal(result.has("chan-a"), true);
-  assert.equal(result.has("chan-b"), true);
-  assert.equal(result.has("chan-c"), false);
-  assert.equal(result.size, 2);
-});
-
-test("mutedChannelIdsFromStore: excludes IDs where muted=false", () => {
-  const store = {
-    version: 1,
-    channels: {
-      "chan-x": { muted: false, updatedAt: 1 },
-      "chan-y": { muted: false, updatedAt: 2 },
-    },
-  };
-  const result = mutedChannelIdsFromStore(store);
-  assert.equal(result.size, 0);
-});
-
-test("mutedChannelIdsFromStore: empty channels returns empty set", () => {
-  const result = mutedChannelIdsFromStore({ version: 1, channels: {} });
-  assert.equal(result.size, 0);
+test("mutes isMutesStoreSubsumedBy: newer/identical head subsumes; older head does not", () => {
+  const candidate = muteStore({ ch: muteEntry(true, 100, 1) });
+  assert.ok(
+    isMutesStoreSubsumedBy(
+      candidate,
+      muteStore({ ch: muteEntry(false, 200, 2) }),
+    ),
+    "head subsumes older candidate",
+  );
+  assert.ok(
+    !isMutesStoreSubsumedBy(
+      muteStore({ ch: muteEntry(true, 300, 5) }),
+      muteStore({ ch: muteEntry(false, 200, 2) }),
+    ),
+    "newer candidate not subsumed",
+  );
+  assert.ok(
+    isMutesStoreSubsumedBy(candidate, candidate),
+    "identical is subsumed",
+  );
 });
