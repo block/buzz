@@ -123,9 +123,25 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     AcpError::AgentError { code, message }
 }
 
-fn build_initialize_params() -> serde_json::Value {
+/// Buzz-compat note: agy-acp's ACP v2 implementation intentionally returns an
+/// empty `session/prompt` result and delivers `stopReason` asynchronously via a
+/// later `session/update` notification instead (a valid, documented v2 design
+/// choice — see agy-acp's own `handlePromptV2`/`v2 prompt lifecycle` comments).
+/// buzz-acp's client does not yet correlate that async notification back into
+/// the pending RPC response, so it sees `stopReason` missing and treats the
+/// agent as errored. agy-acp's v1 implementation returns `stopReason` directly
+/// in the RPC response (verified working end-to-end), so downgrade to
+/// protocolVersion 1 specifically for agy-acp until the v2 async-correlation
+/// path is implemented here.
+fn build_initialize_params_for_command(command: &str) -> serde_json::Value {
+    let protocol_version = if crate::config::normalize_agent_command_identity(command) == "agy-acp"
+    {
+        1
+    } else {
+        2
+    };
     serde_json::json!({
-        "protocolVersion": 2,
+        "protocolVersion": protocol_version,
         "clientCapabilities": build_client_capabilities(),
         "clientInfo": {
             "name": "buzz-acp",
@@ -214,6 +230,9 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// The agent launch command as configured (e.g. "agy-acp", "hermes-acp").
+    /// Used by `initialize()` to select a per-agent protocol version override.
+    command: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -503,6 +522,19 @@ impl AcpClient {
             }
         }
 
+        // Mark this subprocess as a Buzz-managed agent so first-party agent
+        // runtimes (e.g. Hermes's terminal-tool env scrub) know it's safe to
+        // let BUZZ_* credentials (BUZZ_PRIVATE_KEY, BUZZ_RELAY_URL, ...) reach
+        // further child processes the agent spawns itself (e.g. `buzz messages
+        // send` invoked from a terminal tool to post a reply). Without this,
+        // a managed agent can read/act on messages but can never reply back
+        // into the channel because its own credential-scrubbing strips the
+        // signing key before it reaches the `buzz` CLI. See block/buzz#3355-
+        // adjacent reply-path gap; matches the marker name already documented
+        // (but never actually set) as "set only by Buzz Desktop's buzz-acp
+        // harness" in consuming agent runtimes.
+        cmd.env("BUZZ_MANAGED_AGENT", "1");
+
         for (key, value) in extra_env {
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
@@ -563,6 +595,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            command: command.to_string(),
         })
     }
 
@@ -611,7 +644,9 @@ impl AcpClient {
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
         // Requesting version 2 is an intentional temporary pin — we are squatting
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
-        let params = build_initialize_params();
+        // Per-agent override: see build_initialize_params_for_command doc comment
+        // for why agy-acp specifically is pinned to v1.
+        let params = build_initialize_params_for_command(&self.command);
         let result = self.send_request("initialize", params).await?;
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
@@ -2353,6 +2388,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_initialize_params_pins_agy_acp_to_protocol_v1() {
+        let params = build_initialize_params_for_command("agy-acp");
+        assert_eq!(params["protocolVersion"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn build_initialize_params_pins_agy_acp_to_v1_regardless_of_path_or_case() {
+        // normalize_agent_command_identity lowercases the basename and strips
+        // platform-shim extensions, so any of these must still resolve to agy-acp.
+        for command in [
+            "/usr/local/bin/agy-acp",
+            "AGY-ACP",
+            "agy-acp.exe",
+            "C:\\tools\\agy-acp.cmd",
+        ] {
+            let params = build_initialize_params_for_command(command);
+            assert_eq!(
+                params["protocolVersion"],
+                serde_json::json!(1),
+                "expected v1 for command {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_initialize_params_defaults_other_agents_to_protocol_v2() {
+        for command in ["claude-agent-acp", "codex-acp", "hermes-acp", "goose", ""] {
+            let params = build_initialize_params_for_command(command);
+            assert_eq!(
+                params["protocolVersion"],
+                serde_json::json!(2),
+                "expected v2 for command {command:?}"
+            );
+        }
+    }
+
+    #[test]
     fn stop_reason_parses_all_known_values() {
         assert_eq!(StopReason::from_str("end_turn"), Some(StopReason::EndTurn));
         assert_eq!(
@@ -3123,6 +3195,29 @@ mod tests {
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
         );
+    }
+
+    /// Every Buzz-owned agent subprocess must see `BUZZ_MANAGED_AGENT=1`, regardless
+    /// of runtime identity, so first-party agent runtimes (e.g. Hermes's own
+    /// terminal-tool credential scrub) know it is safe to let BUZZ_* credentials
+    /// reach further child processes the agent spawns itself (e.g. `buzz messages
+    /// send`, invoked from a terminal tool to post a reply). Without this marker,
+    /// a managed agent can read/act on messages but can never reply back into the
+    /// channel via its own CLI tool use.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_marks_every_agent_as_buzz_managed() {
+        const VAR: &str = "BUZZ_MANAGED_AGENT";
+        if std::env::var_os(VAR).is_some() {
+            return;
+        }
+        for command in ["hermes-acp", "claude-agent-acp", "agy-acp", "other-agent"] {
+            assert_eq!(
+                spawn_named_and_read_child_env(command, VAR, &[]).await,
+                "1",
+                "spawn() must set {VAR}=1 for every agent command, including {command:?}"
+            );
+        }
     }
 
     #[tokio::test]
