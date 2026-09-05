@@ -33,6 +33,8 @@ import {
   MODAL_SEARCH_SHELL_CLASS,
 } from "@/shared/ui/modalSearchStyles";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+
+import { ChannelRowIcon } from "@/features/channels/ui/ChannelRowIcon";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -790,9 +792,10 @@ function ChannelCard({
       >
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-1.5">
-            <span className="shrink-0 text-sm font-normal text-muted-foreground">
-              #
-            </span>
+            <ChannelRowIcon
+              channel={channel}
+              className="shrink-0 text-muted-foreground"
+            />
             <p className="min-w-0 truncate text-base font-medium tracking-tight">
               {channel.name}
             </p>
