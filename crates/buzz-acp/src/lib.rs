@@ -5856,12 +5856,17 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
+            let mut env = vec![EnvVar {
+                name: "BUZZ_RELAY_URL".into(),
+                value: config.relay_url.clone(),
+            }];
+            if let Some(service) = &config.keychain_service {
+                env.push(EnvVar {
+                    name: config::MCP_KEYCHAIN_SERVICE_ENV.into(),
+                    value: service.clone(),
+                });
+            } else {
+                env.push(EnvVar {
                     name: "BUZZ_PRIVATE_KEY".into(),
                     // bech32 encoding of a valid secret key is infallible.
                     // Panic here is correct: injecting a bogus secret would cause
@@ -5871,8 +5876,8 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                         .secret_key()
                         .to_bech32()
                         .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
+                });
+            }
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
             // so the MCP server can attach it to every signed event.
             if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
@@ -9061,6 +9066,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            keychain_service: None,
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -9120,6 +9126,25 @@ mod build_mcp_servers_tests {
         assert!(
             names.contains(&"BUZZ_PRIVATE_KEY"),
             "missing BUZZ_PRIVATE_KEY; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn session_new_mcp_server_passes_keychain_service_not_private_key() {
+        let mut config = test_config();
+        config.keychain_service = Some("buzz-agent-test".into());
+        let servers = build_mcp_servers(&config);
+
+        let env = &servers[0].env;
+        assert_eq!(
+            env.iter()
+                .find(|entry| entry.name == config::MCP_KEYCHAIN_SERVICE_ENV)
+                .map(|entry| entry.value.as_str()),
+            Some("buzz-agent-test")
+        );
+        assert!(
+            !env.iter().any(|entry| entry.name == "BUZZ_PRIVATE_KEY"),
+            "the MCP session environment must not serialize the private key"
         );
     }
 
@@ -9287,6 +9312,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            keychain_service: None,
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

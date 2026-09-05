@@ -8,7 +8,11 @@ use rmcp::{
     ErrorData, ServerHandler, ServiceExt,
 };
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use zeroize::Zeroize;
 
 mod paths;
 mod read_file;
@@ -170,6 +174,8 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(buzz_cli::run_from_args(std::env::args()).await);
     }
 
+    load_keychain_private_key()?;
+
     // MCP server mode — safe to init tracing now.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -183,6 +189,110 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
     let service = DevMcp::new(state).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Resolve a macOS Keychain-backed Buzz identity for this MCP process.
+///
+/// A configured service is authoritative: lookup or validation failure aborts
+/// startup instead of falling back to an inherited credential.
+#[cfg(target_os = "macos")]
+fn load_keychain_private_key() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(service) = keychain_service_from_env(std::env::var("BUZZ_KEYCHAIN_SERVICE"))? else {
+        return Ok(());
+    };
+    std::env::remove_var("BUZZ_KEYCHAIN_SERVICE");
+    let account = std::env::var("USER")
+        .ok()
+        .filter(|account| !account.is_empty())
+        .ok_or("buzz-dev-mcp: USER is unavailable for Keychain lookup")?;
+
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-a",
+            &account,
+            "-s",
+            &service,
+            "-w",
+        ])
+        .output()
+        .map_err(|error| format!("buzz-dev-mcp: failed to run Keychain lookup: {error}"))?;
+    if !output.status.success() {
+        return Err("buzz-dev-mcp: Keychain service is unavailable".into());
+    }
+
+    let mut stored = String::from_utf8(output.stdout)
+        .map_err(|_| "buzz-dev-mcp: Keychain service returned non-UTF-8 data")?;
+    while stored.ends_with(['\r', '\n']) {
+        stored.pop();
+    }
+    let result = (|| {
+        let private_key = keychain_private_key_value(&stored);
+        if private_key.is_empty() || nostr::Keys::parse(private_key).is_err() {
+            return Err("buzz-dev-mcp: Keychain service returned an invalid private key".into());
+        }
+        std::env::set_var("BUZZ_PRIVATE_KEY", private_key);
+        Ok(())
+    })();
+    stored.zeroize();
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_service_from_env(
+    value: Result<String, std::env::VarError>,
+) -> Result<Option<String>, &'static str> {
+    match value {
+        Ok(service) if service.is_empty() => {
+            Err("buzz-dev-mcp: BUZZ_KEYCHAIN_SERVICE must not be empty")
+        }
+        Ok(service) => Ok(Some(service)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("buzz-dev-mcp: BUZZ_KEYCHAIN_SERVICE must be valid UTF-8")
+        }
+    }
+}
+
+/// Preserve a raw key while accepting the legacy `pubkey:private-key` value.
+#[cfg(target_os = "macos")]
+fn keychain_private_key_value(value: &str) -> &str {
+    value
+        .split_once(':')
+        .map(|(_, private_key)| private_key)
+        .unwrap_or(value)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_keychain_private_key() -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod keychain_tests {
+    use super::{keychain_private_key_value, keychain_service_from_env};
+
+    #[test]
+    fn rejects_empty_keychain_service() {
+        let error = keychain_service_from_env(Ok(String::new())).unwrap_err();
+        assert_eq!(
+            error,
+            "buzz-dev-mcp: BUZZ_KEYCHAIN_SERVICE must not be empty"
+        );
+    }
+
+    #[test]
+    fn preserves_raw_private_key() {
+        assert_eq!(keychain_private_key_value("nsec1rawtest"), "nsec1rawtest");
+    }
+
+    #[test]
+    fn strips_legacy_prefix() {
+        assert_eq!(
+            keychain_private_key_value("pubkey:nsec1prefixedtest"),
+            "nsec1prefixedtest"
+        );
+    }
 }
 
 /// Suppress the console window that Windows otherwise allocates for every

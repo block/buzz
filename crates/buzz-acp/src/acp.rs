@@ -469,6 +469,17 @@ impl AcpClient {
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
 
+        // The harness needs BUZZ_PRIVATE_KEY for relay signing, but an adapter
+        // configured for Keychain delegation must receive only the service
+        // identifier. Some adapters serialize MCP environment values into argv.
+        let uses_keychain_service = extra_env
+            .iter()
+            .any(|(key, _)| key == crate::config::MCP_KEYCHAIN_SERVICE_ENV);
+        if uses_keychain_service {
+            cmd.env_remove("BUZZ_PRIVATE_KEY");
+            cmd.env_remove("BUZZ_ACP_PRIVATE_KEY");
+        }
+
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
         // in the parent environment.
@@ -504,6 +515,11 @@ impl AcpClient {
         }
 
         for (key, value) in extra_env {
+            if uses_keychain_service
+                && matches!(key.as_str(), "BUZZ_PRIVATE_KEY" | "BUZZ_ACP_PRIVATE_KEY")
+            {
+                continue;
+            }
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
