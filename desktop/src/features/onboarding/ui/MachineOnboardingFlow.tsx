@@ -91,6 +91,7 @@ export function MachineOnboardingFlow({
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);
   const [identityWasImported, setIdentityWasImported] = React.useState(false);
+  const [importedNsec, setImportedNsec] = React.useState("");
   const [keyImportStage, setKeyImportStage] =
     React.useState<NostrKeyImportStage>("key-entry");
   const [isKeyImporting, setIsKeyImporting] = React.useState(false);
@@ -205,6 +206,7 @@ export function MachineOnboardingFlow({
       continueWithIdentity(identity.pubkey);
       queryClient.setQueryData(["identity"], identity);
       setIdentityWasImported(true);
+      setImportedNsec(nsec);
       setSelectedPubkey(identity.pubkey);
       setTransitionDirection("forward");
       setPage("setup");
@@ -411,6 +413,7 @@ export function MachineOnboardingFlow({
                 <div className="flex flex-col items-center">
                   <NostrKeyImportForm
                     key={keyImportFormKey}
+                    initialNsec={importedNsec}
                     onBack={backFromKeyImport}
                     onImport={importExistingIdentity}
                     onImportingChange={setIsKeyImporting}
