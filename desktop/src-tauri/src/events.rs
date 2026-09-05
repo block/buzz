@@ -74,7 +74,9 @@ fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
         check_pubkey(hex)?;
         let lower = hex.to_ascii_lowercase();
         if seen.insert(lower.clone()) {
+            // Parallel p (fan-out) + mention (explicit intent) for #2296 contract.
             tags.push(tag(vec!["p", &lower])?);
+            tags.push(tag(vec!["mention", &lower])?);
         }
     }
     Ok(tags)
@@ -356,6 +358,19 @@ pub struct MessageEditTags<'a> {
 
 /// Kind 40003 — edit a message with full content, media, emoji, mentions,
 /// and optional monotonic link-preview suppression.
+///
+/// Carries the full new content AND a fresh imeta tag set; the receiver
+/// overlays the imeta tags onto the original event so the rendered message
+/// reflects exactly the edited state. NIP-30 custom-emoji tags ride along the
+/// same way so an edited body's `:shortcode:`s stay resolvable (the send path
+/// attaches these too).
+///
+/// `mentions` carries the pubkeys of mentions that are *newly added* by this
+/// edit (the caller diffs the edited body against the original). Only those get
+/// parallel `p` + `mention` tags so the newly-mentioned party is notified/woken,
+/// while a typo-fix edit that leaves the mention set unchanged emits neither
+/// and never re-wakes anyone. Mirrors the send path's `mention_tags` (dedup +
+/// lowercase); the receiver overlays these onto the original event's audience.
 pub fn build_message_edit(
     channel_id: Uuid,
     target_event_id: EventId,
@@ -850,6 +865,14 @@ mod tests {
         assert_eq!(event.pubkey.to_hex(), TARGET_HEX);
     }
 
+    // ── build_message_edit p+mention emission (lane 8ace8eed) ──────────────
+    //
+    // The composer diffs the edited body's mentions against the original and
+    // hands `build_message_edit` only the *newly added* pubkeys. These tests
+    // pins the builder's contract: emit parallel `p` + `mention` per added
+    // mention (deduped, lowercased), and none when the added set is empty
+    // (typo-fix edit) — so an unchanged mention set re-wakes nobody.
+
     const CH_ID: &str = "11111111-1111-4111-8111-111111111111";
     const ALICE_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     const BOB_HEX: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
@@ -892,19 +915,21 @@ mod tests {
         let tags = edit_tags(&[ALICE_HEX]);
         assert_eq!(tags[0][0], "h");
         assert_eq!(tags[1][0], "e");
+        // `p` + parallel `mention` ride right after the `e` tag (insertion order).
         assert_eq!(tags[2], vec!["p".to_string(), ALICE_HEX.to_string()]);
+        assert_eq!(tags[3], vec!["mention".to_string(), ALICE_HEX.to_string()]);
     }
 
     #[test]
     fn edit_with_no_added_mentions_emits_no_p_tag() {
         // Typo-fix edit: mention set unchanged, so the composer passes `&[]`.
-        // The edit event must carry no `p` tag and re-wake nobody.
+        // The edit event must carry no `p`/`mention` tags and re-wake nobody.
         let tags = edit_tags(&[]);
         assert!(
-            !tags
-                .iter()
-                .any(|t| t.first().map(String::as_str) == Some("p")),
-            "unchanged-mention edit must not emit any `p` tag, got {tags:?}"
+            !tags.iter().any(|t| {
+                matches!(t.first().map(String::as_str), Some("p" | "mention"))
+            }),
+            "unchanged-mention edit must not emit p/mention tags, got {tags:?}"
         );
     }
 
@@ -960,5 +985,18 @@ mod tests {
         );
         assert_eq!(p_tags[0], &vec!["p".to_string(), ALICE_HEX.to_string()]);
         assert_eq!(p_tags[1], &vec!["p".to_string(), BOB_HEX.to_string()]);
+        let mention_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(String::as_str) == Some("mention"))
+            .collect();
+        assert_eq!(mention_tags.len(), 2);
+        assert_eq!(
+            mention_tags[0],
+            &vec!["mention".to_string(), ALICE_HEX.to_string()]
+        );
+        assert_eq!(
+            mention_tags[1],
+            &vec!["mention".to_string(), BOB_HEX.to_string()]
+        );
     }
 }
