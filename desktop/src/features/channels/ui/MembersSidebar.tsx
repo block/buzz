@@ -16,6 +16,8 @@ import {
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
+import { canRemoveChannelMember } from "@/features/channels/lib/memberUtils";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import { formatMemberName } from "@/features/channels/lib/memberUtils";
 import {
   canAddChannelMembers,
@@ -480,16 +482,22 @@ export function MembersSidebar({
       }),
     [bots, managedAgentByPubkey],
   );
+  const memberProfiles = memberProfilesQuery.data?.profiles;
   const canRemoveMember = React.useCallback(
     (member: ChannelMember) => {
-      return (
-        (selfMember?.role === "admin" && member.pubkey !== currentPubkey) ||
-        (selfMember?.role === "owner" && member.role !== "owner") ||
-        Boolean(selfMember && isMyBot(member)) ||
-        member.pubkey === currentPubkey
-      );
+      const profile = memberProfiles?.[normalizePubkey(member.pubkey)];
+      return canRemoveChannelMember({
+        memberPubkey: member.pubkey,
+        memberRole: member.role,
+        selfRole: selfMember?.role,
+        currentPubkey,
+        isLocallyManagedBot: isMyBot(member),
+        // Same signal UserProfilePanel uses to paint owner-scoped actions, so
+        // an agent whose profile says "managed by you" is also removable by you.
+        viewerIsDeclaredOwner: ownsAuthorAgent(profile, currentPubkey),
+      });
     },
-    [currentPubkey, isMyBot, selfMember],
+    [currentPubkey, isMyBot, memberProfiles, selfMember],
   );
   const removableManagedBots = React.useMemo(
     () =>
