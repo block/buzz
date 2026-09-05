@@ -24,6 +24,7 @@ export type SoundName = (typeof SOUND_NAMES)[number];
 
 export const SOUND_SLOTS = [
   "dm",
+  "huddle_request",
   "mention",
   "thread_reply",
   "needs_action",
@@ -36,6 +37,7 @@ export type SoundSlot = (typeof SOUND_SLOTS)[number];
 
 export const SLOT_LABELS: Record<SoundSlot, string> = {
   dm: "Direct messages",
+  huddle_request: "Huddle requests",
   mention: "@Mentions",
   thread_reply: "Thread replies",
   needs_action: "Needs action",
@@ -58,6 +60,7 @@ export const COMING_SOON_SLOTS: ReadonlySet<SoundSlot> = new Set([
 
 export const SLOT_DESCRIPTIONS: Record<SoundSlot, string> = {
   dm: "When someone messages you directly.",
+  huddle_request: "When someone invites you to a huddle.",
   mention: "When someone tags you in a channel.",
   thread_reply: "When someone replies in a thread you follow or posted in.",
   needs_action: "When an approval or reminder is waiting on you.",
@@ -69,6 +72,7 @@ export const SLOT_DESCRIPTIONS: Record<SoundSlot, string> = {
 
 export const RECOMMENDED_SOUND_BY_SLOT: Record<SoundSlot, SoundName> = {
   dm: "unison",
+  huddle_request: "unison",
   mention: "ping",
   thread_reply: "doop",
   needs_action: "doodone",
@@ -82,6 +86,7 @@ export type SlotSounds = Record<SoundSlot, SoundName>;
 
 export const DEFAULT_SLOT_SOUNDS: SlotSounds = {
   dm: "flutter",
+  huddle_request: "unison",
   mention: "flutter",
   thread_reply: "flutter",
   needs_action: "flutter",
@@ -94,6 +99,7 @@ export const DEFAULT_SLOT_SOUNDS: SlotSounds = {
 /** Per-event alerts (notification + sound) on/off. */
 export const DEFAULT_SLOT_ALERTS_ENABLED: Record<SoundSlot, boolean> = {
   dm: true,
+  huddle_request: true,
   mention: true,
   thread_reply: true,
   needs_action: true,
