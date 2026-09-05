@@ -162,24 +162,80 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
     config.agent_owner.clone()
 }
 
+/// Base delay before re-consulting the relay about an author whose last
+/// sibling lookup was [`SiblingVerdict::Indeterminate`]. Doubles per
+/// consecutive indeterminate result up to [`SIBLING_RETRY_MAX`].
+///
+/// The lookup awaits inline in the sole inbound-event loop (2s timeout), so an
+/// unthrottled retry-per-event under a persistent `/query` outage would let a
+/// chatty sibling stall ingress for the owner too. With this backoff a dead
+/// relay costs at most one inline lookup per author per minute.
+const SIBLING_RETRY_BASE: Duration = Duration::from_secs(5);
+/// Ceiling for the indeterminate-lookup retry backoff.
+const SIBLING_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// One author's entry in the sibling cache.
+#[derive(Debug, Clone, Copy)]
+enum SiblingEntry {
+    /// Relay-proven verdict; immutable for the process lifetime.
+    Proven(bool),
+    /// Last lookup was indeterminate: denied without a relay call until
+    /// `retry_at`. `failures` counts consecutive indeterminate results and
+    /// drives the exponential backoff.
+    Indeterminate {
+        retry_at: std::time::Instant,
+        failures: u32,
+    },
+}
+
+/// What the cache can say about an author before any relay call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiblingCacheState {
+    /// Relay-proven verdict.
+    Proven(bool),
+    /// An indeterminate verdict is still inside its retry deadline: deny
+    /// this event without consulting the relay.
+    Throttled,
+    /// Never seen, or the retry deadline has passed: consult the relay.
+    Unknown,
+}
+
 /// Cache for the agent's owner pubkey.
 ///
 /// Owner is now provided via `--agent-owner` config flag (no REST lookup).
 /// Cache for the agent's owner pubkey + sibling lookups.
 ///
 /// Siblings are other agents whose NIP-OA auth tag proves the same owner.
-/// Lookup results are cached for the process lifetime (attestations are immutable).
+/// Only *proven* verdicts are cached for the process lifetime (attestations
+/// are immutable). A lookup that failed because the relay was unreachable is
+/// [`SiblingVerdict::Indeterminate`]: it is remembered only as a bounded retry
+/// deadline ([`SiblingEntry::Indeterminate`]) — never as a verdict — so one
+/// relay blip cannot make this agent ignore a same-owner sibling until
+/// restart, and a persistent outage cannot turn every sibling event into an
+/// inline relay round-trip.
 struct OwnerCache {
     pubkey: Option<String>,
-    /// author_hex → is_sibling (true = same owner, false = not)
-    siblings: std::sync::Mutex<HashMap<String, bool>>,
+    siblings: std::sync::Mutex<HashMap<String, SiblingEntry>>,
+    retry_base: Duration,
+    retry_max: Duration,
 }
 
 impl OwnerCache {
     fn new(initial: Option<String>) -> Self {
+        Self::with_retry_backoff(initial, SIBLING_RETRY_BASE, SIBLING_RETRY_MAX)
+    }
+
+    /// Construct with an explicit indeterminate-retry backoff (tests shorten it).
+    fn with_retry_backoff(
+        initial: Option<String>,
+        retry_base: Duration,
+        retry_max: Duration,
+    ) -> Self {
         Self {
             pubkey: initial,
             siblings: std::sync::Mutex::new(HashMap::new()),
+            retry_base,
+            retry_max,
         }
     }
 
@@ -188,27 +244,134 @@ impl OwnerCache {
         self.pubkey.as_deref()
     }
 
-    /// Check if author is a known sibling (cached result).
-    fn is_known_sibling(&self, author: &str) -> Option<bool> {
-        self.siblings.lock().ok()?.get(author).copied()
-    }
-
-    /// Cache a sibling lookup result.
-    fn cache_sibling(&self, author: String, is_sibling: bool) {
-        if let Ok(mut map) = self.siblings.lock() {
-            // Cap at 256 entries to prevent unbounded growth.
-            if map.len() >= 256 {
-                map.clear();
+    /// What is known about `author` right now, without touching the relay.
+    fn sibling_state(&self, author: &str) -> SiblingCacheState {
+        let Ok(map) = self.siblings.lock() else {
+            return SiblingCacheState::Unknown;
+        };
+        match map.get(author) {
+            None => SiblingCacheState::Unknown,
+            Some(SiblingEntry::Proven(is_sibling)) => SiblingCacheState::Proven(*is_sibling),
+            Some(SiblingEntry::Indeterminate { retry_at, .. }) => {
+                if std::time::Instant::now() < *retry_at {
+                    SiblingCacheState::Throttled
+                } else {
+                    SiblingCacheState::Unknown
+                }
             }
-            map.insert(author, is_sibling);
         }
     }
+
+    /// The relay-proven verdict for `author`, if one has been cached.
+    #[cfg(test)]
+    fn proven_verdict(&self, author: &str) -> Option<bool> {
+        match self.sibling_state(author) {
+            SiblingCacheState::Proven(is_sibling) => Some(is_sibling),
+            _ => None,
+        }
+    }
+
+    /// Cache a proven sibling verdict.
+    fn cache_sibling(&self, author: String, is_sibling: bool) {
+        self.insert(author, SiblingEntry::Proven(is_sibling));
+    }
+
+    /// Record an indeterminate lookup for `author` and return the backoff
+    /// during which further events from them are denied without a relay call.
+    fn note_indeterminate(&self, author: &str) -> Duration {
+        let failures = match self
+            .siblings
+            .lock()
+            .ok()
+            .and_then(|map| map.get(author).copied())
+        {
+            Some(SiblingEntry::Indeterminate { failures, .. }) => failures.saturating_add(1),
+            _ => 1,
+        };
+        let backoff = self
+            .retry_base
+            .saturating_mul(1u32 << (failures - 1).min(16))
+            .min(self.retry_max);
+        self.insert(
+            author.to_string(),
+            SiblingEntry::Indeterminate {
+                retry_at: std::time::Instant::now() + backoff,
+                failures,
+            },
+        );
+        backoff
+    }
+
+    /// Number of cached authors at the eviction threshold.
+    const SIBLING_CACHE_CAP: usize = 256;
+
+    /// Insert or replace `author`'s entry under the bounded-size policy.
+    ///
+    /// Replacing an author already present never evicts anything — a retry
+    /// deadline being re-armed at capacity must not wipe the other entries,
+    /// or a saturated cache under a `/query` outage would collapse every
+    /// sibling back to a serial inline lookup per event. A previously absent
+    /// author at capacity evicts exactly one entry — the space the newcomer
+    /// needs: the longest-expired retry record if there is one, else an
+    /// arbitrary entry. Expired records are not purged wholesale because their
+    /// `failures` counter is the author's backoff tier; dropping it would
+    /// restart every affected author at the base delay after its next failed
+    /// lookup and multiply serial relay calls during the same outage.
+    fn insert(&self, author: String, entry: SiblingEntry) {
+        let Ok(mut map) = self.siblings.lock() else {
+            return;
+        };
+        if !map.contains_key(&author) && map.len() >= Self::SIBLING_CACHE_CAP {
+            let now = std::time::Instant::now();
+            let victim = map
+                .iter()
+                .filter_map(|(cached, existing)| match existing {
+                    SiblingEntry::Indeterminate { retry_at, .. } if *retry_at <= now => {
+                        Some((cached, *retry_at))
+                    }
+                    _ => None,
+                })
+                .min_by_key(|(_, retry_at)| *retry_at)
+                .map(|(cached, _)| cached.clone())
+                .or_else(|| map.keys().next().cloned());
+            if let Some(victim) = victim {
+                map.remove(&victim);
+            }
+        }
+        map.insert(author, entry);
+    }
+
+    /// Number of authors currently cached (proven or throttled).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.siblings.lock().map(|map| map.len()).unwrap_or(0)
+    }
+}
+
+/// Outcome of one sibling profile verification attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiblingVerdict {
+    /// kind:0 fetched and its NIP-OA auth tag cryptographically proves the
+    /// same owner.
+    Sibling,
+    /// The relay returned the author's profile and it does not prove the
+    /// same owner.
+    NotSibling,
+    /// Nothing was attested either way: the relay could not be consulted
+    /// (timeout, network, or HTTP error), answered with a malformed body, or
+    /// has no kind:0 for the author yet — a sibling's profile may simply not
+    /// have been published or replicated, so its absence is not a verdict.
+    Indeterminate,
 }
 
 /// Check if `author` is the owner OR a sibling (same owner via NIP-OA).
 ///
 /// For unknown authors, queries their kind:0 profile to extract the NIP-OA
-/// auth tag and verify the owner matches. Result is cached.
+/// auth tag and verify the owner matches. Only proven verdicts are cached as
+/// verdicts; an [`SiblingVerdict::Indeterminate`] lookup fails closed for the
+/// current event and arms a bounded retry deadline, so a transient relay
+/// outage cannot poison a sibling for the process lifetime and a persistent
+/// one cannot turn every sibling event into an inline relay round-trip.
 async fn is_owner_or_sibling(
     author: &str,
     owner_cache: &OwnerCache,
@@ -225,14 +388,39 @@ async fn is_owner_or_sibling(
     }
 
     // Check sibling cache.
-    if let Some(cached) = owner_cache.is_known_sibling(author) {
-        return cached;
+    match owner_cache.sibling_state(author) {
+        SiblingCacheState::Proven(is_sibling) => return is_sibling,
+        SiblingCacheState::Throttled => {
+            tracing::debug!(
+                author,
+                "sibling check throttled after an indeterminate lookup — denying without a relay query"
+            );
+            return false;
+        }
+        SiblingCacheState::Unknown => {}
     }
 
     // Query the author's kind:0 profile to check for NIP-OA auth tag.
-    let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
-    owner_cache.cache_sibling(author.to_string(), is_sibling);
-    is_sibling
+    match check_sibling_via_profile(author, my_owner, rest_client).await {
+        SiblingVerdict::Sibling => {
+            owner_cache.cache_sibling(author.to_string(), true);
+            true
+        }
+        SiblingVerdict::NotSibling => {
+            owner_cache.cache_sibling(author.to_string(), false);
+            false
+        }
+        SiblingVerdict::Indeterminate => {
+            let backoff = owner_cache.note_indeterminate(author);
+            tracing::warn!(
+                author,
+                retry_after_secs = backoff.as_secs(),
+                "sibling check indeterminate — relay profile query failed; \
+                 dropping this event without a proven verdict, retrying after backoff"
+            );
+            false
+        }
+    }
 }
 
 /// Return the workflow owner attributed by a relay-signed workflow message.
@@ -542,7 +730,10 @@ mod inbound_author_gate {
                 )
                 .await;
             if !decision.allowed {
-                tracing::debug!(
+                // INFO, not debug: under owner-only fleets a dropped event is
+                // the whole story of "the agent never answered", and the
+                // default log filter hides debug.
+                tracing::info!(
                     channel_id = %buzz_event.channel_id,
                     raw_author = %buzz_event.event.pubkey.to_hex(),
                     effective_author = %decision.effective_author,
@@ -786,16 +977,22 @@ pub(crate) async fn is_dm_channel(
 
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
+///
+/// Only a *fetched* profile yields a verdict the caller may cache: a
+/// profile with no verifying tag is definitively [`SiblingVerdict::NotSibling`],
+/// while a failed query or a missing profile is
+/// [`SiblingVerdict::Indeterminate`] and retried under the bounded backoff.
 async fn check_sibling_via_profile(
     author: &str,
     expected_owner: &str,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> SiblingVerdict {
     let filter = nostr::Filter::new()
         .kind(nostr::Kind::Metadata)
         .author(match nostr::PublicKey::from_hex(author) {
             Ok(pk) => pk,
-            Err(_) => return false,
+            // A malformed author key can never verify — definitively not a sibling.
+            Err(_) => return SiblingVerdict::NotSibling,
         })
         .limit(1);
 
@@ -803,28 +1000,39 @@ async fn check_sibling_via_profile(
         .await
     {
         Ok(Ok(v)) => v,
-        _ => return false, // timeout or error — fail closed
+        Ok(Err(e)) => {
+            tracing::debug!(author, "sibling profile query failed: {e}");
+            return SiblingVerdict::Indeterminate;
+        }
+        Err(_) => {
+            tracing::debug!(author, "sibling profile query timed out");
+            return SiblingVerdict::Indeterminate;
+        }
     };
 
     // Look for an "auth" tag in the profile event.
     let events = match resp.as_array() {
         Some(arr) => arr,
-        None => return false,
+        // Non-array body is a server anomaly, not proof of absence.
+        None => return SiblingVerdict::Indeterminate,
     };
     let event = match events.first() {
         Some(e) => e,
-        None => return false,
+        // No kind:0 yet — not published, or not replicated to this relay.
+        // Not a verdict: the bounded backoff retries it, so a profile that
+        // appears later is picked up without a restart.
+        None => return SiblingVerdict::Indeterminate,
     };
     let tags = match event.get("tags").and_then(|t| t.as_array()) {
         Some(t) => t,
-        None => return false,
+        None => return SiblingVerdict::NotSibling,
     };
 
     // Find ["auth", owner_pk, conditions, sig] and verify the Schnorr signature.
     // Don't trust the relay — verify ourselves.
     let agent_pk = match nostr::PublicKey::from_hex(author) {
         Ok(pk) => pk,
-        Err(_) => return false,
+        Err(_) => return SiblingVerdict::NotSibling,
     };
 
     for tag in tags {
@@ -848,7 +1056,7 @@ async fn check_sibling_via_profile(
         match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
             Ok(_) => {
                 tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
-                return true;
+                return SiblingVerdict::Sibling;
             }
             Err(e) => {
                 tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
@@ -856,7 +1064,7 @@ async fn check_sibling_via_profile(
         }
     }
 
-    false
+    SiblingVerdict::NotSibling
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -7854,6 +8062,384 @@ mod author_gate_tests {
             )
             .await,
             "respond_to=nobody must drop everything, DMs included"
+        );
+    }
+
+    // ── sibling verdict caching ───────────────────────────────────────────
+    //
+    // A sibling lookup that failed because the relay was unreachable is
+    // Indeterminate: it fails closed for that one event but must NOT be
+    // cached, or a single relay blip makes this agent silently ignore a
+    // same-owner sibling until the process restarts.
+
+    /// Serve one JSON body for every request on a loopback port, as the
+    /// `/query` endpoint the sibling check consults.
+    async fn sibling_query_server(
+        body: serde_json::Value,
+    ) -> (relay::RestClient, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind sibling query server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let body = body.to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        (rest, server)
+    }
+
+    #[tokio::test]
+    async fn test_sibling_indeterminate_relay_failure_is_not_cached() {
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner));
+        assert!(
+            !is_owner_or_sibling(&author, &cache, &dummy_rest_client()).await,
+            "an unverifiable author must fail closed for this event"
+        );
+        assert_eq!(
+            cache.proven_verdict(&author),
+            None,
+            "a relay failure must not be cached as a permanent non-sibling verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sibling_absent_profile_is_indeterminate_and_throttled() {
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner));
+        let (rest, server) = sibling_query_server(serde_json::json!([])).await;
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(
+            cache.proven_verdict(&author),
+            None,
+            "a missing kind:0 is not a verdict — the profile may not exist or replicate yet"
+        );
+        assert_eq!(
+            cache.sibling_state(&author),
+            SiblingCacheState::Throttled,
+            "a missing profile is retried under the bounded backoff, not per event"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sibling_profile_without_matching_tag_is_cached_negative() {
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner));
+        let (rest, server) = sibling_query_server(serde_json::json!([{ "tags": [] }])).await;
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(
+            cache.proven_verdict(&author),
+            Some(false),
+            "a fetched profile with no verifying owner attestation is definitive"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sibling_valid_auth_tag_is_verified_and_cached() {
+        let owner_keys = nostr::Keys::generate();
+        let agent_keys = nostr::Keys::generate();
+        let author = agent_keys.public_key().to_hex();
+        let tag_json =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+                .expect("compute auth tag");
+        let tag: serde_json::Value = serde_json::from_str(&tag_json).expect("tag json");
+        let profile = serde_json::json!([{ "tags": [tag] }]);
+        let cache = OwnerCache::new(Some(owner_keys.public_key().to_hex()));
+        let (rest, server) = sibling_query_server(profile).await;
+        assert!(
+            is_owner_or_sibling(&author, &cache, &rest).await,
+            "a kind:0 carrying a valid owner attestation must verify as a sibling"
+        );
+        assert_eq!(cache.proven_verdict(&author), Some(true));
+        server.abort();
+    }
+
+    /// A `/query` stand-in that counts requests and answers HTTP 500 (a
+    /// non-retriable status, so the harness sees an immediate error rather
+    /// than the 2s timeout) until `healthy` is flipped, after which it answers
+    /// `200 [{"tags":[]}]` — a fetched profile with no owner attestation, i.e.
+    /// a definitive `NotSibling`.
+    async fn flaky_sibling_query_server() -> (
+        relay::RestClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind flaky sibling query server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let healthy = std::sync::Arc::new(AtomicBool::new(false));
+        let (server_requests, server_healthy) = (requests.clone(), healthy.clone());
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let response = if server_healthy.load(Ordering::SeqCst) {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n[{\"tags\":[]}]".to_string()
+                } else {
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        (rest, requests, healthy, server)
+    }
+
+    #[tokio::test]
+    async fn test_sibling_indeterminate_retry_is_throttled_then_recovers() {
+        use std::sync::atomic::Ordering;
+
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::with_retry_backoff(
+            Some(owner),
+            Duration::from_millis(80),
+            Duration::from_millis(400),
+        );
+        let (rest, requests, healthy, server) = flaky_sibling_query_server().await;
+
+        // First contact during the outage: one relay call, denied, not proven.
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.proven_verdict(&author), None);
+        assert_eq!(cache.sibling_state(&author), SiblingCacheState::Throttled);
+
+        // A burst of further events inside the retry deadline must be denied
+        // WITHOUT another inline relay round-trip — this is what keeps a
+        // chatty sibling from stalling the inbound loop during an outage.
+        for _ in 0..5 {
+            assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "events inside the retry deadline must not re-query the relay"
+        );
+
+        // Once the deadline passes the lookup is retried (still failing).
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "deadline expiry re-arms the lookup"
+        );
+        assert_eq!(cache.sibling_state(&author), SiblingCacheState::Throttled);
+
+        // Relay recovers: after the (now doubled) deadline the retry lands a
+        // proven verdict, which is cached and ends the throttling entirely.
+        healthy.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            cache.proven_verdict(&author),
+            Some(false),
+            "a relay-confirmed verdict replaces the retry deadline"
+        );
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            3,
+            "a proven verdict is served from cache with no further relay calls"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn test_sibling_indeterminate_backoff_doubles_to_cap() {
+        let cache = OwnerCache::with_retry_backoff(
+            Some("00".into()),
+            Duration::from_secs(5),
+            Duration::from_secs(12),
+        );
+        let observed: Vec<u64> = (0..5)
+            .map(|_| cache.note_indeterminate("author").as_secs())
+            .collect();
+        assert_eq!(
+            observed,
+            vec![5, 10, 12, 12, 12],
+            "consecutive indeterminate lookups back off exponentially up to the cap"
+        );
+        assert_eq!(cache.sibling_state("author"), SiblingCacheState::Throttled);
+        // A proven verdict clears the backoff state.
+        cache.cache_sibling("author".into(), true);
+        assert_eq!(
+            cache.sibling_state("author"),
+            SiblingCacheState::Proven(true)
+        );
+        assert_eq!(
+            cache.note_indeterminate("fresh").as_secs(),
+            5,
+            "backoff is tracked per author"
+        );
+    }
+
+    /// A cache whose retry deadlines expire almost immediately, filled to the
+    /// eviction threshold with proven verdicts for `authors`.
+    fn saturated_cache_with_proven(authors: &[String]) -> OwnerCache {
+        let cache = OwnerCache::with_retry_backoff(
+            Some("00".into()),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        );
+        for author in authors {
+            cache.cache_sibling(author.clone(), true);
+        }
+        cache
+    }
+
+    #[test]
+    fn test_sibling_cache_replacing_an_author_at_capacity_keeps_the_rest() {
+        let authors: Vec<String> = (0..OwnerCache::SIBLING_CACHE_CAP)
+            .map(|i| format!("author-{i}"))
+            .collect();
+        let cache = saturated_cache_with_proven(&authors);
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+
+        // Re-arming one author's retry deadline at capacity — first arming,
+        // then re-arming after it expired — replaces that entry only.
+        cache.note_indeterminate(&authors[0]);
+        std::thread::sleep(Duration::from_millis(5));
+        cache.note_indeterminate(&authors[0]);
+
+        assert_eq!(
+            cache.len(),
+            OwnerCache::SIBLING_CACHE_CAP,
+            "replacing an existing author must not evict anything"
+        );
+        for author in &authors[1..] {
+            assert_eq!(
+                cache.sibling_state(author),
+                SiblingCacheState::Proven(true),
+                "re-arming {} at capacity must keep {author}'s proven verdict",
+                authors[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_sibling_cache_new_author_at_capacity_evicts_expired_deadlines_first() {
+        let proven: Vec<String> = (1..OwnerCache::SIBLING_CACHE_CAP)
+            .map(|i| format!("proven-{i}"))
+            .collect();
+        let cache = saturated_cache_with_proven(&proven);
+        cache.note_indeterminate("expired");
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        std::thread::sleep(Duration::from_millis(5));
+
+        // A new author at capacity displaces the one expired deadline, nothing else.
+        cache.cache_sibling("newcomer".into(), false);
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        assert_eq!(
+            cache.sibling_state("newcomer"),
+            SiblingCacheState::Proven(false)
+        );
+        for author in &proven {
+            assert_eq!(
+                cache.sibling_state(author),
+                SiblingCacheState::Proven(true),
+                "an expired deadline must be evicted before any proven verdict"
+            );
+        }
+
+        // With no expired deadlines left, one more new author evicts exactly
+        // one entry — never the whole map.
+        cache.cache_sibling("newcomer-2".into(), false);
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        assert_eq!(
+            cache.sibling_state("newcomer-2"),
+            SiblingCacheState::Proven(false)
+        );
+        let retained = proven
+            .iter()
+            .chain(std::iter::once(&"newcomer".to_string()))
+            .filter(|author| cache.sibling_state(author) != SiblingCacheState::Unknown)
+            .count();
+        assert_eq!(
+            retained,
+            OwnerCache::SIBLING_CACHE_CAP - 1,
+            "a full cache evicts a single entry for a new author"
+        );
+    }
+
+    #[test]
+    fn test_sibling_cache_evicts_one_expired_record_and_keeps_other_backoff_tiers() {
+        let cache = OwnerCache::with_retry_backoff(
+            Some("00".into()),
+            Duration::from_millis(1),
+            Duration::from_millis(64),
+        );
+        // "old" expires first at the base tier; "tiered" has failed three
+        // times and climbed to a 4ms deadline.
+        assert_eq!(cache.note_indeterminate("old").as_millis(), 1);
+        for _ in 0..3 {
+            cache.note_indeterminate("tiered");
+        }
+        let proven: Vec<String> = (2..OwnerCache::SIBLING_CACHE_CAP)
+            .map(|i| format!("proven-{i}"))
+            .collect();
+        for author in &proven {
+            cache.cache_sibling(author.clone(), true);
+        }
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        std::thread::sleep(Duration::from_millis(10)); // both deadlines expired
+
+        // The newcomer takes exactly one slot: the longest-expired record.
+        cache.cache_sibling("newcomer".into(), false);
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        for author in &proven {
+            assert_eq!(cache.sibling_state(author), SiblingCacheState::Proven(true));
+        }
+        assert_eq!(
+            cache.note_indeterminate("tiered").as_millis(),
+            8,
+            "the surviving expired record must keep its backoff tier (3 failures → 8ms next)"
+        );
+        assert_eq!(
+            cache.note_indeterminate("old").as_millis(),
+            1,
+            "only the longest-expired record was evicted, so it restarts at the base tier"
         );
     }
 
