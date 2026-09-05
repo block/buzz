@@ -1,8 +1,6 @@
-NIP-OA
-======
+# NIP-OA
 
-Owner Attestation
------------------
+## Owner Attestation
 
 `draft` `optional`
 
@@ -48,7 +46,7 @@ The owner MUST produce `<sig-hex>` as a BIP-340 Schnorr signature over the signe
 Each clause in `<conditions>` MUST be one of:
 
 - `kind=<decimal>`
-- `created_at<unix-timestamp>`
+- `created_at<unix-timestamp`
 - `created_at>unix-timestamp`
 
 The `<conditions>` string MUST be either the empty string or a non-empty ASCII string of the form `clause` or `clause&clause&...`.
@@ -65,7 +63,7 @@ Verifiers MUST evaluate every clause.
 Verifiers MUST reject an `auth` tag that contains an unsupported clause, malformed decimal encoding, invalid public key, or invalid signature.
 If `<owner-pubkey-hex>` equals `event.pubkey`, the `auth` tag is invalid and MUST be rejected.
 An event satisfies `kind=<n>` if and only if `event.kind = n`.
-An event satisfies `created_at<t>` if and only if `event.created_at < t`.
+An event satisfies `created_at<t` if and only if `event.created_at < t`.
 An event satisfies `created_at>t` if and only if `event.created_at > t`.
 Clause order is part of the signed preimage and verifiers MUST use the exact `<conditions>` string from the tag when verifying the signature.
 Implementers MUST NOT reorder, deduplicate, normalize, or canonicalize the `<conditions>` string before computing the preimage.
@@ -132,7 +130,14 @@ tag-bytes-hex=5b2261757468222c22373962653636376566396463626261633535613036323935
   "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
   "created_at": 1713956400,
   "kind": 1,
-  "tags": [["auth", "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", "kind=1&created_at<1713957000", "8b7df2575caf0a108374f8471722b233c53f9ff827a8b0f91861966c3b9dd5cb2e189eae9f49d72187674c2f5bd244145e10ff86c9f257ffe65a1ee5f108b369"]],
+  "tags": [
+    [
+      "auth",
+      "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "kind=1&created_at<1713957000",
+      "8b7df2575caf0a108374f8471722b233c53f9ff827a8b0f91861966c3b9dd5cb2e189eae9f49d72187674c2f5bd244145e10ff86c9f257ffe65a1ee5f108b369"
+    ]
+  ],
   "content": "owner-attested agent event",
   "sig": "7fd38992b70b5e9e113644e51b4c8ee2227f3bdd402b1855f8786c0600394ab3ec2621742a7bad0b0000b93d4d1ae6e39525f286a3c1029f43f46c3359a6c76f"
 }
