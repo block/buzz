@@ -1089,6 +1089,76 @@ void main() {
     );
   });
 
+  testWidgets('community switcher renames a community from edit mode', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final communities = [
+      Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      ),
+      Community(
+        id: 'bravo',
+        name: 'Bravo',
+        relayUrl: 'wss://bravo.example.com',
+        addedAt: DateTime(2025),
+      ),
+    ];
+    final communityNotifier = _FakeCommunityListNotifier(communities);
+
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(() => communityNotifier),
+          activeCommunityProvider.overrideWith(
+            (ref) async => communities.first,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('community-switcher-rename-bravo')),
+      findsNothing,
+    );
+
+    await tester.tap(find.text('Edit'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('community-switcher-rename-bravo')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Rename Community'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), '  Bangkok Venues  ');
+    await tester.tap(find.widgetWithText(TextButton, 'Rename'));
+    await tester.pumpAndSettle();
+
+    expect(communityNotifier.renames, [('bravo', 'Bangkok Venues')]);
+    expect(find.text('Bangkok Venues'), findsOneWidget);
+    expect(find.text('Bravo'), findsNothing);
+    // Renaming keeps the sheet open and does not switch communities.
+    expect(find.text('Switch Community'), findsOneWidget);
+    expect(find.text('Done'), findsOneWidget);
+  });
+
   testWidgets('opening the community switcher refreshes visible icons', (
     tester,
   ) async {
@@ -2462,9 +2532,22 @@ class _FakeCommunityListNotifier extends CommunityListNotifier {
 
   List<Community> _communities;
   final List<String> removedIds = [];
+  final List<(String, String)> renames = [];
 
   @override
   Future<List<Community>> build() async => _communities;
+
+  @override
+  Future<void> renameCommunity(String id, String name) async {
+    renames.add((id, name));
+    _communities = _communities
+        .map(
+          (community) =>
+              community.id == id ? community.copyWith(name: name) : community,
+        )
+        .toList();
+    state = AsyncData(_communities);
+  }
 
   @override
   Future<void> removeCommunity(String id) async {
