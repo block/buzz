@@ -1,5 +1,5 @@
 import * as React from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import { toast } from "sonner";
 
 import { cn } from "@/shared/lib/cn";
@@ -71,7 +71,7 @@ export function ExternalLinkAnchor({
               label: "Open link",
               onSelect: () => {
                 closeMenu();
-                void openUrl(href).catch(() => {
+                void openExternalUrl(href).catch(() => {
                   toast.error("Failed to open link");
                 });
               },

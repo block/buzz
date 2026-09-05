@@ -1,5 +1,5 @@
 import * as React from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import { Pencil, Unlink } from "lucide-react";
 
 import {
@@ -228,7 +228,7 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
       if (!href) return;
       event.preventDefault();
       openPopoverLink(href, {
-        openExternal: (url) => void openUrl(url),
+        openExternal: (url) => void openExternalUrl(url),
         openMessageLink: (link) =>
           void goChannel(link.channelId, {
             messageId: link.messageId,
