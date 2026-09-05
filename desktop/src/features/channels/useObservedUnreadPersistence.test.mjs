@@ -511,3 +511,64 @@ test("unrelated rerenders do not change API object identity (catch-up stability)
 
   await harness.unmount();
 });
+
+test("clearAll retains the channels mark-all-read could not cover", async () => {
+  installFreshStorage();
+
+  // Two channels observed unread. Mark-all-read repairs an implausible marker
+  // to the present, so channel-2's future-dated event stays uncovered and its
+  // evidence must survive the clear — otherwise its unread dot is lost for good.
+  const seedMap = new Map();
+  const ch1 = new Map();
+  ch1.set("evt-1", makeObservedEvent({ id: "evt-1", createdAt: NOW_S }));
+  seedMap.set("channel-1", ch1);
+  const ch2 = new Map();
+  ch2.set("evt-2", makeObservedEvent({ id: "evt-2", createdAt: NOW_S + 1 }));
+  seedMap.set("channel-2", ch2);
+  writeObservedUnreadToStorage(PUBKEY, RELAY, seedMap);
+
+  const refs = {
+    eventsRef: { current: new Map() },
+    latestRef: { current: new Map() },
+  };
+  const harness = await mountDefaultHook(refs);
+
+  harness.api.clearAll(new Set(["channel-2"]));
+
+  assert.deepEqual(
+    [...refs.eventsRef.current.keys()],
+    ["channel-2"],
+    "the retained channel's observed events must stay in memory",
+  );
+  assert.deepEqual([...refs.latestRef.current.keys()], ["channel-2"]);
+
+  await act(async () => {
+    globalThis.dispatchEvent({ type: "pagehide" });
+  });
+
+  const persisted = readObservedUnreadFromStorage(PUBKEY, RELAY);
+  assert.ok(persisted, "a partial clear must write survivors, not wipe them");
+  assert.deepEqual([...persisted.keys()], ["channel-2"]);
+
+  await harness.unmount();
+});
+
+test("clearAll with an empty retain set still wipes the bucket", async () => {
+  installFreshStorage();
+  const refs = makeRefs();
+  const harness = await mountDefaultHook(refs);
+
+  harness.api.schedule(harness.api.currentScope);
+  harness.api.clearAll(new Set());
+
+  refs.eventsRef.current = new Map();
+  refs.latestRef.current = new Map();
+
+  await act(async () => {
+    globalThis.dispatchEvent({ type: "pagehide" });
+  });
+
+  assert.equal(readObservedUnreadFromStorage(PUBKEY, RELAY), null);
+
+  await harness.unmount();
+});
