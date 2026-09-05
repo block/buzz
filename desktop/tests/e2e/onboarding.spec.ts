@@ -3280,6 +3280,124 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
   expect(await commandCount(page, "create_managed_agent")).toBe(3);
 });
 
+test("joining a second community reuses the Welcome Team instead of re-minting agents", async ({
+  page,
+}) => {
+  // Regression for the cross-community duplicate mint: joining community B
+  // used to fall through the relay-pin filter and create a brand new keypair
+  // for every Welcome starter. The mock backend persists managed agents, so
+  // a re-mint shows up as extra create_managed_agent calls and new pubkeys.
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await completeProfileOnboarding(page);
+  await expectPrivateWelcomeLanding(page);
+
+  // Community A provisioning settles: exactly one create per starter.
+  await expect.poll(() => commandCount(page, "create_managed_agent")).toBe(3);
+  const createsAfterFirst = await commandCount(page, "create_managed_agent");
+  const agentsAfterFirst = await invokeMockCommand<
+    Array<{ pubkey: string; name: string; persona_id: string | null }>
+  >(page, "list_managed_agents");
+
+  // Join a second community through the community switcher.
+  await page.getByTestId("sidebar-profile-avatar-button").click();
+  await page.getByTestId("community-switcher").click();
+  await page.getByRole("menuitem", { name: "Add a community" }).click();
+  await page.getByTestId("add-community-join").click();
+  await page
+    .getByLabel("Community URL or invite link")
+    .fill("wss://beta.example.com");
+  await page.getByTestId("invite-redeem-submit").click();
+
+  // The add-community flow walks profile → team-intro before entering.
+  await page.getByTestId("community-profile-next").click();
+  await page.getByTestId("community-team-intro-enter").click();
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0, {
+    timeout: 10_000,
+  });
+
+  // The second community runs its own Welcome seeding. Wait for its
+  // ensured-marker (keyed by relay scope) so a re-mint would have happened
+  // by the time we assert.
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Object.keys(window.localStorage).some(
+          (key) =>
+            key.startsWith("buzz-welcome-channel-ensured.v2:") &&
+            key.includes("beta.example.com"),
+        ),
+      ),
+    )
+    .toBe(true);
+
+  expect(await commandCount(page, "create_managed_agent")).toBe(
+    createsAfterFirst,
+  );
+  const agentsAfterSecond = await invokeMockCommand<
+    Array<{ pubkey: string; name: string; persona_id: string | null }>
+  >(page, "list_managed_agents");
+  expect(agentsAfterSecond.map((agent) => agent.pubkey).sort()).toEqual(
+    agentsAfterFirst.map((agent) => agent.pubkey).sort(),
+  );
+});
+
+test("an upgraded install reuses the retired built-in Fizz instead of minting a duplicate lead", async ({
+  page,
+}) => {
+  // Installs that predate the Welcome Team carry a single-member built-in
+  // Fizz record pinned to the retired `builtin-team:fizz` team (#1718). That
+  // record IS the Welcome lead identity: onboarding must adopt it and only
+  // mint the two missing teammates — a miss here mints a second Fizz with a
+  // fresh keypair, which is the duplicate this regression guards.
+  const RETIRED_FIZZ_PUBKEY = "f122".repeat(16);
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      managedAgents: [
+        {
+          pubkey: RETIRED_FIZZ_PUBKEY,
+          name: "Fizz",
+          personaId: "builtin:fizz",
+          teamId: "builtin-team:fizz",
+        },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await completeProfileOnboarding(page);
+  await expectPrivateWelcomeLanding(page);
+
+  // Only the two missing teammates are minted; the retired record is reused.
+  await expect.poll(() => commandCount(page, "create_managed_agent")).toBe(2);
+  const createdNames = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+      .filter((entry) => entry.command === "create_managed_agent")
+      .map(
+        (entry) =>
+          (entry.payload as { input?: { name?: string } })?.input?.name,
+      ),
+  );
+  expect(createdNames.sort()).toEqual(["Honey", "Pollen"]);
+
+  const agents = await invokeMockCommand<
+    Array<{ pubkey: string; name: string; persona_id: string | null }>
+  >(page, "list_managed_agents");
+  const fizzRecords = agents.filter(
+    (agent) => agent.name === "Fizz" && agent.persona_id === "builtin:fizz",
+  );
+  expect(fizzRecords.map((agent) => agent.pubkey)).toEqual([
+    RETIRED_FIZZ_PUBKEY,
+  ]);
+});
+
 test("existing relay profile with display name auto-skips onboarding without localStorage", async ({
   page,
 }) => {

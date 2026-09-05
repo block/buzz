@@ -112,6 +112,8 @@ export type MockManagedAgentSeed = {
   name: string;
   avatarUrl?: string | null;
   personaId?: string | null;
+  /** Team membership pin (e.g. the retired `builtin-team:fizz`). */
+  teamId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
   status?: RawManagedAgent["status"];
@@ -937,6 +939,8 @@ type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  /** Team membership pin (`builtin-team:welcome` for Welcome starters). */
+  team_id?: string | null;
   /** Record-level harness/runtime pin (`null` when inheriting from the persona). */
   runtime: string | null;
   relay_url: string;
@@ -1935,6 +1939,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     persona_id: agent.persona_id,
+    team_id: agent.team_id ?? null,
     runtime: agent.runtime ?? null,
     relay_url: agent.relay_url,
     acp_command: agent.acp_command,
@@ -2494,6 +2499,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     pubkey: seed.pubkey,
     name: seed.name,
     persona_id: seed.personaId ?? null,
+    team_id: seed.teamId ?? null,
     // Native serde always emits this key (`null` when unpinned) — the bridge
     // must mirror the wire shape, not omit the key.
     runtime: seed.runtime ?? null,
@@ -9485,6 +9491,7 @@ async function handleCreateManagedAgent(
     input: {
       name: string;
       personaId?: string;
+      teamId?: string | null;
       relayUrl?: string;
       acpCommand?: string;
       agentCommand?: string;
@@ -9561,6 +9568,7 @@ async function handleCreateManagedAgent(
     pubkey,
     name,
     persona_id: args.input.personaId ?? null,
+    team_id: args.input.teamId ?? null,
     // Create never pins a harness id — the record inherits from the persona.
     runtime: null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
