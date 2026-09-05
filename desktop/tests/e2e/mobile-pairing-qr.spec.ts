@@ -452,3 +452,32 @@ test("step completion respects reduced motion", async ({ page }) => {
   await expect(completedContent).toHaveCSS("opacity", "1");
   await expect(completedContent).toHaveCSS("transform", "none");
 });
+
+test("legacy pairing 404 explains how to configure the relay", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-mobile").click();
+
+  mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
+  const card = page.getByTestId("mobile-pairing-card");
+  await card.getByTestId("start-pairing-button").click();
+  await expect(page.getByTestId("mobile-pairing-qr")).toBeVisible();
+
+  await emitPairingEvent(page, "pairing-error", {
+    message:
+      "Pairing endpoint wss://relay.example.com/pair returned 404. This relay advertises NIP-43 without a pairing_relay_url, but nothing serves /pair. Set BUZZ_PAIRING_RELAY_URL or route /pair to buzz-pair-relay, then try again.",
+  });
+
+  await expect(
+    card.getByText(/Set BUZZ_PAIRING_RELAY_URL or route \/pair/),
+  ).toBeVisible();
+  await expect(card.getByTestId("retry-pairing-button")).toBeVisible();
+  await waitForAnimations(page);
+  await card.screenshot({
+    path: `${SCREENSHOT_DIR}/pairing-legacy-404.png`,
+  });
+});
