@@ -5,8 +5,13 @@ import {
   isPermissionGranted,
   onAction,
   requestPermission,
+  sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
+import {
+  isLinuxPlatform,
+  isMacPlatform,
+  isWindowsPlatform,
+} from "@/shared/lib/platform";
 
 // Backend event emitted when a native Linux notification is clicked or a
 // queued macOS activation becomes available. See src-tauri notification code.
@@ -143,6 +148,19 @@ export async function getDesktopNotificationPermissionState(): Promise<DesktopNo
       if (!shouldUseMacDevelopmentFallback(error)) {
         return "default";
       }
+    }
+  }
+
+  // On Windows the app runs in WebView2, whose DOM `Notification.permission`
+  // reports "denied" by default even though native toasts are delivered by the
+  // Tauri notification plugin. Trusting the DOM value falsely surfaces the
+  // "notifications are blocked" banner and refuses the enable toggle, so read
+  // the plugin (the real delivery path here) as the source of truth instead.
+  if (isTauri() && isWindowsPlatform()) {
+    try {
+      return (await isPermissionGranted()) ? "granted" : "default";
+    } catch {
+      return "default";
     }
   }
 
@@ -440,6 +458,26 @@ export async function sendDesktopNotification(
       // UNUserNotificationCenter is unavailable to the unbundled executable
       // used by Tauri dev. Preserve the previous macOS development behavior by
       // falling through to the notification plugin; packaged apps use native UN.
+    }
+  }
+
+  // On Windows the DOM `Notification` API inside WebView2 does not surface an OS
+  // toast. Post through the Tauri notification plugin, which uses the native
+  // Windows toast system. Click-through comes back via the plugin's `onAction`
+  // listener (registered for non-Linux, non-macOS platforms in
+  // listenForDesktopNotificationActions), which reads the target from `extra`.
+  // `silent` avoids the toast doubling the app's own in-app notification sound.
+  if (isTauri() && isWindowsPlatform()) {
+    try {
+      sendNotification({
+        title: payload.title,
+        body: payload.body,
+        extra: notificationExtra(payload.target),
+        silent: true,
+      });
+      return true;
+    } catch {
+      return false;
     }
   }
 
