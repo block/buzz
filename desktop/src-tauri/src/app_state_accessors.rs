@@ -67,6 +67,39 @@ impl AppState {
             .map(|k| k.clone())
     }
 
+
+    /// Capture the active signing identity and workspace relay as one coherent
+    /// scope for a multi-await command.
+    ///
+    /// `apply_workspace` mutates `relay_url_override` and `keys` under separate
+    /// mutexes. Reading them with two unlocked calls can therefore mix tenant
+    /// A's signer with tenant B's relay. Lock both in the same order
+    /// `apply_workspace` writes them (override, then keys) so the pair is
+    /// coherent for the command's submit + follow-up queries.
+    pub fn signing_and_relay_scope(&self) -> Result<(Keys, String), String> {
+        if self
+            .identity_lost
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .keyring_locked
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("identity is in recovery mode; event signing is disabled \
+                 until the identity is restored and Buzz is relaunched"
+                .to_string());
+        }
+        let override_guard = self
+            .relay_url_override
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let keys_guard = self.keys.lock().map_err(|e| e.to_string())?;
+        let relay_base = match override_guard.as_ref() {
+            Some(url) => crate::relay::relay_http_base_url(url),
+            None => crate::relay::relay_api_base_url(),
+        };
+        Ok((keys_guard.clone(), relay_base))
+    }
+
     /// Emit the current huddle state to the frontend via Tauri event.
     ///
     /// Acquires both locks (app_handle + huddle_state), clones a snapshot,
