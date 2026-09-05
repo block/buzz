@@ -168,6 +168,12 @@ export function JoinPage() {
     null,
   );
 
+  // which path served the material — on <body> so it survives the phase
+  // change to the room view (the e2e reads body[data-join-source]).
+  React.useEffect(() => {
+    document.body.dataset.joinSource = joinSource ?? "";
+  }, [joinSource]);
+
   // Same-origin prefill: when this page is served BY a relay (the estate
   // proves it that way), the address is already in the URL bar — the
   // stranger's one input is done before they arrived.
@@ -314,10 +320,7 @@ export function JoinPage() {
   }
 
   return (
-    <div
-      className="flex min-h-dvh flex-col items-center justify-center bg-zinc-950 px-6 py-12 text-center"
-      data-join-source={joinSource ?? undefined}
-    >
+    <div className="flex min-h-dvh flex-col items-center justify-center bg-zinc-950 px-6 py-12 text-center">
       <div className="w-full max-w-md space-y-5">
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-white">
