@@ -108,8 +108,8 @@ fn persona_drift_state(
 /// pin is ignored — see `effective_agent_relay_url`). Returns `None` for
 /// records that cannot form a valid pair key yet (e.g. key-less agents that
 /// mint keys on first start).
-pub(crate) fn workspace_pair_key(
-    app: &AppHandle,
+pub(crate) fn workspace_pair_key<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
 ) -> Option<ManagedAgentRuntimeKey> {
     let state = app.state::<crate::app_state::AppState>();
@@ -133,8 +133,8 @@ pub(crate) fn resolve_workspace_pair_key(
     ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
 }
 
-pub fn build_managed_agent_summary(
-    app: &AppHandle,
+pub fn build_managed_agent_summary<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     personas: &[crate::managed_agents::types::AgentDefinition],
@@ -150,7 +150,15 @@ pub fn build_managed_agent_summary(
     let pair_key = workspace_pair_key(app, record);
     let pair_runtime = pair_key.as_ref().and_then(|key| runtimes.get(key));
 
-    let (status, pid, log_path) = if record.backend != BackendKind::Local {
+    let (status, pid, log_path) = if let Some(runtime) = pair_runtime {
+        // Tracked local execution is observable/stoppable even when the next
+        // configured backend has migrated to a provider.
+        (
+            "running".to_string(),
+            Some(runtime.child.id()),
+            runtime.log_path.display().to_string(),
+        )
+    } else if record.backend != BackendKind::Local {
         // Two-axis status model for remote agents:
         //
         //   Control-plane (this field): "deployed" = provider has been invoked and
@@ -174,13 +182,7 @@ pub fn build_managed_agent_summary(
         (status, None, String::new())
     } else {
         let persisted_pid = record.runtime_pid.filter(|pid| process_is_running(*pid));
-        if let Some(runtime) = pair_runtime {
-            (
-                "running".to_string(),
-                Some(runtime.child.id()),
-                runtime.log_path.display().to_string(),
-            )
-        } else if let Some(pid) = persisted_pid {
+        if let Some(pid) = persisted_pid {
             (
                 "running".to_string(),
                 Some(pid),
@@ -293,6 +295,7 @@ pub fn build_managed_agent_summary(
         .to_string();
 
     Ok(ManagedAgentSummary {
+        has_local_lifecycle: true,
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),

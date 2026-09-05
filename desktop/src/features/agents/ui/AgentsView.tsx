@@ -1,4 +1,6 @@
 import * as React from "react";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { AgentSyncWarning } from "./AgentSyncWarning";
 import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
@@ -38,6 +40,7 @@ import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function AgentsView() {
+  const { reconnectCommunity } = useCommunities();
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
@@ -217,6 +220,7 @@ export function AgentsView() {
             description="Set up and manage your agents."
             title="Agents"
           />
+          <AgentSyncWarning onReconnect={reconnectCommunity} />
           <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               getAvailability={agents.getAvailability}

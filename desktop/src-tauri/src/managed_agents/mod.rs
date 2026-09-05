@@ -27,6 +27,7 @@ pub(crate) mod parallelism;
 mod persona_avatars;
 pub(crate) mod persona_events;
 mod personas;
+pub(crate) mod private_config_overlay;
 #[cfg(windows)]
 mod process_lifecycle;
 pub(crate) mod readiness;
@@ -147,3 +148,5 @@ pub fn default_agent_workdir() -> Option<std::path::PathBuf> {
 fn is_real_dir(path: &std::path::Path) -> bool {
     path.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false)
 }
+
+pub(crate) mod deletion_recovery;

@@ -64,27 +64,34 @@ pub(crate) async fn deploy_to_provider(
     };
     let _deploy_guard = deploy_lock.lock().await;
     // The payload may have waited behind another deployment. Rebuild it from
-    // the current record so the final provider invocation always carries the
-    // newest saved policy rather than the stale snapshot captured by its caller.
+    // the current record — resolved through the relay-primary overlay, since
+    // this is the final-use boundary the provider actually executes — so the
+    // invocation always carries the newest authoritative policy rather than
+    // the stale snapshot captured by its caller, and never raw disk bytes a
+    // newer relay head has superseded (stale prompt/model/env/credentials/
+    // access, or a raw backend that no longer matches the resolved one).
     let (provider_id, config, cached_binary_path, mut agent_json) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
         let records = load_managed_agents(app)?;
-        let record = records
+        let disk_record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        let (provider_id, config) = match &record.backend {
-            BackendKind::Provider { id, config } => (id.clone(), config.clone()),
-            BackendKind::Local => return Err(format!("agent {pubkey} is not provider-backed")),
-        };
+        let record = crate::managed_agents::private_config_overlay::resolved_local_record(
+            state,
+            disk_record,
+        )?;
+        let (provider_id, config) = resolved_provider_backend(&record)?;
         (
             provider_id,
             config,
+            // Device-local field: the overlay never patches it, so the
+            // resolved record carries the disk value unchanged.
             record.provider_binary_path.clone(),
-            build_deploy_payload(app, state, record)?,
+            build_deploy_payload(app, state, &record)?,
         )
     };
     // The rebuild above re-read the live workspace relay and owner identity.
@@ -122,14 +129,64 @@ pub(crate) async fn deploy_to_provider(
         .lock()
         .map_err(|e| e.to_string())?;
     let mut records = load_managed_agents(app)?;
-    let rec = records
+    let disk_record = records
         .iter_mut()
         .find(|r| r.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-
-    let result = apply_deploy_result(rec, deploy_result, &deployed_agent_json);
+    // Settle onto the relay-resolved record, not the raw disk row: the 30179
+    // head owns `backend_agent_id`, so a disk-only write is invisible to every
+    // resolve site (summary reads `not_deployed`, the delete guard lets an
+    // unforced delete orphan the live deployment). Resolving again HERE —
+    // not reusing the pre-deploy snapshot — also fences a delayed settlement
+    // against relay edits that landed while the provider call was in flight.
+    let resolved =
+        crate::managed_agents::private_config_overlay::resolved_local_record(state, disk_record)?;
+    let (settled, result) =
+        settle_deploy_result(disk_record, resolved, deploy_result, &deployed_agent_json);
     save_managed_agents(app, &records)?;
+    if result.is_ok() {
+        // Author the settlement as the next 30179 head and write it through
+        // to the overlay, exactly like every other edit this device makes.
+        super::retain_managed_agent_pending(app, state, &settled)?;
+    }
     result
+}
+
+/// Apply the deploy outcome to the relay-resolved record (the one to retain)
+/// and mirror the settlement onto the disk row, which stays the device-local
+/// fallback when no relay head exists. Pure over both records so the
+/// post-deploy settlement is testable without a live `AppHandle`.
+fn settle_deploy_result(
+    disk_record: &mut crate::managed_agents::ManagedAgentRecord,
+    mut resolved: crate::managed_agents::ManagedAgentRecord,
+    deploy_result: Result<String, String>,
+    deployed_agent_json: &serde_json::Value,
+) -> (
+    crate::managed_agents::ManagedAgentRecord,
+    Result<(), String>,
+) {
+    let result = apply_deploy_result(&mut resolved, deploy_result, deployed_agent_json);
+    disk_record
+        .backend_agent_id
+        .clone_from(&resolved.backend_agent_id);
+    disk_record.provider_policy_pending = resolved.provider_policy_pending;
+    disk_record.updated_at.clone_from(&resolved.updated_at);
+    crate::managed_agents::private_config_overlay::copy_lifecycle_state(disk_record, &resolved);
+    (resolved, result)
+}
+
+/// Extract the provider backend from the record REBUILT after the deploy
+/// lock — the exact value invoked. Pure over the resolved record so the
+/// post-lock final-use boundary is testable without a live `AppHandle`: a
+/// relay head that migrated the agent back to the local backend must refuse
+/// the deploy by name instead of deploying leftover raw-disk provider bytes.
+fn resolved_provider_backend(
+    record: &crate::managed_agents::ManagedAgentRecord,
+) -> Result<(String, serde_json::Value), String> {
+    match &record.backend {
+        BackendKind::Provider { id, config } => Ok((id.clone(), config.clone())),
+        BackendKind::Local => Err(format!("agent {} is not provider-backed", record.pubkey)),
+    }
 }
 
 /// Assert a caller-captured tenant scope against the payload that will
@@ -464,5 +521,243 @@ mod tests {
         assert_eq!(error, "provider unavailable");
         assert!(record.provider_policy_pending);
         assert_eq!(record.last_error.as_deref(), Some("provider unavailable"));
+    }
+
+    // ── Post-lock rebuild: relay-overlay resolve at the final-use boundary ──
+    //
+    // The production wiring (`deploy_to_provider` resolving the reloaded disk
+    // row through `resolved_local_record` after taking the deploy lock) needs
+    // a live `AppHandle`, so its presence is pinned by
+    // `write_site_resolve_guard` in `private_config_overlay.rs`. These tests
+    // prove the fold itself at the same overlay + backend-extraction seam the
+    // post-lock rebuild composes.
+
+    use crate::managed_agents::private_config_overlay::{test_relay_payload, PrivateConfigOverlay};
+
+    /// A stale disk row as the post-lock rebuild reloads it.
+    fn stale_disk_provider_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
+        let mut record = record();
+        record.pubkey = pubkey.into();
+        record.name = "stale disk name".into();
+        record.system_prompt = Some("stale disk prompt".into());
+        record.backend = BackendKind::Provider {
+            id: "stale-provider".into(),
+            config: serde_json::json!({"region": "stale"}),
+        };
+        record
+    }
+
+    /// Carl round-9 P1 regression (stale-disk A / overlay B at the post-lock
+    /// provider rebuild): the payload actually invoked must carry the relay
+    /// head's backend and config, not the raw disk bytes the rebuild reloads.
+    #[test]
+    fn post_lock_rebuild_deploys_relay_config_not_stale_disk() {
+        let pubkey = "aa".repeat(32);
+        let mut payload = test_relay_payload(&pubkey);
+        payload.config.backend = serde_json::json!({"type":"provider","id":"relay-provider","config":{"region":"relay"}});
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(payload).unwrap();
+
+        let disk = stale_disk_provider_record(&pubkey);
+        let resolved = overlay.resolve_local_record(&disk);
+        let (provider_id, config) = resolved_provider_backend(&resolved).unwrap();
+
+        assert_eq!(provider_id, "relay-provider");
+        assert_eq!(config["region"], "relay");
+        // Relay-owned payload inputs follow the head too.
+        assert_eq!(resolved.name, "relay name");
+        assert_eq!(resolved.system_prompt.as_deref(), Some("relay prompt"));
+
+        // NEGATIVE CONTROL: an empty overlay leaves the raw disk backend —
+        // the assertions above prove the patch, not the fixture.
+        let (stale_id, stale_config) =
+            resolved_provider_backend(&PrivateConfigOverlay::default().resolve_local_record(&disk))
+                .unwrap();
+        assert_eq!(stale_id, "stale-provider");
+        assert_eq!(stale_config["region"], "stale");
+    }
+
+    /// A relay head that migrated the agent back to the LOCAL backend must
+    /// refuse the deploy by name — the raw disk row still says "provider",
+    /// and deploying it would execute configuration this device displays as
+    /// retired.
+    #[test]
+    fn relay_head_migrated_to_local_refuses_post_lock_deploy() {
+        let pubkey = "bb".repeat(32);
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(test_relay_payload(&pubkey)).unwrap(); // backend: local
+
+        let disk = stale_disk_provider_record(&pubkey);
+        let resolved = overlay.resolve_local_record(&disk);
+        let error = resolved_provider_backend(&resolved).unwrap_err();
+        assert!(error.contains("not provider-backed"), "{error}");
+    }
+
+    // ── Post-deploy settlement: the returned id lands on the relay head ─────
+    //
+    // Jude's blocker: `backend_agent_id` is a relay-owned field, so settling
+    // it on the raw disk row alone is invisible to every resolve site — the
+    // summary reports `not_deployed` and the delete guard lets an unforced
+    // delete orphan the live deployment. `deploy_to_provider` now resolves the
+    // reloaded disk row, settles on THAT record, mirrors the settlement to
+    // disk, and retains it as the next 30179 head (write-through to the
+    // overlay via `retain_managed_agent_pending`). The production wiring
+    // needs a live `AppHandle`; `write_site_resolve_guard` pins the resolve
+    // call count, and these tests prove the fold plus the retained chain.
+
+    fn relay_provider_head(pubkey: &str) -> PrivateConfigOverlay {
+        let mut payload = test_relay_payload(pubkey);
+        payload.config.backend = serde_json::json!({"type":"provider","id":"relay-provider","config":{"region":"relay"}});
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(payload).unwrap();
+        overlay
+    }
+
+    #[test]
+    fn settlement_lands_on_the_relay_resolved_record_and_mirrors_to_disk() {
+        let pubkey = "cc".repeat(32);
+        let overlay = relay_provider_head(&pubkey);
+        let mut disk = stale_disk_provider_record(&pubkey);
+        let resolved = overlay.resolve_local_record(&disk);
+        assert_eq!(
+            resolved.backend_agent_id, None,
+            "fixture: head not yet deployed"
+        );
+
+        let (settled, result) = settle_deploy_result(
+            &mut disk,
+            resolved,
+            Ok("provider-agent".into()),
+            &policy_payload("owner-only"),
+        );
+        result.unwrap();
+
+        // The record to retain carries relay config + the new id.
+        assert_eq!(settled.backend_agent_id.as_deref(), Some("provider-agent"));
+        assert_eq!(settled.name, "relay name");
+        assert_eq!(settled.system_prompt.as_deref(), Some("relay prompt"));
+        assert!(settled.last_started_at.is_some());
+        // Disk mirrors ONLY the settlement: id, pending flag, lifecycle,
+        // updated_at. Relay-owned config is never written back to disk.
+        assert_eq!(disk.backend_agent_id.as_deref(), Some("provider-agent"));
+        assert_eq!(disk.updated_at, settled.updated_at);
+        assert_eq!(disk.last_started_at, settled.last_started_at);
+        assert_eq!(disk.name, "stale disk name");
+        assert_eq!(disk.system_prompt.as_deref(), Some("stale disk prompt"));
+    }
+
+    #[test]
+    fn failed_settlement_records_the_error_on_both_and_never_sets_an_id() {
+        let pubkey = "dd".repeat(32);
+        let overlay = relay_provider_head(&pubkey);
+        let mut disk = stale_disk_provider_record(&pubkey);
+        let resolved = overlay.resolve_local_record(&disk);
+
+        let (settled, result) = settle_deploy_result(
+            &mut disk,
+            resolved,
+            Err("provider unavailable".into()),
+            &policy_payload("owner-only"),
+        );
+        assert_eq!(result.unwrap_err(), "provider unavailable");
+        assert_eq!(settled.backend_agent_id, None);
+        assert_eq!(disk.backend_agent_id, None);
+        assert_eq!(disk.last_error.as_deref(), Some("provider unavailable"));
+        assert_eq!(settled.last_error.as_deref(), Some("provider unavailable"));
+    }
+
+    /// The chain Jude asked for: deploy success → resolved summary says
+    /// `deployed` → unforced delete is rejected. Runs the real retain +
+    /// write-through against a temp retention db, then re-resolves through
+    /// the overlay exactly as `get_managed_agents` / `delete_managed_agent`
+    /// do. NEGATIVE CONTROL first: the old disk-only settlement leaves the
+    /// overlay-resolved record `not_deployed`, i.e. the orphan path.
+    #[test]
+    fn settled_id_survives_overlay_resolution_so_delete_guard_holds() {
+        use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
+        use nostr::ToBech32;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let owner_keys = nostr::Keys::generate();
+        let agent_keys = nostr::Keys::generate();
+        let pubkey = agent_keys.public_key().to_hex();
+        let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+
+        let mut payload = test_relay_payload(&pubkey);
+        payload.identity.private_key_nsec = agent_keys.secret_key().to_bech32().unwrap();
+        payload.config.backend =
+            serde_json::json!({"type":"provider","id":"relay-provider","config":{}});
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(payload).unwrap();
+        let mut disk = stale_disk_provider_record(&pubkey);
+
+        // NEGATIVE CONTROL — the pre-fix shape: settle on the raw disk row
+        // only. Resolving through the overlay hides the id: delete guard
+        // (`backend_agent_id.is_some()`) would NOT fire → orphaned infra.
+        let mut disk_only = disk.clone();
+        apply_deploy_result(
+            &mut disk_only,
+            Ok("provider-agent".into()),
+            &policy_payload("owner-only"),
+        )
+        .unwrap();
+        assert_eq!(
+            disk_only.backend_agent_id.as_deref(),
+            Some("provider-agent")
+        );
+        assert_eq!(
+            overlay.resolve_local_record(&disk_only).backend_agent_id,
+            None,
+            "disk-only settlement is invisible behind the relay head"
+        );
+
+        // THE FIX: settle on the resolved record, retain it, write through.
+        let resolved = overlay.resolve_local_record(&disk);
+        let (settled, result) = settle_deploy_result(
+            &mut disk,
+            resolved,
+            Ok("provider-agent".into()),
+            &policy_payload("owner-only"),
+        );
+        result.unwrap();
+        retain_agent_record(&conn, &owner_keys, &settled).unwrap();
+        overlay
+            .absorb_retained_head(&conn, &owner_keys, &pubkey)
+            .unwrap();
+
+        let seen = overlay.resolve_local_record(&disk);
+        assert_eq!(seen.backend_agent_id.as_deref(), Some("provider-agent"));
+        assert_ne!(seen.backend, BackendKind::Local);
+        // …which is exactly the delete guard's predicate
+        // (`commands/agents.rs`, "cannot delete a deployed remote agent").
+        assert!(seen.backend != BackendKind::Local && seen.backend_agent_id.is_some());
+        // Relay-owned config still comes from the head, not disk.
+        assert_eq!(seen.name, "relay name");
+    }
+
+    /// Mutation-found gap: dropping the `retain_managed_agent_pending` call
+    /// after the settlement left every behavioural test above green (they can
+    /// only model the fold; the retain is production wiring behind a live
+    /// `AppHandle`). Pin it positionally, same instrument as
+    /// `write_site_resolve_guard`: the settlement must be followed by exactly
+    /// one retain in the production half of this file.
+    #[test]
+    fn the_settlement_is_retained_as_the_next_head() {
+        let source = include_str!("provider_deploy.rs");
+        let production = &source[..source.find("#[cfg(test)]").unwrap()];
+        let settle = production
+            .find("settle_deploy_result(disk_record")
+            .expect("positive control: the settlement call must be present");
+        let retain = production
+            .find("retain_managed_agent_pending(app, state, &settled)")
+            .expect("the settled record must be retained as the next 30179 head");
+        assert!(
+            settle < retain,
+            "retain the settlement, not the pre-deploy record"
+        );
+        assert_eq!(
+            production.matches("retain_managed_agent_pending(").count(),
+            1
+        );
     }
 }

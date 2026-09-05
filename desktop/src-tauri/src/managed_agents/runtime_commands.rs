@@ -241,6 +241,35 @@ pub fn start_managed_agent_runtime(
     start_managed_agent_runtime_pair_lazy(pubkey, relay_url, app)
 }
 
+/// Fold the relay-resolved record into the exact bytes a pair spawn executes.
+///
+/// Pure over `(resolved, personas)` so the final-use boundary is testable
+/// without a live `AppHandle` (same seam strategy as
+/// `finalize_restore_candidate` in `restore.rs`):
+/// - a RESOLVED non-local backend is refused by name — pair runtimes are a
+///   local-process concept, and a relay head that migrated the agent to a
+///   provider backend must not spawn a local child from leftover disk bytes;
+/// - the linked persona snapshot is re-applied LAST so the definition quad
+///   (prompt/model/provider/runtime) keeps its established precedence over
+///   both disk and relay bytes;
+/// - an orphaned instance (persona_id with no live persona) passes through:
+///   `spawn_agent_child` owns that refusal via `resolve_effective_config`.
+fn resolve_pair_spawn_record(
+    mut resolved: super::ManagedAgentRecord,
+    personas: &[super::AgentDefinition],
+) -> Result<super::ManagedAgentRecord, String> {
+    if resolved.backend != BackendKind::Local {
+        return Err("managed runtime pairs require a local agent".into());
+    }
+    if let Some(persona_id) = resolved.persona_id.clone() {
+        if let Some(persona) = personas.iter().find(|persona| persona.id == persona_id) {
+            super::persona_events::apply_persona_snapshot(&mut resolved, persona);
+            resolved.updated_at = crate::util::now_iso();
+        }
+    }
+    Ok(resolved)
+}
+
 fn start_pair(
     pubkey: String,
     relay_url: String,
@@ -249,6 +278,13 @@ fn start_pair(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
+    // A relay-only record (hydrated overlay head with no disk row) needs a
+    // durable device-local lifecycle anchor before the disk lookup below —
+    // exactly like the interactive start path. Without this, pair
+    // Start/Restart for a relay-only card fails "agent not found" instead of
+    // materializing it; a relay-only PROVIDER card is refused here by name.
+    // Takes and releases its own locks, so it must run before ours.
+    super::private_config_overlay::materialize_relay_only_agent(&app, &state, &pubkey)?;
     let _transition = state
         .managed_agent_runtime_transition
         .lock()
@@ -262,12 +298,19 @@ fn start_pair(
         .map_err(|e| e.to_string())?;
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
-    if record.backend != BackendKind::Local {
-        return Err("managed runtime pairs require a local agent".into());
-    }
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
+    // Final-use boundary: the spawn below executes the relay-primary resolve
+    // of the disk row (persona snapshot re-applied last), never raw disk
+    // bytes — otherwise a follower device showing relay config B would
+    // execute stale disk config A. Lifecycle mutations further down still
+    // land on the DISK `record`; relay-owned configuration is never written
+    // back to the device-local store.
+    let spawn_record = resolve_pair_spawn_record(
+        super::private_config_overlay::resolved_local_record(&state, record)?,
+        &load_personas(&app).unwrap_or_default(),
+    )?;
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
     let mut runtimes = state
         .managed_agent_processes
@@ -277,7 +320,7 @@ fn start_pair(
         .get_mut(&key)
         .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
     {
-        let status = status_for(&app, record, &key, runtimes.get(&key), None);
+        let status = status_for(&app, &spawn_record, &key, runtimes.get(&key), None);
         return Ok(status);
     }
     runtimes.remove(&key);
@@ -288,8 +331,14 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process =
-        spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref(), None)?;
+    let mut process = spawn_agent_child(
+        &app,
+        &spawn_record,
+        &key.relay_url,
+        lazy,
+        owner.as_deref(),
+        None,
+    )?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -308,7 +357,7 @@ fn start_pair(
     record.last_stopped_at = None;
     record.last_error = None;
     runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
-    let status = status_for(&app, record, &key, runtimes.get(&key), None);
+    let status = status_for(&app, &spawn_record, &key, runtimes.get(&key), None);
     drop(runtimes);
     save_managed_agents(&app, &records)?;
     emit_status(&app, &status);
@@ -388,6 +437,13 @@ pub fn restart_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    // Materialize a relay-only record before the stop half, which fails
+    // "agent not found" on a pubkey with no disk row. `start_pair` would
+    // materialize anyway, but only after stop has already failed the restart.
+    {
+        let state = app.state::<AppState>();
+        super::private_config_overlay::materialize_relay_only_agent(&app, &state, &pubkey)?;
+    }
     stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
     start_pair(pubkey, relay_url, true, None, app)
 }
@@ -470,26 +526,50 @@ pub async fn reconcile_managed_agent_runtimes(
     use futures_util::{stream, StreamExt};
 
     let records = load_managed_agents(&app)?;
+    // Fan-out candidates resolve through the relay-primary overlay BEFORE the
+    // probe: the probe authenticates as the agent (nsec + auth tag), and a
+    // follower device may hold a rotated identity only in the overlay.
+    // `start_on_app_launch` is device-local (never patched), so the
+    // auto-start choice itself still reads disk; the backend gate reads the
+    // RESOLVED record so a relay head that migrated an agent off the local
+    // backend is skipped instead of spawned from leftover disk bytes. The
+    // raw disk `updated_at` is carried alongside as the in-flight guard
+    // `start_pair` re-checks against the disk row it reloads.
+    let candidates = {
+        let state = app.state::<AppState>();
+        let mut candidates = Vec::new();
+        for record in records.iter().filter(|record| record.start_on_app_launch) {
+            let resolved = super::private_config_overlay::resolved_local_record(&state, record)?;
+            if resolved.backend != BackendKind::Local {
+                continue;
+            }
+            candidates.push((resolved, record.updated_at.clone()));
+        }
+        candidates
+    };
     let mut jobs = Vec::new();
     for community in communities {
-        for record in records
-            .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+        for (record, disk_updated_at) in &candidates
         // The legacy per-record relay pin is deliberately ignored here — see
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.
         {
-            jobs.push((record.clone(), community.relay_url.clone()));
+            jobs.push((
+                record.clone(),
+                disk_updated_at.clone(),
+                community.relay_url.clone(),
+            ));
         }
     }
     let probes: Vec<_> = stream::iter(jobs)
-        .map(|(record, requested)| {
+        .map(|(record, disk_updated_at, requested)| {
             let state = app.state::<AppState>();
             async move {
                 let fallback_record = record.clone();
                 let fallback_requested = requested.clone();
                 probe_agent_relay_access(&state, record, requested)
                     .await
+                    .map(|(record, key, requested)| (record, key, requested, disk_updated_at))
                     .map_err(|error| (fallback_record, fallback_requested, error))
             }
         })
@@ -507,12 +587,12 @@ pub async fn reconcile_managed_agent_runtimes(
         let mut rows = Vec::new();
         for probe in probes {
             match probe {
-                Ok((record, key, requested)) => {
+                Ok((record, key, requested, disk_updated_at)) => {
                     match start_pair(
                         record.pubkey.clone(),
                         key.relay_url.clone(),
                         true,
-                        Some(&record.updated_at),
+                        Some(&disk_updated_at),
                         app.clone(),
                     ) {
                         Ok(mut status) => {
@@ -730,5 +810,172 @@ mod tests {
             Some("unexpected"),
         );
         assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
+    }
+}
+
+// ── Pair-spawn fold: relay-overlay resolve at the final-use boundary ─────────
+//
+// The production wiring (`start_pair` resolving the disk row through
+// `resolved_local_record` before `spawn_agent_child`) needs a live
+// `AppHandle`, so its presence is pinned by `write_site_resolve_guard` in
+// `private_config_overlay.rs`. These tests prove the fold itself at the same
+// overlay + finalize seam the production path composes — the pair-start
+// variant of `restore_fold_tests`.
+#[cfg(test)]
+mod pair_spawn_resolve_tests {
+    use super::resolve_pair_spawn_record;
+    use crate::managed_agents::private_config_overlay::{test_relay_payload, PrivateConfigOverlay};
+    use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord};
+    use std::collections::BTreeMap;
+
+    /// A stale disk row as `start_pair` reloads it under its store lock.
+    fn stale_disk_record(pubkey: &str) -> ManagedAgentRecord {
+        serde_json::from_value(serde_json::json!({
+            "pubkey": pubkey,
+            "name": "stale disk name",
+            "private_key_nsec": "nsec-stale-disk",
+            "relay_url": "wss://old.example",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": "stale disk prompt",
+            "model": "stale-model",
+            "provider": null,
+            "env_vars": {},
+            "start_on_app_launch": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }))
+        .expect("stale_disk_record fixture")
+    }
+
+    /// Carl round-9 P1 regression (stale-disk A / overlay B at pair start):
+    /// the record handed to `spawn_agent_child` must carry the relay head for
+    /// everything relay-owned, while device-local lifecycle state
+    /// (`start_on_app_launch`) survives — previously a follower device
+    /// showing relay config B pair-started stale disk config A.
+    #[test]
+    fn pair_start_spawns_relay_config_not_stale_disk() {
+        let pubkey = "aa".repeat(32);
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(test_relay_payload(&pubkey)).unwrap();
+
+        let disk = stale_disk_record(&pubkey);
+        let spawn = resolve_pair_spawn_record(overlay.resolve_local_record(&disk), &[])
+            .expect("local resolved record must survive the fold");
+
+        assert_eq!(spawn.name, "relay name");
+        assert_eq!(spawn.system_prompt.as_deref(), Some("relay prompt"));
+        assert_eq!(spawn.model.as_deref(), Some("relay-model"));
+        assert_eq!(spawn.private_key_nsec, "nsec-relay");
+        assert_eq!(spawn.parallelism, 4);
+        assert!(
+            spawn.start_on_app_launch,
+            "device-local lifecycle flag must survive the overlay resolve"
+        );
+
+        // NEGATIVE CONTROL: an empty overlay leaves the disk record as-is —
+        // the assertions above prove the patch, not the fixture.
+        let untouched = resolve_pair_spawn_record(
+            PrivateConfigOverlay::default().resolve_local_record(&disk),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(untouched.name, "stale disk name");
+        assert_eq!(untouched.private_key_nsec, "nsec-stale-disk");
+    }
+
+    /// The linked persona keeps its definition-authoritative precedence over
+    /// BOTH disk and relay bytes — the snapshot is re-applied after the
+    /// overlay patch, mirroring the interactive start and restore paths.
+    #[test]
+    fn persona_snapshot_reapplies_on_top_of_overlay_patch() {
+        let pubkey = "bb".repeat(32);
+        let mut payload = test_relay_payload(&pubkey);
+        payload.config.persona_id = Some("def-1".into());
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(payload).unwrap();
+
+        let persona = AgentDefinition {
+            id: "def-1".into(),
+            display_name: "Definition".into(),
+            avatar_url: None,
+            description: None,
+            system_prompt: "definition prompt".into(),
+            runtime: Some("goose".into()),
+            model: Some("definition-model".into()),
+            provider: None,
+            name_pool: vec![],
+            is_builtin: false,
+            is_active: true,
+            shared: false,
+            source_team: None,
+            source_team_persona_slug: None,
+            catalog_source: None,
+            team_catalog_source: None,
+            env_vars: BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: vec![],
+            parallelism: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        let resolved = overlay.resolve_local_record(&stale_disk_record(&pubkey));
+        let spawn = resolve_pair_spawn_record(resolved, std::slice::from_ref(&persona)).unwrap();
+        assert_eq!(spawn.system_prompt.as_deref(), Some("definition prompt"));
+        assert_eq!(spawn.model.as_deref(), Some("definition-model"));
+        // Relay still owns what the definition does not.
+        assert_eq!(spawn.name, "relay name");
+        assert_eq!(spawn.private_key_nsec, "nsec-relay");
+    }
+
+    /// A relay head that migrated the agent off the local backend must be
+    /// refused by name — never spawned as a local child from leftover disk
+    /// bytes.
+    #[test]
+    fn resolved_non_local_backend_is_refused() {
+        let pubkey = "cc".repeat(32);
+        let mut record = stale_disk_record(&pubkey);
+        record.backend = BackendKind::Provider {
+            id: "cloud".into(),
+            config: serde_json::json!({}),
+        };
+        let error = resolve_pair_spawn_record(record, &[]).unwrap_err();
+        assert_eq!(error, "managed runtime pairs require a local agent");
+    }
+
+    /// Carl round-9 P1, relay-only arm: a hydrated overlay head with no disk
+    /// row materializes into a spawnable record on the pair route (previously
+    /// "agent not found"); a relay-only PROVIDER head is refused by name at
+    /// the same fold.
+    #[test]
+    fn relay_only_record_materializes_for_pair_start() {
+        let pubkey = "dd".repeat(32);
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(test_relay_payload(&pubkey)).unwrap();
+
+        let materialized = overlay
+            .materialize_relay_only_record(&pubkey, &[])
+            .expect("relay-only head must materialize");
+        let spawn = resolve_pair_spawn_record(materialized, &[]).unwrap();
+        assert_eq!(spawn.name, "relay name");
+        assert_eq!(spawn.private_key_nsec, "nsec-relay");
+        assert_eq!(spawn.backend, BackendKind::Local);
+
+        let mut provider = test_relay_payload(&"ee".repeat(32));
+        provider.config.backend = serde_json::json!({"type":"provider","id":"cloud","config":{}});
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(provider).unwrap();
+        let materialized = overlay
+            .materialize_relay_only_record(&"ee".repeat(32), &[])
+            .unwrap();
+        assert!(resolve_pair_spawn_record(materialized, &[]).is_err());
     }
 }

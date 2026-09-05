@@ -176,6 +176,12 @@ fn definition_slug_resolves_to_definition_and_linked_instance_is_valid_memory_so
 
 // ── Resolver edge cases ───────────────────────────────────────────────────
 
+// ── Overlay-fold resolution (kind:30179) ──────────────────────────────────
+// Sibling file: keeps this file under the 1000-line gate.
+#[cfg(not(target_os = "windows"))]
+#[path = "tests_overlay_fold.rs"]
+mod overlay_fold;
+
 #[test]
 fn resolve_by_pubkey_finds_keyed_instance() {
     let inst = make_instance("pubkey-xyz", "my-agent");

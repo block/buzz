@@ -303,7 +303,8 @@ with a TypeScript lookup table or an id comparison in a component.
     revalidation fail closed on invalid ownership or managed policy evidence,
     and on missing membership or directory evidence; do not add a cross-owner
     clamp to either mention path. Local `agents-data-changed` events
-    refresh only local persona/team/managed-agent caches; they must never
+    refresh local persona/team/managed-agent caches and all per-agent config
+    surfaces (including retained private-head changes); they must never
     invalidate the remote relay directory.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
@@ -389,3 +390,32 @@ matches the code is worse than no rule; a new pattern that isn't written down
 here will be broken by the next agent that never learns it existed. Reviewers:
 treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 "no rules changed" note) as incomplete.
+
+## Managed-agent bootstrap recovery
+
+The Agents page exposes the native owner/community-scoped bootstrap warning
+separately from the cached agent list. An incomplete history must not silently
+look like successful synchronization, nor hide tracked local children and Stop.
+Reconnect community reruns workspace initialization; repeated cap errors retain
+the warning and operator guidance rather than running an automatic retry loop.
+
+A tracked native process (`ManagedAgent.pid`) owns the native Stop action even
+when relay config changes its next backend to Provider. Use
+`hasTrackedLocalAgentProcess` in lifecycle routing; do not send `!shutdown` or
+require a relay channel instead of stopping that owned child. This receipt is
+teardown authority only, never permission to start a provider deployment.
+
+`hasLocalLifecycle` distinguishes local operational membership from relay-only
+visibility. Relay-only identities retain config reads/export/delete and Local
+Start (which materializes after readiness checks), but cannot edit local runtime
+settings, toggle auto-start, or deploy a Provider from this device. Gate these
+capabilities independently of running/stopped status; a tracked child still owns
+Stop. The native list derives membership from disk, never from resolved backend.
+
+A public-only recreation after deletion preserves local identity, not permission
+to execute old disk config. Native config reads/edits/Start refuse until a newer
+validated private head restores authority; exports, persona cascades, and
+persona-edit propagation exclude these denied identities. A denied identity must
+not block unrelated definition edits. List and owned-process Stop remain
+available, as does explicit identity deletion. Do not repair missing private
+authority by silently republishing the disk migration seed.

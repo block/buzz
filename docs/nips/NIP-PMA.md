@@ -1,18 +1,57 @@
-# NIP-PMA: Private Managed-Agent Aggregate
+# NIP-PMA: Private Managed-Agent Config
 
-`draft` — protocol/codec reservation only. Relays MUST reject this kind until
-privacy, transactional CAS, backup/restore, revocation, and capability gates are
-deployed.
+`draft` — implemented codec (`crates/buzz-core/src/private_managed_agent.rs`)
+and relay gates. This document describes the wire contract as shipped; where
+an earlier reservation planned a stricter mechanism, the difference is called
+out explicitly rather than left implied.
 
 ## Purpose and kind
 
-Kind `30179` is an owner-authored, addressable, owner-readable aggregate for one
-runnable managed agent. Its coordinate is `(owner pubkey, 30179, agent pubkey)`.
-It is the only durable authority after a per-agent migration is independently
-verified. Kinds `30175` and `30177` remain public/compatibility projections.
+Kind `30179` is an owner-authored, addressable, owner-readable event carrying
+the runnable private configuration of one managed agent: its nsec, optional
+NIP-OA attestation, secret environment, and the portable runtime settings a
+second device needs to run the same agent. Its coordinate is
+`(owner pubkey, 30179, agent pubkey)`.
 
-This reservation does not change current agent authority, storage, startup,
-mutation, deletion, catalog, or sharing behavior.
+Kinds `30175` (definition) and `30177` (instance) remain the public
+projections. `30179` carries secrets plus the instance's runnable snapshot,
+including public instance fields (name, definition link, parallelism,
+`respond_to`, allowlist) and definition mirrors (runtime, model, provider,
+system prompt). Definition/catalog display metadata (display name,
+description, avatar, slug) does not enter the payload.
+
+## Encryption exception
+
+[VISION.md § Encryption](../../VISION.md#encryption) states Buzz's one model:
+TLS in transit, storage-layer encryption at rest, server-readable content so
+eDiscovery works on everything. Kind `30179` is the deliberate exception. Its
+content is NIP-44 v2 ciphertext from the owner's key to itself, because the
+payload holds agent private keys and API credentials that must never be
+readable by relay operators, backups, or search. The relay treats the event as
+opaque author-only data: its ciphertext is unavailable to relay-side
+discovery, while the event's existence, coordinate, and tags, the public
+`30175`/`30177` projections, kind:5 deletions, and the agent's own signed
+messages remain server-readable as usual. Any change that widens `30179`'s
+contents beyond secrets and runnable settings must revisit this exception.
+
+## Relay contract (as enforced)
+
+- `30179` is a parameterized-replaceable kind: the relay keeps one live head
+  per coordinate and resolves concurrent writes by ordinary NIP-33
+  last-write-wins on `created_at`.
+- `30179 ∈ AUTHOR_ONLY_KINDS`: REQ, COUNT, and subscription fan-out return the
+  event only to the authenticated author. Existence, tags, and counts are not
+  revealed to anyone else.
+- Global-only scope (`UsersWrite`), never channel-scoped; excluded from the
+  FTS allowlist (`migrations/0033_private_managed_agent_fts.sql`).
+- Deletion is an ordinary NIP-09 kind:5 naming the coordinate. Desktop
+  enqueues kind:5s for both the `30177` and `30179` coordinates in one local
+  transaction (`tombstone_managed_agent_at`); a kind:5 naming either
+  coordinate is treated locally as covering both heads.
+
+There is **no** transactional CAS, no aggregate submission endpoint, no
+`state` tag, and no relay-side anti-resurrection rule. Generation and
+predecessor below are advisory audit metadata, validated for shape only.
 
 ## Signed outer envelope
 
@@ -21,92 +60,161 @@ Exactly these two-element tags are permitted:
 - `d = <64 lowercase hex agent pubkey>` exactly once;
 - `g = <canonical positive decimal generation>` exactly once;
 - `prev = <64 lowercase hex predecessor event id>` exactly once after
-  generation 1 and absent at generation 1;
-- `state = active|deleted` exactly once.
+  generation 1 and absent at generation 1.
 
-Content is bounded NIP-44 v2 ciphertext encrypted owner-to-owner. Event ID and
-signature, exact kind/author/tag grammar, canonical curve-valid agent keys, and size
-are validated before decrypt. The decrypted payload repeats owner, agent,
-generation, predecessor, and state; any mismatch is corruption.
+Any other tag, a duplicate tag, or a tag with a different arity is rejected
+before decrypt. Content is non-empty NIP-44 v2 ciphertext no longer than
+`MAX_CIPHERTEXT_BYTES`. Event ID, signature, kind, author, tag grammar, and
+canonical curve-valid agent key are validated before decrypt. The decrypted
+payload repeats owner, agent, generation, and predecessor; any mismatch is
+rejected as corruption.
 
 ## Decrypted v1 payload
 
-Top-level and nested core schemas reject unknown and duplicate JSON member
-names. Forward-compatible data is confined to namespaced `extensions` entries;
-core semantics never depend on an extension. Projection recovery v1 contains
-the complete signed public event; validation verifies its signature and ID,
-owner, kind and `d` coordinate, and hashes its exact content bytes against the
-binding. This makes reconstruction deterministic rather than an agreement over
-an untyped JSON blob.
+```json
+{
+  "format": "buzz-private-managed-agent",
+  "version": 1,
+  "agent_pubkey": "<hex>",
+  "owner_pubkey": "<hex>",
+  "generation": 3,
+  "previous_event_id": "<hex>",
+  "updated_at": "<RFC3339>",
+  "identity": { "private_key_nsec": "nsec1…", "auth_tag": "[…]" },
+  "config": { … },
+  "extensions": { "namespace:key": … }
+}
+```
 
-An active payload binds exact signed `30175` and `30177` event IDs, SHA-256 of
-their exact content bytes, and complete versioned recovery material. It also
-contains the preserved agent nsec and an optional NIP-OA attestation, plus
-explicitly allowlisted private runnable configuration. When present, the
-attestation MUST be a cryptographically valid unconditional (`conditions = ""`)
-owner-to-agent authorization: its owner equals the aggregate author and its
-agent equals the nsec-derived `d` coordinate. Conditional, malformed, wrong-owner,
-or wrong-agent attestations are rejected. The nsec MUST derive the `d`
-coordinate.
+Duplicate JSON member names anywhere in the plaintext are rejected. Known
+members are strictly typed. Unknown members at the top level and inside
+`config` are **preserved verbatim** (`extra` maps) so an older writer editing
+one known field never drops data authored by a newer Desktop; a matching
+known key always binds to the typed field, so an unknown member can never
+shadow one. `extensions` keys must be namespaced (`contains ':'`) and bounded.
+Core semantics never depend on `extra` or `extensions`.
 
-All active aggregates require a stable `30175` definition binding. Before a
-legacy definition-less agent can be encoded, the migrator MUST deterministically
-materialize its definition fields as a non-shared `30175` under the owner, with
-a stable collision-safe slug derived from the agent pubkey. Materialization and
-read-back verification are prerequisites: failure leaves the agent `LegacyOnly`
-and preserves its local record/key unchanged. No client may synthesize a default
-or mint a replacement identity to satisfy this schema.
+`identity.private_key_nsec` MUST derive the `d` coordinate. When present,
+`identity.auth_tag` MUST be a cryptographically valid unconditional
+(`conditions = ""`) owner-to-agent NIP-OA attestation whose owner equals the
+event author and whose agent equals the nsec-derived coordinate.
 
-A deleted payload is minimal: it contains no active body, advances generation
-from its predecessor, and includes `deleted_at`. Relay anti-resurrection and
-undelete rules are specified by the later transactional CAS contract; generic
-NIP-33 LWW is explicitly insufficient.
+`config` members (all optional unless noted):
+
+| member | type | notes |
+|---|---|---|
+| `relay_url` | string, required (may be empty) | device-validated; empty = workspace relay |
+| `name` | string, required, non-empty | instance handle |
+| `persona_id` | string | definition linkage; carried verbatim. A device without the linked definition refuses to materialize the instance (no lifecycle row is written) until the definition arrives; it never detaches the link |
+| `runtime`, `model`, `provider`, `system_prompt` | string | definition mirror (authoritative only for definition-less instances) |
+| `parallelism` | u32 | instance projection mirror |
+| `respond_to`, `respond_to_allowlist` | NIP-AP wire string, hex list | instance projection mirror |
+| `agent_command_override`, `agent_args` | string, string list | device-validated before launch |
+| `idle_timeout_seconds`, `max_turn_duration_seconds` | u64 | portable |
+| `env_vars` | string map | secret-bearing; bounded by `MAX_ENV_*` |
+| `backend` | JSON, required | versioned `BackendKind`; device/provider-validated |
+| `backend_agent_id` | string | remote identity; ownership device-validated |
+| `team_id`, `persona_name_in_team` | string | portable team linkage |
+| `relay_mesh` | JSON | versioned mesh marker (definition mirror) |
+| `effort_level` | string, ≤ `MAX_EFFORT_LEVEL_BYTES` | canonical harness-agnostic effort; each device normalizes it against the destination runtime at spawn |
+
+Payloads authored before `effort_level` existed decode with it absent
+(`None` = inherit); a writer that has never set it omits the key.
 
 ## Field authority
 
-- `30175` definition projection: display name, prompt, runtime/model/provider,
-  name pool, definition behavior defaults, sharing/provenance, public avatar.
-- `30177` instance projection: agent pubkey/name/definition linkage,
-  parallelism, `respond_to`, and allowlist.
-- private portable canonical: nsec, auth tag, env, durable timeout/team fields,
-  and secret-bearing backend configuration.
-- private but device-validated: relay URL, explicit command/args, backend remote
-  identity, and any explicitly portable path/provider reference.
-- local device policy/derived: start-on-launch, auto-restart, effective binary
-  paths, installed team directory, and catalog-derived commands.
-- legacy conversion only: create-time command/model/provider mirrors,
-  deprecated MCP/turn timeout, source-version drift markers, and relay-mesh
-  fallback markers where a definition is authoritative.
-- transient local only: PID and all last start/stop/exit/error receipts/logs.
+Every `ManagedAgentRecord` field belongs to exactly one class:
 
-Adding a `ManagedAgentRecord` field must update an exhaustive Desktop
-classification/conversion fixture before migration-writing code can merge.
-This inert core-only reservation does not yet depend on the Desktop type and
-therefore does not claim to provide that compile-time tripwire.
+- **coordinate**: agent pubkey (`d`).
+- **`30177` instance projection** (also carried in `30179` so a fresh device
+  can reconstruct the instance): name, definition linkage, parallelism,
+  `respond_to`, allowlist.
+- **definition mirror**: prompt, runtime, model, provider, relay-mesh marker.
+  `30175` is authoritative for a definition-linked instance; `30179` carries
+  the runnable snapshot for definition-less instances.
+- **`30175` definition/catalog projection only**: display name, description,
+  slug, name pool, builtin/active flags, sharing/provenance, definition
+  behavior defaults, public avatar. Never enters `30179`.
+- **private portable canonical**: nsec, auth tag, env, timeouts, team
+  linkage, secret-bearing backend configuration, `effort_level`.
+- **private but device-validated**: relay URL, explicit command/args, backend
+  remote identity.
+- **local device policy/derived**: start-on-launch, auto-restart, provider
+  policy pending, effective binary paths, installed team directory,
+  catalog-derived commands.
+- **legacy conversion only**: create-time command/model/provider mirrors,
+  deprecated MCP/turn timeout, source-version drift markers, the retired
+  `shared` flag.
+- **transient local only**: PID and all last start/stop/exit/error receipts.
+- **bookkeeping**: `updated_at` rides the payload as advisory metadata but is
+  excluded from body equality; `created_at` stays local.
 
-## Aggregate submission boundary
+Adding a `ManagedAgentRecord` field fails to compile until it is classified in
+`desktop/src-tauri/src/managed_agents/reconcile/tests/field_classification_tests.rs`,
+whose exhaustive destructure is the tripwire; the same test asserts that each
+class either does or does not change the `30179` payload body the writer
+compares, so a misclassification fails at test time rather than drifting.
 
-Three ordinary Nostr `EVENT` writes cannot atomically commit an aggregate. The
-future relay contract accepts independently signed projection candidates plus
-the signed private head through one authenticated aggregate submission and one
-PostgreSQL transaction. It validates CAS predecessor/generation, signatures,
-hashes, recovery material, definition revision, tombstone watermark, and all
-coordinates before exposing any candidate. Fan-out begins only after commit.
+## Desktop write and read discipline
 
-Public catalog definitions require an independently verifiable public
-CAS/revision head; browsing must never require decrypting kind `30179`.
+- A `30179` head is written only through `retain_private_agent_record`, which
+  rebuilds the payload from the resolved record, preserves `extra`/`extensions`
+  authored by newer clients, and skips the write when the decrypted body is
+  unchanged (NIP-44 is randomized, so ciphertext is never compared).
+- Interactive edits resolve the relay overlay onto the disk record before
+  applying the user's patch, so a follower's edit is authored on top of the
+  config it is actually running rather than stale disk.
+- Boot publishes a `30179` only when no retained head exists for the
+  coordinate; an existing head is left to the interactive paths.
+- Inbound heads pass `validate_and_decrypt` and Desktop-side field validation
+  (`PrivateConfigPatch::from_payload`) before entering the overlay; a rejected
+  head leaves the previously cached patch in place.
+- Local-only effort controls (the per-instance effort picker and its
+  next-spawn restart semantics) are unchanged: they write `effort_level` on
+  the record, and that column is what rides `30179`.
 
-## Required deployment order
+### Bootstrap, deletion, and recovery boundaries
 
-1. this inert codec/kind reservation while ingest still rejects `30179`;
-2. author-only privacy gates, SQL visibility before `LIMIT`, and verification
-   that the positive FTS allowlist continues to exclude `30179`;
-3. dark CAS schema/transaction;
-4. feature-gated aggregate submission;
-5. read/repair/export/import and destructive restore drill;
-6. tombstone revocation across authentication/ingest/session caches;
-7. owner rotation epoch/freeze/receipts/activation;
-8. Desktop reader and verified dual-write migration.
+Before boot may mint a private head from disk, native Desktop fetches the
+owner's authenticated history for kinds `5`, `30177`, and `30179`. It verifies
+signatures and owner scope and completes pagination before applying history.
+HTTP `/query` pages use `(until, before_id)` in `created_at DESC, id ASC` order;
+an empty or short page establishes exhaustion. Bootstrap is capped at 200
+pages of 500 events, 32 MiB of serialized events, and 30 seconds of fetching.
+The kind:5 query includes unrelated owner deletions: a generic `#a` filter is
+not used because relay post-filtering could make a partial page look complete.
+Cap/network errors suppress boot agent publication and remain visible on the
+Agents page, with reconnect retry and operator guidance. Cached retained
+configuration can still hydrate; corrupt retained authority is an error, never
+an empty authoritative set.
 
-No phase may publish secrets before step 2 or retire local recovery evidence
-before the complete migration exit gate passes.
+Private heads are applied before historical deletions. Public `30177` heads
+are used only as deletion-survival witnesses: a strictly newer public-only
+recreation preserves the existing local lifecycle row and key. The witness is
+not retained as an already-applied public update, so the ordinary subscription
+still owns public policy application and its runtime transitions. A private
+head covered by the historical deletion is removed from retention/overlay;
+the public witness does not reconstruct private configuration. The retained
+watermark also denies disk fallback when no newer private head exists: config
+reads, edits, and launch must refuse rather than execute deleted settings.
+Hydration and self-authored absorption reject covered retained private rows,
+even if an older client left such a row behind. A strictly newer validated
+private head restores config authority. The local identity/process receipt
+remains available for explicit deletion and owned-process Stop; config exports
+and persona cascades exclude identities without private authority.
+
+A kind:5 watermark for either managed-agent coordinate fences both heads at
+`created_at <= deletion.created_at`, including replay after restart. A newer
+recreation does not discard that watermark. Local deletion atomically prepares
+both signed tombstones, archive state, head removal, and an exact owner/agent
+cleanup obligation before destructive process/JSON/key cleanup. Inbound
+managed-agent deletion also prepares its obligation before cleanup. Failed
+cleanup keeps the obligation for boot recovery, which runs before positive
+reconciliation; pending cleanup gates authority readiness and head admission.
+Recovery targets journaled identities, not every agent absent from local disk:
+relay-only configurations are legitimate records, not deletion evidence.
+
+These are client recovery rules, not relay CAS or a cross-device lease. A
+concurrent edit arriving after the history snapshot remains an ordinary LWW
+race. No live two-device or provider conformance guarantee follows from the
+local bootstrap ordering alone.

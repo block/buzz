@@ -99,6 +99,8 @@ Auth is simple — authenticated or not. Channel membership gates content visibi
 
 One model. TLS in transit. At-rest encryption delegated to the storage layer (e.g., Postgres TDE, volume encryption). Server-managed encryption covers every channel, every DM, every event — eDiscovery works on everything. End-to-end encryption (NIP-44) is a future consideration for DMs.
 
+One deliberate exception: kind `30179`, an owner's private managed-agent config (agent private keys and API credentials), is NIP-44 ciphertext from the owner's key to itself. Its content is unavailable to relay-side discovery; the event's existence, tags, public agent projections, and the agent's own messages stay server-readable. See [NIP-PMA](docs/nips/NIP-PMA.md#encryption-exception).
+
 ---
 
 ## Huddles

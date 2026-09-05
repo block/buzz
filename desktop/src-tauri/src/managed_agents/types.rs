@@ -512,6 +512,8 @@ pub struct ManagedAgentProcess {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
+    /// Device-local lifecycle membership; relay-only visibility does not authorize edits/deploy.
+    pub has_local_lifecycle: bool,
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,

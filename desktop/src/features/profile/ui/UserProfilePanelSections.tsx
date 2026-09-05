@@ -7,6 +7,7 @@ import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import {
   getManagedAgentPrimaryActionLabel,
+  canStartManagedAgent,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
@@ -424,7 +425,14 @@ export function ProfileSummaryView({
           className={primaryActionsMotionClassName}
           concealed={primaryActionsConcealed}
           followMutation={followMutation}
-          agentActionDisabled={isAgentActionPending}
+          agentActionDisabled={
+            isAgentActionPending ||
+            Boolean(
+              managedAgent &&
+                !isManagedAgentActive(managedAgent) &&
+                !canStartManagedAgent(managedAgent),
+            )
+          }
           agentStartBlockReason={
             managedAgent
               ? agentPresenceStartBlockReason(

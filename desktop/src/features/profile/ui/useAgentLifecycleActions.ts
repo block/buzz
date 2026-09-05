@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import {
   isManagedAgentActive,
+  hasTrackedLocalAgentProcess,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
@@ -42,7 +43,10 @@ export function useAgentLifecycleActions({
           relayAgents: relayAgents ?? [],
           stopManagedAgent,
         });
-        if (managedAgent.backend.type === "local") {
+        if (
+          managedAgent.backend.type === "local" ||
+          hasTrackedLocalAgentProcess(managedAgent)
+        ) {
           clearActiveTurnsForAgentOnStop(managedAgent.pubkey);
         }
         toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}.`);

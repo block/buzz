@@ -120,8 +120,8 @@ fn stop_legacy_scalar_pid<R: tauri::Runtime>(
 /// pairs in other communities. Clears the matching agent session cache
 /// (pair-scoped when a pair key resolves). When no pair is tracked for this
 /// workspace, only legacy scalar-PID cleanup runs.
-pub fn stop_managed_agent_workspace_pair(
-    app: &AppHandle,
+pub fn stop_managed_agent_workspace_pair<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
 ) -> Result<(), String> {

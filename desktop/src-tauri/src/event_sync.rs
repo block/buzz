@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+mod managed_agent_bootstrap;
+
 /// Reconcile personas, teams, and managed agents into signed retention
 /// events. All readers consume the already-synced
 /// `personas.json`/`teams.json`/`managed-agents.json` that
@@ -17,6 +19,7 @@ pub fn run_event_sync(
     app: &tauri::AppHandle,
     owner_keys: &nostr::Keys,
     db_path: &Path,
+    agent_history_complete: bool,
 ) -> Result<(), String> {
     // Persona and agent legs stay best-effort: they log and swallow, and their
     // failure does not undo the boot team-membership repair. The team leg is
@@ -28,12 +31,64 @@ pub fn run_event_sync(
     migrate_personas_to_events(app, owner_keys, db_path);
     migrate_teams_to_events(app, owner_keys, db_path)?;
     reconcile_team_catalog_heads(app, owner_keys, db_path);
-    crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys, db_path);
+    if agent_history_complete {
+        crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys, db_path);
+    }
+    hydrate_private_config_overlay(app, owner_keys, db_path)?;
     // Negative-side backstop: retract any retained head whose disk record is
     // gone (a deletion whose atomic tombstone failed after removing the JSON).
     // Runs LAST so the positive legs' just-retained live heads are matched and
     // skipped; only genuine orphans remain.
     reconcile_deleted_heads(app, owner_keys, db_path);
+    Ok(())
+}
+
+/// Rebuild cached authority without racing inbound retention/overlay updates.
+/// Corrupt or unavailable retained authority is fatal, unlike an unavailable
+/// network bootstrap: falling back to disk here would execute stale config.
+fn hydrate_private_config_overlay<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    owner_keys: &nostr::Keys,
+    db_path: &Path,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    let state = app.state::<crate::app_state::AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    state
+        .managed_agent_authority_ready
+        .store(false, std::sync::atomic::Ordering::Release);
+    let scope = crate::managed_agents::retention::active_retention_scope(app, &state)?;
+    if scope.db_path != db_path || scope.owner_keys.public_key() != owner_keys.public_key() {
+        return Err("private authority hydration scope changed".into());
+    }
+    let conn = crate::managed_agents::retention::open_retention_db(db_path)?;
+    if !crate::managed_agents::retention::deletion_intent::agents(
+        &conn,
+        &owner_keys.public_key().to_hex(),
+    )?
+    .is_empty()
+    {
+        return Err(
+            "managed-agent deletion cleanup is pending; retry workspace initialization".into(),
+        );
+    }
+    let hydrated =
+        crate::managed_agents::private_config_overlay::hydrate_from_retention(&conn, owner_keys)?;
+    let count = hydrated.len();
+    *state
+        .private_managed_agent_overlay
+        .lock()
+        .map_err(|error| error.to_string())? = hydrated;
+    state
+        .managed_agent_authority_ready
+        .store(true, std::sync::atomic::Ordering::Release);
+    if count > 0 {
+        eprintln!("buzz-desktop: private-config-overlay: hydrated {count} agents from retention");
+    }
     Ok(())
 }
 
@@ -54,9 +109,27 @@ pub async fn run_event_sync_blocking(
     owner_keys: nostr::Keys,
     db_path: std::path::PathBuf,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || run_event_sync(&app, &owner_keys, &db_path))
-        .await
-        .map_err(|e| format!("event-sync: spawn_blocking failed: {e}"))?
+    let recovery_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::managed_agents::deletion_recovery::recover(&recovery_app)
+    })
+    .await
+    .map_err(|error| format!("agent deletion recovery task failed: {error}"))??;
+    // Offline/incomplete history is not evidence that an agent never existed.
+    // Keep cached reads available, but never mint a dominating boot head from
+    // stale disk until this exact owner/community history has been reconciled.
+    let agent_history_complete = match managed_agent_bootstrap::bootstrap(&app, &owner_keys).await {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("buzz-desktop: managed-agent boot publication deferred: {error}");
+            false
+        }
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        run_event_sync(&app, &owner_keys, &db_path, agent_history_complete)
+    })
+    .await
+    .map_err(|e| format!("event-sync: spawn_blocking failed: {e}"))?
 }
 
 /// Reconcile `personas.json` into the persona-event retention store.

@@ -23,7 +23,7 @@ mod inbound_tests;
 mod catalog_reconcile_tests;
 
 #[derive(Debug)]
-enum InboundRuntimeRefresh {
+pub(super) enum InboundRuntimeRefresh {
     Local {
         pubkey: String,
         relay_urls: Vec<String>,
@@ -145,7 +145,7 @@ pub async fn reconcile_inbound_persona_event(
     Ok(())
 }
 
-fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
+pub(super) fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
     event_json: String,
     arrival_relay_url: String,
     app: AppHandle<R>,
@@ -162,7 +162,8 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
         team_events::team_content_from_event,
     };
     use buzz_core_pkg::kind::{
-        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM, KIND_TEAM_CATALOG,
+        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM,
+        KIND_TEAM_CATALOG,
     };
     use nostr::JsonUtil;
 
@@ -186,11 +187,22 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
     // Non-deletion upserts (30175/76/77) and the owner's own 30178 catalog head
     // share one scope + connection resolved below. A 30178 head carries no
     // local record, so it routes to witness retention through the shared
-    // dispatcher; the store-bearing kinds fall through to their spine.
+    // dispatcher; the store-bearing kinds fall through to their spine. The
+    // owner-encrypted 30179 private config has its own spine (overlay, not the
+    // JSON store) and dispatches before the shared scope is resolved.
     if !matches!(
         kind,
-        KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_TEAM_CATALOG
+        KIND_PERSONA
+            | KIND_TEAM
+            | KIND_MANAGED_AGENT
+            | KIND_PRIVATE_MANAGED_AGENT
+            | KIND_TEAM_CATALOG
     ) {
+        return Ok(None);
+    }
+
+    if kind == KIND_PRIVATE_MANAGED_AGENT {
+        reconcile_inbound_private_managed_agent(&event, &arrival_relay_url, &app, &state)?;
         return Ok(None);
     }
 
@@ -407,6 +419,80 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
     Ok(runtime_refresh)
 }
 
+fn apply_inbound_private_managed_agent_event(
+    event: &nostr::Event,
+    owner_keys: &nostr::Keys,
+    conn: &rusqlite::Connection,
+    overlay: &mut crate::managed_agents::private_config_overlay::PrivateConfigOverlay,
+) -> Result<crate::managed_agents::retention::InboundOutcome, String> {
+    use crate::managed_agents::{
+        private_config_overlay::PrivateConfigPatch,
+        retention::{retain_inbound_event, InboundOutcome, RetainedEvent},
+    };
+    use buzz_core_pkg::{kind::KIND_PRIVATE_MANAGED_AGENT, private_managed_agent};
+    use nostr::JsonUtil;
+
+    // The codec verifies signature/owner, decrypts, validates the nsec binding,
+    // and rejects malformed portable config before any local state changes.
+    let (_, payload) = private_managed_agent::validate_and_decrypt(event, owner_keys)
+        .map_err(|error| format!("invalid private managed-agent event: {error}"))?;
+    let d_tag = payload.agent_pubkey.clone();
+    // Constructing the Desktop patch validates backend-specific fields without
+    // mutating the live overlay or retained head.
+    let patch = PrivateConfigPatch::from_payload(payload)?;
+    let outcome = retain_inbound_event(
+        conn,
+        &RetainedEvent {
+            kind: KIND_PRIVATE_MANAGED_AGENT,
+            pubkey: event.pubkey.to_hex(),
+            d_tag,
+            content: event.content.clone(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: false,
+        },
+    )?;
+    if outcome == InboundOutcome::Applied {
+        overlay.insert_patch(patch);
+    }
+    Ok(outcome)
+}
+
+fn reconcile_inbound_private_managed_agent<R: tauri::Runtime>(
+    event: &nostr::Event,
+    arrival_relay_url: &str,
+    app: &AppHandle<R>,
+    state: &AppState,
+) -> Result<(), String> {
+    use crate::managed_agents::retention::{open_retention_db, InboundOutcome};
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let Some(scope) =
+        crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
+    else {
+        return Ok(());
+    };
+
+    let mut overlay = state
+        .private_managed_agent_overlay
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let conn = open_retention_db(&scope.db_path)?;
+    let outcome =
+        apply_inbound_private_managed_agent_event(event, &scope.owner_keys, &conn, &mut overlay)?;
+    if outcome == InboundOutcome::Skipped {
+        return Ok(());
+    }
+
+    drop(overlay);
+    try_regenerate_nest(app);
+    let _ = app.emit("agents-data-changed", ());
+    Ok(())
+}
+
 /// Retain an inbound kind:30178 catalog head as this device's publication
 /// witness — retention-only, never a local store write or a republish. Returns
 /// `true` when the event was a catalog head this fn handled (so the caller
@@ -487,7 +573,7 @@ fn parse_verified_inbound_event(event_json: &str) -> Result<nostr::Event, String
 /// Parse a NIP-09 `a`-tag coordinate `<kind>:<owner_pubkey>:<d_tag>` into its
 /// target kind and d-tag. Returns `None` if the tag is absent or malformed, so
 /// the caller no-ops on a tombstone it can't route.
-fn parse_deletion_coordinate(event: &nostr::Event) -> Option<(u32, String)> {
+pub(super) fn parse_deletion_coordinate(event: &nostr::Event) -> Option<(u32, String)> {
     event.tags.iter().find_map(|tag| {
         let values: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
         if values.first() != Some(&"a") {
@@ -511,58 +597,68 @@ fn parse_deletion_coordinate(event: &nostr::Event) -> Option<(u32, String)> {
     })
 }
 
-/// Apply an inbound kind:5 NIP-09 deletion: remove the local record at the
-/// tombstone's target coordinate, scoped per-kind. Mirrors the upsert spine —
-/// arrival-scoped retention resolution under the store lock, then a per-kind
-/// store mutation — but removes rather than patches. Unknown/malformed
-/// coordinates no-op, as does a tombstone whose arrival community is no longer
-/// active.
-fn reconcile_inbound_tombstone<R: tauri::Runtime>(
+/// Resolve an inbound kind:5 tombstone against the scope owner and the
+/// retention store: authorize it, run the caller's fallible local-store
+/// removal, commit the tombstone, and return the `(target_kind, target_d_tag)`
+/// that was removed — or `None` when the tombstone must no-op (the store is
+/// then untouched).
+///
+/// Authorization is TWO bindings, both enforced in Rust because the frontend
+/// owner filter reads attacker-controlled fields and callable IPC bypasses it
+/// anyway: `parse_deletion_coordinate` proves the signer owns the coordinate
+/// it NAMES, and the check here proves that signer is the active workspace
+/// owner. The local stores match by d-tag alone, so without the second
+/// binding a validly signed foreign-owner tombstone naming its OWN coordinate
+/// with a colliding d-tag would delete this owner's record.
+///
+/// Retention follows the relay's coordinate-deletion contract
+/// (`commit_inbound_tombstone_covering`): a covered head newer than the
+/// tombstone preserves the record; the tombstone row and the covered head(s)
+/// commit in ONE transaction only after `remove_json` succeeds, so a failed
+/// store write leaves the identical relay tombstone retryable. The two
+/// managed-agent kinds are one record locally, so a kind:5 naming EITHER
+/// coordinate covers both the kind:30177 and kind:30179 heads — the local
+/// delete path tombstones both, but the sibling kind:5 may be lost or unsent,
+/// and a surviving 30179 head would rematerialize the deleted secret-bearing
+/// config at the next boot's `hydrate_from_retention`.
+fn resolve_inbound_tombstone_with_store<F>(
     event: &nostr::Event,
-    arrival_relay_url: &str,
-    app: &AppHandle<R>,
-    state: &AppState,
-) -> Result<(), String> {
-    use crate::managed_agents::{
-        load_managed_agents, load_teams,
-        retention::{
-            commit_inbound_tombstone_with_store, open_retention_db, tombstone_retention_d_tag,
-            InboundOutcome, RetainedEvent,
-        },
-        save_managed_agents, save_teams,
+    scope_owner: &nostr::PublicKey,
+    conn: &rusqlite::Connection,
+    remove_json: F,
+) -> Result<Option<(u32, String)>, String>
+where
+    F: FnOnce(u32, &str) -> Result<(), String>,
+{
+    use crate::managed_agents::retention::{
+        commit_inbound_tombstone_covering, tombstone_retention_d_tag, InboundOutcome, RetainedEvent,
     };
     use buzz_core_pkg::kind::{
-        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM, KIND_TEAM_CATALOG,
+        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM,
+        KIND_TEAM_CATALOG,
     };
     use nostr::JsonUtil;
 
+    if event.pubkey != *scope_owner {
+        return Ok(None); // foreign-owner tombstone: not authorized in this scope
+    }
     let Some((target_kind, target_d_tag)) = parse_deletion_coordinate(event) else {
-        return Ok(()); // no routable coordinate — nothing to delete
+        return Ok(None); // no routable coordinate — nothing to delete
     };
     if !matches!(
         target_kind,
-        KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_TEAM_CATALOG
+        KIND_PERSONA
+            | KIND_TEAM
+            | KIND_MANAGED_AGENT
+            | KIND_PRIVATE_MANAGED_AGENT
+            | KIND_TEAM_CATALOG
     ) {
-        return Ok(()); // deletion for a kind we don't track locally
+        return Ok(None); // deletion for a kind we don't track locally
     }
 
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-
-    // Resolve against the retained tombstone row (keyed by the target
-    // coordinate, F2c) so a re-received tombstone or one older than a pending
-    // local edit is a no-op. Scoped to the arrival community, so a workspace
-    // switch since arrival drops the tombstone instead of retaining it — and
-    // deleting a record — in the wrong community's store.
-    let Some(scope) =
-        crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
-    else {
-        return Ok(());
-    };
-    let conn = open_retention_db(&scope.db_path)?;
     let owner_hex = event.pubkey.to_hex();
+    // Keyed by the target coordinate (F2c) so a re-received tombstone or one
+    // older than a pending local edit is a no-op.
     let inbound_tombstone = RetainedEvent {
         kind: KIND_DELETION,
         pubkey: owner_hex.clone(),
@@ -572,36 +668,92 @@ fn reconcile_inbound_tombstone<R: tauri::Runtime>(
         raw_event: event.as_json(),
         pending_sync: false,
     };
-
-    // Teams reference a member by its local persona `id`, which differs from
-    // the d-tag for pack personas. Capture the id before the removal so the
-    // post-tombstone member-loss refresh can find the affected teams — after
-    // the closure runs, the persona is gone from the store.
-    let deleted_persona_id = (target_kind == KIND_PERSONA)
-        .then(|| load_personas(app))
-        .transpose()?
-        .and_then(|personas| {
-            personas
-                .iter()
-                .find(|record| persona_d_tag(record) == target_d_tag)
-                .map(|record| record.id.clone())
-        });
-
-    // Resolve the tombstone against BOTH its own kind:5 row AND the covered
-    // `(target_kind, owner, d_tag)` head, purging the head atomically with the
-    // tombstone commit only after the fallible JSON save — the relay's
-    // coordinate-deletion contract (see `commit_inbound_tombstone_with_store`).
-    // The removal uses the SAME per-kind match rule the apply fns use: persona
-    // by `persona_d_tag`, team by `id`, managed-agent by `pubkey`.
-    let outcome = commit_inbound_tombstone_with_store(
-        &conn,
+    let covered_kinds: &[u32] =
+        if matches!(target_kind, KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT) {
+            &[KIND_MANAGED_AGENT, KIND_PRIVATE_MANAGED_AGENT]
+        } else {
+            std::slice::from_ref(&target_kind)
+        };
+    let outcome = commit_inbound_tombstone_covering(
+        conn,
         &inbound_tombstone,
-        target_kind,
+        covered_kinds,
         &owner_hex,
         &target_d_tag,
-        || match target_kind {
+        || remove_json(target_kind, &target_d_tag),
+    )?;
+    if outcome == InboundOutcome::Skipped {
+        return Ok(None);
+    }
+    Ok(Some((target_kind, target_d_tag)))
+}
+
+/// Store-free [`resolve_inbound_tombstone_with_store`]: the authorization and
+/// retention decisions alone, so the security seam is testable without a live
+/// AppHandle.
+#[cfg(test)]
+fn resolve_inbound_tombstone(
+    event: &nostr::Event,
+    scope_owner: &nostr::PublicKey,
+    conn: &rusqlite::Connection,
+) -> Result<Option<(u32, String)>, String> {
+    resolve_inbound_tombstone_with_store(event, scope_owner, conn, |_, _| Ok(()))
+}
+
+/// Apply an inbound kind:5 NIP-09 deletion: remove the local record at the
+/// tombstone's target coordinate, scoped per-kind. Mirrors the upsert spine —
+/// arrival-scoped retention resolution under the store lock, then a per-kind
+/// store mutation — but removes rather than patches. Unknown/malformed
+/// coordinates no-op, as does a tombstone whose arrival community is no longer
+/// active or whose signer is not the scope owner.
+fn reconcile_inbound_tombstone<R: tauri::Runtime>(
+    event: &nostr::Event,
+    arrival_relay_url: &str,
+    app: &AppHandle<R>,
+    state: &AppState,
+) -> Result<(), String> {
+    use crate::managed_agents::{load_teams, retention::open_retention_db, save_teams};
+    use buzz_core_pkg::kind::{
+        KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM, KIND_TEAM_CATALOG,
+    };
+
+    let _transition_guard = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+
+    // Scoped to the arrival community, so a workspace switch since arrival
+    // drops the tombstone instead of retaining it — and deleting a record —
+    // in the wrong community's store.
+    let Some(scope) =
+        crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
+    else {
+        return Ok(());
+    };
+    let conn = open_retention_db(&scope.db_path)?;
+
+    // Teams reference a member by its local persona `id`, which differs from
+    // the d-tag for pack personas. Capture the id during the removal so the
+    // post-tombstone member-loss refresh can find the affected teams — after
+    // the closure runs, the persona is gone from the store.
+    let mut deleted_persona_id: Option<String> = None;
+    // The removal uses the SAME per-kind match rule the apply fns use: persona
+    // by `persona_d_tag`, team by `id`, managed-agent by `pubkey`.
+    let resolved = resolve_inbound_tombstone_with_store(
+        event,
+        &scope.owner_keys.public_key(),
+        &conn,
+        |target_kind, target_d_tag| match target_kind {
             KIND_PERSONA => {
                 let mut personas = load_personas(app)?;
+                deleted_persona_id = personas
+                    .iter()
+                    .find(|record| persona_d_tag(record) == target_d_tag)
+                    .map(|record| record.id.clone());
                 personas.retain(|record| persona_d_tag(record) != target_d_tag);
                 save_personas(app, &personas)
             }
@@ -610,22 +762,37 @@ fn reconcile_inbound_tombstone<R: tauri::Runtime>(
                 teams.retain(|record| record.id != target_d_tag);
                 save_teams(app, &teams)
             }
-            KIND_MANAGED_AGENT => {
-                let mut agents = load_managed_agents(app)?;
-                agents.retain(|record| record.pubkey != target_d_tag);
-                save_managed_agents(app, &agents)
+            KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT => {
+                crate::managed_agents::deletion_recovery::finish(
+                    app,
+                    state,
+                    &conn,
+                    &scope.owner_keys.public_key().to_hex(),
+                    target_d_tag,
+                )
             }
             // A 30178 catalog head has no local JSON record — it lives only in
             // the retention store as this device's publication witness. The
-            // covered-head purge inside `commit_inbound_tombstone_with_store`
-            // removes the retained row; there is nothing else to delete.
+            // covered-head purge inside the retention commit removes the
+            // retained row; there is nothing else to delete.
             KIND_TEAM_CATALOG => Ok(()),
             _ => unreachable!("target kind gated above"),
         },
     )?;
-    if outcome == InboundOutcome::Skipped {
-        return Ok(());
+    if event.pubkey == scope.owner_keys.public_key() {
+        if let Some((KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT, agent)) =
+            parse_deletion_coordinate(event)
+        {
+            state
+                .private_managed_agent_overlay
+                .lock()
+                .map_err(|e| e.to_string())?
+                .refresh_config_authority(&conn, &scope.owner_keys, &agent)?;
+        }
     }
+    let Some((target_kind, target_d_tag)) = resolved else {
+        return Ok(());
+    };
 
     // Converge the catalog after a tracked removal, matching the local delete
     // paths. A team tombstone must also retract its separate 30178 catalog

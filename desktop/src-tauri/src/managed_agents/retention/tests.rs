@@ -699,10 +699,10 @@ fn inbound_tombstone_skips_when_covered_head_is_newer() {
     // Older tombstone (t=1000) arrives late.
     let tombstone = sample_tombstone(30175, 1000);
     let removed = std::cell::Cell::new(false);
-    let outcome = commit_inbound_tombstone_with_store(
+    let outcome = commit_inbound_tombstone_covering(
         &conn,
         &tombstone,
-        30175,
+        &[30175],
         "abc123",
         "test-persona",
         || {
@@ -746,10 +746,10 @@ fn inbound_tombstone_purges_covered_head_after_json_removal() {
 
     let tombstone = sample_tombstone(30175, 1000);
     let removed = std::cell::Cell::new(false);
-    let outcome = commit_inbound_tombstone_with_store(
+    let outcome = commit_inbound_tombstone_covering(
         &conn,
         &tombstone,
-        30175,
+        &[30175],
         "abc123",
         "test-persona",
         || {
@@ -789,10 +789,10 @@ fn inbound_tombstone_json_failure_leaves_replay_retryable() {
     retain_inbound_event(&conn, &head).unwrap();
 
     let tombstone = sample_tombstone(30175, 2000);
-    let err = commit_inbound_tombstone_with_store(
+    let err = commit_inbound_tombstone_covering(
         &conn,
         &tombstone,
-        30175,
+        &[30175],
         "abc123",
         "test-persona",
         || Err("disk full".to_string()),
@@ -815,10 +815,10 @@ fn inbound_tombstone_json_failure_leaves_replay_retryable() {
     // Replay: the removal now succeeds and both effects land, proving the
     // failed attempt consumed nothing.
     let removed = std::cell::Cell::new(false);
-    let outcome = commit_inbound_tombstone_with_store(
+    let outcome = commit_inbound_tombstone_covering(
         &conn,
         &tombstone,
-        30175,
+        &[30175],
         "abc123",
         "test-persona",
         || {
@@ -840,5 +840,81 @@ fn inbound_tombstone_json_failure_leaves_replay_retryable() {
             .unwrap()
             .is_some(),
         "replay commits the tombstone row"
+    );
+}
+
+#[test]
+fn managed_agent_deletion_watermark_covers_both_heads_after_reopen() {
+    for deleted_kind in [30177, 30179] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retention.db");
+        let conn = open_retention_db(&path).unwrap();
+        let tombstone = sample_tombstone(deleted_kind, 2000);
+        retain_event(&conn, &tombstone).unwrap();
+        drop(conn);
+        let conn = open_retention_db(&path).unwrap();
+        for head_kind in [30177, 30179] {
+            for timestamp in [1999, 2000, 2001] {
+                let mut head = sample_event();
+                head.kind = head_kind;
+                head.created_at = timestamp;
+                let expected = if timestamp <= 2000 {
+                    InboundOutcome::Skipped
+                } else {
+                    InboundOutcome::Applied
+                };
+                assert_eq!(
+                    inbound_event_outcome(&conn, &head).unwrap(),
+                    expected,
+                    "delete {deleted_kind}, head {head_kind} at {timestamp}"
+                );
+                if timestamp <= 2000 {
+                    assert!(
+                        retain_event(&conn, &head).is_err(),
+                        "local writers must not bypass deletion watermarks"
+                    );
+                }
+                // The same d-tag under a different owner is not covered.
+                head.pubkey = "another-owner".into();
+                assert_eq!(
+                    inbound_event_outcome(&conn, &head).unwrap(),
+                    InboundOutcome::Applied
+                );
+            }
+        }
+        // A managed-agent deletion must not cover unrelated kinds.
+        assert_eq!(
+            inbound_event_outcome(&conn, &sample_event()).unwrap(),
+            InboundOutcome::Applied
+        );
+    }
+}
+
+#[test]
+fn historical_managed_agent_delete_still_fences_older_sibling_head() {
+    let conn = open_retention_db(Path::new(":memory:")).unwrap();
+    let mut head = sample_event();
+    head.kind = 30177;
+    head.created_at = 3000;
+    retain_event(&conn, &head).unwrap();
+    let tombstone = sample_tombstone(30177, 2000);
+    assert_eq!(
+        commit_inbound_tombstone_covering(
+            &conn,
+            &tombstone,
+            &[30177, 30179],
+            &head.pubkey,
+            &head.d_tag,
+            || panic!("newer recreation must survive"),
+        )
+        .unwrap(),
+        InboundOutcome::Skipped
+    );
+    head.kind = 30179;
+    head.created_at = 1000;
+    assert_eq!(
+        retain_inbound_event(&conn, &head).unwrap(),
+        InboundOutcome::Skipped,
+        "historical deletion remains a watermark even when a newer public head survives"
     );
 }

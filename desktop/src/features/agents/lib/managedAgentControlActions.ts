@@ -32,7 +32,20 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
+/** A native receipt owns Stop even when the next backend is remote. */
+export function hasTrackedLocalAgentProcess(agent: Pick<ManagedAgent, "pid">) {
+  return agent.pid != null;
+}
+
+/** Local Start can materialize; provider deploy requires a local lifecycle row. */
+export function canStartManagedAgent(agent: ManagedAgent) {
+  return agent.backend.type === "local" || agent.hasLocalLifecycle !== false;
+}
+
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
+  if (hasTrackedLocalAgentProcess(agent)) return "Stop";
+  if (!isManagedAgentActive(agent) && !canStartManagedAgent(agent))
+    return "Deploy unavailable on this device";
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
   }
@@ -82,6 +95,11 @@ export async function startManagedAgentWithRules({
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
+  if (!canStartManagedAgent(agent)) {
+    throw new Error(
+      "This remote agent has no local deployment record on this device.",
+    );
+  }
   await startManagedAgent(agent.pubkey);
 }
 
@@ -98,7 +116,10 @@ export async function respawnManagedAgentWithRules({
    * clear stale working badges at the right boundary. */
   onStopped?: () => void;
 }) {
-  if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
+  if (
+    hasTrackedLocalAgentProcess(agent) ||
+    (agent.backend.type === "local" && isManagedAgentActive(agent))
+  ) {
     await stopManagedAgent(agent.pubkey);
     onStopped?.();
   }
@@ -116,7 +137,10 @@ export async function stopManagedAgentWithRules({
   agent: ManagedAgent;
   stopManagedAgent: StopManagedAgent;
 } & ManagedAgentChannelContext): Promise<ManagedAgentActionResult> {
-  if (agent.backend.type === "provider") {
+  if (
+    agent.backend.type === "provider" &&
+    !hasTrackedLocalAgentProcess(agent)
+  ) {
     const channelId = resolveManagedAgentChannelId(agent, {
       channels,
       preferredChannelId,

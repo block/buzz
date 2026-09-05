@@ -15,7 +15,7 @@ use crate::secret_store::{KeyringProbe, SecretStore};
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
-fn agent_keyring_name(pubkey: &str) -> String {
+pub(super) fn agent_keyring_name(pubkey: &str) -> String {
     format!("agent:{pubkey}")
 }
 
@@ -24,7 +24,7 @@ fn agent_keyring_name(pubkey: &str) -> String {
 /// `SecretStore::shared` so identity and agent callers share one instance —
 /// and therefore one in-memory cache and one mutex — preventing last-writer-wins
 /// races on concurrent blob writes.
-fn agent_secret_store() -> Option<&'static SecretStore> {
+pub(super) fn agent_secret_store() -> Option<&'static SecretStore> {
     if cfg!(feature = "system-keyring") {
         Some(SecretStore::shared(keyring_service()))
     } else {
@@ -48,7 +48,7 @@ pub(crate) fn managed_agents_store_path<R: tauri::Runtime>(
     Ok(managed_agents_base_dir(app)?.join("managed-agents.json"))
 }
 
-fn managed_agents_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn managed_agents_logs_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("logs");
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create logs dir: {error}"))?;
     Ok(dir)
@@ -82,7 +82,10 @@ fn is_safe_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
-pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
+pub fn managed_agent_log_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pubkey: &str,
+) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
 }
 
@@ -133,7 +136,7 @@ fn newest_agent_log_in_dir(dir: &Path, pubkey: &str) -> Option<PathBuf> {
 /// The keyring operations the migration chokepoint needs. Abstracted so the
 /// migrate-and-strip decision logic ([`migrate_inline_key`]) can be unit-tested
 /// against a fake without touching the live OS keyring.
-trait KeyStore {
+pub(super) trait KeyStore {
     fn probe(&self, name: &str) -> KeyringProbe;
     /// Read a key. `Ok(None)` is "no such entry" (absent); `Err` is a backend
     /// failure (keyring unreachable) — the caller MUST NOT collapse the two.
@@ -310,7 +313,7 @@ pub(crate) fn backup_invalid_store(path: &Path) {
 ///   writes clean JSON and plaintext stops lingering on disk; if still
 ///   unreachable, leave it inline. This makes the strip deterministic on the
 ///   next reachable boot rather than waiting for a non-deterministic save.
-fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
+pub(crate) fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
     let Some(store) = agent_secret_store() else {
         return;
     };
@@ -325,7 +328,7 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
 /// to spawn an agent whose key could not be read (see the empty-key bail in
 /// `spawn_agent_child`). Empty here never means "fine" — it means "no usable
 /// key this boot."
-fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
+pub(super) fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
     for record in records.iter_mut() {
         // A key-less definition (no pubkey yet — unified agent model) has no
         // keyring entry by construction; keys are minted on first start.
@@ -595,14 +598,6 @@ pub(crate) fn try_delete_agent_key(pubkey: &str) -> Result<(), String> {
     } else {
         // No keyring backend — nothing to clean up.
         Ok(())
-    }
-}
-
-/// Remove an agent's key from the keyring (best-effort). Called when an agent
-/// is deleted so its secret does not linger in the OS store.
-pub fn delete_agent_key(pubkey: &str) {
-    if let Err(e) = try_delete_agent_key(pubkey) {
-        eprintln!("buzz-desktop: failed to delete agent {pubkey} key from keyring: {e}");
     }
 }
 
@@ -991,4 +986,4 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
 
 #[cfg(test)]
 #[path = "storage_tests.rs"]
-mod tests;
+pub(super) mod tests;

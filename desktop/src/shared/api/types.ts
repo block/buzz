@@ -306,6 +306,8 @@ export type ManagedAgentBackend =
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
+  /** False for a relay-only identity without a local lifecycle row. */
+  hasLocalLifecycle?: boolean;
   pubkey: string;
   name: string;
   personaId: string | null;

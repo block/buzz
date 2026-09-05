@@ -597,6 +597,55 @@ fn definition_fields_present_in_snapshot() {
     assert!(!snapshot.definition.respond_to_allowlist.is_empty());
 }
 
+/// A definition-level mode must carry the DEFINITION list, never the
+/// instance list — mode and list travel together (`minimal_record` has
+/// distinct values on each level, so a mix-up is detectable).
+#[test]
+fn definition_respond_to_keeps_definition_list_not_instance_list() {
+    let record = minimal_record();
+    let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
+    assert_eq!(snapshot.definition.respond_to.as_deref(), Some("allowlist"));
+    assert_eq!(snapshot.definition.respond_to_allowlist, vec!["abc123def"]);
+}
+
+/// A record materialized from a kind:30179 relay head carries its effective
+/// respond_to/allowlist only on the INSTANCE fields. Export must fall back
+/// to them (like parallelism already does) instead of advertising
+/// `respond_to: None` while the agent enforces an allowlist.
+#[test]
+fn respond_to_falls_back_to_instance_fields_when_definition_unset() {
+    let mut record = minimal_record();
+    record.definition_respond_to = None;
+    record.definition_respond_to_allowlist = vec![];
+    record.respond_to = RespondTo::Allowlist;
+    record.respond_to_allowlist = vec!["ef".repeat(32)];
+
+    let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
+    assert_eq!(snapshot.definition.respond_to.as_deref(), Some("allowlist"));
+    assert_eq!(
+        snapshot.definition.respond_to_allowlist,
+        vec!["ef".repeat(32)]
+    );
+}
+
+/// The instance fallback exports the enforced default explicitly rather
+/// than `None` — an owner-only agent advertises owner-only.
+#[test]
+fn respond_to_fallback_exports_explicit_owner_only_default() {
+    let mut record = minimal_record();
+    record.definition_respond_to = None;
+    record.definition_respond_to_allowlist = vec![];
+    record.respond_to = RespondTo::default();
+    record.respond_to_allowlist = vec![];
+
+    let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
+    assert_eq!(
+        snapshot.definition.respond_to.as_deref(),
+        Some("owner-only")
+    );
+    assert!(snapshot.definition.respond_to_allowlist.is_empty());
+}
+
 #[test]
 fn profile_fields_present_in_snapshot() {
     let mut record = minimal_record();

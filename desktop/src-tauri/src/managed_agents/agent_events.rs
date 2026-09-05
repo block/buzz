@@ -152,7 +152,26 @@ pub fn managed_agent_content_from_event(
 /// live. The coordinate delete removes the agent for every client and across
 /// reboots.
 pub fn build_agent_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<EventBuilder, String> {
-    let coord = format!("{KIND_MANAGED_AGENT}:{owner_pubkey_hex}:{d_tag}");
+    build_agent_delete_for_kind(KIND_MANAGED_AGENT, d_tag, owner_pubkey_hex)
+}
+
+pub fn build_private_agent_delete(
+    d_tag: &str,
+    owner_pubkey_hex: &str,
+) -> Result<EventBuilder, String> {
+    build_agent_delete_for_kind(
+        buzz_core_pkg::kind::KIND_PRIVATE_MANAGED_AGENT,
+        d_tag,
+        owner_pubkey_hex,
+    )
+}
+
+fn build_agent_delete_for_kind(
+    target_kind: u32,
+    d_tag: &str,
+    owner_pubkey_hex: &str,
+) -> Result<EventBuilder, String> {
+    let coord = format!("{target_kind}:{owner_pubkey_hex}:{d_tag}");
     let tag = Tag::parse(["a", coord.as_str()]).map_err(|e| format!("invalid a-tag: {e}"))?;
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
 }

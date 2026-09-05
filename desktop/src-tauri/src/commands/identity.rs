@@ -415,6 +415,14 @@ pub(crate) fn commit_imported_identity(
 
     let storage = persist(&keys)?;
 
+    // Serialize the identity scope transition with inbound private-config
+    // handling, which holds this lock from owner resolution through overlay
+    // insertion. Otherwise an old-owner patch could land after this clear.
+    let _managed_agents_store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+
     // Update in-memory keys BEFORE clearing recovery flags. The Release
     // stores below pair with Acquire loads in get_identity: a reader
     // observing false is guaranteed to see the updated keys.
@@ -424,6 +432,14 @@ pub(crate) fn commit_imported_identity(
         *active_keys = keys;
         state.set_identity_storage(storage);
     }
+    state
+        .managed_agent_authority_ready
+        .store(false, std::sync::atomic::Ordering::Release);
+    state
+        .private_managed_agent_overlay
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clear();
 
     // Clear both recovery flags — an import is valid in either lost or
     // keyring-locked state and resolves both. In the locked case the

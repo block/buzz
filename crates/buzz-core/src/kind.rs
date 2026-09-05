@@ -108,13 +108,14 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// dedicated push lease tables.
 pub const KIND_PUSH_LEASE: u32 = 30350;
 
-/// NIP-PMA: owner-encrypted private managed-agent aggregate.
+/// NIP-PMA: owner-encrypted private managed-agent config.
 ///
-/// Addressed by `(owner pubkey, kind, agent pubkey)`. The signed outer tags
-/// expose only the agent coordinate, CAS generation/predecessor, and active/deleted
-/// state required for relay enforcement. Content is NIP-44 v2 encrypted from
-/// the owner's key to itself and contains the runnable identity/configuration
-/// plus exact public projection bindings. See `docs/nips/NIP-PMA.md`.
+/// Addressed by `(owner pubkey, kind, agent pubkey)` and resolved by ordinary
+/// NIP-33 last-write-wins. The signed outer tags expose only the agent
+/// coordinate plus an advisory generation/predecessor pair (validated for
+/// shape, never CAS-enforced). Content is NIP-44 v2 encrypted from the owner's
+/// key to itself and contains the agent nsec, optional NIP-OA attestation, and
+/// the portable runnable configuration. See `docs/nips/NIP-PMA.md`.
 pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
 
 /// Kinds whose stored events are readable only by their author.

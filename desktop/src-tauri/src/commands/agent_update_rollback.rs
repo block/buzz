@@ -12,6 +12,7 @@ pub(super) struct AgentUpdateRollback {
     attempted_record: ManagedAgentRecord,
     previous_record: ManagedAgentRecord,
     preserve_access_policy: bool,
+    scope: Option<std::path::PathBuf>,
 }
 
 impl AgentUpdateRollback {
@@ -24,14 +25,18 @@ impl AgentUpdateRollback {
             attempted_record: attempted.clone(),
             previous_record,
             preserve_access_policy,
+            scope: None,
         }
+    }
+
+    pub(super) fn with_scope(mut self, scope: std::path::PathBuf) -> Self {
+        self.scope = Some(scope);
+        self
     }
 }
 
 fn copy_runtime_state(from: &ManagedAgentRecord, to: &mut ManagedAgentRecord) {
     to.runtime_pid = from.runtime_pid;
-    to.backend = from.backend.clone();
-    to.backend_agent_id.clone_from(&from.backend_agent_id);
     to.provider_binary_path
         .clone_from(&from.provider_binary_path);
     to.last_started_at.clone_from(&from.last_started_at);
@@ -85,6 +90,22 @@ fn restore_agent_update(
     Ok(())
 }
 
+// Caller holds store: compare against current relay config, not its stale disk
+// mirror. Backend and resource identity are config, never normalized as runtime.
+fn restore_authoritative_update(
+    state: &AppState,
+    records: &mut [ManagedAgentRecord],
+    pubkey: &str,
+    rollback: AgentUpdateRollback,
+) -> Result<(), String> {
+    let record = records
+        .iter_mut()
+        .find(|record| record.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found while rolling back failed rename"))?;
+    *record = crate::managed_agents::private_config_overlay::resolved_local_record(state, record)?;
+    restore_agent_update(records, pubkey, rollback)
+}
+
 pub(super) fn rollback_failed_agent_update(
     app: &AppHandle,
     state: &AppState,
@@ -96,14 +117,20 @@ pub(super) fn rollback_failed_agent_update(
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        if rollback.scope.as_deref() != Some(scope.db_path.as_path()) {
+            return Err("workspace changed before failed rename rollback; not restored".into());
+        }
         let mut records = load_managed_agents(app)?;
-        restore_agent_update(&mut records, pubkey, rollback)?;
-        save_managed_agents(app, &records)?;
+        restore_authoritative_update(state, &mut records, pubkey, rollback)?;
         let restored = records
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found after failed rename rollback"))?;
-        super::agents::retain_managed_agent_pending(app, state, restored);
+        // Commit authority before its disk mirror. A disk-save failure must not
+        // leave the old retained head shadowing a rollback reported as saved.
+        super::agents::retain_managed_agent_pending(app, state, restored)?;
+        save_managed_agents(app, &records)?;
     }
     try_regenerate_nest(app);
     Ok(())
@@ -227,5 +254,48 @@ mod tests {
         assert_eq!(records[0].last_exit_code, Some(1));
         assert_eq!(records[0].last_error.as_deref(), Some("harness exited"));
         assert_eq!(records[0].updated_at, "runtime-change");
+    }
+    #[test]
+    fn relay_changes_and_backend_identity_fence_failed_rename_rollback() {
+        use crate::managed_agents::private_config_overlay::{
+            test_relay_payload, PrivateConfigOverlay,
+        };
+        let state = crate::app_state::build_app_state();
+        state
+            .managed_agent_authority_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        let pubkey = "ac".repeat(32);
+        let mut payload = test_relay_payload(&pubkey);
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(payload.clone()).unwrap();
+        let attempted = overlay.materialize_relay_only_record(&pubkey, &[]).unwrap();
+        let mut previous = attempted.clone();
+        previous.name = "previous name".into();
+        for change in ["prompt", "backend", "resource"] {
+            let mut records = vec![attempted.clone()];
+            payload = test_relay_payload(&pubkey);
+            match change {
+                "prompt" => payload.config.system_prompt = Some("newer relay prompt".into()),
+                "backend" => {
+                    payload.config.backend =
+                        serde_json::json!({"type":"provider","id":"remote","config":{}})
+                }
+                _ => payload.config.backend_agent_id = Some("newer resource".into()),
+            }
+            state
+                .private_managed_agent_overlay
+                .lock()
+                .unwrap()
+                .insert(payload.clone())
+                .unwrap();
+            let error = restore_authoritative_update(
+                &state,
+                &mut records,
+                &pubkey,
+                AgentUpdateRollback::new(previous.clone(), &attempted, false),
+            )
+            .unwrap_err();
+            assert!(error.contains("changed again"), "{change}: {error}");
+        }
     }
 }

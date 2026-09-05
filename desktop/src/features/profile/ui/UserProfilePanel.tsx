@@ -316,7 +316,12 @@ export function UserProfilePanel({
     [effectivePubkey, isBot, managedAgent, profile, relayAgent, viewerIsOwner],
   );
   // Observer ingestion is owner-global across local and declared-owned agents.
-  const canEditAgent = Boolean(isOwner && (managedAgent ?? resolvedPersona));
+  const canEditAgent = Boolean(
+    isOwner &&
+      (managedAgent
+        ? managedAgent.hasLocalLifecycle !== false
+        : resolvedPersona),
+  );
   const isSelf =
     currentPubkey !== undefined &&
     pubkeyLower.length > 0 &&

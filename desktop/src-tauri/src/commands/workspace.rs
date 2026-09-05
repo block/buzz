@@ -212,6 +212,21 @@ pub async fn apply_workspace(
         assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
         // ── Apply all state changes (nothing below can fail) ──────────────────
+        // Serialize the scope transition with inbound private-config handling.
+        // Inbound holds this lock from scope resolution through overlay insert,
+        // so a patch decrypted for the old workspace cannot land after this clear.
+        let _managed_agents_store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        state
+            .managed_agent_authority_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        state
+            .private_managed_agent_overlay
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clear();
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
             *override_guard = Some(relay_url);
@@ -224,6 +239,7 @@ pub async fn apply_workspace(
             let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
             *keys_guard = keys;
         }
+        drop(_managed_agents_store_guard);
 
         // Keep the backend-side reconcile guard aligned with the frontend
         // experiment before launch-time restore can spawn any agents. Missing
@@ -269,7 +285,6 @@ pub async fn apply_workspace(
     assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
     let state = restore_app.state::<AppState>();
-    super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
     // The Bumble→Pollen migration may have renamed stopped agents. Reconcile
     // their relay profiles independently of runtime restore; successful writes
     // record this relay while retaining the agent for other communities, and
@@ -322,6 +337,14 @@ pub async fn apply_workspace(
             ));
         }
     }
+
+    // Provider redeploys execute the relay-resolved config, so they must run
+    // AFTER the event sync above hydrates the overlay for this exact
+    // relay+owner scope. Before it the overlay is deliberately empty (cleared
+    // in the transaction), every resolve falls through to raw disk, and a
+    // follower device would redeploy stale disk config A over relay head B —
+    // backend, prompt, env, credentials and access included.
+    super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
 
     let restore_pending = state
         .managed_agent_restore_pending
@@ -395,6 +418,42 @@ mod tests {
         let error = assert_current_apply_generation(&generation, older).unwrap_err();
         assert!(error.contains("superseded"), "{error}");
         assert_current_apply_generation(&generation, newer).unwrap();
+    }
+
+    /// `apply_workspace` is a `#[tauri::command]` needing a live `AppHandle`,
+    /// so its phase order can only be pinned positionally (same instrument as
+    /// `write_site_resolve_guard`). The overlay is cleared inside the apply
+    /// transaction and refilled only by `run_event_sync_blocking`; a provider
+    /// redeploy sequenced before that sync resolves every row to raw disk and
+    /// redeploys stale config A over relay head B.
+    #[test]
+    fn provider_reconcile_runs_after_the_overlay_is_hydrated() {
+        // Production half only: this test's own literals live below the
+        // `#[cfg(test)]` marker and must not count as call sites.
+        let source = include_str!("workspace.rs");
+        let production = &source[..source.find("#[cfg(test)]").unwrap()];
+        let clear = production
+            .find(".clear();")
+            .expect("positive control: the overlay clear must be present");
+        let hydrate = production
+            .find("run_event_sync_blocking(")
+            .expect("positive control: the event sync must be present");
+        let redeploy = production
+            .find("reconcile_on_workspace_apply(")
+            .expect("positive control: the provider reconcile must be present");
+        assert!(
+            clear < hydrate,
+            "the overlay is cleared before it is rehydrated"
+        );
+        assert!(
+            hydrate < redeploy,
+            "provider redeploys must run AFTER run_event_sync_blocking hydrates the overlay"
+        );
+        assert_eq!(
+            production.matches("reconcile_on_workspace_apply(").count(),
+            1,
+            "exactly one production call site; a second would evade this ordering guard"
+        );
     }
 
     #[tokio::test]

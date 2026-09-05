@@ -56,6 +56,34 @@ pub(crate) fn resolve_from_lists<'a>(
     Err(format!("agent {id:?} not found"))
 }
 
+/// Load the managed-agent instances with the kind:30179 private-config
+/// overlay folded on — patching disk records and synthesizing relay-only
+/// entries, the same resolution the agent list uses.
+///
+/// Every export/card resolver and persona-cascade selection reads instances
+/// through this helper, never raw `load_managed_agents`: disk may carry stale
+/// config or deleted linkage, while relay-only agents have no disk row.
+/// Deleted-private identities are omitted without hiding them from List/Stop.
+///
+/// Lock order: callers already hold `managed_agents_store_lock` (outer);
+/// this takes only the overlay lock (inner) and releases it before returning.
+pub(crate) fn load_effective_managed_agents<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+) -> Result<Vec<ManagedAgentRecord>, String> {
+    crate::managed_agents::private_config_overlay::require_authority_ready(state)?;
+    let instances = load_managed_agents(app)?;
+    let overlay = state
+        .private_managed_agent_overlay
+        .lock()
+        .map_err(|e| e.to_string())?;
+    Ok(overlay
+        .resolved_records(&instances)
+        .into_iter()
+        .filter(|record| overlay.require_config_authority(&record.pubkey).is_ok())
+        .collect())
+}
+
 /// Materialize persona-owned display metadata onto a cloned instance for
 /// portable snapshot construction. Keyless definition records already carry
 /// their own description.
@@ -264,7 +292,10 @@ pub(crate) async fn materialize_snapshot_bytes(
             .lock()
             .map_err(|e| e.to_string())?;
 
-        let instances = load_managed_agents(&app)?;
+        // Fold the kind:30179 overlay onto the disk records (and synthesize
+        // relay-only entries) so export sees the EFFECTIVE config — see
+        // `load_effective_managed_agents`.
+        let instances = load_effective_managed_agents(&app, &state)?;
         let definitions = load_agent_definitions(&app)?;
         let (def_record, is_definition) = resolve_from_lists(&id, &instances, &definitions)
             .map(|(r, is_def)| (r.clone(), is_def))?;
@@ -465,6 +496,9 @@ pub async fn encode_agent_snapshot_for_send(
     })
 }
 
+#[cfg(test)]
+#[path = "snapshot/tests_export_resolver_guard.rs"]
+mod export_resolver_guard;
 #[cfg(test)]
 mod fidelity_tests;
 #[cfg(test)]

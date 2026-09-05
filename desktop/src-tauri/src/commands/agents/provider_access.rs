@@ -68,7 +68,19 @@ pub(crate) async fn reconcile_on_workspace_apply(
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        collect_targets_with(load_managed_agents(app)?, owner_only_access, |record| {
+        // Resolve each disk row through the relay-primary overlay before
+        // selecting targets: the redeploy below is a final-use boundary, so
+        // both the selection predicate (backend, backend_agent_id, pending
+        // flag) and the payload handed to the provider must read the
+        // authoritative config, not raw disk bytes a newer relay head has
+        // superseded.
+        let records = load_managed_agents(app)?
+            .iter()
+            .map(|record| {
+                crate::managed_agents::private_config_overlay::resolved_local_record(state, record)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        collect_targets_with(records, owner_only_access, |record| {
             super::build_deploy_payload(app, state, record)
         })
     };
@@ -231,5 +243,90 @@ mod tests {
             Ok(serde_json::Value::Null)
         })
         .is_empty());
+    }
+
+    // ── Workspace reconcile: relay-overlay resolve before target selection ──
+    //
+    // The production wiring (`reconcile_on_workspace_apply` resolving every
+    // disk row through `resolved_local_record` before `collect_targets_with`)
+    // needs a live `AppHandle`, so its presence is pinned by
+    // `write_site_resolve_guard` in `private_config_overlay.rs`. This test
+    // proves the fold itself: both the selection predicate and the redeploy
+    // inputs read the resolved records, not raw disk rows.
+
+    /// Carl round-9 P1 regression (stale-disk A / overlay B at workspace
+    /// provider-access reconciliation): a relay head that migrated the
+    /// backend must drive BOTH selection and the payload — the raw disk row's
+    /// provider must neither be redeployed (head says local) nor keep stale
+    /// policy inputs (head says a different provider).
+    #[test]
+    fn reconcile_selects_and_deploys_relay_resolved_records_not_raw_disk() {
+        use crate::managed_agents::private_config_overlay::{
+            test_relay_payload, PrivateConfigOverlay,
+        };
+
+        // Disk row A: provider on disk, but the relay head migrated it to
+        // local — reconciliation must not select it at all.
+        let migrated_pubkey = "aa".repeat(32);
+        let mut migrated_disk = record(
+            BackendKind::Provider {
+                id: "stale-provider".into(),
+                config: serde_json::json!({}),
+            },
+            Some("existing"),
+        );
+        migrated_disk.pubkey = migrated_pubkey.clone();
+
+        // Disk row B: provider on disk AND on the relay head, but the head
+        // carries newer policy inputs — the redeploy payload must read them.
+        let repolicied_pubkey = "bb".repeat(32);
+        let mut repolicied_disk = record(
+            BackendKind::Provider {
+                id: "stale-provider".into(),
+                config: serde_json::json!({"region": "stale"}),
+            },
+            Some("existing"),
+        );
+        repolicied_disk.pubkey = repolicied_pubkey.clone();
+        repolicied_disk.system_prompt = Some("stale disk prompt".into());
+
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay
+            .insert(test_relay_payload(&migrated_pubkey))
+            .unwrap(); // backend: local
+        let mut repolicied_head = test_relay_payload(&repolicied_pubkey);
+        repolicied_head.config.backend = serde_json::json!({"type":"provider","id":"relay-provider","config":{"region":"relay"}});
+        repolicied_head.config.backend_agent_id = Some("existing".into());
+        overlay.insert(repolicied_head).unwrap();
+
+        let resolved: Vec<_> = [&migrated_disk, &repolicied_disk]
+            .into_iter()
+            .map(|record| overlay.resolve_local_record(record))
+            .collect();
+        let targets = collect_targets_with(resolved, true, |record| {
+            Ok(serde_json::json!({"system_prompt": record.system_prompt}))
+        });
+
+        assert_eq!(
+            targets.len(),
+            1,
+            "the head-migrated-to-local row must not be selected"
+        );
+        assert_eq!(targets[0].pubkey, repolicied_pubkey);
+        assert_eq!(targets[0].provider_id, "relay-provider");
+        assert_eq!(targets[0].config["region"], "relay");
+        assert_eq!(
+            targets[0].agent_json.as_ref().unwrap()["system_prompt"],
+            "relay prompt",
+            "the redeploy payload must be built from the resolved record"
+        );
+
+        // NEGATIVE CONTROL: raw disk rows select the migrated agent and keep
+        // the stale provider — proving the resolve, not the fixtures.
+        let raw = collect_targets_with(vec![migrated_disk, repolicied_disk], true, |_| {
+            Ok(serde_json::Value::Null)
+        });
+        assert_eq!(raw.len(), 2);
+        assert!(raw.iter().all(|t| t.provider_id == "stale-provider"));
     }
 }

@@ -163,6 +163,14 @@ pub async fn update_managed_agent(
         }
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
+        // Item 2: fold the relay-config overlay onto the disk record BEFORE
+        // applying the user's patch, so the edit is authored on top of the
+        // config this device is actually following. Without this, retaining
+        // the raw disk record republishes every OTHER field from stale disk
+        // and LWW makes that the new relay head. Ordering is load-bearing:
+        // resolving AFTER the patch would discard the user's edit instead.
+        *record =
+            crate::managed_agents::private_config_overlay::resolved_local_record(&state, record)?;
         let previous_record = record.clone();
 
         let mut name_changed = false;
@@ -330,7 +338,7 @@ pub async fn update_managed_agent(
         // Publish the edit to the relay. After-save, inside the lock, before
         // any .await. The retention upsert hashes the opt-IN projection, so an
         // update that touched only runtime/local fields is a no-op publish.
-        super::super::agents::retain_managed_agent_pending(&app, &state, record);
+        super::super::agents::retain_managed_agent_pending(&app, &state, record)?;
 
         let sync_params = if name_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
@@ -366,8 +374,17 @@ pub async fn update_managed_agent(
         };
 
         let summary = { super::super::agents::summarize_from_disk(&app, record, &runtimes)? };
-        let rollback = name_changed
-            .then(|| AgentUpdateRollback::new(previous_record, record, access_policy_changed));
+        let rollback = if name_changed {
+            Some(
+                AgentUpdateRollback::new(previous_record, record, access_policy_changed)
+                    .with_scope(
+                        crate::managed_agents::retention::active_retention_scope(&app, &state)?
+                            .db_path,
+                    ),
+            )
+        } else {
+            None
+        };
         (
             summary,
             sync_params,

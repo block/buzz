@@ -14,6 +14,7 @@ use tauri::AppHandle;
 
 use crate::app_state::AppState;
 
+pub(crate) mod deletion_intent;
 mod legacy_migration;
 pub use legacy_migration::migrate_legacy_retention_db;
 
@@ -147,6 +148,7 @@ pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
     )
     .map_err(|e| format!("failed to create retention table: {e}"))?;
 
+    deletion_intent::initialize(&conn)?;
     Ok(conn)
 }
 
@@ -211,6 +213,9 @@ pub fn deferred_behind_failed_tombstone(
 ///
 /// Only replaces if the new event has a newer or equal `created_at` (NIP-33 semantics).
 pub fn retain_event(conn: &Connection, event: &RetainedEvent) -> Result<(), String> {
+    if managed_agent_head_is_deleted(conn, event)? {
+        return Err("managed-agent head is covered by a retained deletion".to_string());
+    }
     conn.execute(
         "INSERT INTO persona_events (kind, pubkey, d_tag, content, created_at, raw_event, pending_sync)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -280,6 +285,9 @@ pub fn inbound_event_outcome(
     conn: &Connection,
     event: &RetainedEvent,
 ) -> Result<InboundOutcome, String> {
+    if managed_agent_head_is_deleted(conn, event)? {
+        return Ok(InboundOutcome::Skipped);
+    }
     let existing = get_retained_event(conn, event.kind, &event.pubkey, &event.d_tag)?;
     Ok(match existing {
         None => InboundOutcome::Applied,
@@ -294,6 +302,36 @@ pub fn inbound_event_outcome(
         // that won (or an undecidable tie) keeps its `pending_sync`.
         Some(_) => InboundOutcome::Skipped,
     })
+}
+
+/// Public and private managed-agent heads describe one local identity. A
+/// deletion of either coordinate fences both, including after the head itself
+/// was purged. Only a strictly later recreation may cross that watermark.
+pub(crate) fn managed_agent_head_is_deleted(
+    conn: &Connection,
+    event: &RetainedEvent,
+) -> Result<bool, String> {
+    use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PRIVATE_MANAGED_AGENT};
+
+    if !matches!(event.kind, KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT) {
+        return Ok(false);
+    }
+    if deletion_intent::pending(conn, &event.pubkey, &event.d_tag)? {
+        return Ok(true);
+    }
+    for kind in [KIND_MANAGED_AGENT, KIND_PRIVATE_MANAGED_AGENT] {
+        if get_retained_event(
+            conn,
+            KIND_DELETION,
+            &event.pubkey,
+            &tombstone_retention_d_tag(kind, &event.d_tag),
+        )?
+        .is_some_and(|tombstone| event.created_at <= tombstone.created_at)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// NIP-01 addressable-event tiebreak at equal `created_at`: the event with the
@@ -346,25 +384,31 @@ where
 }
 
 /// Resolve and commit an inbound NIP-09 tombstone against BOTH its own kind:5
-/// retention row AND the covered target head, matching the relay's
+/// retention row AND every covered target head, matching the relay's
 /// coordinate-deletion contract (a deletion removes only target rows with
 /// `created_at <= tombstone.created_at`, `buzz-db`).
 ///
+/// `covered_kinds` is usually the tombstone's own target kind. The two
+/// managed-agent kinds (public 30177 + private 30179) are one record locally,
+/// so a kind:5 naming either coordinate covers both heads — the sibling
+/// tombstone may be lost or unsent, and a surviving 30179 head would
+/// rematerialize the deleted secret-bearing config at the next boot hydration.
+///
 /// Order, so a crash or store failure never loses the recovery source:
-/// 1. Covered head strictly NEWER than the tombstone → `Skipped`: a historical
-///    delete replayed after a newer recreation; the relay keeps the head, so we
-///    must preserve the local record.
+/// 1. A covered head strictly NEWER than the tombstone → `Skipped`: a
+///    historical delete replayed after a newer recreation; the relay keeps the
+///    head, so we must preserve the local record.
 /// 2. Tombstone-row preflight loses (re-received / superseded) → `Skipped`.
 /// 3. Run the fallible `remove_json` FIRST. On failure nothing durable advances,
 ///    so replay of the identical tombstone retries.
-/// 4. Commit the tombstone row and purge the covered head in ONE transaction. A
+/// 4. Commit the tombstone row and purge the covered heads in ONE transaction. A
 ///    kill between them would otherwise advance the tombstone row (making replay
-///    read as already-consumed) while leaving the covered head in retention with
+///    read as already-consumed) while leaving a covered head in retention with
 ///    no witness to remove it.
-pub fn commit_inbound_tombstone_with_store<F>(
+pub fn commit_inbound_tombstone_covering<F>(
     conn: &Connection,
     tombstone: &RetainedEvent,
-    target_kind: u32,
+    covered_kinds: &[u32],
     target_owner: &str,
     target_d_tag: &str,
     remove_json: F,
@@ -372,22 +416,57 @@ pub fn commit_inbound_tombstone_with_store<F>(
 where
     F: FnOnce() -> Result<(), String>,
 {
-    let covered_head = get_retained_event(conn, target_kind, target_owner, target_d_tag)?;
-    if covered_head
-        .as_ref()
-        .is_some_and(|head| head.created_at > tombstone.created_at)
-    {
-        return Ok(InboundOutcome::Skipped);
+    let managed_agent = covered_kinds
+        .iter()
+        .any(|kind| matches!(*kind, 30177 | 30179));
+    if managed_agent && deletion_intent::pending(conn, target_owner, target_d_tag)? {
+        remove_json()?;
+        deletion_intent::finish(conn, target_owner, target_d_tag)?;
+        return Ok(InboundOutcome::Applied);
+    }
+    for covered_kind in covered_kinds {
+        let covered_head = get_retained_event(conn, *covered_kind, target_owner, target_d_tag)?;
+        if covered_head
+            .as_ref()
+            .is_some_and(|head| head.created_at > tombstone.created_at)
+        {
+            // A recreation survives, but the historical delete still fences
+            // older sibling heads that have not arrived yet. Do not discard
+            // that watermark merely because one covered head is newer.
+            if covered_kinds.iter().any(|kind| {
+                matches!(
+                    *kind,
+                    buzz_core_pkg::kind::KIND_MANAGED_AGENT
+                        | buzz_core_pkg::kind::KIND_PRIVATE_MANAGED_AGENT
+                )
+            }) {
+                retain_inbound_event(conn, tombstone)?;
+            }
+            return Ok(InboundOutcome::Skipped);
+        }
     }
     if inbound_event_outcome(conn, tombstone)? == InboundOutcome::Skipped {
         return Ok(InboundOutcome::Skipped);
     }
-    remove_json()?;
+    // Legacy persona/team ordering is unchanged. Managed agents instead
+    // commit an exact cleanup obligation before their destructive work.
+    let mut remove_json = Some(remove_json);
+    if !managed_agent {
+        if let Some(remove) = remove_json.take() {
+            remove()?;
+        }
+    }
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("failed to begin inbound tombstone transaction: {e}"))?;
     let result = (|| -> Result<(), String> {
         retain_inbound_event(conn, tombstone)?;
-        delete_retained_event(conn, target_kind, target_owner, target_d_tag)
+        if managed_agent {
+            deletion_intent::record(conn, target_owner, target_d_tag, tombstone.created_at)?;
+        }
+        for covered_kind in covered_kinds {
+            delete_retained_event(conn, *covered_kind, target_owner, target_d_tag)?;
+        }
+        Ok(())
     })();
     match result {
         Ok(()) => conn
@@ -397,6 +476,10 @@ where
             let _ = conn.execute_batch("ROLLBACK");
             return Err(e);
         }
+    }
+    if let Some(remove) = remove_json {
+        remove()?;
+        deletion_intent::finish(conn, target_owner, target_d_tag)?;
     }
     Ok(InboundOutcome::Applied)
 }
@@ -597,6 +680,10 @@ pub fn get_retained_event(
 /// Used by the team-catalog reconcile, which enumerates retained 30178 heads
 /// as the authoritative worklist — not the current team store — so a shared
 /// head whose team was later deleted stays visible and can be tombstoned.
+/// Also used by the boot-time kind:30179 overlay hydration: the inbound path
+/// only populates the in-memory overlay when an event is strictly newer than
+/// the retained row, so after a restart the re-delivered backfill dedupes to
+/// `Skipped` and the overlay would otherwise stay empty for the whole session.
 pub fn get_retained_events_by_kind(
     conn: &Connection,
     kind: u32,

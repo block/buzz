@@ -258,7 +258,7 @@ pub async fn get_agent_config_surface(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RuntimeConfigSurface, String> {
-    let record = {
+    let (record, workspace_relay) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -276,10 +276,12 @@ pub async fn get_agent_config_surface(
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }
-        records
-            .into_iter()
-            .find(|r| r.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?
+        (
+            crate::managed_agents::private_config_overlay::resolved_record_for_read(
+                &state, &records, &pubkey,
+            )?,
+            crate::relay::relay_ws_url_with_override(&state),
+        )
     };
 
     let personas = load_personas(&app).unwrap_or_default();
@@ -287,10 +289,7 @@ pub async fn get_agent_config_surface(
     let runtime_meta = known_acp_runtime(&effective_cmd);
     let runtime_key = ManagedAgentRuntimeKey::new(
         pubkey.clone(),
-        &crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &crate::relay::relay_ws_url_with_override(&state),
-        ),
+        &crate::relay::effective_agent_relay_url(&record.relay_url, &workspace_relay),
     )?;
     let session_cache = state.get_session_cache(&runtime_key);
     let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();

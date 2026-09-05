@@ -112,6 +112,7 @@ type RawRelayAgent = {
 };
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
+  has_local_lifecycle?: boolean;
   pubkey: string;
   name: string;
   persona_id: string | null;
@@ -666,6 +667,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
+    hasLocalLifecycle: agent.has_local_lifecycle ?? true,
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],
   };

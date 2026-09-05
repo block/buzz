@@ -2,6 +2,7 @@
 //! Extracted from the parent module to keep it under the file-size cap.
 
 use super::*;
+use nostr::{JsonUtil, ToBech32};
 use std::collections::BTreeMap;
 
 const UUID: &str = "11111111-2222-3333-4444-555555555555"; // sadscan:disable sq.pii.cc.visa -- fixed test UUID
@@ -158,6 +159,186 @@ fn no_local_match_inserts_inbound_reusing_d_tag_as_id() {
 // ── Managed-agent (30177) inbound ────────────────────────────────────────
 
 const AGENT_PUBKEY: &str = "agentpubkeyhex0000000000000000000000000000000000000000000000000000";
+
+fn private_agent_payload(
+    owner_keys: &nostr::Keys,
+    agent_keys: &nostr::Keys,
+    name: &str,
+    parallelism: u32,
+) -> buzz_core_pkg::private_managed_agent::Payload {
+    use buzz_core_pkg::private_managed_agent::{
+        Payload, PrivateConfig, PrivateIdentity, FORMAT, VERSION,
+    };
+
+    Payload {
+        format: FORMAT.into(),
+        version: VERSION,
+        agent_pubkey: agent_keys.public_key().to_hex(),
+        owner_pubkey: owner_keys.public_key().to_hex(),
+        generation: 1,
+        previous_event_id: None,
+        updated_at: "2026-08-06T00:00:00Z".into(),
+        identity: PrivateIdentity {
+            private_key_nsec: agent_keys.secret_key().to_bech32().unwrap(),
+            auth_tag: None,
+        },
+        config: PrivateConfig {
+            relay_url: "wss://relay.example".into(),
+            name: name.into(),
+            persona_id: None,
+            runtime: Some("goose".into()),
+            model: None,
+            provider: None,
+            system_prompt: Some("relay prompt".into()),
+            parallelism: Some(parallelism),
+            respond_to: None,
+            respond_to_allowlist: vec![],
+            agent_command_override: None,
+            agent_args: vec![],
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            env_vars: BTreeMap::new(),
+            backend: serde_json::json!({"type":"local"}),
+            backend_agent_id: None,
+            team_id: None,
+            persona_name_in_team: None,
+            relay_mesh: None,
+            effort_level: None,
+            extra: serde_json::Map::new(),
+        },
+        extensions: BTreeMap::new(),
+        extra: serde_json::Map::new(),
+    }
+}
+
+#[test]
+fn private_agent_inbound_rejects_before_retain_and_stale_event_preserves_overlay() {
+    use crate::managed_agents::{
+        private_config_overlay::PrivateConfigOverlay,
+        retention::{get_retained_event, open_retention_db, InboundOutcome},
+    };
+    use buzz_core_pkg::{kind::KIND_PRIVATE_MANAGED_AGENT, private_managed_agent};
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+    let pubkey = agent_keys.public_key().to_hex();
+    let mut overlay = PrivateConfigOverlay::default();
+
+    let valid = private_agent_payload(&owner_keys, &agent_keys, "new", 4);
+    let newer_event = private_managed_agent::build_event(&owner_keys, &valid, 20).unwrap();
+    assert_eq!(
+        apply_inbound_private_managed_agent_event(&newer_event, &owner_keys, &conn, &mut overlay,)
+            .unwrap(),
+        InboundOutcome::Applied
+    );
+    assert_eq!(overlay.resolved_records(&[])[0].name, "new");
+
+    let mut malformed = private_agent_payload(&owner_keys, &agent_keys, "malformed", 4);
+    malformed.generation = 2;
+    malformed.previous_event_id = Some(newer_event.id.to_hex());
+    malformed.config.backend = serde_json::json!({"type":"provider"});
+    let malformed_event = private_managed_agent::build_event(&owner_keys, &malformed, 30).unwrap();
+    assert!(apply_inbound_private_managed_agent_event(
+        &malformed_event,
+        &owner_keys,
+        &conn,
+        &mut overlay,
+    )
+    .is_err());
+    assert_eq!(overlay.resolved_records(&[])[0].name, "new");
+    let retained = get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(retained.raw_event, newer_event.as_json());
+
+    let stale = private_agent_payload(&owner_keys, &agent_keys, "stale", 2);
+    let stale_event = private_managed_agent::build_event(&owner_keys, &stale, 10).unwrap();
+    assert_eq!(
+        apply_inbound_private_managed_agent_event(&stale_event, &owner_keys, &conn, &mut overlay,)
+            .unwrap(),
+        InboundOutcome::Skipped
+    );
+    assert_eq!(overlay.resolved_records(&[])[0].name, "new");
+}
+
+/// SAMI PROBE: the retention DB survives a restart but the overlay does not.
+/// On the next launch the backfill re-delivers the SAME event, which resolves
+/// to `Skipped` against the retained row — so `insert_patch` never runs and the
+/// overlay stays empty for the whole session.
+#[test]
+fn sami_probe_overlay_does_not_rehydrate_after_restart() {
+    use crate::managed_agents::{
+        private_config_overlay::PrivateConfigOverlay,
+        retention::{open_retention_db, InboundOutcome},
+    };
+    use buzz_core_pkg::private_managed_agent;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("retention.db");
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+
+    let payload = private_agent_payload(&owner_keys, &agent_keys, "relay name", 4);
+    let event = private_managed_agent::build_event(&owner_keys, &payload, 20).unwrap();
+
+    // ── Session 1: event arrives, overlay hydrates. ──
+    {
+        let conn = open_retention_db(&db_path).unwrap();
+        let mut overlay = PrivateConfigOverlay::default();
+        assert_eq!(
+            apply_inbound_private_managed_agent_event(&event, &owner_keys, &conn, &mut overlay)
+                .unwrap(),
+            InboundOutcome::Applied
+        );
+        assert_eq!(
+            overlay.resolved_records(&[]).len(),
+            1,
+            "control: overlay hydrates on first arrival"
+        );
+    }
+
+    // ── Session 2: same DB file, fresh in-memory overlay (app restart). ──
+    let conn = open_retention_db(&db_path).unwrap();
+    let mut overlay = PrivateConfigOverlay::default();
+    let outcome =
+        apply_inbound_private_managed_agent_event(&event, &owner_keys, &conn, &mut overlay)
+            .unwrap();
+    assert_eq!(
+        outcome,
+        InboundOutcome::Skipped,
+        "re-delivered event is deduped against the retained row"
+    );
+    assert!(
+        overlay.resolved_records(&[]).is_empty(),
+        "DEFECT: overlay is empty after restart — relay config silently unavailable"
+    );
+
+    // ── Positive control: the probe CAN observe hydration in session 2. ──
+    // A strictly-newer event is the only thing that repopulates the overlay.
+    let mut newer = private_agent_payload(&owner_keys, &agent_keys, "newer name", 4);
+    newer.generation = 2;
+    newer.previous_event_id = Some(event.id.to_hex());
+    let newer_event = private_managed_agent::build_event(&owner_keys, &newer, 30).unwrap();
+    assert_eq!(
+        apply_inbound_private_managed_agent_event(&newer_event, &owner_keys, &conn, &mut overlay)
+            .unwrap(),
+        InboundOutcome::Applied
+    );
+    assert_eq!(
+        overlay.resolved_records(&[])[0].name,
+        "newer name",
+        "positive control: this harness observes hydration when it happens"
+    );
+}
 
 /// A local managed agent carrying every device-local secret that an inbound
 /// event must NEVER be able to overwrite.
@@ -729,135 +910,10 @@ fn inbound_team_propagates_persist_teams_error() {
     assert_eq!(err, "disk full");
 }
 
-// ── Tombstone (kind:5) consume ────────────────────────────────────────────
-
-fn deletion_event(coord: &str) -> nostr::Event {
-    deletion_event_with_keys(coord, &nostr::Keys::generate())
-}
-
-fn deletion_event_with_keys(coord: &str, keys: &nostr::Keys) -> nostr::Event {
-    use nostr::{EventBuilder, JsonUtil, Kind, Tag};
-    let event = EventBuilder::new(Kind::Custom(5), "")
-        .tags(vec![Tag::parse(["a", coord]).unwrap()])
-        .sign_with_keys(keys)
-        .unwrap();
-    nostr::Event::from_json(event.as_json()).unwrap()
-}
-
-/// A deletion event whose coordinate owner IS its signer — the only shape
-/// `parse_deletion_coordinate` accepts since the owner check landed.
-fn owned_deletion_event(kind: u32, d_tag: &str) -> nostr::Event {
-    let keys = nostr::Keys::generate();
-    let owner = keys.public_key().to_hex();
-    deletion_event_with_keys(&format!("{kind}:{owner}:{d_tag}"), &keys)
-}
-
-#[test]
-fn parse_deletion_coordinate_extracts_kind_and_d_tag() {
-    // Persona / team / agent coordinates all route by their leading kind.
-    let p = owned_deletion_event(30175, "my-persona");
-    assert_eq!(
-        parse_deletion_coordinate(&p),
-        Some((30175, "my-persona".to_string()))
-    );
-    let a = owned_deletion_event(30177, "agentpubkeyhex");
-    assert_eq!(
-        parse_deletion_coordinate(&a),
-        Some((30177, "agentpubkeyhex".to_string()))
-    );
-}
-
-#[test]
-fn parse_deletion_coordinate_rejects_foreign_owner() {
-    // A validly signed kind:5 naming ANOTHER owner's coordinate must no-op:
-    // NIP-09 scopes deletion to the record's own author.
-    let foreign_owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-    let forged = deletion_event(&format!("30175:{foreign_owner}:my-persona"));
-    assert_eq!(parse_deletion_coordinate(&forged), None);
-}
-
-#[test]
-fn parse_deletion_coordinate_handles_colon_in_d_tag_and_rejects_malformed() {
-    // A d-tag containing ':' keeps its remainder intact (splitn(3)).
-    let weird = owned_deletion_event(30176, "a:b:c");
-    assert_eq!(
-        parse_deletion_coordinate(&weird),
-        Some((30176, "a:b:c".to_string()))
-    );
-    // Missing d-tag segment / non-numeric kind → None (no-op).
-    assert_eq!(
-        parse_deletion_coordinate(&deletion_event("30175:owner")),
-        None
-    );
-    assert_eq!(
-        parse_deletion_coordinate(&deletion_event("notakind:owner:d")),
-        None
-    );
-}
-
-#[test]
-fn tombstone_removal_predicates_match_apply_fn_keys() {
-    // The deletion path removes by the SAME per-kind key the apply fns use.
-    // Persona: by persona_d_tag (slug/id).
-    let mut personas = vec![local_in_app()];
-    let target = persona_d_tag(&personas[0]);
-    personas.retain(|r| persona_d_tag(r) != target);
-    assert!(personas.is_empty(), "persona removed by its d-tag");
-
-    // Team: by id.
-    let mut teams = vec![local_team()];
-    teams.retain(|r| r.id != TEAM_ID);
-    assert!(teams.is_empty(), "team removed by id");
-
-    // Managed-agent: by pubkey. A non-matching d-tag is a no-op.
-    let mut agents = vec![local_agent()];
-    agents.retain(|r| r.pubkey != "someoneelse");
-    assert_eq!(agents.len(), 1, "non-matching agent tombstone no-ops");
-    agents.retain(|r| r.pubkey != AGENT_PUBKEY);
-    assert!(agents.is_empty(), "agent removed by pubkey");
-}
-
-// ── Inbound signature gate ──────────────────────────────────────────────────
-
-#[test]
-fn inbound_gate_rejects_tampered_event() {
-    use nostr::JsonUtil;
-    // A validly signed event whose content was altered post-signing: the
-    // pubkey is real, the sig no longer covers the bytes. Must die at the
-    // gate before any store logic runs.
-    let keys = nostr::Keys::generate();
-    let event = nostr::EventBuilder::new(nostr::Kind::Custom(30175), "{}")
-        .tags(vec![nostr::Tag::parse(["d", "victim-slug"]).unwrap()])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let tampered = event.as_json().replace(
-        "\"content\":\"{}\"",
-        "\"content\":\"{\\\"system_prompt\\\":\\\"pwned\\\"}\"",
-    );
-    assert_ne!(
-        tampered,
-        event.as_json(),
-        "string replace must have taken effect — if this fails the test is testing an un-tampered event"
-    );
-
-    let err = parse_verified_inbound_event(&tampered).unwrap_err();
-    assert!(
-        err.contains("signature"),
-        "tampered event must fail the signature gate: {err}"
-    );
-}
-
-#[test]
-fn inbound_gate_accepts_validly_signed_event() {
-    use nostr::JsonUtil;
-    let keys = nostr::Keys::generate();
-    let event = nostr::EventBuilder::new(nostr::Kind::Custom(30175), "{}")
-        .tags(vec![nostr::Tag::parse(["d", "slug"]).unwrap()])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let parsed = parse_verified_inbound_event(&event.as_json()).unwrap();
-    assert_eq!(parsed.pubkey, keys.public_key());
-}
+// Tombstone authorization, signature-gate, and restart-rehydration
+// regressions live in a sibling file to stay under the file-size cap.
+#[path = "inbound_security_tests.rs"]
+mod security_tests;
 
 #[test]
 fn inbound_persona_rejects_invisible_definition_text() {

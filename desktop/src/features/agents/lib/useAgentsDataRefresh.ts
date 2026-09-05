@@ -15,6 +15,7 @@ export const LOCAL_AGENT_DATA_QUERY_KEYS = [
   personasQueryKey,
   teamsQueryKey,
   managedAgentsQueryKey,
+  ["agent-config-surface"],
 ] as const;
 
 // Trailing-coalesce local agent-store bursts into one cache refresh. The relay

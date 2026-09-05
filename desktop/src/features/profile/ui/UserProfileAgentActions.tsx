@@ -46,6 +46,7 @@ export function UserProfileAgentSettingsMenu({
   const canToggleAutoStart =
     managedAgent !== undefined &&
     managedAgent.backend.type === "local" &&
+    managedAgent.hasLocalLifecycle !== false &&
     onToggleAutoStart !== undefined;
   const autoStartSwitchId = `user-profile-agent-auto-start-${actionKey}`;
   const hasPrimaryActions = Boolean(onDuplicatePersona || onExportPersona);

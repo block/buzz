@@ -696,6 +696,7 @@ pub fn run() {
             list_relay_agents,
             revalidate_relay_agents,
             list_managed_agents,
+            get_managed_agent_sync_error,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,

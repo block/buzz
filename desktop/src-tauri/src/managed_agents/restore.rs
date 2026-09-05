@@ -1,3 +1,5 @@
+mod authority;
+
 use super::{
     bestie_assignment::recover_pending_assignment_cleanup, find_managed_agent_mut,
     kill_stale_tracked_processes, load_managed_agents, load_personas, managed_agents_base_dir,
@@ -90,8 +92,8 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
 ///
 /// Split into three phases to minimise lock contention with the frontend:
 ///   A (under lock): sync process state, cleanup, collect agents to start
-///   B (no locks):   resolve commands and spawn processes in parallel
-///   C (re-lock):    write back PIDs and status to records on disk
+///   B (transition → store): reload authority, then spawn in parallel
+///   C (same locks): register children and persist lifecycle receipts
 pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
@@ -104,6 +106,7 @@ pub async fn restore_managed_agents_on_launch(
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
     let mut agents_to_start: Vec<super::ManagedAgentRecord>;
+    let restore_scope;
     {
         let _store_guard = state
             .managed_agents_store_lock
@@ -114,6 +117,8 @@ pub async fn restore_managed_agents_on_launch(
             return Ok(());
         }
 
+        super::private_config_overlay::require_authority_ready(&state)?;
+        restore_scope = super::retention::active_retention_scope(app, &state)?.db_path;
         let mut records = load_managed_agents(app)?;
         recover_pending_assignment_cleanup(&managed_agents_base_dir(app)?, |pending_pubkey| {
             records
@@ -171,11 +176,7 @@ pub async fn restore_managed_agents_on_launch(
         // replacing the three separate kernel enumerations.
         super::sweep_untracked_bundle_harnesses(&tracked_pids);
 
-        let candidates: Vec<String> = records
-            .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
-            .map(|record| record.pubkey.clone())
-            .collect();
+        let candidates = authority::restore_candidate_pubkeys(&records);
 
         let mut to_start = Vec::new();
         for pubkey in &candidates {
@@ -199,33 +200,24 @@ pub async fn restore_managed_agents_on_launch(
         }
         agents_to_start = to_start;
 
-        // Re-snapshot persona config for agents about to be restored, matching
-        // the interactive spawn path so auto-start agents also pick up the
-        // current persona on app launch.
-        let personas_for_snapshot = super::load_personas(app).unwrap_or_default();
-        for record in records.iter_mut() {
-            if !agents_to_start.iter().any(|r| r.pubkey == record.pubkey) {
-                continue;
-            }
-            let Some(persona_id) = record.persona_id.clone() else {
-                continue;
-            };
-            let Some(persona) = personas_for_snapshot.iter().find(|p| p.id == persona_id) else {
-                // Orphaned: no current persona to re-snapshot from. Leave the
-                // record as-is — `spawn_agent_child` (Phase B below) refuses to
-                // spawn it and Phase C persists the refusal to `last_error`.
-                continue;
-            };
-            super::persona_events::apply_persona_snapshot(record, persona);
-            record.updated_at = util::now_iso();
-            changed = true;
-        }
-        // Re-collect to_start from the updated records so Phase B spawns the refreshed config.
-        agents_to_start = records
+        // Resolve before backend selection: a Provider disk seed may now be
+        // Local on the relay. Persona snapshots remain in memory, never written
+        // back over the migration seed during housekeeping.
+        let personas_for_snapshot = super::load_personas(app)?;
+        let mut resolved_to_start = Vec::with_capacity(agents_to_start.len());
+        for record in records
             .iter()
             .filter(|r| agents_to_start.iter().any(|s| s.pubkey == r.pubkey))
-            .cloned()
-            .collect();
+        {
+            let resolved = crate::managed_agents::private_config_overlay::resolved_local_record(
+                &state, record,
+            )?;
+            if let Some(spawn_record) = finalize_restore_candidate(resolved, &personas_for_snapshot)
+            {
+                resolved_to_start.push(spawn_record);
+            }
+        }
+        agents_to_start = resolved_to_start;
 
         if changed {
             save_managed_agents(app, &records)?;
@@ -236,18 +228,8 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
-    // Snapshot the workspace owner pubkey once for the legacy auth_tag fallback.
-    // Read outside the per-agent spawn loop so all parallel spawns see the same
-    // value and we don't lock `state.keys` repeatedly.
-    let owner_hex: Option<String> = state
-        .keys
-        .lock()
-        .map_err(|e| e.to_string())
-        .ok()
-        .map(|k| k.public_key().to_hex());
-
     #[cfg(feature = "mesh-llm")]
-    let agents_to_start = {
+    let (agents_to_start, preflight_models) = {
         // Preflight against the same resolution spawn uses — `resolve_effective_config`
         // (definition → global fallback). A linked instance's own `provider`/`model`/
         // `relay_mesh` bytes never contribute. See `start_local_agent_with_preflight`
@@ -255,10 +237,12 @@ pub async fn restore_managed_agents_on_launch(
         let personas = load_personas(app).unwrap_or_default();
         let global = super::load_global_agent_config(app).unwrap_or_default();
         let mut mesh_preflight_failures = std::collections::HashSet::new();
+        let mut preflight_models = std::collections::HashMap::new();
         for record in &agents_to_start {
             let mesh_model_id = super::effective_config::resolve_effective_relay_mesh_model_id(
                 record, &personas, &global,
             );
+            preflight_models.insert(record.pubkey.clone(), mesh_model_id.clone());
             if mesh_model_id.is_none() {
                 continue;
             }
@@ -269,14 +253,17 @@ pub async fn restore_managed_agents_on_launch(
                 crate::commands::ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false)
                     .await
             {
-                persist_restore_error(app, &state, &record.pubkey, error)?;
+                persist_restore_error(app, &state, &restore_scope, &record.pubkey, error)?;
                 mesh_preflight_failures.insert(record.pubkey.clone());
             }
         }
-        agents_to_start
-            .into_iter()
-            .filter(|record| !mesh_preflight_failures.contains(&record.pubkey))
-            .collect::<Vec<_>>()
+        (
+            agents_to_start
+                .into_iter()
+                .filter(|record| !mesh_preflight_failures.contains(&record.pubkey))
+                .collect::<Vec<_>>(),
+            preflight_models,
+        )
     };
     if agents_to_start.is_empty() {
         return Ok(());
@@ -294,6 +281,30 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
+    // Rebuild immediately before use, after all awaits and transition waiting.
+    // Keep this guard through registration so delete/config/scope writers cannot
+    // invalidate authority between resolution, spawn, and receipt persistence.
+    let mut authority =
+        authority::lock_restore_authority(app, &state, &restore_scope, &agents_to_start)?;
+    let agents_to_start = std::mem::take(&mut authority.candidates);
+    #[cfg(feature = "mesh-llm")]
+    {
+        let personas = load_personas(app)?;
+        let global = super::load_global_agent_config(app)?;
+        for record in &agents_to_start {
+            let current_model = super::effective_config::resolve_effective_relay_mesh_model_id(
+                record, &personas, &global,
+            );
+            if preflight_models.get(&record.pubkey) != Some(&current_model) {
+                return Err(
+                    "agent mesh configuration changed during restore; retry initialization".into(),
+                );
+            }
+        }
+    }
+    let owner_hex = Some(authority.owner_hex.clone());
+    let workspace_relay = &authority.workspace_relay;
+
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
@@ -302,12 +313,8 @@ pub async fn restore_managed_agents_on_launch(
             .filter(|_| !shutdown_started.load(Ordering::SeqCst))
             .map(|record| {
                 let handle = scope.spawn(move || {
-                    let workspace_relay =
-                        crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
-                    let relay_url = crate::relay::effective_agent_relay_url(
-                        &record.relay_url,
-                        &workspace_relay,
-                    );
+                    let relay_url =
+                        crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay);
                     let outcome =
                         match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
                         {
@@ -369,12 +376,8 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
-    // ── Phase C (re-acquire lock): write back PIDs and status to records ──
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(app)?;
+    // ── Phase C (same authority guard): register and persist lifecycle only ──
+    let records = &mut authority.records;
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -388,7 +391,9 @@ pub async fn restore_managed_agents_on_launch(
             // this pair; leave its runtime and record state untouched.
             SpawnOutcome::Skipped => continue,
             SpawnOutcome::Spawned(key, mut process) => {
-                let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
+                let Ok(record) = find_managed_agent_mut(records, &pubkey) else {
+                    let _ = super::terminate_process(process.child.id());
+                    let _ = process.child.wait();
                     continue;
                 };
                 let now = util::now_iso();
@@ -422,7 +427,7 @@ pub async fn restore_managed_agents_on_launch(
                 successfully_spawned.push((pubkey, key.relay_url.clone()));
             }
             SpawnOutcome::Failed(error) => {
-                let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
+                let Ok(record) = find_managed_agent_mut(records, &pubkey) else {
                     continue;
                 };
                 record.updated_at = util::now_iso();
@@ -434,13 +439,16 @@ pub async fn restore_managed_agents_on_launch(
     // Collect profile reconciliation data for successfully spawned agents before
     // releasing the lock. This mirrors the fire-and-forget pattern in
     // start_managed_agent — ensuring boot-restored agents get the same profile
-    // self-healing as UI-started agents.
+    // self-healing as UI-started agents. Read from `agents_to_start` (the
+    // overlay-resolved spawn records), not the raw disk `records`, so the
+    // reconciled profile matches the config the spawn actually used — the
+    // interactive path builds its reconcile data from the resolved record too.
     let reconcile_personas = super::load_personas(app).unwrap_or_default();
     let reconcile_items: Vec<(String, crate::commands::ProfileReconcileData)> =
         successfully_spawned
             .iter()
             .filter_map(|(pubkey, spawn_relay)| {
-                let record = records.iter().find(|r| r.pubkey == *pubkey)?;
+                let record = agents_to_start.iter().find(|r| r.pubkey == *pubkey)?;
                 // Resolve the effective harness for the avatar-fallback
                 // derivation (the snapshot may be empty/stale for an inherited
                 // harness). Mirrors the UI start path.
@@ -470,9 +478,9 @@ pub async fn restore_managed_agents_on_launch(
             })
             .collect();
 
-    save_managed_agents(app, &records)?;
+    save_managed_agents(app, records)?;
     drop(runtimes);
-    drop(_store_guard);
+    drop(authority);
     drop(restore_transition);
 
     // ── Profile reconciliation (fire-and-forget) ────────────────────────────
@@ -496,6 +504,37 @@ pub async fn restore_managed_agents_on_launch(
 
 fn profile_reconcile_completed(outcome: crate::commands::ProfileReconcileOutcome) -> bool {
     outcome == crate::commands::ProfileReconcileOutcome::Reconciled
+}
+
+/// Final shaping of a spawn candidate AFTER the relay-overlay
+/// resolve, mirroring `start_local_agent_with_preflight` exactly:
+///
+/// - a resolved backend that is no longer local cannot be spawned by this
+///   device — the candidate is dropped (`None`);
+/// - the linked persona snapshot is re-applied ON TOP of the overlay patch,
+///   so the definition-authoritative quad keeps its established precedence
+///   over both disk and relay bytes;
+/// - an orphaned instance (persona_id with no live persona) is passed through
+///   untouched: `spawn_agent_child` refuses it via
+///   `resolve_effective_config`'s `OrphanedInstance` arm and Phase C persists
+///   the refusal to `last_error` — restore must not silently drop it.
+///
+/// Pure over (record, personas) so the restore fold is testable without an
+/// `AppHandle`.
+fn finalize_restore_candidate(
+    mut resolved: super::ManagedAgentRecord,
+    personas: &[super::AgentDefinition],
+) -> Option<super::ManagedAgentRecord> {
+    if resolved.backend != BackendKind::Local {
+        return None;
+    }
+    if let Some(persona_id) = resolved.persona_id.clone() {
+        if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
+            super::persona_events::apply_persona_snapshot(&mut resolved, persona);
+            resolved.updated_at = util::now_iso();
+        }
+    }
+    Some(resolved)
 }
 
 pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, workspace_relay: &str) {
@@ -561,10 +600,211 @@ mod profile_reconcile_tests {
     }
 }
 
+// ── Restore fold: relay-overlay resolve before spawn ────────────────────────
+//
+// The production wiring (Phase A resolving every candidate through
+// `resolved_local_record` before Phase B spawns) needs a live `AppHandle`, so
+// its presence is pinned by `write_site_resolve_guard` in
+// `private_config_overlay.rs`. These tests prove the fold itself: what a
+// resolved candidate looks like, at the same overlay + finalize seam the
+// production path composes.
+#[cfg(test)]
+mod restore_fold_tests {
+    use super::finalize_restore_candidate;
+    use crate::managed_agents::private_config_overlay::PrivateConfigOverlay;
+    use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord};
+    use buzz_core_pkg::private_managed_agent::{
+        Payload, PrivateConfig, PrivateIdentity, FORMAT, VERSION,
+    };
+    use std::collections::BTreeMap;
+
+    fn relay_payload(pubkey: &str) -> Payload {
+        Payload {
+            format: FORMAT.into(),
+            version: VERSION,
+            agent_pubkey: pubkey.into(),
+            owner_pubkey: "11".repeat(32),
+            generation: 2,
+            previous_event_id: None,
+            updated_at: "2026-08-20T00:00:00Z".into(),
+            identity: PrivateIdentity {
+                private_key_nsec: "nsec-relay".into(),
+                auth_tag: None,
+            },
+            config: PrivateConfig {
+                relay_url: "wss://relay.example".into(),
+                name: "relay name".into(),
+                persona_id: None,
+                runtime: Some("goose".into()),
+                model: Some("relay-model".into()),
+                provider: None,
+                system_prompt: Some("relay prompt".into()),
+                parallelism: Some(4),
+                respond_to: None,
+                respond_to_allowlist: vec![],
+                agent_command_override: None,
+                agent_args: vec![],
+                idle_timeout_seconds: None,
+                max_turn_duration_seconds: None,
+                env_vars: BTreeMap::new(),
+                backend: serde_json::json!({"type":"local"}),
+                backend_agent_id: None,
+                team_id: None,
+                persona_name_in_team: None,
+                relay_mesh: None,
+                effort_level: None,
+                extra: serde_json::Map::new(),
+            },
+            extensions: BTreeMap::new(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    /// A stale disk record flagged for auto-start, as Phase A collects it.
+    fn stale_disk_record(pubkey: &str) -> ManagedAgentRecord {
+        serde_json::from_value(serde_json::json!({
+            "pubkey": pubkey,
+            "name": "stale disk name",
+            "private_key_nsec": "nsec-stale-disk",
+            "relay_url": "wss://old.example",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": "stale disk prompt",
+            "model": "stale-model",
+            "provider": null,
+            "env_vars": {},
+            "start_on_app_launch": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }))
+        .expect("stale_disk_record fixture")
+    }
+
+    /// Issue-1 regression (stale-disk / newer-retained-head / start-on-launch):
+    /// a hydrated overlay head must win over the disk record for everything
+    /// relay-owned, while disk-only lifecycle state (`start_on_app_launch`)
+    /// survives untouched — the pair that previously spawned "config A shown
+    /// as config B".
+    #[test]
+    fn restore_candidate_spawns_relay_config_not_stale_disk() {
+        let pubkey = "aa".repeat(32);
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(relay_payload(&pubkey)).unwrap();
+
+        let disk = stale_disk_record(&pubkey);
+        let resolved = overlay.resolve_local_record(&disk);
+        let spawn = finalize_restore_candidate(resolved, &[])
+            .expect("local candidate must survive the fold");
+
+        assert_eq!(spawn.name, "relay name");
+        assert_eq!(spawn.system_prompt.as_deref(), Some("relay prompt"));
+        assert_eq!(spawn.model.as_deref(), Some("relay-model"));
+        assert_eq!(spawn.private_key_nsec, "nsec-relay");
+        assert_eq!(spawn.relay_url, "wss://relay.example");
+        assert_eq!(spawn.parallelism, 4);
+        assert!(
+            spawn.start_on_app_launch,
+            "device-local lifecycle flag must survive the overlay resolve"
+        );
+
+        // NEGATIVE CONTROL: an empty overlay leaves the disk record as-is —
+        // the assertions above are proving the patch, not the fixture.
+        let untouched = PrivateConfigOverlay::default().resolve_local_record(&disk);
+        assert_eq!(untouched.name, "stale disk name");
+        assert_eq!(untouched.private_key_nsec, "nsec-stale-disk");
+    }
+
+    /// The linked persona keeps its definition-authoritative precedence over
+    /// BOTH disk and relay bytes — mirroring the interactive start path, which
+    /// re-applies the snapshot after the overlay resolve.
+    #[test]
+    fn persona_snapshot_reapplies_on_top_of_overlay_patch() {
+        let pubkey = "bb".repeat(32);
+        let mut payload = relay_payload(&pubkey);
+        payload.config.persona_id = Some("def-1".into());
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(payload).unwrap();
+
+        let persona = AgentDefinition {
+            id: "def-1".into(),
+            display_name: "Definition".into(),
+            avatar_url: None,
+            description: None,
+            system_prompt: "definition prompt".into(),
+            runtime: Some("goose".into()),
+            model: Some("definition-model".into()),
+            provider: None,
+            name_pool: vec![],
+            is_builtin: false,
+            is_active: true,
+            shared: false,
+            source_team: None,
+            source_team_persona_slug: None,
+            catalog_source: None,
+            team_catalog_source: None,
+            env_vars: BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: vec![],
+            parallelism: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        let resolved = overlay.resolve_local_record(&stale_disk_record(&pubkey));
+        let spawn = finalize_restore_candidate(resolved, std::slice::from_ref(&persona)).unwrap();
+        assert_eq!(spawn.system_prompt.as_deref(), Some("definition prompt"));
+        assert_eq!(spawn.model.as_deref(), Some("definition-model"));
+        // Relay still owns what the definition does not.
+        assert_eq!(spawn.name, "relay name");
+        assert_eq!(spawn.private_key_nsec, "nsec-relay");
+    }
+
+    /// A candidate whose RESOLVED backend is no longer local must not spawn on
+    /// this device — same refusal as `start_local_agent_with_preflight`.
+    #[test]
+    fn non_local_resolved_backend_is_dropped() {
+        let pubkey = "cc".repeat(32);
+        let mut record = stale_disk_record(&pubkey);
+        record.backend = BackendKind::Provider {
+            id: "cloud".into(),
+            config: serde_json::json!({}),
+        };
+        assert!(
+            finalize_restore_candidate(record, &[]).is_none(),
+            "a non-local resolved backend must be refused at the fold"
+        );
+    }
+
+    /// An orphaned instance (persona_id with no live persona) passes through
+    /// unchanged: `spawn_agent_child` owns the refusal so Phase C persists it
+    /// to `last_error` — the fold must not silently drop the record.
+    #[test]
+    fn orphaned_instance_passes_through_for_spawn_refusal() {
+        let pubkey = "dd".repeat(32);
+        let mut record = stale_disk_record(&pubkey);
+        record.persona_id = Some("gone".into());
+        let spawn = finalize_restore_candidate(record, &[]).unwrap();
+        assert_eq!(spawn.persona_id.as_deref(), Some("gone"));
+        assert_eq!(
+            spawn.system_prompt.as_deref(),
+            Some("stale disk prompt"),
+            "no persona to re-apply: record passes through untouched"
+        );
+    }
+}
+
 #[cfg(feature = "mesh-llm")]
 fn persist_restore_error(
     app: &tauri::AppHandle,
     state: &AppState,
+    expected_scope: &std::path::Path,
     pubkey: &str,
     error: String,
 ) -> Result<(), String> {
@@ -572,6 +812,10 @@ fn persist_restore_error(
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
+    if super::retention::active_retention_scope(app, state)?.db_path != expected_scope {
+        return Err("workspace changed during managed-agent restore; retry initialization".into());
+    }
+    super::private_config_overlay::require_authority_ready(state)?;
     let mut records = load_managed_agents(app)?;
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     record.updated_at = util::now_iso();

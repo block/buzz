@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   startManagedAgentWithRules,
+  stopManagedAgentWithRules,
+  getManagedAgentPrimaryActionLabel,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
 
@@ -165,4 +167,72 @@ test("test_respawn_onStopped_fires_before_start_resolves", async () => {
     ["stop", "onStopped", "start"],
     "onStopped must fire after stop resolves and before start is called",
   );
+});
+
+test("tracked local child keeps native Stop after next backend migrates to provider", async () => {
+  const migrated = agent({
+    status: "running",
+    pid: 1234,
+    backend: { type: "provider", id: "remote" },
+  });
+  assert.equal(getManagedAgentPrimaryActionLabel(migrated), "Stop");
+  assert.equal(
+    getManagedAgentPrimaryActionLabel({ ...migrated, pid: null }),
+    "Shutdown",
+  );
+  let stopped = null;
+  await stopManagedAgentWithRules({
+    agent: migrated,
+    channels: [],
+    relayAgents: [],
+    stopManagedAgent: async (pubkey) => {
+      stopped = pubkey;
+    },
+  });
+  assert.equal(
+    stopped,
+    migrated.pubkey,
+    "must not require a relay channel to stop our local child",
+  );
+  const order = [];
+  await respawnManagedAgentWithRules({
+    agent: migrated,
+    stopManagedAgent: async () => {
+      order.push("stop");
+    },
+    onStopped: () => order.push("clear"),
+    startManagedAgent: async () => {
+      order.push("start");
+    },
+  });
+  assert.deepEqual(order, ["stop", "clear", "start"]);
+});
+
+test("relay-only remote cannot deploy here but local Start can materialize", async () => {
+  let starts = 0;
+  const remote = agent({
+    hasLocalLifecycle: false,
+    backend: { type: "provider", id: "remote" },
+  });
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(remote),
+    "Deploy unavailable on this device",
+  );
+  await assert.rejects(
+    startManagedAgentWithRules({
+      agent: remote,
+      startManagedAgent: async () => {
+        starts++;
+      },
+    }),
+    /no local deployment record/,
+  );
+  assert.equal(starts, 0);
+  await startManagedAgentWithRules({
+    agent: { ...remote, backend: { type: "local" } },
+    startManagedAgent: async () => {
+      starts++;
+    },
+  });
+  assert.equal(starts, 1);
 });
