@@ -888,7 +888,7 @@ pub enum UsersCmd {
         /// Avatar URL
         #[arg(long)]
         avatar: Option<String>,
-        /// Bio / about text
+        /// Bio / about text. Use '-' to read from stdin
         #[arg(long)]
         about: Option<String>,
         /// NIP-05 identifier (e.g. user@example.com)
