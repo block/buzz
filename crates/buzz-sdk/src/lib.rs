@@ -95,6 +95,9 @@ pub enum SdkError {
         /// Actual byte count.
         got: usize,
     },
+    /// Message content is empty (or whitespace-only) with no media attached.
+    #[error("refusing to build a message with empty content and no media")]
+    EmptyContent,
     /// A tag could not be constructed.
     #[error("invalid tag: {0}")]
     InvalidTag(String),
