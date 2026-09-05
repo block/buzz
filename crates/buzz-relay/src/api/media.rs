@@ -617,6 +617,22 @@ fn validate_media_path(sha256_ext: &str) -> Result<(), MediaError> {
 /// additional range requests.
 const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 
+/// CSP for a blob response, kept least-privilege while allowing browser-native
+/// viewers to load the response as their generated `<img>` or `<video>` source.
+///
+/// Chromium applies the blob response's CSP when a user navigates directly to
+/// an image or video URL. A bare `default-src 'none'` therefore blocks the
+/// browser-generated media element from loading the very response being viewed.
+fn blob_content_security_policy(content_type: &str) -> &'static str {
+    if content_type.starts_with("image/") {
+        "default-src 'none'; img-src 'self'"
+    } else if content_type.starts_with("video/") {
+        "default-src 'none'; media-src 'self'"
+    } else {
+        "default-src 'none'"
+    }
+}
+
 /// GET /media/{sha256_ext} — Blossom BUD-01 serve blob, with HTTP 206 range support.
 ///
 /// `sha256_ext` is either:
@@ -688,14 +704,16 @@ pub(crate) async fn serve_blob_for_tenant(
     };
 
     // Images and video render inline; generic files force download. This is the
-    // primary defence for non-previewable types — combined with `nosniff` and
-    // `CSP: default-src 'none'`, an attachment disposition prevents an uploaded
-    // file from ever executing or rendering as active content in the client.
+    // primary defence for non-previewable types — combined with `nosniff` and a
+    // restrictive CSP, an attachment disposition prevents an uploaded file from
+    // ever executing or rendering as active content in the client. Inline media
+    // gets only its own CSP source directive so direct browser navigation works.
     let disposition = if buzz_media::serve_inline(&content_type) {
         "inline"
     } else {
         "attachment"
     };
+    let content_security_policy = blob_content_security_policy(&content_type);
 
     let key = resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?;
 
@@ -725,7 +743,7 @@ pub(crate) async fn serve_blob_for_tenant(
                 .header(header::CONTENT_LENGTH, total.to_string())
                 .header(header::CONTENT_DISPOSITION, disposition)
                 .header(header::CACHE_CONTROL, cache_control)
-                .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
+                .header(header::CONTENT_SECURITY_POLICY, content_security_policy)
                 .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
                 .header(header::ACCEPT_RANGES, "bytes")
                 .body(axum::body::Body::from_stream(stream))
@@ -767,7 +785,7 @@ pub(crate) async fn serve_blob_for_tenant(
                         .header(header::CONTENT_DISPOSITION, disposition)
                         .header(header::ACCEPT_RANGES, "bytes")
                         .header(header::CACHE_CONTROL, cache_control)
-                        .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
+                        .header(header::CONTENT_SECURITY_POLICY, content_security_policy)
                         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
                         .body(axum::body::Body::from(chunk))
                         .map_err(|_| MediaError::Internal)?)
@@ -1128,6 +1146,30 @@ mod tests {
         let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
         assert!(infer::get(bytes).is_none());
         assert!(should_stream_as_video(bytes));
+    }
+
+    #[test]
+    fn inline_media_csp_allows_only_its_browser_native_viewer() {
+        assert_eq!(
+            blob_content_security_policy("video/mp4"),
+            "default-src 'none'; media-src 'self'"
+        );
+        assert_eq!(
+            blob_content_security_policy("image/png"),
+            "default-src 'none'; img-src 'self'"
+        );
+    }
+
+    #[test]
+    fn attachment_csp_keeps_all_resource_loading_disabled() {
+        assert_eq!(
+            blob_content_security_policy("application/pdf"),
+            "default-src 'none'"
+        );
+        assert_eq!(
+            blob_content_security_policy("application/octet-stream"),
+            "default-src 'none'"
+        );
     }
 
     async fn test_state() -> Arc<AppState> {
