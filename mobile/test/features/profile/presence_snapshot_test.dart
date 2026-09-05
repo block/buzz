@@ -288,6 +288,7 @@ class _Relay extends RelaySessionNotifier {
     emit = onEvent;
     status = onStatusChanged;
     close = onClosed!;
+    onStatusChanged(RelaySubscriptionStatus.ready);
     if (ready != null) await ready!.future;
     return () => unsubscribes++;
   }
