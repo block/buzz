@@ -47,6 +47,12 @@ pub struct AdminActionRecord {
     pub cancelled_by: Option<Vec<u8>>,
     /// Error from the last failure, if any.
     pub error_message: Option<String>,
+    /// Authoritative target pubkey persisted at claim time (kick/ban/timeout pubkey targets).
+    /// `None` for event/blob targets or actions with no pubkey target.
+    pub enforcement_target_pubkey: Option<Vec<u8>>,
+    /// Authoritative channel persisted at claim time (kick actions).
+    /// `None` for community-wide actions.
+    pub enforcement_channel_id: Option<Uuid>,
     /// Row creation time.
     pub created_at: DateTime<Utc>,
     /// Row last-updated time.
@@ -241,6 +247,7 @@ pub async fn claim_report(
             r#"
             SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                    action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
+                   enforcement_target_pubkey, enforcement_channel_id,
                    created_at, updated_at
             FROM relay_admin_actions
             WHERE report_community_id = $1 AND report_id = $2 AND request_id = $3
@@ -269,10 +276,11 @@ pub async fn claim_report(
         r#"
         INSERT INTO relay_admin_actions (
             report_id, report_community_id, request_id, actor_pubkey, actor_role,
-            action, reason, timeout_until, state
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+            action, reason, timeout_until, state, enforcement_target_pubkey, enforcement_channel_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
         RETURNING id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                   action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
+                  enforcement_target_pubkey, enforcement_channel_id,
                   created_at, updated_at
         "#,
     )
@@ -284,6 +292,8 @@ pub async fn claim_report(
     .bind(action)
     .bind(reason)
     .bind(timeout_until)
+    .bind(target_pubkey)
+    .bind(channel_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -1242,6 +1252,7 @@ pub async fn get_action(pool: &PgPool, action_id: Uuid) -> Result<Option<AdminAc
         r#"
         SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
+               enforcement_target_pubkey, enforcement_channel_id,
                created_at, updated_at
         FROM relay_admin_actions WHERE id = $1
         "#,
@@ -1263,6 +1274,7 @@ pub async fn get_action_by_request(
         r#"
         SELECT id, report_id, report_community_id, request_id, actor_pubkey, actor_role,
                action, reason, timeout_until, state, step_marker, cancelled_by, error_message,
+               enforcement_target_pubkey, enforcement_channel_id,
                created_at, updated_at
         FROM relay_admin_actions
         WHERE report_community_id = $1 AND report_id = $2 AND request_id = $3
@@ -1520,7 +1532,8 @@ pub async fn claim_stranded_action_batch(
               AND (action_lease_expires_at IS NULL OR action_lease_expires_at < now())
             RETURNING id, report_id, report_community_id, request_id, actor_pubkey,
                       actor_role, action, reason, timeout_until, state, step_marker,
-                      cancelled_by, error_message, created_at, updated_at
+                      cancelled_by, error_message, enforcement_target_pubkey,
+                      enforcement_channel_id, created_at, updated_at
             "#,
         )
         .bind(id)
@@ -1618,6 +1631,8 @@ fn row_to_action(row: sqlx::postgres::PgRow) -> Result<AdminActionRecord> {
         step_marker: row.try_get("step_marker")?,
         cancelled_by: row.try_get("cancelled_by")?,
         error_message: row.try_get("error_message")?,
+        enforcement_target_pubkey: row.try_get("enforcement_target_pubkey")?,
+        enforcement_channel_id: row.try_get("enforcement_channel_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
