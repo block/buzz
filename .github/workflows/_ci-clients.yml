@@ -111,9 +111,9 @@ jobs:
       - name: Analyze
         run: cd mobile && flutter analyze
       - name: Test
-        run: cd mobile && flutter test
+        run: cd mobile && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
       - name: Build Android debug APK
-        run: just mobile-build-android
+        run: BUZZ_PUSH_GATEWAY_URL=https://push.example just mobile-build-android
 
   mobile-swift:
     name: Mobile Swift
@@ -132,7 +132,7 @@ jobs:
       - name: Test
         run: swift test --package-path mobile/ios/BuzzPushKit
       - name: Build complete unsigned iOS release
-        run: cd mobile && flutter build ios --release --no-codesign --no-pub
+        run: cd mobile && flutter build ios --release --no-codesign --no-pub --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 
   results:
     name: Results

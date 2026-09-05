@@ -21,6 +21,9 @@ void main() {
     apnsRegistrationError.value = null;
     pushEndpointGrants.value = const [];
     pushEndpointGrantError.value = null;
+    retiredBuzzPushRelayOrigins.value = const {};
+    replacementBuzzPushRelayOrigins.value = const {};
+    replacementBuzzPushGeneration.value = 0;
     pushCommunitySnapshotError.value = null;
     pendingPushNotificationLink.value = null;
     installBuzzPushMethodHandler();
@@ -47,12 +50,184 @@ void main() {
   });
 
   test(
+    'initializes native gateway cleanup without starting APNs registration',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'initializeGateway');
+            expect(call.arguments, {'gatewayUrl': Env.pushGatewayUrl});
+            return {
+              'retiredRelayOrigins': ['wss://old-relay.example'],
+              'replacementRelayOrigins': ['wss://rotated-relay.example'],
+              'replacementGeneration': 4,
+            };
+          });
+
+      expect(await initializeBuzzPushGateway(), {
+        'wss://old-relay.example',
+        'wss://rotated-relay.example',
+      });
+      expect(retiredBuzzPushRelayOrigins.value, {'wss://old-relay.example'});
+      expect(replacementBuzzPushRelayOrigins.value, {
+        'wss://rotated-relay.example',
+      });
+      expect(replacementBuzzPushGeneration.value, 4);
+    },
+  );
+
+  test(
+    'completes retired gateway cleanup only through the explicit seam',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      retiredBuzzPushRelayOrigins.value = {'wss://old-relay.example'};
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'completeGatewayMigration');
+            expect(call.arguments, {'gatewayUrl': Env.pushGatewayUrl});
+            return {
+              'retiredRelayOrigins': <String>[],
+              'replacementRelayOrigins': <String>[],
+              'replacementGeneration': 0,
+            };
+          });
+
+      await completeBuzzPushGatewayMigration();
+
+      expect(retiredBuzzPushRelayOrigins.value, isEmpty);
+      expect(replacementBuzzPushRelayOrigins.value, isEmpty);
+      expect(replacementBuzzPushGeneration.value, 0);
+    },
+  );
+
+  test(
+    'retains native migration inventory when cleanup token becomes stale',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      retiredBuzzPushRelayOrigins.value = {'wss://old-relay.example'};
+      replacementBuzzPushRelayOrigins.value = {'wss://old-relay.example'};
+      replacementBuzzPushGeneration.value = 4;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'completeGatewayMigration');
+            return {
+              'retiredRelayOrigins': <String>[],
+              'replacementRelayOrigins': ['wss://old-relay.example'],
+              'replacementGeneration': 4,
+            };
+          });
+
+      await completeBuzzPushGatewayMigration();
+
+      expect(retiredBuzzPushRelayOrigins.value, isEmpty);
+      expect(replacementBuzzPushRelayOrigins.value, {
+        'wss://old-relay.example',
+      });
+      expect(replacementBuzzPushGeneration.value, 4);
+    },
+  );
+
+  test('durably queues a complete delegation authority group', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'queueGatewayReplacements');
+          expect(call.arguments, {
+            'relayOrigins': [
+              'wss://already-queued.example',
+              'wss://retired-only.example',
+            ],
+          });
+          return {
+            'retiredRelayOrigins': ['wss://retired-only.example'],
+            'replacementRelayOrigins': [
+              'wss://already-queued.example',
+              'wss://retired-only.example',
+            ],
+            'replacementGeneration': 5,
+          };
+        });
+
+    await queueBuzzPushGatewayReplacements({
+      'wss://retired-only.example',
+      'wss://already-queued.example',
+    });
+
+    expect(retiredBuzzPushRelayOrigins.value, {'wss://retired-only.example'});
+    expect(replacementBuzzPushRelayOrigins.value, {
+      'wss://already-queued.example',
+      'wss://retired-only.example',
+    });
+    expect(replacementBuzzPushGeneration.value, 5);
+  });
+
+  test('atomically checkpoints origins sharing delegation authority', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    replacementBuzzPushRelayOrigins.value = {
+      'wss://done.example',
+      'wss://pending.example',
+    };
+    replacementBuzzPushGeneration.value = 7;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'checkpointGatewayReplacements');
+          expect(call.arguments, {
+            'relayOrigins': ['wss://also-done.example', 'wss://done.example'],
+            'generation': 7,
+            'deviceToken': 'device-token',
+          });
+          return true;
+        });
+
+    replacementBuzzPushRelayOrigins.value = {
+      'wss://also-done.example',
+      ...replacementBuzzPushRelayOrigins.value,
+    };
+    await checkpointBuzzPushGatewayReplacements(
+      {'wss://done.example', 'wss://also-done.example'},
+      7,
+      'device-token',
+    );
+
+    expect(replacementBuzzPushRelayOrigins.value, {'wss://pending.example'});
+  });
+
+  test('preserves replacement inventory after a stale checkpoint', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    replacementBuzzPushRelayOrigins.value = {'wss://pending.example'};
+    replacementBuzzPushGeneration.value = 7;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'checkpointGatewayReplacements');
+          expect(call.arguments, {
+            'relayOrigins': ['wss://pending.example'],
+            'generation': 7,
+            'deviceToken': 'stale-token',
+          });
+          return false;
+        });
+
+    await expectLater(
+      checkpointBuzzPushGatewayReplacements(
+        {'wss://pending.example'},
+        7,
+        'stale-token',
+      ),
+      throwsStateError,
+    );
+
+    expect(replacementBuzzPushRelayOrigins.value, {'wss://pending.example'});
+    expect(replacementBuzzPushGeneration.value, 7);
+  });
+
+  test(
     'starts native permission and APNs registration without a result gate',
     () async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_channel, (call) async {
             expect(call.method, 'startRegistration');
+            expect(call.arguments, {'gatewayUrl': Env.pushGatewayUrl});
             return null;
           });
 
@@ -177,7 +352,12 @@ void main() {
         methods.add(call.method);
         if (call.method == 'enrollPush') {
           enrollmentArguments.add(call.arguments);
-          return _grantMap('new-grant');
+          return {
+            ..._grantMap('new-grant'),
+            'retiredRelayOrigins': ['wss://retired.example'],
+            'replacementRelayOrigins': ['wss://sibling.example'],
+            'replacementGeneration': 8,
+          };
         }
         if (call.method == 'endpointGrants') {
           return [_grantMap('new-grant')];
@@ -196,6 +376,7 @@ void main() {
       final secondGrant = await enrollBuzzPush(
         'wss://relay.example/',
         'https://gateway-two.example/',
+        forceDelegationRenewal: true,
         communitiesForSnapshotRefresh: [
           Community(
             id: 'community-id',
@@ -210,14 +391,19 @@ void main() {
 
       expect(firstGrant.endpointGrant, 'new-grant');
       expect(secondGrant.endpointGrant, 'new-grant');
+      expect(retiredBuzzPushRelayOrigins.value, {'wss://retired.example'});
+      expect(replacementBuzzPushRelayOrigins.value, {'wss://sibling.example'});
+      expect(replacementBuzzPushGeneration.value, 8);
       expect(enrollmentArguments, [
         {
           'relayUrl': 'wss://relay.example/',
           'gatewayUrl': 'https://gateway-one.example/',
+          'forceDelegationRenewal': false,
         },
         {
           'relayUrl': 'wss://relay.example/',
           'gatewayUrl': 'https://gateway-two.example/',
+          'forceDelegationRenewal': true,
         },
       ]);
       expect(methods, [
@@ -246,11 +432,9 @@ void main() {
     },
   );
 
-  test('development push gateway matches the compiled configuration', () {
-    const expectedGateway = String.fromEnvironment(
-      'BUZZ_PUSH_GATEWAY_URL',
-      defaultValue: 'https://push.buzz.xyz',
-    );
+  test('push gateway matches the required compiled configuration', () {
+    const expectedGateway = String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL');
+    expect(expectedGateway, isNotEmpty);
     expect(Env.pushGatewayUrl, expectedGateway);
   });
 

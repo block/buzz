@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -16,6 +17,18 @@ import 'push_relay_capability_provider.dart';
 import 'push_subscription.dart';
 
 const _pushBootstrapRetryDelay = Duration(seconds: 5);
+const _maxGatewayInitializationRetries = 6;
+
+@visibleForTesting
+Duration? buzzPushGatewayInitializationRetryDelay(int failureCount) {
+  if (failureCount < 1) {
+    throw ArgumentError.value(failureCount, 'failureCount', 'must be positive');
+  }
+  if (failureCount > _maxGatewayInitializationRetries) return null;
+  return Duration(
+    seconds: _pushBootstrapRetryDelay.inSeconds << (failureCount - 1),
+  );
+}
 
 @visibleForTesting
 class BuzzPushAttemptGate {
@@ -32,6 +45,8 @@ class BuzzPushAttemptGate {
     _attempt = attempt;
     return true;
   }
+
+  bool isCurrent(String attempt) => _attempt == attempt;
 
   void failed(String attempt, {required VoidCallback retry}) {
     if (_attempt != attempt) return;
@@ -69,6 +84,26 @@ class BuzzPushAttemptGate {
 }
 
 @visibleForTesting
+class BuzzPushAttemptFailureBudget {
+  String? _attempt;
+  int _failureCount = 0;
+
+  int recordFailure(String attempt) {
+    if (_attempt != attempt) {
+      _attempt = attempt;
+      _failureCount = 0;
+    }
+    return ++_failureCount;
+  }
+
+  void clear(String attempt) {
+    if (_attempt != attempt) return;
+    _attempt = null;
+    _failureCount = 0;
+  }
+}
+
+@visibleForTesting
 String buzzPushPublicationAttemptKey({
   required String communityId,
   required String relayBaseUrl,
@@ -91,14 +126,255 @@ bool buzzPushLifecycleEnabled({
 }) => community?.pushNotificationsEnabled == true && descriptor != null;
 
 @visibleForTesting
+List<Community> buzzPushCommunitiesRequiringGatewayMigration({
+  required List<Community> communities,
+  required Set<String> retiredRelayOrigins,
+  Set<String> replacementRelayOrigins = const {},
+  required String targetGatewayOrigin,
+}) => communities
+    .where(
+      (community) =>
+          community.pushNotificationsEnabled &&
+          retiredRelayOrigins.contains(
+            buzzPushRelayWebSocketOrigin(community.relayUrl),
+          ) &&
+          (replacementRelayOrigins.contains(
+                buzzPushRelayWebSocketOrigin(community.relayUrl),
+              ) ||
+              community.pushSubscriptionState.acceptedGatewayOrigin !=
+                  targetGatewayOrigin),
+    )
+    .toList();
+
+@visibleForTesting
+bool buzzPushGatewayMigrationAttemptIsCurrent({
+  required bool attemptIsCurrent,
+  required String token,
+  required String? liveToken,
+  required Set<String> retiredRelayOrigins,
+  required Set<String> liveRetiredRelayOrigins,
+  required Set<String> replacementRelayOrigins,
+  required Set<String> liveReplacementRelayOrigins,
+  required int replacementGeneration,
+  required int liveReplacementGeneration,
+}) =>
+    attemptIsCurrent &&
+    token == liveToken &&
+    setEquals(retiredRelayOrigins, liveRetiredRelayOrigins) &&
+    setEquals(replacementRelayOrigins, liveReplacementRelayOrigins) &&
+    replacementGeneration == liveReplacementGeneration;
+
+@visibleForTesting
+Future<bool> markBuzzPushGatewayMigrationAcceptedIfCurrent({
+  required bool Function() attemptIsCurrent,
+  required Future<bool> Function() markAccepted,
+}) {
+  if (!attemptIsCurrent()) return Future.value(false);
+  return markAccepted();
+}
+
+@visibleForTesting
+Future<T> runBuzzPushGatewayMigrationMutationIfCurrent<T>({
+  required bool Function() attemptIsCurrent,
+  required Future<T> Function() mutate,
+}) {
+  if (!attemptIsCurrent()) {
+    return Future.error(
+      StateError('Push gateway migration attempt is obsolete.'),
+    );
+  }
+  return mutate();
+}
+
+typedef BuzzPushGatewayMigrationTarget = ({
+  Community community,
+  String relayOrigin,
+  BuzzPushLeaseDescriptor descriptor,
+});
+
+@visibleForTesting
+class BuzzPushGatewayMigrationResolution {
+  BuzzPushGatewayMigrationResolution({
+    required this.targets,
+    required this.blockedOrigins,
+    this.firstError,
+    this.firstStack,
+  });
+
+  final List<BuzzPushGatewayMigrationTarget> targets;
+  final Set<String> blockedOrigins;
+  final Object? firstError;
+  final StackTrace? firstStack;
+
+  void throwIfFailed() {
+    if (firstError != null) {
+      Error.throwWithStackTrace(firstError!, firstStack!);
+    }
+  }
+}
+
+@visibleForTesting
+Future<BuzzPushGatewayMigrationResolution>
+resolveBuzzPushGatewayMigrationTargets({
+  required Iterable<Community> communities,
+  required Future<BuzzPushLeaseDescriptor> Function(String relayUrl)
+  fetchDescriptor,
+}) async {
+  final ordered = communities.toList()
+    ..sort(
+      (left, right) => buzzPushRelayWebSocketOrigin(
+        left.relayUrl,
+      ).compareTo(buzzPushRelayWebSocketOrigin(right.relayUrl)),
+    );
+  final targets = <BuzzPushGatewayMigrationTarget>[];
+  final blockedOrigins = <String>{};
+  Object? firstError;
+  StackTrace? firstStack;
+  for (final community in ordered) {
+    final relayOrigin = buzzPushRelayWebSocketOrigin(community.relayUrl);
+    try {
+      targets.add((
+        community: community,
+        relayOrigin: relayOrigin,
+        descriptor: await fetchDescriptor(community.relayUrl),
+      ));
+    } catch (error, stack) {
+      blockedOrigins.add(relayOrigin);
+      firstError ??= error;
+      firstStack ??= stack;
+    }
+  }
+  return BuzzPushGatewayMigrationResolution(
+    targets: targets,
+    blockedOrigins: blockedOrigins,
+    firstError: firstError,
+    firstStack: firstStack,
+  );
+}
+
+@visibleForTesting
+Map<String, List<BuzzPushGatewayMigrationTarget>>
+buzzPushGroupGatewayMigrationsByDelegationAuthority(
+  Iterable<BuzzPushGatewayMigrationTarget> targets,
+) {
+  final groups = <String, List<BuzzPushGatewayMigrationTarget>>{};
+  for (final target in targets) {
+    groups.putIfAbsent(target.descriptor.executorPubkey, () => []).add(target);
+  }
+  return groups;
+}
+
+@visibleForTesting
+Set<String> buzzPushGatewayMigrationGroupOriginsToQueue({
+  required Iterable<BuzzPushGatewayMigrationTarget> targets,
+  required Set<String> replacementRelayOrigins,
+}) {
+  final groupOrigins = targets.map((target) => target.relayOrigin).toSet();
+  if (groupOrigins.intersection(replacementRelayOrigins).isEmpty ||
+      replacementRelayOrigins.containsAll(groupOrigins)) {
+    return const {};
+  }
+  return groupOrigins;
+}
+
+@visibleForTesting
+Future<bool> processBuzzPushGatewayMigrationGroups<T>({
+  required Iterable<T> groups,
+  required Future<bool> Function(T group) process,
+  Object? initialError,
+  StackTrace? initialStack,
+}) async {
+  Object? firstError = initialError;
+  StackTrace? firstStack = initialStack;
+  for (final group in groups) {
+    try {
+      if (await process(group)) return true;
+    } catch (error, stack) {
+      firstError ??= error;
+      firstStack ??= stack;
+    }
+  }
+  if (firstError != null) {
+    Error.throwWithStackTrace(firstError, firstStack!);
+  }
+  return false;
+}
+
+/// Owns the APNs-registration side effect so migration-triggered registration
+/// is exercised through the same production boundary as active-community
+/// registration.
+@visibleForTesting
+class BuzzPushRegistrationBootstrap extends HookWidget {
+  const BuzzPushRegistrationBootstrap({
+    required this.shouldRegister,
+    required this.attemptKey,
+    required this.child,
+    this.startRegistration = startBuzzPushRegistration,
+    super.key,
+  });
+
+  final bool shouldRegister;
+  final String attemptKey;
+  final Widget child;
+  final Future<void> Function() startRegistration;
+
+  @override
+  Widget build(BuildContext context) {
+    final attemptGate = useMemoized(BuzzPushAttemptGate.new);
+    final retry = useState(0);
+    useEffect(() => attemptGate.dispose, const []);
+    useEffect(() {
+      if (!shouldRegister || !attemptGate.tryBegin(attemptKey)) return null;
+      unawaited(() async {
+        try {
+          await startRegistration();
+        } catch (error, stack) {
+          attemptGate.failed(
+            attemptKey,
+            retry: () {
+              if (context.mounted) retry.value += 1;
+            },
+          );
+          debugPrint('Push registration bootstrap failed: $error');
+          debugPrintStack(stackTrace: stack);
+        }
+      }());
+      return null;
+    }, [shouldRegister, attemptKey, retry.value]);
+    return child;
+  }
+}
+
+@visibleForTesting
+String buzzPushRelayWebSocketOrigin(String relayUrl) {
+  final uri = Uri.parse(RelayConfig(baseUrl: relayUrl).wsUrl);
+  return uri.replace(path: '', query: null, fragment: null).toString();
+}
+
+@visibleForTesting
+String buzzPushGatewayOrigin(String gatewayUrl) {
+  final uri = Uri.parse(gatewayUrl);
+  return uri.replace(path: '', query: null, fragment: null).toString();
+}
+
+@visibleForTesting
 Future<int> publishBuzzPushLeaseRecoverably({
   required Future<int> Function() reserveGeneration,
   required Future<void> Function(int generation) publish,
-  required Future<void> Function(int generation) markAccepted,
+  required Future<bool> Function(int generation) markAccepted,
+  bool Function()? operationIsCurrent,
 }) async {
+  if (operationIsCurrent?.call() == false) {
+    throw StateError('Push lease publication attempt is obsolete.');
+  }
   final generation = await reserveGeneration();
+  if (operationIsCurrent?.call() == false) {
+    throw StateError('Push lease publication attempt is obsolete.');
+  }
   await publish(generation);
-  await markAccepted(generation);
+  if (!await markAccepted(generation)) {
+    throw StateError('A newer push lease superseded the published generation.');
+  }
   return generation;
 }
 
@@ -112,19 +388,46 @@ class BuzzPushBootstrap extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(apnsDeviceToken);
-    final registrationAttempt = useMemoized(BuzzPushAttemptGate.new);
+    useListenable(retiredBuzzPushRelayOrigins);
+    useListenable(replacementBuzzPushRelayOrigins);
+    useListenable(replacementBuzzPushGeneration);
+    final gatewayInitializationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
+    final gatewayMigrationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
-    final registrationRetry = useState(0);
+    final gatewayInitializationRetry = useState(0);
+    final gatewayInitializationFailures = useRef(0);
     final publicationRetry = useState(0);
+    final gatewayMigrationRetry = useState(0);
+    final gatewayMigrationFailures = useMemoized(
+      BuzzPushAttemptFailureBudget.new,
+    );
     final tombstoneRetry = useState(0);
     final revocationOutbox = ref.watch(buzzPushLeaseRevocationOutboxProvider);
     final session = ref.watch(relaySessionProvider);
-    final communities = ref.watch(communityListProvider).value ?? const [];
+    final communitiesAsync = ref.watch(communityListProvider);
+    final communities = communitiesAsync.value ?? const [];
     final config = ref.watch(relayConfigProvider);
     final community = ref.watch(activeCommunityProvider).value;
     final memberPubkey = ref.watch(myPubkeyProvider);
     final descriptor = ref.watch(currentRelayPushDescriptorProvider).value;
+    final token = apnsDeviceToken.value;
+    final retiredRelayOrigins = retiredBuzzPushRelayOrigins.value;
+    final replacementRelayOrigins = replacementBuzzPushRelayOrigins.value;
+    final replacementGeneration = replacementBuzzPushGeneration.value;
+    final migrationRelayOrigins = retiredRelayOrigins.union(
+      replacementRelayOrigins,
+    );
+    final targetGatewayOrigin = buzzPushGatewayOrigin(Env.pushGatewayUrl);
+    final migrationCommunities = buzzPushCommunitiesRequiringGatewayMigration(
+      communities: communities,
+      retiredRelayOrigins: migrationRelayOrigins,
+      replacementRelayOrigins: replacementRelayOrigins,
+      targetGatewayOrigin: targetGatewayOrigin,
+    );
+    final activeLifecycleReady =
+        _ready(session, config, community, memberPubkey) &&
+        buzzPushLifecycleEnabled(community: community, descriptor: descriptor);
 
     useEffect(() {
       final listener = AppLifecycleListener(
@@ -141,10 +444,47 @@ class BuzzPushBootstrap extends HookConsumerWidget {
       return null;
     }, [revocationOutbox, session.status]);
 
+    useEffect(() {
+      const attempt = 'configured-gateway';
+      if (!gatewayInitializationAttempt.tryBegin(attempt)) return null;
+      unawaited(() async {
+        try {
+          await initializeBuzzPushGateway();
+          gatewayInitializationFailures.value = 0;
+          gatewayInitializationAttempt.complete(attempt);
+        } catch (error, stack) {
+          gatewayInitializationFailures.value += 1;
+          final retryDelay = buzzPushGatewayInitializationRetryDelay(
+            gatewayInitializationFailures.value,
+          );
+          if (retryDelay == null) {
+            gatewayInitializationAttempt.complete(attempt);
+          } else {
+            gatewayInitializationAttempt.retryAfter(
+              attempt,
+              delay: retryDelay,
+              retry: () {
+                if (context.mounted) gatewayInitializationRetry.value += 1;
+              },
+            );
+          }
+          debugPrint('Push gateway initialization failed: $error');
+          if (retryDelay == null) {
+            debugPrint(
+              'Push gateway migration is deferred until the next app launch.',
+            );
+          }
+          debugPrintStack(stackTrace: stack);
+        }
+      }());
+      return null;
+    }, [gatewayInitializationRetry.value]);
+
     useEffect(
       () => () {
-        registrationAttempt.dispose();
+        gatewayInitializationAttempt.dispose();
         publicationAttempt.dispose();
+        gatewayMigrationAttempt.dispose();
         tombstoneAttempt.dispose();
       },
       const [],
@@ -209,49 +549,155 @@ class BuzzPushBootstrap extends HookConsumerWidget {
       ],
     );
 
+    final activeCommunityAwaitingGatewayMigration =
+        community != null &&
+        buzzPushCommunitiesRequiringGatewayMigration(
+          communities: [community],
+          retiredRelayOrigins: migrationRelayOrigins,
+          replacementRelayOrigins: replacementRelayOrigins,
+          targetGatewayOrigin: targetGatewayOrigin,
+        ).isNotEmpty;
     useEffect(
       () {
-        if (!_ready(session, config, community, memberPubkey) ||
-            !buzzPushLifecycleEnabled(
-              community: community,
-              descriptor: descriptor,
-            )) {
+        if (token == null ||
+            migrationRelayOrigins.isEmpty ||
+            !communitiesAsync.hasValue) {
           return null;
         }
-        final activeCommunity = community!;
-        final activeDescriptor = descriptor!;
-        final attempt = '${activeCommunity.id}|${config.baseUrl}';
-        if (!registrationAttempt.tryBegin(attempt)) return null;
+        final attempt = [
+          token,
+          'retired:${(retiredRelayOrigins.toList()..sort()).join(',')}',
+          'replacement:${(replacementRelayOrigins.toList()..sort()).join(',')}',
+          'replacement-generation:$replacementGeneration',
+        ].join('|');
+        if (!gatewayMigrationAttempt.tryBegin(attempt)) return null;
         unawaited(() async {
+          bool attemptIsCurrent() => buzzPushGatewayMigrationAttemptIsCurrent(
+            attemptIsCurrent: gatewayMigrationAttempt.isCurrent(attempt),
+            token: token,
+            liveToken: apnsDeviceToken.value,
+            retiredRelayOrigins: retiredRelayOrigins,
+            liveRetiredRelayOrigins: retiredBuzzPushRelayOrigins.value,
+            replacementRelayOrigins: replacementRelayOrigins,
+            liveReplacementRelayOrigins: replacementBuzzPushRelayOrigins.value,
+            replacementGeneration: replacementGeneration,
+            liveReplacementGeneration: replacementBuzzPushGeneration.value,
+          );
           try {
-            await startBuzzPushRegistrationIfCapable(
-              activeDescriptor,
-              startRegistration: startBuzzPushRegistration,
+            final candidates = buzzPushCommunitiesRequiringGatewayMigration(
+              communities: communities,
+              retiredRelayOrigins: migrationRelayOrigins,
+              replacementRelayOrigins: replacementRelayOrigins,
+              targetGatewayOrigin: targetGatewayOrigin,
             );
-          } catch (error, stack) {
-            registrationAttempt.failed(
-              attempt,
-              retry: () {
-                if (context.mounted) registrationRetry.value += 1;
+            final resolution = await resolveBuzzPushGatewayMigrationTargets(
+              communities: candidates,
+              fetchDescriptor: fetchBuzzPushLeaseDescriptor,
+            );
+            final authorityGroups =
+                buzzPushGroupGatewayMigrationsByDelegationAuthority(
+                  resolution.targets,
+                );
+            final stopped = await processBuzzPushGatewayMigrationGroups(
+              groups: authorityGroups.values,
+              initialError: resolution.firstError,
+              initialStack: resolution.firstStack,
+              process: (authorityTargets) async {
+                final originsToQueue =
+                    buzzPushGatewayMigrationGroupOriginsToQueue(
+                      targets: authorityTargets,
+                      replacementRelayOrigins: replacementRelayOrigins,
+                    );
+                if (originsToQueue.isNotEmpty) {
+                  if (!attemptIsCurrent()) return true;
+                  await queueBuzzPushGatewayReplacements(originsToQueue);
+                  // Queueing advances the inventory generation. Let the
+                  // resulting rebuild process the fully journaled group.
+                  return true;
+                }
+                final queuedOrigins = authorityTargets
+                    .map((target) => target.relayOrigin)
+                    .where(replacementRelayOrigins.contains)
+                    .where(
+                      (origin) => !resolution.blockedOrigins.contains(origin),
+                    )
+                    .toSet();
+                for (
+                  var index = 0;
+                  index < authorityTargets.length;
+                  index += 1
+                ) {
+                  final target = authorityTargets[index];
+                  await _publishCommunityReplacement(
+                    ref,
+                    target.community,
+                    communities,
+                    targetGatewayOrigin,
+                    descriptor: target.descriptor,
+                    forceDelegationRenewal:
+                        queuedOrigins.isNotEmpty && index == 0,
+                    attemptIsCurrent: attemptIsCurrent,
+                  );
+                }
+                if (queuedOrigins.isEmpty) return false;
+                if (!attemptIsCurrent()) return true;
+                await checkpointBuzzPushGatewayReplacements(
+                  queuedOrigins,
+                  replacementGeneration,
+                  token,
+                );
+                // The checkpoint atomically removes every origin whose grants
+                // share this delegation authority. Let the resulting rebuild
+                // own the next authority so attempts cannot overlap.
+                return true;
               },
             );
-            debugPrint('Push registration bootstrap failed: $error');
+            if (stopped) return;
+            if (!attemptIsCurrent()) return;
+            await completeBuzzPushGatewayMigration();
+            gatewayMigrationFailures.clear(attempt);
+            gatewayMigrationAttempt.complete(attempt);
+          } catch (error, stack) {
+            if (!attemptIsCurrent()) return;
+            final failureCount = gatewayMigrationFailures.recordFailure(
+              attempt,
+            );
+            final retryDelay = buzzPushGatewayInitializationRetryDelay(
+              failureCount,
+            );
+            if (retryDelay == null) {
+              gatewayMigrationAttempt.complete(attempt);
+            } else {
+              gatewayMigrationAttempt.retryAfter(
+                attempt,
+                delay: retryDelay,
+                retry: () {
+                  if (context.mounted) gatewayMigrationRetry.value += 1;
+                },
+              );
+            }
+            debugPrint('Push gateway migration failed: $error');
+            if (retryDelay == null) {
+              debugPrint(
+                'Push gateway migration remains durably queued for the next app launch.',
+              );
+            }
             debugPrintStack(stackTrace: stack);
           }
         }());
         return null;
       },
       [
-        session.status,
-        config.baseUrl,
-        community?.id,
-        memberPubkey,
-        descriptor,
-        registrationRetry.value,
+        token,
+        migrationRelayOrigins,
+        replacementRelayOrigins,
+        replacementGeneration,
+        communitiesAsync.hasValue,
+        communities,
+        gatewayMigrationRetry.value,
       ],
     );
 
-    final token = apnsDeviceToken.value;
     useEffect(
       () {
         if (!_ready(session, config, community, memberPubkey) ||
@@ -259,7 +705,8 @@ class BuzzPushBootstrap extends HookConsumerWidget {
               community: community,
               descriptor: descriptor,
             ) ||
-            token == null) {
+            token == null ||
+            activeCommunityAwaitingGatewayMigration) {
           return null;
         }
         final activeCommunity = community!;
@@ -323,11 +770,20 @@ class BuzzPushBootstrap extends HookConsumerWidget {
         memberPubkey,
         descriptor,
         token,
+        activeCommunityAwaitingGatewayMigration,
         publicationRetry.value,
       ],
     );
 
-    return child;
+    return BuzzPushRegistrationBootstrap(
+      shouldRegister: activeLifecycleReady || migrationCommunities.isNotEmpty,
+      attemptKey: [
+        if (activeLifecycleReady) 'active:${community!.id}|${config.baseUrl}',
+        if (migrationCommunities.isNotEmpty)
+          'migration:${migrationCommunities.map((candidate) => candidate.id).join(',')}',
+      ].join('|'),
+      child: child,
+    );
   }
 
   static bool _ready(
@@ -380,7 +836,74 @@ class BuzzPushBootstrap extends HookConsumerWidget {
         community.id,
         subscriptions: desired,
         generation: leaseGeneration,
+        gatewayOrigin: buzzPushGatewayOrigin(Env.pushGatewayUrl),
       ),
+    );
+    return grant;
+  }
+
+  static Future<BuzzPushEndpointGrant> _publishCommunityReplacement(
+    WidgetRef ref,
+    Community community,
+    List<Community> communities,
+    String targetGatewayOrigin, {
+    required BuzzPushLeaseDescriptor descriptor,
+    bool forceDelegationRenewal = false,
+    required bool Function() attemptIsCurrent,
+  }) async {
+    final config = RelayConfig(
+      baseUrl: community.relayUrl,
+      nsec: community.nsec,
+    );
+    final nsec = config.nsec;
+    final memberPubkey = pubkeyFromNsec(nsec);
+    if (nsec == null || nsec.isEmpty || memberPubkey == null) {
+      throw StateError(
+        'Cannot migrate push for ${community.id}: signing key is unavailable',
+      );
+    }
+    final grant = await runBuzzPushGatewayMigrationMutationIfCurrent(
+      attemptIsCurrent: attemptIsCurrent,
+      mutate: () => enrollBuzzPush(
+        config.wsUrl,
+        Env.pushGatewayUrl,
+        communitiesForSnapshotRefresh: communities,
+        forceDelegationRenewal: forceDelegationRenewal,
+      ),
+    );
+    final notifier = ref.read(communityListProvider.notifier);
+    await publishBuzzPushLeaseRecoverably(
+      reserveGeneration: () =>
+          notifier.reservePushLeaseGeneration(community.id),
+      operationIsCurrent: attemptIsCurrent,
+      publish: (generation) => publishBuzzDevPushLease(
+        grant: grant,
+        leaseInstallationId: community.pushLeaseInstallationId,
+        leaseGeneration: generation,
+        descriptor: descriptor,
+        nsec: nsec,
+        memberPubkey: memberPubkey,
+        subscriptions: community.pushSubscriptionState.desired,
+        submit: ({required kind, required content, required tags, createdAt}) =>
+            submitSignedEventOnce(
+              wsUrl: config.wsUrl,
+              nsec: nsec,
+              kind: kind,
+              content: content,
+              tags: tags,
+              createdAt: createdAt,
+            ),
+      ),
+      markAccepted: (generation) =>
+          markBuzzPushGatewayMigrationAcceptedIfCurrent(
+            attemptIsCurrent: attemptIsCurrent,
+            markAccepted: () => notifier.markPushLeaseAccepted(
+              community.id,
+              subscriptions: community.pushSubscriptionState.desired,
+              generation: generation,
+              gatewayOrigin: targetGatewayOrigin,
+            ),
+          ),
     );
     return grant;
   }

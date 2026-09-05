@@ -412,32 +412,41 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     });
   }
 
-  Future<void> markPushLeaseAccepted(
+  Future<bool> markPushLeaseAccepted(
     String id, {
     required List<BuzzPushSubscription> subscriptions,
     required int generation,
+    String? gatewayOrigin,
   }) => _serializePushMutation(() async {
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? await storage.loadAll();
     final index = current.indexWhere((community) => community.id == id);
-    if (index < 0) return;
+    if (index < 0) return false;
 
     final community = current[index];
     final acceptedGeneration =
         community.pushSubscriptionState.acceptedGeneration ?? 0;
     final generationCursor =
         community.pushSubscriptionState.generationCursor ?? 0;
-    if (generation < max(acceptedGeneration, generationCursor)) return;
+    if (generation < max(acceptedGeneration, generationCursor)) return false;
+    if (buzzPushSubscriptionsFingerprint(
+          community.pushSubscriptionState.desired,
+        ) !=
+        buzzPushSubscriptionsFingerprint(subscriptions)) {
+      return false;
+    }
     final updated = community.copyWith(
       pushSubscriptionState: community.pushSubscriptionState.withAccepted(
         subscriptions: subscriptions,
         generation: generation,
+        gatewayOrigin: gatewayOrigin,
       ),
     );
     await storage.save(updated);
     final updatedList = [...current]..[index] = updated;
     state = AsyncData(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
+    return true;
   });
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {

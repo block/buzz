@@ -71,10 +71,7 @@ class Env {
     'BUZZ_RELAY_URL',
     defaultValue: 'http://localhost:3000',
   );
-  static const pushGatewayUrl = String.fromEnvironment(
-    'BUZZ_PUSH_GATEWAY_URL',
-    defaultValue: 'https://push.buzz.xyz',
-  );
+  static const pushGatewayUrl = String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL');
 }
 
 class RelayConfigNotifier extends Notifier<RelayConfig> {

@@ -25,7 +25,7 @@ engine all come from the same Flutter version.
 just mobile-dev
 
 # Direct (uses the app's configured community; apply worktree overrides first):
-cd mobile && flutter run
+cd mobile && flutter run --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 ### Worktree-aware debug identity
@@ -70,13 +70,18 @@ For direct Xcode / Android Studio / `flutter run` development, run
 switch to refresh the display label (the install identity never changes);
 the persisted files are then picked up by any subsequent build. In the main
 checkout the script is a no-op that removes stale override files, restoring
-the plain `Buzz` identity.
+the plain `Buzz` identity. Direct Xcode builds and Runner tests also require a
+`BUZZ_PUSH_GATEWAY_URL` build setting in the gitignored
+`mobile/ios/Flutter/AppOverrides.xcconfig`; the build phase validates and
+passes it through as a Flutter Dart define. Since `//` begins an xcconfig
+comment, spell the origin as `BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example`.
 
 For an Android debug build that must remain installed alongside other Buzz
 worktree builds, set an explicit launcher name and package suffix when invoking
 the generator or a recipe that invokes it:
 
 ```bash
+BUZZ_PUSH_GATEWAY_URL="https://push.example" \
 BUZZ_ANDROID_DEBUG_APP_NAME="Buzz Huddles" \
 BUZZ_ANDROID_DEBUG_ID_SUFFIX=".huddles_829c" \
 ./bin/just mobile-build-android
@@ -104,6 +109,18 @@ enrollment, or lease publication, so a later user opt-in can display pushes
 without rebuilding transport authority. An absent, malformed, or unreachable
 descriptor leaves push inactive without partial enrollment.
 
+Every mobile build must supply the gateway origin explicitly:
+
+```bash
+flutter build ios --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+flutter build apk --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+```
+
+The iOS and Android build gates fail when the define is absent. The app binds
+enrollment state to this origin and discards legacy or mismatched grants and
+pending enrollment journals before enrolling again. Notification permission is
+not reset.
+
 Relay rollout remains an explicit deployment opt-in. Only deployments with
 `BUZZ_PUSH_ENABLED=true` advertise the descriptor and process push. See
 `docs/push-gateway-deployment.md` for the canonical gateway profile contract,
@@ -117,6 +134,7 @@ BUNDLE_IDENTIFIER = xyz.block.buzz.mobile
 BUZZ_DEVELOPMENT_TEAM = EYF346PHUG
 BUZZ_IOS_PUSH_ENVIRONMENT = development
 BUZZ_APP_ATTEST_ENVIRONMENT = development
+BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example
 ```
 
 This exercises the client, extension, relay, and gateway integration without
@@ -148,7 +166,7 @@ short sender pubkey, community subtitle, and no image.
 ```bash
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test
+flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 Or from the repo root: `just mobile-check` and `just mobile-test`.

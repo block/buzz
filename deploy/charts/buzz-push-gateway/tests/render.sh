@@ -2,15 +2,17 @@
 set -euo pipefail
 out=$(mktemp); production_out=$(mktemp); route_out=$(mktemp); datadog_out=$(mktemp)
 trap 'rm -f "$out" "$production_out" "$route_out" "$datadog_out" "${monitoring_out:-}"' EXIT
+gateway_origin_arg=(--set 'gatewayOrigin=https://push.example')
 
-# Defaults must lint and render without parameter injection.
-helm lint deploy/charts/buzz-push-gateway >/dev/null
-helm template push deploy/charts/buzz-push-gateway >"$out"
+# Generic values require the deployment-owned gateway origin.
+helm lint deploy/charts/buzz-push-gateway "${gateway_origin_arg[@]}" >/dev/null
+helm template push deploy/charts/buzz-push-gateway "${gateway_origin_arg[@]}" >"$out"
 # Production values support a platform-owned ingress without rendering an
 # HTTPRoute. The environment-owned inputs remain mandatory.
 production_args=(
   -f deploy/charts/buzz-push-gateway/values-production.yaml
   --set 'image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  --set 'gatewayOrigin=https://push.example'
   --set 'profiles.dogfood.appAttestAppId=REALTEAM.xyz.block.buzz.dogfood.mobile'
   --set 'networkPolicy.postgresEgressCidrs[0]=10.42.0.0/16'
 )
@@ -20,6 +22,7 @@ helm template push deploy/charts/buzz-push-gateway "${production_args[@]}" >"$pr
 # Gateway API remains an explicit supported ingress mode when an operator opts
 # in and supplies the environment-owned parent.
 helm template push deploy/charts/buzz-push-gateway \
+  "${gateway_origin_arg[@]}" \
   --set httpRoute.enabled=true \
   --set 'httpRoute.parentRefs[0].name=production-gateway' \
   --set 'httpRoute.parentRefs[0].namespace=gateway-system' \
@@ -63,8 +66,12 @@ required = Set.new(%w[
   DATABASE_URL BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH
   BUZZ_PUSH_DOGFOOD_APNS_TOPIC BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID
   BUZZ_PUSH_GRANT_KEYS BUZZ_PUSH_TOKEN_KEYS BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS
+  BUZZ_PUSH_GATEWAY_ORIGIN
 ])
 assert!(required.subset?(env_names))
+gateway_origin = d.dig("spec", "template", "spec", "containers", 0, "env")
+  .find { |entry| entry["name"] == "BUZZ_PUSH_GATEWAY_ORIGIN" }
+assert!(gateway_origin["value"] == "https://push.example")
 assert!(!env_names.any? { |name| name.include?("APP_STORE") })
 apns_volume = d.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "apns-dogfood" }
 assert!(apns_volume.dig("secret", "defaultMode") == 0o400, apns_volume.inspect)
@@ -100,12 +107,26 @@ production_image = production_deployment.dig("spec", "template", "spec", "contai
 assert!(production_image == "ghcr.io/block/buzz-push-gateway@sha256:#{"a" * 64}", production_image.inspect)
 route = YAML.load_stream(File.read(ARGV[2])).compact.find { |x| x["kind"] == "HTTPRoute" }
 assert!(!route.dig("spec", "parentRefs").empty?)
-assert!(route.dig("spec", "hostnames").include?("push.buzz.xyz"))
+assert!(route.dig("spec", "hostnames") == ["push.example"])
 RUBY
+
+# A gateway origin is a required deployment input, even when HTTPRoute is off.
+if helm template push deploy/charts/buzz-push-gateway >/dev/null 2>&1; then
+  echo 'expected missing gatewayOrigin to fail' >&2
+  exit 1
+fi
+for invalid_origin in 'http://push.example' 'https://push.example:8443' 'https://push.example/base'; do
+  if helm template push deploy/charts/buzz-push-gateway \
+    --set "gatewayOrigin=$invalid_origin" >/dev/null 2>&1; then
+    echo "expected malformed gatewayOrigin $invalid_origin to fail" >&2
+    exit 1
+  fi
+done
 
 # Legacy token-auth values must fail rather than silently selecting the default
 # certificate Secret.
 if helm template push deploy/charts/buzz-push-gateway \
+  "${gateway_origin_arg[@]}" \
   --set apnsKey.secretName=legacy-apns-secret \
   --set apnsKey.secretKey=legacy-provider.p8 >/dev/null 2>&1; then
   echo 'expected legacy apnsKey values to fail schema validation' >&2
@@ -113,7 +134,7 @@ if helm template push deploy/charts/buzz-push-gateway \
 fi
 
 # Enabling a route without a Gateway attachment must fail schema validation.
-if helm template push deploy/charts/buzz-push-gateway --set httpRoute.enabled=true >/dev/null 2>&1; then
+if helm template push deploy/charts/buzz-push-gateway "${gateway_origin_arg[@]}" --set httpRoute.enabled=true >/dev/null 2>&1; then
   echo 'expected httpRoute.enabled=true without parentRefs to fail' >&2
   exit 1
 fi
@@ -129,6 +150,7 @@ fi
 # keyed to the named monitoring source — never a blanket 8081 rule.
 monitoring_out=$(mktemp)
 helm template push deploy/charts/buzz-push-gateway \
+  "${gateway_origin_arg[@]}" \
   --set podMonitor.enabled=true \
   --set prometheusRule.enabled=true \
   --set networkPolicy.monitoring.enabled=true \
@@ -162,9 +184,11 @@ RUBY
 # Datadog discovers the same private endpoint from pod annotations and needs no
 # prometheus-operator CRDs. Its agent ingress remains selector-scoped.
 helm lint deploy/charts/buzz-push-gateway \
-  -f deploy/charts/buzz-push-gateway/tests/datadog-values.yaml >/dev/null
+  -f deploy/charts/buzz-push-gateway/tests/datadog-values.yaml \
+  "${gateway_origin_arg[@]}" >/dev/null
 helm template push deploy/charts/buzz-push-gateway \
   -f deploy/charts/buzz-push-gateway/tests/datadog-values.yaml \
+  "${gateway_origin_arg[@]}" \
   >"$datadog_out"
 
 env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -rjson -ryaml -rset \
@@ -200,6 +224,7 @@ RUBY
 # Negative: monitoring enabled with default empty selectors must fail (would
 # otherwise render a blanket 8081 rule matching all namespaces/pods).
 if helm template push deploy/charts/buzz-push-gateway \
+  "${gateway_origin_arg[@]}" \
   --set podMonitor.enabled=true \
   --set networkPolicy.monitoring.enabled=true >/dev/null 2>&1; then
   echo 'expected monitoring.enabled with empty selectors to fail' >&2
@@ -209,6 +234,7 @@ fi
 # Negative: PodMonitor without ingress is an unreachable scraper and must fail.
 # Scoped ingress without PodMonitor is valid for annotation-discovered agents.
 if helm template push deploy/charts/buzz-push-gateway \
+  "${gateway_origin_arg[@]}" \
   --set podMonitor.enabled=true \
   --set 'networkPolicy.monitoring.namespaceSelector.kubernetes\.io/metadata\.name=monitoring' \
   --set 'networkPolicy.monitoring.podSelector.app\.kubernetes\.io/name=prometheus' \
@@ -219,6 +245,7 @@ fi
 
 # Negative: retry-ratio threshold is a fraction; a value > 1 must fail schema.
 if helm template push deploy/charts/buzz-push-gateway \
+  "${gateway_origin_arg[@]}" \
   --set prometheusRule.enabled=true \
   --set prometheusRule.apnsRetryRatioThreshold=2 >/dev/null 2>&1; then
   echo 'expected apnsRetryRatioThreshold=2 to fail' >&2

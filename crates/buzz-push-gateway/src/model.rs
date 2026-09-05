@@ -94,6 +94,17 @@ pub struct InstallationEnrollResponse {
     pub expires_at: i64,
 }
 
+/// Recovery proof for the gateway-neutral legacy client schema. The opaque
+/// grant proves which gateway and delegation own the submitted APNs token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverInstallationRequest {
+    pub v: u8,
+    pub endpoint_grant: String,
+    pub app_profile: AppProfile,
+    pub endpoint: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegationRequest {

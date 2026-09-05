@@ -1,3 +1,5 @@
+import java.net.URI
+import java.util.Base64
 import java.util.Properties
 
 plugins {
@@ -20,6 +22,43 @@ val uploadSigningValues =
     )
 val missingUploadSigningValues = uploadSigningValues.filterValues { it.isNullOrBlank() }.keys
 val hasUploadSigning = missingUploadSigningValues.isEmpty()
+val dartDefines = providers.gradleProperty("dart-defines").orNull.orEmpty()
+val pushGatewayDefinePrefix = "BUZZ_PUSH_GATEWAY_URL="
+val pushGatewayOrigins =
+    dartDefines.split(',').mapNotNull { encoded ->
+        val define = runCatching { String(Base64.getDecoder().decode(encoded)) }.getOrNull()
+        define
+            ?.takeIf { it.startsWith(pushGatewayDefinePrefix) }
+            ?.removePrefix(pushGatewayDefinePrefix)
+    }
+fun isValidPushGatewayOrigin(value: String, requireHttps: Boolean): Boolean {
+    val uri = runCatching { URI(value) }.getOrNull() ?: return false
+    val scheme = uri.scheme?.lowercase()
+    return (scheme == "https" || (!requireHttps && scheme == "http")) &&
+        !uri.host.isNullOrBlank() &&
+        uri.rawUserInfo == null &&
+        (uri.rawPath.isNullOrEmpty() || uri.rawPath == "/") &&
+        uri.rawQuery == null &&
+        uri.rawFragment == null &&
+        (if (requireHttps) uri.port == -1 else uri.port == -1 || uri.port in 1..65535)
+}
+
+tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
+    doFirst {
+        val requireHttps = !name.endsWith("Debug", ignoreCase = true)
+        val hasValidPushGatewayOrigin =
+            pushGatewayOrigins.size == 1 &&
+                isValidPushGatewayOrigin(pushGatewayOrigins.single(), requireHttps)
+        if (!hasValidPushGatewayOrigin) {
+            throw GradleException(
+                "BUZZ_PUSH_GATEWAY_URL must be supplied as an " +
+                    (if (requireHttps) "HTTPS" else "HTTP(S)") +
+                    " origin without " + (if (requireHttps) "an explicit port, " else "") +
+                    "credentials, path, query, or fragment for every mobile build.",
+            )
+        }
+    }
+}
 
 // Worktree-aware debug identity (gitignored, written by
 // scripts/mobile-worktree-overrides.sh): debug builds from a git worktree get a

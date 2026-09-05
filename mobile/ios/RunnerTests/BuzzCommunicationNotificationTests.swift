@@ -202,9 +202,11 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     metadataPubkey: String
   ) -> BuzzPushEndpointGrantRecord {
     BuzzPushEndpointGrantRecord(
+      gatewayOrigin: "https://push.example",
       relayOrigin: "https://relay.example",
       relayPubkey: String(repeating: "c", count: 64),
       relayMetadataPubkey: metadataPubkey,
+      appAttestKeyId: Data(repeating: 0xAA, count: 32).base64EncodedString(),
       installationId: "installation",
       endpointGrant: "opaque-grant",
       endpointHash: String(repeating: "d", count: 64),

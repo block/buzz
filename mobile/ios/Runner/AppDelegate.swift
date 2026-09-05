@@ -16,6 +16,8 @@ import os.log
     accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
   )
   private var enrollmentTask: Task<Void, Never>?
+  private var gatewayCleanupTask: Task<Void, Error>?
+  private var pushGatewayURL: URL?
   private var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
@@ -344,8 +346,159 @@ import os.log
       return
     }
     switch call.method {
+    case "initializeGateway":
+      guard let gatewayURL = gatewayURL(from: call) else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Push initialization requires gatewayUrl.",
+            details: nil
+          )
+        )
+        return
+      }
+      Task {
+        do {
+          result(try initializePushGateway(gatewayURL))
+        } catch {
+          result(
+            FlutterError(
+              code: "push_gateway_initialization_failed",
+              message: "Push gateway initialization failed.",
+              details: error.localizedDescription
+            )
+          )
+        }
+      }
+    case "completeGatewayMigration":
+      guard enrollmentTask == nil else {
+        result(
+          FlutterError(
+            code: "push_enrollment_in_progress",
+            message: "Push enrollment must finish before gateway cleanup.",
+            details: nil
+          )
+        )
+        return
+      }
+      do {
+        let cleanupTask = try retiredGatewayCleanupTask()
+        Task {
+          do {
+            if let cleanupTask {
+              try await cleanupTask.value
+            }
+            result(try pushGatewayMigrationInventory())
+          } catch {
+            result(
+              FlutterError(
+                code: "push_gateway_cleanup_failed",
+                message: "Retired push gateway cleanup failed.",
+                details: error.localizedDescription
+              )
+            )
+          }
+        }
+      } catch {
+        result(
+          FlutterError(
+            code: "push_gateway_cleanup_failed",
+            message: "Retired push gateway cleanup failed.",
+            details: error.localizedDescription
+          )
+        )
+      }
+    case "queueGatewayReplacements":
+      guard let arguments = call.arguments as? [String: Any],
+        let relayOrigins = arguments["relayOrigins"] as? [String],
+        !relayOrigins.isEmpty,
+        relayOrigins.allSatisfy({ !$0.isEmpty })
+      else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Gateway replacement queue requires relayOrigins.",
+            details: nil
+          )
+        )
+        return
+      }
+      do {
+        try endpointGrantStore.queueReplacementRelayOrigins(relayOrigins)
+        result(try pushGatewayMigrationInventory())
+      } catch {
+        result(
+          FlutterError(
+            code: "push_gateway_queue_failed",
+            message: "Push gateway replacement queue failed.",
+            details: error.localizedDescription
+          )
+        )
+      }
+    case "checkpointGatewayReplacements":
+      guard let arguments = call.arguments as? [String: Any],
+        let relayOrigins = arguments["relayOrigins"] as? [String],
+        !relayOrigins.isEmpty,
+        relayOrigins.allSatisfy({ !$0.isEmpty }),
+        let generation = (arguments["generation"] as? NSNumber)?.int64Value,
+        let expectedDeviceToken = arguments["deviceToken"] as? String,
+        !expectedDeviceToken.isEmpty
+      else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Gateway replacement checkpoint requires relayOrigins.",
+            details: nil
+          )
+        )
+        return
+      }
+      guard
+        apnsDeviceToken?.map({ String(format: "%02x", $0) }).joined()
+          == expectedDeviceToken
+      else {
+        result(false)
+        return
+      }
+      do {
+        result(
+          try endpointGrantStore.checkpointReplacementRelayOrigins(
+            relayOrigins,
+            expectedGeneration: generation
+          )
+        )
+      } catch {
+        result(
+          FlutterError(
+            code: "push_gateway_checkpoint_failed",
+            message: "Push gateway replacement checkpoint failed.",
+            details: error.localizedDescription
+          )
+        )
+      }
     case "startRegistration":
-      startPushRegistration(result: result)
+      guard let gatewayURL = gatewayURL(from: call) else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Push registration requires gatewayUrl.",
+            details: nil
+          )
+        )
+        return
+      }
+      do {
+        try configurePushGateway(gatewayURL)
+        startPushRegistration(result: result)
+      } catch {
+        result(
+          FlutterError(
+            code: "push_gateway_configuration_failed",
+            message: "Push gateway configuration is invalid.",
+            details: error.localizedDescription
+          )
+        )
+      }
     case "takePendingNotificationResponse":
       result(pushNavigationBuffer.take()?.flutterArguments)
     case "notificationAuthorizationStatus":
@@ -441,6 +594,16 @@ import os.log
       )
       return
     }
+    guard gatewayCleanupTask == nil else {
+      result(
+        FlutterError(
+          code: "gateway_cleanup_in_progress",
+          message: "Gateway cleanup must finish before push enrollment.",
+          details: nil
+        )
+      )
+      return
+    }
     guard let deviceToken = apnsDeviceToken else {
       result(
         FlutterError(
@@ -476,6 +639,7 @@ import os.log
       )
       return
     }
+    let forceDelegationRenewal = arguments["forceDelegationRenewal"] as? Bool ?? false
 
     do {
       let driver = try BuzzDevPushEnrollmentDriver(
@@ -490,9 +654,15 @@ import os.log
         do {
           let record = try await driver.enroll(
             deviceToken: deviceToken,
-            relayURL: relayURL
+            relayURL: relayURL,
+            forceDelegationRenewal: forceDelegationRenewal
           )
-          await MainActor.run { result(record.flutterArguments) }
+          try self?.endpointGrantStore.clearQuarantinedLegacyState()
+          var arguments = record.flutterArguments
+          if let inventory = try self?.pushGatewayMigrationInventory() {
+            arguments.merge(inventory) { _, latest in latest }
+          }
+          await MainActor.run { result(arguments) }
         } catch {
           await MainActor.run {
             result(
@@ -514,6 +684,69 @@ import os.log
         )
       )
     }
+  }
+
+  private func retiredGatewayCleanupTask() throws -> Task<Void, Error>? {
+    if let gatewayCleanupTask { return gatewayCleanupTask }
+    guard let gatewayURL = pushGatewayURL else { return nil }
+    let driver = try BuzzDevPushEnrollmentDriver(
+      gatewayBaseURL: gatewayURL,
+      store: endpointGrantStore,
+      appAttestKeychainAccessGroup: pushKeychainAccessGroup
+    )
+    let cleanupDeviceToken = apnsDeviceToken
+    let task = Task { [weak self] in
+      try await driver.cleanRetiredGateways(deviceToken: cleanupDeviceToken)
+      try await MainActor.run { [weak self] in
+        guard let self else { return }
+        try BuzzPushCleanupTokenFence.checkpointIfCurrent(
+          capturedDeviceToken: cleanupDeviceToken,
+          liveDeviceToken: self.apnsDeviceToken
+        ) {
+          try self.endpointGrantStore.clearReplacementRelayOrigins()
+        }
+      }
+    }
+    gatewayCleanupTask = task
+    Task { [weak self] in
+      _ = await task.result
+      self?.gatewayCleanupTask = nil
+    }
+    return task
+  }
+
+  private func gatewayURL(from call: FlutterMethodCall) -> URL? {
+    guard let arguments = call.arguments as? [String: Any],
+      let gatewayText = arguments["gatewayUrl"] as? String
+    else { return nil }
+    return URL(string: gatewayText)
+  }
+
+  private func configurePushGateway(_ gatewayURL: URL) throws {
+    let gatewayOrigin = try BuzzPushTranscript.canonicalGatewayOrigin(gatewayURL)
+    guard pushGatewayURL != gatewayOrigin.url else { return }
+    try endpointGrantStore.reset(forGatewayOrigin: gatewayOrigin.text)
+    pushGatewayURL = gatewayOrigin.url
+  }
+
+  private func initializePushGateway(_ gatewayURL: URL) throws -> [String: Any] {
+    try configurePushGateway(gatewayURL)
+    return try pushGatewayMigrationInventory()
+  }
+
+  private func pushGatewayMigrationInventory() throws -> [String: Any] {
+    let retiredRelayOrigins = Array(
+      Set(
+        try endpointGrantStore.gatewayCleanupStates()
+          .flatMap { $0.grants.map(\.relayOrigin) + $0.pendingEnrollments.map(\.relayOrigin) }
+      )
+    ).sorted()
+    let replacementState = try endpointGrantStore.replacementQueueState()
+    return [
+      "retiredRelayOrigins": retiredRelayOrigins,
+      "replacementRelayOrigins": replacementState.relayOrigins,
+      "replacementGeneration": replacementState.generation,
+    ]
   }
 
   private func handleMediaUploadMethodCall(

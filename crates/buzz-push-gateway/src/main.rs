@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             authority,
             token_keyring: Arc::new(token_keyring),
             profile: Arc::new(profile),
-            delivery_url: c.public_delivery_url,
+            gateway_urls: Arc::new(c.gateway_urls),
             max_grant_lifetime_seconds: c.max_grant_lifetime_seconds,
             max_installation_lifetime_seconds: c.max_installation_lifetime_seconds,
             endpoint_quota_window_seconds: c.endpoint_quota_window_seconds,

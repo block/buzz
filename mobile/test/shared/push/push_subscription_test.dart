@@ -47,12 +47,17 @@ void main() {
     final subscription = buildDesiredBuzzPushSubscriptions(myPubkey: me).single;
     final state =
         BuzzPushLeaseSubscriptionState.desired(desired: [subscription])
-            .withAccepted(subscriptions: [subscription], generation: 9)
+            .withAccepted(
+              subscriptions: [subscription],
+              generation: 9,
+              gatewayOrigin: 'https://push.example',
+            )
             .withReservedGeneration(10);
 
     final decoded = BuzzPushLeaseSubscriptionState.fromJson(state.toJson());
     expect(decoded.acceptedGeneration, 9);
     expect(decoded.generationCursor, 10);
+    expect(decoded.acceptedGatewayOrigin, 'https://push.example');
     expect(decoded.toJson(), state.toJson());
   });
 

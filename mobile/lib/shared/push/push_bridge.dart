@@ -94,6 +94,9 @@ final apnsRegistrationError = ValueNotifier<String?>(null);
 
 final pushEndpointGrants = ValueNotifier<List<BuzzPushEndpointGrant>>([]);
 final pushEndpointGrantError = ValueNotifier<String?>(null);
+final retiredBuzzPushRelayOrigins = ValueNotifier<Set<String>>(const {});
+final replacementBuzzPushRelayOrigins = ValueNotifier<Set<String>>(const {});
+final replacementBuzzPushGeneration = ValueNotifier<int>(0);
 
 /// The most recent notification response waiting for app navigation.
 ///
@@ -136,13 +139,109 @@ Future<void> syncPendingBuzzPushNotificationResponse() async {
   }
 }
 
+/// Inventories durable retired-gateway state without revoking it.
+///
+/// Replacement publication and the explicit cleanup completion seam remain
+/// separate so every enabled community can migrate first.
+Future<Set<String>> initializeBuzzPushGateway() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return const {};
+  try {
+    final inventory = await _channel.invokeMapMethod<dynamic, dynamic>(
+      'initializeGateway',
+      {'gatewayUrl': Env.pushGatewayUrl},
+    );
+    final retired = _relayOriginSet(inventory?['retiredRelayOrigins']);
+    final replacements = _relayOriginSet(inventory?['replacementRelayOrigins']);
+    retiredBuzzPushRelayOrigins.value = retired;
+    replacementBuzzPushRelayOrigins.value = replacements;
+    replacementBuzzPushGeneration.value =
+        inventory?['replacementGeneration'] as int? ?? 0;
+    return retired.union(replacements);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+    return const {};
+  }
+}
+
+/// Revokes retired gateway authority after every affected enabled community
+/// has durably published its replacement lease.
+Future<void> completeBuzzPushGatewayMigration() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    final inventory = await _channel.invokeMapMethod<dynamic, dynamic>(
+      'completeGatewayMigration',
+      {'gatewayUrl': Env.pushGatewayUrl},
+    );
+    retiredBuzzPushRelayOrigins.value = _relayOriginSet(
+      inventory?['retiredRelayOrigins'],
+    );
+    replacementBuzzPushRelayOrigins.value = _relayOriginSet(
+      inventory?['replacementRelayOrigins'],
+    );
+    replacementBuzzPushGeneration.value =
+        inventory?['replacementGeneration'] as int? ?? 0;
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Durably queues every relay origin sharing delegation authority before any
+/// member is renewed, so a partial group cannot lose replacement work.
+Future<void> queueBuzzPushGatewayReplacements(Set<String> relayOrigins) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    final inventory = await _channel.invokeMapMethod<dynamic, dynamic>(
+      'queueGatewayReplacements',
+      {'relayOrigins': relayOrigins.toList()..sort()},
+    );
+    retiredBuzzPushRelayOrigins.value = _relayOriginSet(
+      inventory?['retiredRelayOrigins'],
+    );
+    replacementBuzzPushRelayOrigins.value = _relayOriginSet(
+      inventory?['replacementRelayOrigins'],
+    );
+    replacementBuzzPushGeneration.value =
+        inventory?['replacementGeneration'] as int? ?? 0;
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Atomically removes same-gateway relay origins only after all community
+/// replacement leases sharing their delegation authority are durable.
+Future<void> checkpointBuzzPushGatewayReplacements(
+  Set<String> relayOrigins,
+  int generation,
+  String deviceToken,
+) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    final checkpointed = await _channel
+        .invokeMethod<bool>('checkpointGatewayReplacements', {
+          'relayOrigins': relayOrigins.toList()..sort(),
+          'generation': generation,
+          'deviceToken': deviceToken,
+        });
+    if (checkpointed != true) {
+      throw StateError('Push replacement inventory changed before checkpoint.');
+    }
+    replacementBuzzPushRelayOrigins.value = {
+      ...replacementBuzzPushRelayOrigins.value,
+    }..removeAll(relayOrigins);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
 /// Starts the independent iOS notification-authorization and APNs-registration
 /// requests. Display authorization is intentionally not returned or persisted:
 /// APNs registration and enrollment remain valid while display is denied.
 Future<void> startBuzzPushRegistration() async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
   try {
-    await _channel.invokeMethod<void>('startRegistration');
+    await _channel.invokeMethod<void>('startRegistration', {
+      'gatewayUrl': Env.pushGatewayUrl,
+    });
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
   }
@@ -212,14 +311,24 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
   String relayUrl,
   String gatewayUrl, {
   List<Community>? communitiesForSnapshotRefresh,
+  bool forceDelegationRenewal = false,
 }) async {
   final raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
     'relayUrl': relayUrl,
     'gatewayUrl': gatewayUrl,
+    'forceDelegationRenewal': forceDelegationRenewal,
   });
   if (raw == null) {
     throw StateError('Native push enrollment returned no grant.');
   }
+  retiredBuzzPushRelayOrigins.value = _relayOriginSet(
+    raw['retiredRelayOrigins'],
+  );
+  replacementBuzzPushRelayOrigins.value = _relayOriginSet(
+    raw['replacementRelayOrigins'],
+  );
+  replacementBuzzPushGeneration.value =
+      raw['replacementGeneration'] as int? ?? 0;
   final grant = BuzzPushEndpointGrant.fromMap(raw);
   await readBuzzPushEndpointGrants();
   if (communitiesForSnapshotRefresh != null) {
@@ -232,6 +341,9 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
   }
   return grant;
 }
+
+Set<String> _relayOriginSet(Object? value) =>
+    value is List ? value.cast<String>().toSet() : const {};
 
 /// Latest failure to export the community snapshot used by the iOS
 /// notification service extension. Snapshot export is push enrichment and must
