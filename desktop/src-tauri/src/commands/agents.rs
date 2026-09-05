@@ -7,12 +7,13 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         bestie_assignment::{recover_pending_assignment_cleanup, with_agent_assignments_cleared},
-        build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
-        find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
-        managed_agents_base_dir, normalize_agent_args, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
+        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
+        load_teams, managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
+        provider_deploy, resolve_provider_binary, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process,
         stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
-        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        validate_provider_config, validate_provider_value, BackendKind, CreateManagedAgentRequest,
         CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
         DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
@@ -581,6 +582,7 @@ pub async fn create_managed_agent(
         let snapshot_source_version = persona_snapshot.as_ref().map(|s| s.source_version.clone());
         let effective_provider = snapshot_provider
             .or_else(|| input.provider.as_deref().and_then(trim_to_optional_string));
+        validate_provider_value(effective_provider.as_deref().unwrap_or_default())?;
         let mut effective_model =
             snapshot_model.or_else(|| input.model.as_deref().and_then(trim_to_optional_string));
         if effective_provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
@@ -588,7 +590,6 @@ pub async fn create_managed_agent(
         {
             effective_model = Some(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID.to_string());
         }
-
         // Mint-time behavioral quad: explicit input wins, then the linked
         // definition's NIP-AP defaults, then client defaults. The ONLY parse
         // point for definition behavioral strings — fails loudly on a bad

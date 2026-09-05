@@ -5,7 +5,6 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
-use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
 use super::agent_models_env::{
@@ -18,12 +17,12 @@ use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRoll
 use crate::{
     app_state::AppState,
     managed_agents::{
-        current_instance_id, discovery_env_with_baked_floor, find_managed_agent_mut,
-        known_acp_runtime, load_global_agent_config, load_managed_agents, load_personas,
-        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
-        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
-        AgentModelsResponse, ManagedAgentRecord, UpdateManagedAgentRequest,
-        UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
+        build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
+        find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
+        load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
+        resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
+        AgentModelInfo, AgentModelsResponse, ManagedAgentRecord, UpdateManagedAgentRequest,
+        validate_provider_value, UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
 };
@@ -201,8 +200,10 @@ pub async fn discover_agent_models(
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
-    // Also validate definition_env (caller-supplied, same trust level as env_vars).
     crate::managed_agents::validate_user_env_keys(&input.definition_env)?;
+    if let Some(provider) = input.provider.as_deref() {
+        crate::managed_agents::validate_provider_value(provider)?;
+    }
 
     let acp_command = input
         .acp_command
@@ -345,13 +346,11 @@ use openrouter::{
 };
 
 fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
-    matches!(
-        provider
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("openai" | "openai-compat")
-    )
+    let normalized = provider.map(str::trim).map(str::to_ascii_lowercase);
+    matches!(normalized.as_deref(), Some("openai" | "openai-compat"))
+        || normalized
+            .as_deref()
+            .is_some_and(crate::managed_agents::provider_is_http_base_url)
 }
 
 #[cfg(test)]

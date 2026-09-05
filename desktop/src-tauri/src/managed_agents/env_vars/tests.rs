@@ -222,6 +222,32 @@ fn validate_keys_accepts_normal_env() {
 }
 
 #[test]
+fn validate_keys_rejects_credential_bearing_openai_compatible_base_url() {
+    let env = map(&[(
+        "OPENAI_COMPAT_BASE_URL",
+        "https://user:secret@example.com/v1",
+    )]);
+    let err = validate_user_env_keys(&env).expect_err("unsafe base URL must be rejected");
+    assert!(err.contains("cannot include credentials"), "got: {err}");
+    assert!(
+        !err.contains("secret"),
+        "error must not echo URL values: {err}"
+    );
+}
+
+#[test]
+fn validate_keys_leaves_runtime_native_provider_urls_to_custom_harnesses() {
+    let env = map(&[
+        ("GOOSE_PROVIDER__HOST", "localhost:11434"),
+        (
+            "OPENAI_BASE_URL",
+            "https://example.com/v1?api-version=2025-01-01",
+        ),
+    ]);
+    assert!(validate_user_env_keys(&env).is_ok());
+}
+
+#[test]
 fn validate_keys_rejects_reserved() {
     let env = map(&[("BUZZ_PRIVATE_KEY", "nsec1evil")]);
     let err = validate_user_env_keys(&env).unwrap_err();
