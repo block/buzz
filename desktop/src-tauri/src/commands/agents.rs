@@ -176,14 +176,19 @@ async fn start_local_agent_with_preflight(
     replay_floor_unix: Option<u64>,
 ) -> Result<ManagedAgentSummary, String> {
     let launch_owner = workspace_owner_hex(state)?;
-    let launch_key = crate::managed_agents::ManagedAgentRuntimeKey::new(
-        pubkey,
-        &relay_ws_url_with_override(state),
+    // Runtime keys fold loopback aliases for process bookkeeping, not tenant
+    // identity. Preserve the workspace authority across the preflight await.
+    let launch_relay = crate::relay::bind_expected_relay_scope(
+        expected_relay_url,
+        relay_ws_url_with_override(state),
     )?;
+    let launch_key =
+        crate::managed_agents::ManagedAgentRuntimeKey::new(pubkey, launch_relay.as_str())?;
     let resume = if matches!(intent, LocalStartIntent::Explicit) {
         Some(crate::managed_agents::remote_stop::capture_resume(
             app,
             &launch_key,
+            launch_relay.as_str(),
             &launch_owner,
         )?)
     } else {
@@ -236,10 +241,8 @@ async fn start_local_agent_with_preflight(
     // below — the check is tied to its use, so a switch landing after this
     // point can no longer retarget the spawn (it only changes state this
     // call no longer consults).
-    let workspace_relay_url = crate::relay::bind_expected_relay_scope(
-        expected_relay_url.or(Some(launch_key.relay_url.as_str())),
-        crate::relay::relay_ws_url_with_override(state),
-    )?;
+    let workspace_relay_url =
+        launch_relay.revalidate(crate::relay::relay_ws_url_with_override(state))?;
     // Bind the active owner after the same final await as the relay. A
     // same-relay identity replacement during mesh preflight must not release
     // the stale preflight owner to spawn.

@@ -477,7 +477,7 @@ pub(crate) fn spawn_agent_child_with_broker(
     broker: Option<&super::broker_launch::BrokerSession>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
-    super::remote_stop::check_launch(app, &key, owner_hex, resume)?;
+    super::remote_stop::check_launch(app, &key, relay_url, owner_hex, resume)?;
     if let Some(session) = broker {
         session.validate(super::broker_launch::LaunchScope {
             owner: owner_hex.ok_or("Desktop owner unavailable")?,
@@ -574,7 +574,8 @@ pub(crate) fn spawn_agent_child_with_broker(
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // Process identity normalization must not select a different relay tenant.
+    let effective_relay_url = relay_url.to_owned();
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
     //   - nvm-managed node/npm (nvm initializes only in interactive shells)
@@ -946,7 +947,7 @@ pub fn start_managed_agent_process(
     let mut process = spawn_agent_child(
         app,
         record,
-        &key.relay_url,
+        workspace_relay.as_str(),
         false,
         owner_hex,
         replay_floor_unix,
@@ -973,7 +974,7 @@ pub fn start_managed_agent_process(
     record.last_error_code = None;
 
     runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
-    super::remote_stop::finish_resume(app, &key, owner_hex, resume)?;
+    super::remote_stop::finish_resume(app, &key, workspace_relay.as_str(), owner_hex, resume)?;
     Ok(())
 }
 
