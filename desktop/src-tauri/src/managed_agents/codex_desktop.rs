@@ -221,13 +221,40 @@ fn classify_windows_process_snapshot(
         .map(|path| normalize_windows_executable_path(path))
         .collect::<HashSet<_>>();
 
+    // Newer Desktop builds copy codex.exe into a versioned LocalAppData
+    // directory instead of launching the package's app/resources copy. Treat
+    // app-server descendants of the verified Desktop process tree as Desktop
+    // backends as well, while leaving unrelated CLI app-servers alone.
+    let desktop_process_ids = snapshot
+        .processes
+        .iter()
+        .filter(|process| {
+            desktop_paths.contains(&normalize_windows_executable_path(&process.executable_path))
+        })
+        .map(|process| process.process_id)
+        .collect::<HashSet<_>>();
+    let mut desktop_descendant_ids = desktop_process_ids.clone();
+    loop {
+        let mut changed = false;
+        for process in &snapshot.processes {
+            if desktop_descendant_ids.contains(&process.parent_process_id) {
+                changed |= desktop_descendant_ids.insert(process.process_id);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     let mut classified = CodexDesktopProcessSnapshot::default();
     for process in snapshot.processes {
         let path = normalize_windows_executable_path(&process.executable_path);
         if desktop_paths.contains(&path) {
             classified.desktop_processes.push(process.clone());
         }
-        if backend_paths.contains(&path)
+        let is_codex_executable = path.ends_with("\\codex.exe");
+        if (backend_paths.contains(&path)
+            || (desktop_descendant_ids.contains(&process.process_id) && is_codex_executable))
             && command_has_argument(&process.command_line, "app-server")
             && !command_listens_on(&process.command_line, shared_url)
         {
@@ -1458,6 +1485,13 @@ mod tests {
             ],
             processes: vec![
                 WindowsProcessInfo {
+                    process_id: 30,
+                    parent_process_id: 1,
+                    executable_path: r"C:\Program Files\WindowsApps\OpenAI.Codex_1\app\ChatGPT.exe"
+                        .to_string(),
+                    command_line: "ChatGPT.exe".to_string(),
+                },
+                WindowsProcessInfo {
                     process_id: 20,
                     parent_process_id: 1,
                     executable_path:
@@ -1486,6 +1520,13 @@ mod tests {
                         DEFAULT_CODEX_SHARED_APP_SERVER_URL
                     ),
                 },
+                WindowsProcessInfo {
+                    process_id: 23,
+                    parent_process_id: 30,
+                    executable_path:
+                        r"C:\Users\tester\AppData\Local\OpenAI\Codex\bin\new\codex.exe".to_string(),
+                    command_line: "codex.exe app-server --analytics-default-enabled".to_string(),
+                },
             ],
         };
         let snapshot = classify_windows_process_snapshot(raw, DEFAULT_CODEX_SHARED_APP_SERVER_URL);
@@ -1495,7 +1536,7 @@ mod tests {
                 .iter()
                 .map(|process| process.process_id)
                 .collect::<Vec<_>>(),
-            vec![21]
+            vec![21, 23]
         );
         assert!(!snapshot
             .private_app_server_processes

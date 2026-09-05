@@ -213,3 +213,11 @@
 - 处理：推翻上一条未合并的 kill-on-quit 方案。Windows 首次启动 shared app-server 前，将 `codex.exe`、Code Mode host、command runner 和 sandbox setup 复制到 Buzz 管理的版本化不可变目录；成功启动后主动释放 `Child` 句柄，让 backend 跨 Buzz 退出继续服务，而 Codex 更新不再被锁。启动探测失败时仍只回收本次新进程。显式 Stop 改为对已跟踪 `Child` 调用 `try_wait`，仍运行时终止整棵进程树并等待退出，然后清理 receipt/session cache；Agent 身份和 Codex task 绑定保持不变。
 - 验证：Codex lifecycle Rust 测试 11/11、runtime command 测试 10/10、前端 Agent Connect/Disconnect 行为测试 8/8 通过。新增测试确认版本更新产生新缓存且旧版本保持可执行、Buzz 丢弃子进程句柄后 backend 仍存活，以及 Windows Stop 确实终止运行中的进程树。`managed_agents` 扩展测试 980 通过、5 失败；失败均为 Windows 环境无法启动 Unix `env`/`true` 或 PATH 占位命令的既有跨平台夹具，不涉及本次修改路径。
 - 版本/提交：分支 `codex/codex-lifecycle-cleanup`，待提交。
+
+## 2026-09-05：新版 Codex Desktop backend 路径导致 Start 接管检查漏检
+
+- 现象：Xiaoxin 同时运行 Codex Desktop 私有 app-server 与 Buzz shared app-server 时，本地 task Agent 点击 Connect Buzz 后直接进入监听状态，没有先显示 `Close and reconnect`。由于 task-bound Agent 使用 lazy worker，冲突会被延迟到首条工作消息才暴露。
+- 定位：Buzz 只把 Windows Appx 安装目录下的 `app/resources/codex.exe` 识别为 Desktop backend；新版 Codex Desktop 实际从 `%LOCALAPPDATA%/OpenAI/Codex/bin/<version>/codex.exe` 启动 app-server。现场 PID `20536` 是 `ChatGPT.exe` 的子进程，但因路径不同未进入 `private_app_server_process_ids`。
+- 处理：Windows 进程分类同时识别已验证 Desktop 进程树中的 `codex.exe app-server` 后代，并保留旧 Appx backend 路径匹配；监听 shared URL 的 backend 继续排除，独立 CLI app-server 也不会因路径相似被误判。这样 Start/Restart 会在创建 Agent worker 前触发现有接管确认。
+- 验证：Tauri `codex_desktop` 定向测试 11/11 通过，覆盖 LocalAppData Desktop 子进程、旧 Appx backend、shared listener 与无关 CLI backend。随后构建并在 Xiaoxin 安装 `0.5.18-local.1`：新版准确显示 1 个私有 app-server，Connect 前弹出 `Close and reconnect`，且确认前没有启动 `buzz-acp`；确认后旧私有 PID 消失，Codex Desktop 重开并复用原 shared PID `2596`。临时 Agent 经 DM 返回精确文本 `BUZZ_LOCK_LIVE_OK`，日志记录 5 秒后 lazy worker 回收且没有 writer conflict；Disconnect 后 harness 退出，Desktop 与 shared runtime 保持运行。
+- 版本/提交：PR 分支 `codex/detect-versioned-codex-desktop`；Xiaoxin 验收安装包基于原始测试提交 `9760ec38`，版本 `0.5.18-local.1_9760ec382776`。
