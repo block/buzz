@@ -133,8 +133,11 @@ async function copyFromTimeline(
       selection.removeAllRanges();
       const range = document.createRange();
       if (selectPartialChip) {
-        const label = chip.firstChild;
-        if (!label) throw new Error("Mention chip has no text node.");
+        const walker = document.createTreeWalker(chip, NodeFilter.SHOW_TEXT);
+        const label = walker.nextNode();
+        if (!label?.nodeValue?.startsWith("John")) {
+          throw new Error("Mention chip has no leading John text node.");
+        }
         range.setStart(label, 0);
         range.setEnd(label, 4);
       } else {
@@ -202,6 +205,11 @@ async function openInboxMentionItem(page: Page) {
     },
   );
 
+  const preview = page
+    .getByTestId(`home-inbox-item-${item.id}`)
+    .locator("[data-mention]");
+  await expect(preview).toHaveText("John Smith");
+  expect(await preview.ariaSnapshot()).toContain("John");
   await page.getByTestId(`home-inbox-item-${item.id}`).click();
   // The inbox resolves a non-member's display name off its own profile batch,
   // so wait for the chip's identity rather than for the row — same setup
@@ -210,6 +218,7 @@ async function openInboxMentionItem(page: Page) {
     .getByTestId("home-inbox-detail-scroll")
     .locator(`[data-mention-pubkey="${JOHN_SMITH_PUBKEY}"]`);
   await expect(chip).toHaveText("John Smith", { timeout: 15_000 });
+  expect(await chip.ariaSnapshot()).toContain("John");
   return item;
 }
 
@@ -930,7 +939,7 @@ test("a boundary-crossing default copy pastes its chip fragment without a sigil"
       return nodes;
     };
     const label = textNodesUnder(chip).find((node) =>
-      node.nodeValue?.includes("John Smith"),
+      node.nodeValue?.includes("Smith"),
     );
     const tail = textNodesUnder(body).find((node) =>
       node.nodeValue?.includes("fixed the bug"),

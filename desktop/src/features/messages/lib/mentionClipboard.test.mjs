@@ -440,3 +440,25 @@ test("does not treat an uncapped label's ellipsis as a truncation", () => {
   // whole must not gain a second accepted form.
   assert.equal(matchChipTextToLabel("John…", "John Smith", "@"), "fragment");
 });
+
+test("whole compact mention labels are restored only for their declared exact key", () => {
+  const key = `150b20bd${"a".repeat(52)}15dc`;
+  const label = `Scout (${key}) 2`;
+  const compact = "Scout (150b20bd…15dc) 2";
+  assert.equal(matchChipTextToLabel(compact, label, "@", key), "truncated");
+  assert.equal(
+    matchChipTextToLabel(`@${compact}`, label, "@", key),
+    "truncated",
+  );
+  assert.equal(matchChipTextToLabel(compact, label, "@"), "fragment");
+  assert.equal(
+    matchChipTextToLabel(compact, label, "@", "b".repeat(64)),
+    "fragment",
+  );
+  assert.equal(matchChipTextToLabel(compact, label, "#", key), "fragment");
+  assert.equal(
+    matchChipTextToLabel("Scout (150b20bd…15dc)", label, "@", key),
+    "fragment",
+  );
+  assert.equal(matchChipTextToLabel("Scout", label, "@", key), "fragment");
+});

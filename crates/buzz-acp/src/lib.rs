@@ -5,6 +5,7 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
+mod pi_launcher;
 mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
@@ -2582,6 +2583,49 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
+    let cwd = current_working_directory()?;
+    let base_prompt_content = config.base_prompt_content.take();
+    let base_prompt = if config.no_base_prompt {
+        None
+    } else {
+        // Build standing context once under the configured policy, before any
+        // agent process starts. Pi consumes this through its native
+        // `--system-prompt`; other ACP agents consume the same bytes through
+        // session/new or legacy first-turn framing.
+        Some(
+            config.session_policy.append_session_model(
+                base_prompt_content
+                    .as_deref()
+                    .unwrap_or(include_str!("base_prompt.md")),
+            ),
+        )
+    };
+    // PI_ACP_PI_COMMAND is Buzz-owned. Strip stale/user-provided copies from
+    // every adapter before optionally installing Buzz's generated Pi launcher.
+    config
+        .persona_env_vars
+        .retain(|(key, _)| !key.eq_ignore_ascii_case(pi_launcher::PI_ACP_PI_COMMAND_ENV));
+    let managed_skills_dir = std::path::Path::new(&cwd).join(".agents/skills");
+    let inherited_pi_command_is_set =
+        std::env::var_os(pi_launcher::PI_ACP_PI_COMMAND_ENV).is_some();
+    let (pi_launch_override, base_prompt) = pi_launcher::PiLaunchOverride::prepare(
+        &config.agent_command,
+        base_prompt,
+        &managed_skills_dir,
+        inherited_pi_command_is_set,
+    )
+    .context("failed to prepare Pi launch overrides")?;
+    if let Some(prepared) = pi_launch_override.as_ref() {
+        config.persona_env_vars.push((
+            pi_launcher::PI_ACP_PI_COMMAND_ENV.to_string(),
+            prepared.launcher_path().to_string_lossy().into_owned(),
+        ));
+        tracing::info!(
+            skills_dir = %managed_skills_dir.display(),
+            "configured Pi to consume Buzz standing context and managed skills through native CLI flags"
+        );
+    }
+
     let observer = config
         .relay_observer
         .then(observer::ObserverHandle::in_process);
@@ -2830,8 +2874,6 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    let base_prompt_content = config.base_prompt_content.take();
-    let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2842,20 +2884,7 @@ async fn tokio_main() -> Result<()> {
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
-        base_prompt: if config.no_base_prompt {
-            None
-        } else {
-            // Build standing context once under the configured policy, before
-            // any session/new. Both modern ACP and legacy first-turn framing
-            // consume this same assembled base (including custom base files).
-            Some(
-                config.session_policy.append_session_model(
-                    base_prompt_content
-                        .as_deref()
-                        .unwrap_or(include_str!("base_prompt.md")),
-                ),
-            )
-        },
+        base_prompt,
         heartbeat_prompt: config.heartbeat_prompt.clone(),
         cwd,
         rest_client: relay.rest_client(),
@@ -4188,6 +4217,10 @@ async fn tokio_main() -> Result<()> {
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
 
+    // Pi may restore subprocesses throughout the pool lifetime. Remove its
+    // private prompt and launcher only after every adapter has shut down.
+    drop(pi_launch_override);
+
     tracing::info!("buzz-acp stopped");
     Ok(())
 }
@@ -5280,6 +5313,9 @@ mod agent_draft_prompt_tests {
     #[test]
     fn shared_base_prompt_teaches_portable_agent_drafts() {
         let prompt = include_str!("base_prompt.md");
+        assert!(prompt.starts_with(
+            "You are an agent operating inside Buzz — a Nostr-based messaging platform for human-agent collaboration.\nBuzz is a desktop and mobile collaboration app organized around channels, conversations, and shared work."
+        ));
         assert!(prompt.contains("buzz agents draft-create"));
         assert!(prompt.contains("ask for at most two things"));
         assert!(prompt.contains("what it should do day-to-day"));

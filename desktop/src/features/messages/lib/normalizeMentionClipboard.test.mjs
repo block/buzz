@@ -265,3 +265,19 @@ test("an ordinary chip still flattens to a registrable mention", () => {
     [JOHN_SMITH_PUBKEY],
   );
 });
+
+test("compact mention paste expands only complete bound labels", () => {
+  const key = `150b20bd${"a".repeat(52)}15dc`;
+  const label = `Scout (${key}) 2`;
+  const html = (text) =>
+    `<span data-mention="" data-mention-pubkey="${key}" ` +
+    `data-mention-label="${label}">${text}</span>`;
+  assert.equal(
+    normalizeMentionClipboardContent(html("Scout (150b20bd…15dc) 2")).text,
+    `@${label}`,
+  );
+  assert.equal(
+    normalizeMentionClipboardContent(html("Scout (150b20bd…15dc)")).text,
+    "Scout (150b20bd…15dc)",
+  );
+});

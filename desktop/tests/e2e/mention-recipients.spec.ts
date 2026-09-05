@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { truncatePubkey } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -7,7 +8,7 @@ const SECOND = TEST_IDENTITIES.bob.pubkey;
 const AMBIGUOUS =
   "The mention @Scout is ambiguous. Choose a recipient from the mention picker.";
 
-async function install(page: Page, channel = "general") {
+async function install(page: Page, channel = "general", agents = false) {
   await installMockBridge(page, {
     managedAgents:
       channel === "watercooler"
@@ -17,10 +18,18 @@ async function install(page: Page, channel = "general") {
             status: "running",
             channelNames: ["watercooler"],
           }))
-        : [],
+        : agents
+          ? [FIRST, SECOND].map((pubkey) => ({
+              pubkey,
+              name: "Scout",
+              status: "running",
+              channelNames: [channel],
+            }))
+          : [],
     searchProfiles: [FIRST, SECOND].map((pubkey) => ({
       pubkey,
       displayName: "Scout",
+      isAgent: agents,
     })),
   });
   await page.goto("/");
@@ -419,12 +428,19 @@ test("editing to a longer typed member drops the original shorter reference", as
   await expect(row).toContainText("Scout Jones hello");
 });
 
-for (const scale of [1, 1.5]) {
-  test(`exact-key chips wrap in narrow composer, sent message and reopen at ${scale}x text`, async ({
+// The default relay directory knows FIRST as an agent; SECOND is a human.
+// The agent variant makes SECOND managed too, covering a qualified bot label.
+for (const { kind, scale } of [
+  { kind: "mixed", scale: 1 },
+  { kind: "mixed", scale: 1.5 },
+  { kind: "agent", scale: 1 },
+  { kind: "agent", scale: 1.5 },
+]) {
+  test(`exact-key ${kind} chips wrap in narrow composer, sent message and reopen at ${scale}x text`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 800, height: 900 });
-    await install(page);
+    await install(page, "general", kind === "agent");
     await page.evaluate((scale) => {
       document.documentElement.style.fontSize = `${16 * scale}px`;
     }, scale);
@@ -460,6 +476,13 @@ for (const scale of [1, 1.5]) {
       host: import("@playwright/test").Locator,
       stage: string,
     ) => {
+      if (stage === "sent") {
+        await expect(host.locator("[data-mention]")).toHaveCount(2);
+        await expect(host.locator("[data-mention]").last()).toHaveAttribute(
+          "data-mention-kind",
+          kind === "agent" ? "agent" : "human",
+        );
+      }
       const result = await geometry(host);
       expect(result.chips.length).toBeGreaterThanOrEqual(2);
       expect(result.scrollWidth).toBeLessThanOrEqual(result.clientWidth + 1);
@@ -475,7 +498,35 @@ for (const scale of [1, 1.5]) {
           expect(rect.right).toBeLessThanOrEqual(result.width + 1);
         }
       }
-      if (stage !== "sent") {
+      if (stage === "sent") {
+        for (const chip of await host.locator("[data-mention]").all()) {
+          const expectedKind =
+            kind === "agent" ||
+            (await chip.getAttribute("data-mention-pubkey")) === FIRST
+              ? "agent"
+              : "human";
+          await expect(chip).toHaveAttribute("data-mention-kind", expectedKind);
+          const leading = chip.locator(".inline-chip-leading-fragment");
+          await expect(leading).toHaveText("Scout");
+          expect(await leading.ariaSnapshot()).toContain("Scout");
+          const icon = await leading.evaluate((element) => {
+            const style = getComputedStyle(element, "::before");
+            return {
+              display: style.display,
+              mask: style.maskImage,
+              width: parseFloat(style.width),
+              height: parseFloat(style.height),
+            };
+          });
+          expect(icon.display).toBe("block");
+          expect(icon.mask).toContain("data:image/svg+xml");
+          expect(icon.width).toBeGreaterThan(0);
+          expect(icon.height).toBeGreaterThan(0);
+          await expect(leading).toHaveClass(
+            new RegExp(`inline-chip-icon-${expectedKind}`),
+          );
+        }
+      } else {
         for (const prefix of await host
           .locator(".mention-prefix-hidden")
           .all()) {
@@ -495,7 +546,7 @@ for (const scale of [1, 1.5]) {
       });
       await waitForAnimations(page);
       await page.screenshot({
-        path: `test-results/mention-recipients/layout-${scale}-${stage}.png`,
+        path: `test-results/mention-recipients/layout-${kind}-${scale}-${stage}.png`,
       });
     };
     await expect(input).toHaveText(content);
@@ -514,6 +565,13 @@ for (const scale of [1, 1.5]) {
       .filter({ hasText: "layout journey" })
       .last();
     await assertFits(markdown, "sent");
+    const qualifiedChip = row.locator("[data-mention]").last();
+    await expect(qualifiedChip).toHaveText(`Scout (${truncatePubkey(SECOND)})`);
+    await expect(qualifiedChip).toHaveAttribute(
+      "data-mention-label",
+      `Scout (${SECOND})`,
+    );
+    await expect(qualifiedChip).toHaveAttribute("title", `Scout (${SECOND})`);
     await expect(row.locator("[data-mention]").last()).toHaveAttribute(
       "aria-label",
       `Scout (${SECOND})`,
@@ -815,7 +873,7 @@ for (const mismatchedKey of [false, true]) {
       .getByTestId("message-row")
       .filter({ hasText: "qualified clipboard roundtrip" })
       .locator(`[data-mention-pubkey="${SECOND}"]`);
-    await expect(chip).toHaveText(`Scout (${SECOND})`);
+    await expect(chip).toHaveText(`Scout (${truncatePubkey(SECOND)})`);
     const flavors = await chip.evaluate((element) => {
       const range = document.createRange();
       range.selectNode(element);
@@ -868,5 +926,120 @@ for (const mismatchedKey of [false, true]) {
     await expect
       .poll(() => recipients(page, flavors.text.trim()))
       .toEqual([mismatchedKey ? [] : [SECOND]]);
+  });
+}
+
+for (const partial of [false, true]) {
+  test(`matching abbreviated keys ${partial ? "do not bind a partial copy" : "retain separate exact recipients through copy and paste"}`, async ({
+    page,
+  }) => {
+    const keys = ["a", "b"].map((middle) => `150b20bd${middle.repeat(52)}15dc`);
+    await installMockBridge(page, {
+      searchProfiles: keys.map((pubkey) => ({ pubkey, displayName: "Scout" })),
+    });
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    await page.waitForFunction(() =>
+      window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+        channelName: "general",
+      }),
+    );
+    await page.evaluate((keys) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `@Scout (${keys[0]}) and @Scout (${keys[1]}) compact collision`,
+        mentionPubkeys: keys,
+      });
+    }, keys);
+    const row = page
+      .getByTestId("message-row")
+      .filter({ hasText: "compact collision" });
+    for (const key of keys) {
+      const chip = row.locator(`[data-mention-pubkey="${key}"]`);
+      await expect(chip).toHaveText(`Scout (${truncatePubkey(key)})`);
+      await expect(chip).toHaveAttribute("title", `Scout (${key})`);
+      const flavors = await chip.evaluate((element, partial) => {
+        const range = document.createRange();
+        range.selectNode(element);
+        if (partial) {
+          const leadingText = document
+            .createTreeWalker(element, NodeFilter.SHOW_TEXT)
+            .nextNode();
+          if (!leadingText) throw new Error("Missing mention text");
+          range.setStart(leadingText, 0);
+          range.setEnd(leadingText, 5);
+        }
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        const clipboardData = new DataTransfer();
+        const event = new ClipboardEvent("copy", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        });
+        element.dispatchEvent(event);
+        // Model the browser's default HTML serialization if our handler declines.
+        const fallback = document.createElement("div");
+        fallback.append(range.cloneContents());
+        return {
+          handled: event.defaultPrevented,
+          text: event.defaultPrevented
+            ? clipboardData.getData("text/plain")
+            : (selection?.toString() ?? ""),
+          html: event.defaultPrevented
+            ? clipboardData.getData("text/html")
+            : fallback.innerHTML,
+        };
+      }, partial);
+      expect(flavors.handled).toBe(!partial);
+      expect(flavors.text.trim()).toBe(partial ? "Scout" : `@Scout (${key})`);
+      const input = page.getByTestId("message-input");
+      await input.focus();
+      await input.evaluate((element, flavors) => {
+        const clipboardData = new DataTransfer();
+        clipboardData.setData("text/plain", flavors.text);
+        clipboardData.setData("text/html", flavors.html);
+        element.dispatchEvent(
+          new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData,
+          }),
+        );
+      }, flavors);
+      const marker = ` copied-${keys.indexOf(key)}`;
+      await page.keyboard.type(marker);
+      const content = `${flavors.text}${marker}`;
+      await expect(input).toHaveText(content);
+      await page.getByTestId("send-message").click();
+      if (!partial) {
+        await page
+          .getByRole("alertdialog")
+          .getByRole("button", { name: "Invite", exact: true })
+          .click();
+      }
+      // Chromium can preserve the typed separator as NBSP after a rich paste.
+      // Assert the full literal body and exact tags, tolerating only that space.
+      await expect
+        .poll(() =>
+          page.evaluate(
+            (marker) =>
+              (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
+                .filter(
+                  (event) =>
+                    event.kind === 9 && event.content.endsWith(marker.trim()),
+                )
+                .map((event) => ({
+                  content: event.content.replace(/\u00a0/g, " ").trim(),
+                  keys: event.tags
+                    .filter((tag) => tag[0] === "p")
+                    .map((tag) => tag[1]),
+                })),
+            marker,
+          ),
+        )
+        .toEqual([{ content: content.trim(), keys: partial ? [] : [key] }]);
+    }
   });
 }

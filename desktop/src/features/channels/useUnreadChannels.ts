@@ -5,7 +5,6 @@ import {
 } from "@/features/channels/useLiveChannelUpdates";
 import {
   countUnreadAppBadgeObservedEvents,
-  countUnreadBadgeObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
   hasUnreadTopLevelObservedEvent,
@@ -426,13 +425,14 @@ export function useUnreadChannels(
   const handleChannelMessage = React.useCallback(
     (channelId: string, event: RelayEvent) => {
       const channel = channelsRef.current.find((ch) => ch.id === channelId);
-      const isHighPriority =
-        channel?.channelType === "dm" ||
-        (normalizedPubkey !== null &&
-          isHighPriorityEventForUser(event, normalizedPubkey));
       const isThreadedReply =
         getThreadReference(event.tags).parentId !== null &&
         !isBroadcastReply(event.tags);
+      const isHighPriority =
+        channel?.channelType === "dm" ||
+        isThreadedReply ||
+        (normalizedPubkey !== null &&
+          isHighPriorityEventForUser(event, normalizedPubkey));
       const didRecordUnreadEvent = recordUnreadEvent(
         channelId,
         makeObservedUnreadEvent({
@@ -852,38 +852,24 @@ export function useUnreadChannels(
         ) {
           topLevelUnread.add(channel.id);
         }
-        const badgeCount =
-          nativeProjection?.badgeCount ??
-          countUnreadBadgeObservedEvents(
-            observedEvents,
-            readAtForObservedEvent,
-          );
         const appBadgeCount =
           nativeProjection?.appBadgeCount ??
           countUnreadAppBadgeObservedEvents(
             observedEvents,
             readAtForObservedEvent,
           );
-        // Sidebar numerals on non-DM rows count every unread mention and
-        // broadcast, including threaded ones. The Dock projection
-        // (appBadgeCount) keeps excluding threaded replies because Home's
-        // badge subtotal already counts those; reusing it here would hide
-        // thread mentions from the channel row.
         const highPriorityCount =
           nativeProjection?.highPriorityCount ??
           countUnreadHighPriorityObservedEvents(
             observedEvents,
             readAtForObservedEvent,
           );
-        counts.set(
-          channel.id,
-          channel.channelType === "dm" ? badgeCount : highPriorityCount,
-        );
+        counts.set(channel.id, unreadCount);
         unreadChannelNotificationCount += appBadgeCount;
 
         // DM channels: any unread DM is high-priority. Non-DM: high-priority
-        // only if at least one mention/broadcast remains unread in its own
-        // channel/thread context.
+        // only if at least one mention, broadcast, or relevant thread reply
+        // remains unread in its own channel/thread context.
         if (channel.channelType === "dm" || highPriorityCount > 0) {
           highPriority.add(channel.id);
         }

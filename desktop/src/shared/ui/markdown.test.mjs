@@ -1400,7 +1400,12 @@ test("resolved human mentions replace the authored at-sign with the shared icon"
   );
 
   assert.match(html, /data-mention=""/);
-  assert.match(html, /inline-chip-icon-human/);
+  assert.match(
+    html,
+    /inline-chip-leading-fragment[^>]*inline-chip-icon-human[^>]*>alice<\/span>/,
+  );
+  assert.match(html, /aria-label="alice"/);
+  assert.doesNotMatch(html, /aria-hidden="true"[^>]*>alice</);
   assert.match(html, />alice</);
   assert.doesNotMatch(html, />@alice</);
 });
@@ -1432,7 +1437,12 @@ test("agent mentions retain the bot treatment instead of the human icon", () => 
 
   assert.match(html, /data-mention=""/);
   assert.match(html, /agent-mention-highlight/);
-  assert.match(html, /inline-chip-icon-agent/);
+  assert.match(
+    html,
+    /inline-chip-leading-fragment[^>]*inline-chip-icon-agent[^>]*>alice<\/span>/,
+  );
+  assert.match(html, /aria-label="alice"/);
+  assert.doesNotMatch(html, /aria-hidden="true"[^>]*>alice</);
   assert.match(html, />alice</);
   assert.doesNotMatch(html, />@alice</);
 });

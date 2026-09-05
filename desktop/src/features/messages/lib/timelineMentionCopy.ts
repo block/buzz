@@ -50,7 +50,12 @@ function restoreChipSigils(root: HTMLElement): boolean {
     const label = element.getAttribute(MENTION_LABEL_ATTRIBUTE);
     if (
       label &&
-      matchChipTextToLabel(element.textContent ?? "", label, "@") !== "fragment"
+      matchChipTextToLabel(
+        element.textContent ?? "",
+        label,
+        "@",
+        element.getAttribute(MENTION_PUBKEY_ATTRIBUTE) ?? undefined,
+      ) !== "fragment"
     ) {
       element.textContent = `@${label}`;
       restored = true;

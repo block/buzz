@@ -117,9 +117,13 @@ Immutable annotated automatic-address metadata remains separate, and only
 previously delivered automatic addresses are forwarded. Snapshot bodies and
 full-key qualifiers alone never authorize an untagged recipient.
 
-Full-key literal labels remain intact in the composer and on the wire. Composer
-and rendered mention chips break between characters within narrow line boxes;
-rendered chips expose the complete label through their accessible name/title.
+Full-key literal labels remain intact in the composer and on the wire. Readonly
+mention chips abbreviate only their bound public key with the shared
+`truncatePubkey` display form (eight leading characters, ellipsis, four trailing).
+The complete literal label and exact key remain in metadata, title and profile
+target; whole-chip copy restores the full label for paste/edit round trips.
+Abbreviations are recognition aids, never recipient lookup keys. Partial copies
+remain plain text. Composer and rendered chips still wrap within narrow lines.
 The browser regression covers 800px windows at 100% and 150% root text size,
 send/reopen, and historical replacement followed by forwarding.
 
