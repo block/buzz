@@ -20,6 +20,7 @@ tokio        = { workspace = true, features = ["test-util"] }
 buzz-core = { workspace = true }
 base64       = { workspace = true }
 chrono       = { workspace = true }
+dashmap      = { workspace = true }
 jsonwebtoken = { workspace = true }
 nostr        = { workspace = true }
 futures-util = { workspace = true }

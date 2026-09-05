@@ -207,6 +207,48 @@ impl fmt::Debug for VerifiedAssertion {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+impl VerifiedAssertion {
+    /// Test-only factory for building `VerifiedAssertion` fixtures without
+    /// going through the full JWT/JWKS verification path. NOT available in
+    /// production builds.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `authority_deadlines` is empty — an empty set violates the
+    /// non-empty invariant that `upstream_authority_deadline()` relies on.
+    pub fn for_test(
+        asserted_key: Option<PublicKey>,
+        authority_deadlines: Vec<DateTime<Utc>>,
+    ) -> Self {
+        assert!(
+            !authority_deadlines.is_empty(),
+            "VerifiedAssertion::for_test: authority_deadlines must be non-empty \
+             (upstream_authority_deadline() panics on empty)"
+        );
+        use super::config::{AssertionPolicyId, TransportContractId};
+        Self {
+            identity: FederatedIdentity {
+                issuer: "test-issuer".to_string(),
+                subject: "test-subject".to_string(),
+            },
+            asserted_key,
+            capabilities: CanonicalCapabilities::from_pairs(vec![]),
+            authority_deadlines,
+            assertion_policy_id: AssertionPolicyId::zero(),
+            transport_contract_id: TransportContractId::zero(),
+            revalidation_dependencies: RevalidationDependencies {
+                verification_key_id: "test-kid".to_string(),
+                key_snapshot_generation: 0,
+                key_snapshot_hard_deadline: DateTime::<Utc>::MAX_UTC,
+                confidential_assertion: ConfidentialAssertion {
+                    compact_jws: "test.test.test".to_string(),
+                },
+            },
+        }
+    }
+}
+
 impl RevalidationDependencies {
     pub(super) fn new(
         verification_key_id: String,

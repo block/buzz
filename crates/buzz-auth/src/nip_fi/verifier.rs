@@ -143,6 +143,15 @@ impl AssertionKeySet {
     pub(crate) fn hard_deadline(&self) -> chrono::DateTime<chrono::Utc> {
         self.hard_deadline
     }
+
+    /// The authenticated JWKS for this issuer snapshot.
+    ///
+    /// `pub(super)` so the command verifier in the same `nip_fi` module can
+    /// look up keys by `kid` without duplicating the key-selection logic.
+    /// External consumers cannot access key material through this path.
+    pub(super) fn jwks(&self) -> &JwkSet {
+        &self.jwks
+    }
 }
 
 impl fmt::Debug for AssertionKeySet {
@@ -566,10 +575,10 @@ impl VerifierError {
 }
 
 /// A minimally parsed JOSE header.
-struct ParsedHeader {
-    algorithm: Algorithm,
-    kid: String,
-    typ: Option<String>,
+pub(super) struct ParsedHeader {
+    pub(super) algorithm: Algorithm,
+    pub(super) kid: String,
+    pub(super) typ: Option<String>,
 }
 
 /// Reject any token that is not exactly three compact-JWS segments.
@@ -582,7 +591,7 @@ struct ParsedHeader {
 /// base64url — is validated separately by [`enforce_signature_shape`] after
 /// header parsing, so that no structurally malformed token can defer to the
 /// key-source lookup and masquerade as a 503 outage (NIP-FI.md:151-171).
-fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
+pub(super) fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
     if token.split('.').count() == 3 {
         Ok(())
     } else {
@@ -599,7 +608,7 @@ fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
 /// after [`parse_header`], so `alg=none`'s empty-signature token is already
 /// rejected at header parsing (unsupported algorithm) before this distinction
 /// matters (NIP-FI.md:151-171).
-fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
+pub(super) fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
     let signature = token
         .split('.')
         .nth(2)
@@ -608,7 +617,7 @@ fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
     base64url_decode(signature).map(|_| ())
 }
 
-fn parse_header(token: &str) -> Result<ParsedHeader, VerifierError> {
+pub(super) fn parse_header(token: &str) -> Result<ParsedHeader, VerifierError> {
     let segment = token
         .split('.')
         .next()
@@ -758,7 +767,7 @@ fn capture_capabilities(
     CanonicalCapabilities::from_pairs(entries)
 }
 
-fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, VerifierError> {
+pub(super) fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, VerifierError> {
     let mut matching = jwks
         .keys
         .iter()
@@ -770,7 +779,7 @@ fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, Verifie
     Ok(jwk)
 }
 
-fn validate_jwk(jwk: &Jwk, token_algorithm: Algorithm) -> Result<(), VerifierError> {
+pub(super) fn validate_jwk(jwk: &Jwk, token_algorithm: Algorithm) -> Result<(), VerifierError> {
     let usage_ok = jwk
         .common
         .public_key_use
@@ -882,7 +891,7 @@ fn optional_numeric_date(
 /// them) is converted with subsecond nanosecond precision. NaN, infinity, a
 /// non-number, and any magnitude outside the representable `i64`-seconds range
 /// deny as invalid time bounds.
-fn parse_numeric_date(value: &Value) -> Result<DateTime<Utc>, VerifierError> {
+pub(super) fn parse_numeric_date(value: &Value) -> Result<DateTime<Utc>, VerifierError> {
     // Integer NumericDate: exact, no float round-trip.
     if let Some(secs) = value.as_i64() {
         return Utc
@@ -926,7 +935,7 @@ fn checked_add(at: DateTime<Utc>, delta: chrono::Duration) -> Result<DateTime<Ut
 }
 
 /// Parse the claims segment as a JSON object, rejecting any duplicate member.
-fn parse_unique_claims(token: &str) -> Result<Map<String, Value>, VerifierError> {
+pub(super) fn parse_unique_claims(token: &str) -> Result<Map<String, Value>, VerifierError> {
     let segment = token
         .split('.')
         .nth(1)

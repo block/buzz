@@ -122,6 +122,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(api::invites::accept_policy),
         )
         .route("/api/invites/claim", post(api::invites::claim_invite))
+        // NIP-FI admin command API — authenticated by signed command JWT,
+        // NOT by NIP-98.  Self-contained auth inside the handler.
+        .route("/api/nip-fi/disconnect", post(api::nip_fi::disconnect))
         // Moderation queue reads (NIP-98 auth + mod-authz gate, L6)
         .route("/moderation/reports", get(api::bridge::moderation_reports))
         .route("/moderation/audit", get(api::bridge::moderation_audit))
@@ -334,6 +337,85 @@ async fn nip11_or_ws_handler(
         return Json(nip11_document(&state, raw_host).await).into_response();
     }
 
+    // NIP-FI assertion check at upgrade — runs BEFORE `bind_community` so that:
+    // (a) a denied upgrade pays zero DB cost [FI-TRACE-TRANSPORT-CLOSED], and
+    // (b) tests that assert 401/503 are not pre-empted by a 404 from an
+    //     unseeded DB — the gate exercises its own seam without coupling to
+    //     host-resolution fixture state.
+    //
+    // Gated to genuine WebSocket upgrade requests (requests carrying both
+    // `Upgrade: websocket` and a `Connection` header with the `Upgrade` token)
+    // so plain browser GET / and NIP-11 fallback requests are never intercepted
+    // by the enforcement gate.  Requiring both headers matches RFC 6455 §4.1
+    // and avoids intercepting a request that carries only one header and would
+    // be rejected by Axum's WebSocketUpgrade extractor anyway.
+    //
+    // Keying on the header pair (not on `Accept`) means an HTML Accept header
+    // on a real WS upgrade is still gated correctly.
+    //
+    // This pre-check runs BEFORE `WebSocketUpgrade::from_request` so that the
+    // denial response is returned on the raw HTTP connection, not inside the
+    // upgrade callback.
+    let nip_fi_assertion = {
+        let is_ws_upgrade = headers
+            .get(axum::http::header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("websocket"))
+            .unwrap_or(false)
+            && headers
+                .get(axum::http::header::CONNECTION)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| {
+                    // Connection header is a comma-separated token list; per RFC 7230
+                    // each token is case-insensitive. A genuine WS upgrade carries
+                    // "Upgrade" (or "keep-alive, Upgrade") as a Connection token.
+                    v.split(',')
+                        .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
+                })
+                .unwrap_or(false);
+        if is_ws_upgrade {
+            use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+            let mode = state.config.nip_fi.mode;
+            let verifier = state.nip_fi_verifier.as_deref();
+            match check_nip_fi_at_upgrade(&headers, verifier, mode) {
+                NipFiUpgradeOutcome::NotRequired => None,
+                NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
+                NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
+            }
+        } else {
+            None
+        }
+    };
+
+    // S4 deny-map early-bounce check: runs after assertion validation, before bind_community.
+    //
+    // This is an OPTIMIZATION (early HTTP bounce), not the correctness mechanism.
+    // Correctness is enforced in step 6 of the spec (NIP-FI.md:217-233):
+    // NIP-42 proof → key equality → register proven k → deny check → admit.
+    // That normative sequence runs in handlers/auth.rs after set_authenticated_pubkey.
+    //
+    // This pre-upgrade check provides a cheap bounce for keys already in the deny
+    // map before the connection is upgraded — pays zero DB cost and rejects before
+    // tungstenite hands the socket to the application. It is NOT race-free against
+    // a concurrent disconnect (the session isn't registered yet), which is why the
+    // normative post-registration check in auth.rs is the correctness gate.
+    //
+    // Off-mode: `nip_fi_deny_map` is `None` → the entire block is a no-op;
+    // `asserted_key` is `None` → no key to check → pass through.
+    // [FI-TRACE-DENY-SET]
+    if let Some(assertion) = &nip_fi_assertion {
+        if let Some(key) = assertion.asserted_key() {
+            if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+                if deny_map.is_denied(assertion.identity().issuer(), &key, chrono::Utc::now()) {
+                    return crate::nip_fi_upgrade::denial_response(
+                        buzz_auth::DenialClass::AuthorizationDenied,
+                    )
+                    .into_response();
+                }
+            }
+        }
+    }
+
     // Row zero: bind the connection to its community from the request host
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
     // connection. The host is the authoritative selector; an unmapped host or a
@@ -341,6 +423,9 @@ async fn nip11_or_ws_handler(
     // tenant. NIP-11 above is served before binding and stays fail-open: an
     // unmapped host still gets the document (with host-scoped fields like
     // `icon` simply absent), so the doc cannot leak which hosts are mapped.
+    //
+    // NIP-FI gate runs above (before bind_community) so denied upgrades pay
+    // zero DB cost and the gate seam is testable without a seeded-DB fixture.
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
         Err(_) => {
@@ -356,6 +441,7 @@ async fn nip11_or_ws_handler(
     };
 
     let max_frame_bytes = state.config.max_frame_bytes;
+
     match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => {
             // Shutting down: refuse new sockets instead of accepting a
@@ -367,8 +453,22 @@ async fn nip11_or_ws_handler(
             if state.shutting_down.load(Ordering::Relaxed) {
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
+            // Capture the upgrade instant here — before the on_upgrade callback
+            // fires — so the NIP-FI session partition is rooted at the HTTP
+            // handshake, not the post-community-active-check instant.
+            // [FI-TRACE-LEASE-BOUND]
+            let connection_time = chrono::Utc::now();
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| {
+                    handle_connection(
+                        socket,
+                        state,
+                        addr,
+                        tenant,
+                        nip_fi_assertion,
+                        connection_time,
+                    )
+                })
                 .into_response()
         }
         Err(_) => {
@@ -383,7 +483,7 @@ async fn nip11_or_ws_handler(
                     }
                 }
             }
-            // Not a WS request and not asking for nostr+json — serve NIP-11 as fallback.
+            // Not a WS upgrade request — serve NIP-11 as fallback.
             Json(nip11_document(&state, raw_host).await).into_response()
         }
     }
@@ -1374,6 +1474,645 @@ mod tests {
         assert!(
             !handler_receives_message_with_limit(limit, limit + 1).await,
             "oversized messages must be rejected by the WebSocket parser before the handler sees them"
+        );
+    }
+
+    // ── NIP-FI built-router gate: both WS ingresses ───────────────────────────
+    //
+    // Drive the REAL built router (via tower `oneshot`) for both the root `/`
+    // and the huddle audio `/huddle/{id}/audio` WebSocket ingresses in NIP-FI
+    // enforce mode. These tests prove that both gate call sites live in
+    // production: deleting either gate call (at the top of `nip11_or_ws_handler`
+    // in `router.rs` or at the top of `ws_audio_handler` in `audio/handler.rs`)
+    // causes the request to proceed past the pre-101 check and receive a
+    // 404 (tenant not found) instead of the expected denial, turning these
+    // tests red.
+    //
+    // Mutation evidence:
+    //   A) Delete the gate call in `nip11_or_ws_handler` → root request
+    //      returns 404 (no community) instead of 401/503 → assert_eq panics.
+    //   B) Delete the gate call in `ws_audio_handler` → audio request returns
+    //      404 (no community) instead of 401/503 → assert_eq panics.
+    //   C) Switch `Enforce` to `Off` in the test state → both ingresses skip
+    //      the gate and return 404 (no community) → status assertions panic.
+
+    /// Build AppState with NIP-FI enforce mode and no verifier (simulates
+    /// startup with no JWKS yet warmed). The verifier is `None` because
+    /// `jwks_configs` is empty and `ProductionJwksSource::new` returns `None`
+    /// for an empty list; the mode field is set directly so no env is needed.
+    ///
+    /// The NIP-FI gate runs before `bind_community`, so these tests exercise
+    /// the gate seam independently of DB / host-resolution state. The lazy
+    /// PG pool is kept so `AppState::new` compiles; it is never queried by
+    /// any of these router tests.
+    async fn nip_fi_enforce_state() -> Arc<AppState> {
+        use crate::nip_fi_config::NipFiRelayConfig;
+        use buzz_auth::{IssuerRegistry, NipFiMode};
+
+        // Build config directly without env mutation — the nip_fi field is
+        // constructed explicitly below, so reading NIP-FI env vars is irrelevant
+        // and mutating them would race the config-module tests (separate statics).
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        // Override NIP-FI mode to Enforce with no issuers configured — the
+        // verifier will be None (no JWKS source), which is the startup-race
+        // condition that must return 503 for a token-carrying request.
+        config.nip_fi = NipFiRelayConfig {
+            mode: NipFiMode::Enforce,
+            registry: IssuerRegistry::new(),
+            jwks_configs: vec![],
+            command_configs: vec![],
+            max_connection_lifetime_secs: 3600,
+        };
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    /// Drive a request through the real built router. Returns the HTTP status code.
+    /// For WebSocket upgrade paths, sends proper upgrade headers so axum's
+    /// WebSocketUpgrade extractor doesn't reject with 400 before the handler runs.
+    async fn nip_fi_gate_status(
+        state: Arc<AppState>,
+        path: &str,
+        extra_header_name: Option<&str>,
+        extra_header_value: Option<&str>,
+    ) -> axum::http::StatusCode {
+        nip_fi_gate_response(state, path, extra_header_name, extra_header_value)
+            .await
+            .status()
+    }
+
+    /// Drive a request through the real built router. Returns the full response.
+    async fn nip_fi_gate_response(
+        state: Arc<AppState>,
+        path: &str,
+        extra_header_name: Option<&str>,
+        extra_header_value: Option<&str>,
+    ) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut builder = Request::get(path)
+            .header(axum::http::header::HOST, "relay.example")
+            // WebSocket upgrade headers so axum's WebSocketUpgrade extractor
+            // doesn't reject with 400/426 before the handler body runs.
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+        if let (Some(name), Some(value)) = (extra_header_name, extra_header_value) {
+            builder = builder.header(name, value);
+        }
+        let req = builder.body(Body::empty()).expect("request");
+        build_router(state)
+            .oneshot(req)
+            .await
+            .expect("router response")
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_root_denies_missing_assertion_401() {
+        let state = nip_fi_enforce_state().await;
+        let status = nip_fi_gate_status(state, "/", None, None).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "root WebSocket upgrade without assertion must be denied 401 in enforce mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_audio_denies_missing_assertion_401() {
+        let state = nip_fi_enforce_state().await;
+        let channel_id = uuid::Uuid::new_v4();
+        let path = format!("/huddle/{channel_id}/audio");
+        let status = nip_fi_gate_status(state, &path, None, None).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "audio WebSocket upgrade without assertion must be denied 401 in enforce mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_root_denies_token_when_no_verifier_503() {
+        let state = nip_fi_enforce_state().await;
+        // A plausible but unverifiable bearer token on the correct header —
+        // verifier is None (no JWKS). Expect 503 authorization unavailable.
+        let status = nip_fi_gate_status(
+            state,
+            "/",
+            Some("Nostr-Federated-Identity"),
+            Some("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "root WebSocket upgrade with token but no verifier must be denied 503 in enforce mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_audio_denies_token_when_no_verifier_503() {
+        let state = nip_fi_enforce_state().await;
+        let channel_id = uuid::Uuid::new_v4();
+        let path = format!("/huddle/{channel_id}/audio");
+        let status = nip_fi_gate_status(
+            state,
+            &path,
+            Some("Nostr-Federated-Identity"),
+            Some("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "audio WebSocket upgrade with token but no verifier must be denied 503 in enforce mode"
+        );
+    }
+
+    // ── B4: non-upgrade document requests bypass the NIP-FI gate ─────────────
+    //
+    // A plain browser GET / or a NIP-11 content-negotiated request must reach
+    // the NIP-11 fallback path, never the enforcement gate. The gate fires only
+    // on genuine WebSocket upgrades (Connection/Upgrade headers present).
+    //
+    // Because the gate runs before bind_community, these tests are DB-free —
+    // the lazy pool is never queried and no host seeding is required. Adding a
+    // DB-dependent fixture here would hide a regression where the gate fires
+    // only because the unseeded-host 404 has not yet been reached.
+    //
+    // Mutation evidence:
+    //   A) Move the NIP-FI gate back after bind_community → without a seeded
+    //      DB, plain-GET tests return 404 (not 200); the assertion panics.
+    //      With a seeded DB the gate returns 401/503, also panics.
+    //   B) Key the gate on the Accept header → a WS request with Accept:
+    //      text/html bypasses it → the 401/503 test below returns 101 → panics.
+
+    /// Drive a plain (non-WS) GET request through the built router. Returns
+    /// the HTTP status and, for NIP-11 responses, validates the JSON content.
+    async fn nip_fi_non_upgrade_status(
+        state: Arc<AppState>,
+        path: &str,
+        accept: Option<&str>,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut builder = Request::get(path).header(axum::http::header::HOST, "relay.example");
+        if let Some(accept_value) = accept {
+            builder = builder.header("Accept", accept_value);
+        }
+        let req = builder.body(Body::empty()).expect("request");
+        build_router(state)
+            .oneshot(req)
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_plain_get_serves_nip11_not_401() {
+        let state = nip_fi_enforce_state().await;
+        // A plain GET / without WS upgrade headers is not a WebSocket upgrade.
+        // In enforce mode the NIP-FI gate must NOT intercept it — the response
+        // must be the NIP-11 JSON fallback (200), not a denial (401/403/503).
+        let status = nip_fi_non_upgrade_status(state, "/", None).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "plain GET / in enforce mode must fall through to NIP-11 (200), not be gated (401/503)"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_nip11_content_negotiation_serves_200_not_401() {
+        let state = nip_fi_enforce_state().await;
+        // application/nostr+json short-circuits before the WS check; the
+        // NIP-FI gate must never intercept it regardless of mode.
+        let status = nip_fi_non_upgrade_status(state, "/", Some("application/nostr+json")).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "NIP-11 content-negotiated GET in enforce mode must return 200"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_ws_upgrade_with_html_accept_is_gated_401() {
+        let state = nip_fi_enforce_state().await;
+        // A genuine WS upgrade request that also carries Accept: text/html
+        // must still be gated. The gate must NOT key on Accept — it must key
+        // on the Connection/Upgrade headers that make it a real WS upgrade.
+        let status = nip_fi_gate_status(state, "/", Some("Accept"), Some("text/html")).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "WS upgrade with Accept: text/html in enforce mode must still be denied 401"
+        );
+    }
+
+    // ── B4 negative: single-header requests bypass the NIP-FI gate ───────────
+    //
+    // The gate fires ONLY when BOTH `Upgrade: websocket` AND a `Connection`
+    // header carrying the `upgrade` token are present. A request with only one
+    // of the two headers is not a valid WebSocket upgrade and must not be
+    // intercepted by the NIP-FI enforcement gate.
+    //
+    // Mutation evidence:
+    //   A) Change the gate to key on `Upgrade: websocket` alone (drop the
+    //      Connection check) → the Upgrade-only test gets denied 401 instead of
+    //      passing through → the assertion panics.
+    //   B) Change the gate to key on `Connection: Upgrade` alone (drop the
+    //      Upgrade check) → the Connection-only test gets denied 401 → panics.
+
+    /// Drive a request that carries exactly `Upgrade: websocket` but no
+    /// `Connection` header. Must not be gated — returns whatever the NIP-11
+    /// or HTTP handler produces (not 401/503 from the NIP-FI gate).
+    async fn nip_fi_upgrade_only_status(
+        state: Arc<AppState>,
+        path: &str,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let req = Request::get(path)
+            .header(axum::http::header::HOST, "relay.example")
+            .header("Upgrade", "websocket")
+            // Deliberately omit Connection header.
+            .body(Body::empty())
+            .expect("request");
+        build_router(state)
+            .oneshot(req)
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    /// Drive a request that carries `Connection: Upgrade` but no `Upgrade`
+    /// header. Must not be gated by the NIP-FI enforcement logic.
+    async fn nip_fi_connection_only_status(
+        state: Arc<AppState>,
+        path: &str,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let req = Request::get(path)
+            .header(axum::http::header::HOST, "relay.example")
+            .header("Connection", "Upgrade")
+            // Deliberately omit Upgrade header.
+            .body(Body::empty())
+            .expect("request");
+        build_router(state)
+            .oneshot(req)
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn b4_upgrade_only_no_connection_header_not_gated() {
+        let state = nip_fi_enforce_state().await;
+        // Upgrade: websocket present, Connection absent → not a valid WS
+        // upgrade handshake → must NOT be denied by the NIP-FI gate.
+        // The request falls through to the NIP-11 / HTTP handler, which
+        // returns 200 (NIP-11 JSON) or 426 (Upgrade Required) — not 401/503.
+        let status = nip_fi_upgrade_only_status(state, "/").await;
+        assert_ne!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "B4: Upgrade-only request (no Connection header) must not be denied 401 by NIP-FI gate"
+        );
+        assert_ne!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "B4: Upgrade-only request (no Connection header) must not be denied 503 by NIP-FI gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn b4_connection_upgrade_only_no_upgrade_header_not_gated() {
+        let state = nip_fi_enforce_state().await;
+        // Connection: Upgrade present, Upgrade absent → not a valid WS
+        // upgrade handshake → must NOT be denied by the NIP-FI gate.
+        let status = nip_fi_connection_only_status(state, "/").await;
+        assert_ne!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "B4: Connection-only request (no Upgrade header) must not be denied 401 by NIP-FI gate"
+        );
+        assert_ne!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "B4: Connection-only request (no Upgrade header) must not be denied 503 by NIP-FI gate"
+        );
+    }
+
+    // ── S4 deny-map admission check ──────────────────────────────────────────
+    //
+    // A key with a live deny entry is refused at WS admission with 403
+    // `authorization_denied`, even when the assertion JWT is otherwise valid.
+    //
+    // Placement: the check runs after `check_nip_fi_at_upgrade` returns
+    // `Admitted(assertion)` and before `bind_community`, so no DB query is
+    // made for denied keys.  The test drives the REAL built router via
+    // `tower::oneshot`, with a `ProductionJwksSource` seeded with a test JWKS
+    // snapshot so the assertion verifier runs the full JWT pipeline.
+    //
+    // Mutation evidence:
+    //   A) Delete the deny-map check block in `nip11_or_ws_handler` → the
+    //      denied key is not refused at the pre-101 HTTP gate → the upgrade
+    //      proceeds until `bind_community` returns 404 (test host not seeded) →
+    //      the assertion `assert_eq!(status, 403)` below panics.
+    //   B) Flip the `is_denied` condition to `!is_denied` → admitted keys
+    //      are refused and denied keys are admitted → this test panics (no
+    //      deny entry yet, so the negated check admits nothing, status 403
+    //      for the wrong key or 404 for admitted).
+    //   C) Remove the `nip_fi_deny_map` assignment from `nip_fi_deny_state`
+    //      → the map is `None` → the block is a no-op → upgrade proceeds to
+    //      404 (no community) → assertion panics.
+
+    // ES256 key pair — same as command.rs / api/nip_fi.rs test material.
+    const DENY_TEST_PRIVATE_KEY_PEM: &str =
+        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n";
+
+    const DENY_TEST_ISS: &str = "https://nip-fi-deny-test.example.com";
+    const DENY_TEST_AUD: &str = "https://relay.example";
+    const DENY_TEST_KID: &str = "deny-test-key-1";
+
+    fn deny_test_public_jwk() -> jsonwebtoken::jwk::Jwk {
+        serde_json::from_value(serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "RW-mZ7H5Kjjl8hIY9ygUKYRiheL02s4Xm22r22dWaJI",
+            "y": "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA",
+            "alg": "ES256",
+            "use": "sig",
+            "kid": DENY_TEST_KID
+        }))
+        .expect("valid deny-test JWK")
+    }
+
+    /// Build an AppState with a seeded NIP-FI assertion verifier (`Enforce`
+    /// mode, test issuer) and a populated deny map containing `denied_key`.
+    async fn nip_fi_deny_state(denied_key: &nostr::PublicKey) -> Arc<AppState> {
+        use crate::nip_fi_config::NipFiRelayConfig;
+        use buzz_auth::{
+            FederatedAssertionVerifier, FreshnessClass, HttpJwksFetcher, IssuerCapacity,
+            IssuerRegistry, JwksSourceContract, NipFiDenyMap, NipFiMode, ProductionJwksSource,
+            TokenClass,
+        };
+
+        // Build config in enforce mode.
+        let mut config = crate::config::Config::hermetic_for_test();
+        config.require_relay_membership = false;
+
+        let jwks_contract =
+            JwksSourceContract::new(format!("{DENY_TEST_ISS}/.well-known/jwks.json"), 300, 86400)
+                .expect("valid JWKS contract");
+        let issuer_policy = buzz_auth::IssuerPolicy::new(
+            DENY_TEST_ISS.to_owned(),
+            vec![DENY_TEST_AUD.to_owned()],
+            TokenClass::DedicatedNipFi,
+            FreshnessClass::OfflineJwt,
+            vec![buzz_auth::JwtAlgorithm::ES256],
+            30,
+            3600,
+            None,
+            jwks_contract.clone(),
+        )
+        .expect("valid test issuer policy");
+
+        let jwks_config = buzz_auth::IssuerJwksConfig {
+            issuer: DENY_TEST_ISS.to_owned(),
+            contract: jwks_contract,
+        };
+
+        config.nip_fi = NipFiRelayConfig {
+            mode: NipFiMode::Enforce,
+            registry: {
+                let mut r = IssuerRegistry::new();
+                r.insert(issuer_policy);
+                r
+            },
+            jwks_configs: vec![jwks_config],
+            command_configs: vec![],
+            max_connection_lifetime_secs: 3600,
+        };
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (mut state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+
+        // Wire the NIP-FI assertion verifier with a seeded JWKS snapshot so the
+        // full JWT pipeline runs without any HTTP call. The seeded JWKS contains
+        // the test public key that signs tokens in `mint_deny_test_token`.
+        let jwks = jsonwebtoken::jwk::JwkSet {
+            keys: vec![deny_test_public_jwk()],
+        };
+        let key_source = Arc::new(
+            ProductionJwksSource::new(
+                vec![buzz_auth::IssuerJwksConfig {
+                    issuer: DENY_TEST_ISS.to_owned(),
+                    contract: buzz_auth::JwksSourceContract::new(
+                        format!("{DENY_TEST_ISS}/.well-known/jwks.json"),
+                        300,
+                        86400,
+                    )
+                    .expect("valid contract"),
+                }],
+                HttpJwksFetcher::new(),
+            )
+            .expect("key source"),
+        );
+        key_source.seed_snapshot_for_test(DENY_TEST_ISS, jwks).await;
+        let verifier = Arc::new(FederatedAssertionVerifier::new(
+            state.config.nip_fi.registry.clone(),
+            Arc::clone(&key_source),
+        ));
+        state.nip_fi_verifier = Some(verifier);
+        state.nip_fi_jwks_source = Some(Arc::clone(&key_source));
+
+        // Populate the deny map with a live entry for the denied key.
+        let deny_map = Arc::new(NipFiDenyMap::new(
+            16,
+            vec![IssuerCapacity {
+                issuer: DENY_TEST_ISS.to_owned(),
+                capacity: 16,
+            }],
+        ));
+        let until = chrono::Utc::now() + chrono::Duration::seconds(3600);
+        let merge_result =
+            deny_map.merge_cross_pod_deny(DENY_TEST_ISS, denied_key, until, chrono::Utc::now());
+        assert!(
+            matches!(merge_result, buzz_auth::CrossPodMergeResult::Merged),
+            "deny entry must be inserted for test setup"
+        );
+        state.nip_fi_deny_map = Some(deny_map);
+
+        Arc::new(state)
+    }
+
+    /// Mint a valid ES256 `nip-fi+jwt` assertion for `nostr_pubkey = key_hex`,
+    /// signed by the deny-test key pair.
+    fn mint_deny_test_token(key_hex: &str) -> String {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "iss": DENY_TEST_ISS,
+            "aud": DENY_TEST_AUD,
+            "sub": "test-subject",
+            "iat": now,
+            "exp": now + 600,
+            "nostr_pubkey": key_hex,
+        });
+        let mut header = Header::new(Algorithm::ES256);
+        header.typ = Some("nip-fi+jwt".to_owned());
+        header.kid = Some(DENY_TEST_KID.to_owned());
+        let key = EncodingKey::from_ec_pem(DENY_TEST_PRIVATE_KEY_PEM.as_bytes())
+            .expect("valid test EC key");
+        encode(&header, &claims, &key).expect("sign deny-test token")
+    }
+
+    #[tokio::test]
+    async fn deny_map_blocks_ws_admission_for_live_entry() {
+        // A key with a live deny entry is refused 403 `authorization_denied`
+        // at WS admission even when the bearer JWT is otherwise valid.
+        //
+        // Full wire contract assertion: status 403, Content-Type text/plain,
+        // exact body "authorization denied\n", no WWW-Authenticate header.
+        // This distinguishes AuthorizationDenied from EvidenceRejected (also 403)
+        // and from AuthorizationUnavailable (503). [FI-TRACE-DENIAL-ORACLE]
+        //
+        // Mutation evidence (A–C in build comments above):
+        //   A) Delete the deny-map check → 404 not 403 → status assert panics.
+        //   B) Use DenialClass::EvidenceRejected → body is "evidence rejected\n"
+        //      → body assert panics.
+        //   C) Remove nip_fi_deny_map from state → map None → 404 → status panics.
+        let denied_key = nostr::Keys::generate().public_key();
+        let state = nip_fi_deny_state(&denied_key).await;
+        let token = mint_deny_test_token(&denied_key.to_hex());
+        let bearer = format!("Bearer {token}");
+
+        let resp =
+            nip_fi_gate_response(state, "/", Some("Nostr-Federated-Identity"), Some(&bearer)).await;
+
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::FORBIDDEN,
+            "WS admission for a key with a live deny entry must be refused 403 \
+             authorization_denied [FI-TRACE-DENY-SET]"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+            "authorization_denied response must carry text/plain; charset=utf-8"
+        );
+        assert!(
+            resp.headers().get("WWW-Authenticate").is_none(),
+            "authorization_denied must NOT carry WWW-Authenticate (that is MissingEvidence only)"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 64)
+            .await
+            .expect("body bytes");
+        assert_eq!(
+            body.as_ref(),
+            b"authorization denied\n",
+            "authorization_denied wire body must be exactly 'authorization denied\\n' \
+             [FI-TRACE-DENIAL-ORACLE]"
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_map_admits_key_not_in_map() {
+        // A key NOT in the deny map passes the check and proceeds to
+        // bind_community (which returns 404 — test host is not seeded).
+        // This proves the Off-path (no deny entry → pass through) and guards
+        // against an inverted condition.
+        let clean_key = nostr::Keys::generate().public_key();
+        // Build state with a DIFFERENT denied key so clean_key is not in the map.
+        let other_key = nostr::Keys::generate().public_key();
+        let state = nip_fi_deny_state(&other_key).await;
+        let token = mint_deny_test_token(&clean_key.to_hex());
+        let bearer = format!("Bearer {token}");
+
+        let status =
+            nip_fi_gate_status(state, "/", Some("Nostr-Federated-Identity"), Some(&bearer)).await;
+
+        // The key is not denied — the pre-101 gate passes and the request
+        // proceeds to `bind_community`, which returns 404 (test host not seeded).
+        // A 403 here means the deny check fired incorrectly for a non-denied key.
+        assert_eq!(
+            status,
+            axum::http::StatusCode::NOT_FOUND,
+            "WS admission for a key NOT in the deny map must pass the deny check \
+             and proceed to bind_community (404 — test host not seeded)"
         );
     }
 }

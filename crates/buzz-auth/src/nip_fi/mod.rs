@@ -9,8 +9,10 @@
 pub const CLIENT_ATTACHED_HEADER: &str = "Nostr-Federated-Identity";
 
 pub mod assertion;
+pub mod command;
 pub mod config;
 pub mod denial;
+pub mod deny_map;
 pub mod discovery;
 pub mod jwks;
 pub mod startup;
@@ -20,12 +22,17 @@ pub use assertion::{
     CanonicalCapabilities, ConfidentialAssertion, FederatedIdentity, RevalidationDependencies,
     VerifiedAssertion,
 };
+pub use command::{
+    CommandError, CommandIssuerPolicy, CommandPolicyError, CommandResult, CommandVerifier,
+    COMMAND_JWT_TYP, MAX_COMMAND_AGE_SECONDS,
+};
 pub use config::{
     AssertionPolicyId, ClientSubjectPosture, FreshnessClass, IssuerPolicy, IssuerPolicyError,
     IssuerRegistry, SubjectClass, SubjectClassContract, TokenClass, TransportContractId,
     NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
 };
 pub use denial::DenialClass;
+pub use deny_map::{CrossPodMergeResult, DenySetFull, IssuerCapacity, NipFiDenyMap};
 pub use discovery::{
     AssertionFreshnessDiscovery, FederatedIdentityDiscovery, FreshnessClassDiscovery,
 };

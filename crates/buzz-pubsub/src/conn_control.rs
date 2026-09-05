@@ -34,6 +34,55 @@ pub fn conn_control_channel(ctx: &TenantContext) -> String {
     format!("{BUZZ_PREFIX}:{}:{CONN_CONTROL_SUFFIX}", ctx.community())
 }
 
+// ── NIP-FI global disconnect channel ─────────────────────────────────────────
+
+/// Global (issuer-scoped, not community-scoped) Redis pub/sub channel for NIP-FI
+/// disconnect commands.  A single channel covers all communities because NIP-FI
+/// deny entries apply across the full issuer domain — the community a user is
+/// connected to at that moment is irrelevant.
+pub const NIP_FI_DISCONNECT_CHANNEL: &str = "buzz:nip-fi:disconnect";
+
+/// A NIP-FI admin-disconnect command broadcast cross-pod after the local deny
+/// entry is inserted.  Every pod merges this entry into its own deny map and
+/// closes any matching sessions (same `max(until)` rule as the local path).
+///
+/// Transmitted asynchronously — the HTTP response does not wait on remote-pod
+/// delivery; the spec's asynchronous-success semantics are preserved.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NipFiDisconnect {
+    /// Exact `iss` URI of the issuer that originated the command.
+    pub issuer: String,
+    /// 32 raw bytes of the target Nostr public key.
+    pub pubkey_bytes: Vec<u8>,
+    /// `until` seconds since the Unix epoch (whole-second component).
+    pub until_unix: i64,
+    /// Nanosecond sub-second component of `until` (0..1_000_000_000).
+    /// Transmitted alongside `until_unix` so the full sub-second precision of
+    /// the signed command JWT is preserved across pod boundaries.
+    #[serde(default)]
+    pub until_unix_nanos: u32,
+}
+
+/// Encode a [`NipFiDisconnect`] message to a JSON string for publication on
+/// the Redis pub/sub channel.
+///
+/// This is the single publication path — the HTTP handler and any future
+/// publisher must call this function rather than serialising directly, so the
+/// wire format is defined in one place and the round-trip oracle can cover it.
+pub fn encode_nip_fi_disconnect(message: &NipFiDisconnect) -> Result<String, serde_json::Error> {
+    serde_json::to_string(message)
+}
+
+/// Decode a [`NipFiDisconnect`] message from a JSON string received from the
+/// Redis pub/sub channel.
+///
+/// This is the single consumption path — the subscriber and any future consumer
+/// must call this function rather than deserialising directly, so the wire format
+/// is defined in one place and the round-trip oracle can cover it.
+pub fn decode_nip_fi_disconnect(payload: &str) -> Result<NipFiDisconnect, serde_json::Error> {
+    serde_json::from_str(payload)
+}
+
 /// Parse a connection-control Redis channel into its scoped community id.
 pub fn parse_conn_control_channel(channel: &str) -> Option<CommunityId> {
     let mut parts = channel.split(':');
@@ -161,6 +210,76 @@ async fn connect_and_subscribe(
     Ok(())
 }
 
+// ── NIP-FI disconnect subscriber ──────────────────────────────────────────────
+
+/// Subscribes to [`NIP_FI_DISCONNECT_CHANNEL`] and forwards commands to the
+/// broadcast.  Mirrors [`run_conn_control_subscriber`]: reconnect loop with
+/// exponential backoff.  Never returns.
+pub async fn run_nip_fi_disconnect_subscriber(
+    redis_url: String,
+    broadcast_tx: broadcast::Sender<NipFiDisconnect>,
+) {
+    let mut backoff_secs = BACKOFF_INITIAL_SECS;
+
+    loop {
+        match connect_and_subscribe_nip_fi(&redis_url, &broadcast_tx).await {
+            Ok(()) => {
+                backoff_secs = BACKOFF_INITIAL_SECS;
+                tracing::warn!(
+                    "Redis NIP-FI disconnect stream ended (clean disconnect) — reconnecting in {backoff_secs}s"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Redis NIP-FI disconnect error: {e} — reconnecting in {backoff_secs}s"
+                );
+            }
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+        backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
+    }
+}
+
+async fn connect_and_subscribe_nip_fi(
+    redis_url: &str,
+    broadcast_tx: &broadcast::Sender<NipFiDisconnect>,
+) -> Result<(), redis::RedisError> {
+    let client = redis::Client::open(redis_url)?;
+    let mut conn = client.get_async_pubsub().await?;
+
+    conn.subscribe(NIP_FI_DISCONNECT_CHANNEL).await?;
+
+    tracing::info!(
+        "Redis NIP-FI disconnect subscriber connected — listening on {NIP_FI_DISCONNECT_CHANNEL}"
+    );
+
+    let mut stream = conn.on_message();
+    while let Some(msg) = stream.next().await {
+        let payload: String = match msg.get_payload() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to get NIP-FI disconnect payload: {e}");
+                continue;
+            }
+        };
+
+        let command: NipFiDisconnect = match decode_nip_fi_disconnect(&payload) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Failed to deserialize NIP-FI disconnect message: {e}");
+                continue;
+            }
+        };
+
+        if broadcast_tx.send(command).is_err() {
+            tracing::trace!("No NIP-FI disconnect receivers — message dropped");
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +344,56 @@ mod tests {
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert_eq!(serde_json::from_str::<ConnControl>(&json).unwrap(), cmd);
+    }
+
+    // ── NipFiDisconnect serde ─────────────────────────────────────────────────
+
+    #[test]
+    fn nip_fi_disconnect_serde_round_trips() {
+        let cmd = NipFiDisconnect {
+            issuer: "https://idp.example.com".to_string(),
+            pubkey_bytes: vec![0xabu8; 32],
+            until_unix: 9_999_999_999,
+            until_unix_nanos: 500_000_000,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let decoded: NipFiDisconnect = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, cmd);
+    }
+
+    #[test]
+    fn nip_fi_disconnect_nanos_default_to_zero_when_absent() {
+        // Old messages (without the until_unix_nanos field) must still deserialize.
+        let legacy_json = r#"{"issuer":"https://idp.example.com","pubkey_bytes":[171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171,171],"until_unix":9999999999}"#;
+        let decoded: NipFiDisconnect = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(
+            decoded.until_unix_nanos, 0,
+            "missing nanos field must default to 0"
+        );
+        assert_eq!(decoded.until_unix, 9_999_999_999);
+    }
+
+    #[test]
+    fn nip_fi_disconnect_channel_is_global_not_community_scoped() {
+        // Must NOT contain a community UUID segment — it's issuer-global.
+        assert_eq!(NIP_FI_DISCONNECT_CHANNEL, "buzz:nip-fi:disconnect");
+        assert!(!NIP_FI_DISCONNECT_CHANNEL.contains("conn-control"));
+    }
+
+    #[test]
+    fn nip_fi_disconnect_malformed_payload_is_skipped() {
+        // Simulate what the subscriber does: malformed JSON produces an error
+        // and the message is skipped (no panic).
+        let malformed = r#"{"issuer": 42}"#; // wrong type for issuer
+        assert!(serde_json::from_str::<NipFiDisconnect>(malformed).is_err());
+        // Well-formed payload still parses.
+        let good = serde_json::to_string(&NipFiDisconnect {
+            issuer: "https://a.example.com".to_string(),
+            pubkey_bytes: vec![1u8; 32],
+            until_unix: 1_000_000,
+            until_unix_nanos: 0,
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<NipFiDisconnect>(&good).is_ok());
     }
 }

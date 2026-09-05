@@ -480,6 +480,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
     tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
 
+    // Spawn Redis pub/sub subscriber for NIP-FI cross-pod disconnect commands.
+    // Remote pods publish to this global channel after accepting a disconnect
+    // command; every pod merges the deny entry and closes matching sessions.
+    let pubsub_for_nip_fi = Arc::clone(&pubsub);
+    tokio::spawn(async move { pubsub_for_nip_fi.run_nip_fi_disconnect_subscriber().await });
+
     let auth = AuthService::new(config.auth.clone());
 
     // Postgres FTS: the searchable row IS the persisted event row (its
@@ -512,7 +518,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to initialize media storage: {e}"))?;
     info!("Media storage connected");
 
-    let (app_state, audit_shutdown) = AppState::new(
+    let (mut app_state, audit_shutdown) = AppState::new(
         config.clone(),
         db,
         redis_health_pool,
@@ -524,6 +530,33 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         relay_keypair,
         media_storage,
     );
+    // NIP-FI S4: construct deny map + command verifier from startup config,
+    // before Arc::new so we can mutate app_state directly.
+    // Delegates to install_nip_fi_command_components which owns JWKS warmup,
+    // the refresh loop, build_nip_fi_command_components, and both state assignments.
+    {
+        let nip_fi = &config.nip_fi;
+        if let Some(key_source) = app_state.nip_fi_jwks_source.clone() {
+            // Share the exact Arc that nip_fi_verifier already holds so warmup
+            // and the background refresh loop populate the same snapshot cache
+            // that assertion verification reads synchronously via key_set().
+            buzz_relay::api::nip_fi::install_nip_fi_command_components(
+                &mut app_state,
+                nip_fi.mode,
+                &nip_fi.registry,
+                key_source,
+                &nip_fi.jwks_configs,
+                &nip_fi.command_configs,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("NIP-FI startup failed: {e}"))?;
+        } else if nip_fi.is_enforce() {
+            return Err(anyhow::anyhow!(
+                "NIP-FI: failed to construct JWKS key source \
+                 (empty or duplicate issuer config)"
+            ));
+        }
+    }
     let state = Arc::new(app_state);
 
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
@@ -1085,6 +1118,42 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         });
     }
 
+    // Cross-pod NIP-FI disconnect consumer: receive deny entries from remote
+    // pods, merge them into the local deny map (same max(until) rule), and
+    // close any matching sessions.  Every pod subscribes; the publishing pod
+    // also receives its own message and applies it — this is idempotent because
+    // the deny entry was already inserted locally before the publish.
+    //
+    // The consumer delegates to `apply_nip_fi_disconnect` which owns all
+    // validation, merge, and session-close logic.  This keeps the loop body
+    // minimal and makes the exact production path testable end-to-end.
+    {
+        let state_for_nip_fi = Arc::clone(&state);
+        let mut rx = state_for_nip_fi.pubsub.subscribe_nip_fi_disconnect();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let now = chrono::Utc::now();
+                        buzz_relay::api::nip_fi::apply_nip_fi_disconnect(
+                            &state_for_nip_fi,
+                            &msg,
+                            now,
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        metrics::counter!("buzz_nip_fi_disconnect_lag_total").increment(n);
+                        tracing::warn!("NIP-FI disconnect consumer lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::error!("NIP-FI disconnect broadcast channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     let router = build_router(Arc::clone(&state));
     let health_router = build_health_router(Arc::clone(&state));
 
@@ -1493,6 +1562,7 @@ async fn serve(
             .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
         uds_handle.abort();
         hard_shutdown.abort();
+        // The JWKS refresh loop exits via the shutting_down flag set by AppState::shutdown().
         return Ok(());
     }
 
@@ -1517,6 +1587,7 @@ async fn serve(
         .await
         .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
     hard_shutdown.abort();
+    // The JWKS refresh loop exits via the shutting_down flag set by AppState::shutdown().
     Ok(())
 }
 

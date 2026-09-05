@@ -341,6 +341,59 @@ async fn huddle_started_link_exists_with_operation(
         .any(|content| huddle_started_content_links(content, ephemeral_channel_id)))
 }
 
+/// Return whether a creator-signed huddle-start event links a parent channel
+/// to the requested ephemeral huddle channel — checked inside an open
+/// transaction with a shared row lock on matching rows.
+///
+/// Uses `SELECT ... FOR SHARE` so any concurrent `soft_delete_event()` that
+/// attempts `UPDATE events SET deleted_at = NOW() WHERE ...` on the same row
+/// must wait until this transaction commits or rolls back. This makes the
+/// re-read authoritative against concurrent deletion — "visibility" alone
+/// (i.e. a plain SELECT) is insufficient under READ COMMITTED because deletion
+/// can commit between the SELECT and the join commit in the same transaction.
+///
+/// Uses `tx.as_mut()` so the lock participates in the caller's transaction.
+/// A `false` return means the link was deleted or was never inserted, and the
+/// caller should abort the surrounding transaction.
+pub async fn huddle_started_link_exists_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    parent_channel_id: Uuid,
+    ephemeral_channel_id: Uuid,
+    creator_pubkey: &[u8],
+) -> Result<bool> {
+    let uuid_needle = format!("%{}%", ephemeral_channel_id);
+    let candidates: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT content
+        FROM events
+        WHERE deleted_at IS NULL
+          AND community_id = $1
+          AND channel_id = $2
+          AND kind = $3
+          AND pubkey = $4
+          AND octet_length(content) <= $5
+          AND content ILIKE $6
+        ORDER BY created_at DESC, id ASC
+        LIMIT $7
+        FOR SHARE
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(parent_channel_id)
+    .bind(KIND_HUDDLE_STARTED as i32)
+    .bind(creator_pubkey)
+    .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
+    .bind(uuid_needle)
+    .bind(HUDDLE_LINK_CANDIDATE_LIMIT)
+    .fetch_all(tx.as_mut())
+    .await?;
+
+    Ok(candidates
+        .iter()
+        .any(|content| huddle_started_content_links(content, ephemeral_channel_id)))
+}
+
 /// Insert a Nostr event. Rejects AUTH and ephemeral kinds.
 ///
 /// Returns `(StoredEvent, was_inserted)` — `was_inserted` is `false` on duplicate.
@@ -2835,6 +2888,135 @@ mod postgres_tests {
             .await
             .expect("batch huddle links");
         assert_eq!(links, vec![(session, parent, creator)]);
+    }
+
+    // I4 deletion-race witness:
+    // `huddle_started_link_exists_in_transaction` acquires FOR SHARE on the
+    // matching row. A concurrent `soft_delete_event` (UPDATE events SET
+    // deleted_at = NOW() WHERE ...) must BLOCK until the join transaction
+    // commits or rolls back — it cannot race past the re-read and commit
+    // deletion before the join completes.
+    //
+    // Test protocol:
+    //   1. Insert a huddle_started event row.
+    //   2. Open a transaction and call `huddle_started_link_exists_in_transaction`
+    //      (acquires FOR SHARE).
+    //   3. Concurrently try `soft_delete_event` from a second connection —
+    //      the UPDATE blocks because FOR SHARE conflicts with UPDATE.
+    //   4. Commit the first transaction.
+    //   5. The concurrent delete now completes — confirm it succeeds.
+    //
+    // Mutation evidence:
+    //   Remove `FOR SHARE` from the SELECT in `huddle_started_link_exists_in_transaction` →
+    //   the concurrent delete completes before the join tx commits →
+    //   `link_gone_before_commit` becomes true before the tx commits →
+    //   assertion panics ("FOR SHARE must make delete block").
+    #[tokio::test]
+    #[ignore = "requires Postgres — link deletion contends with join transaction via FOR SHARE"]
+    async fn i4_huddle_link_deletion_blocked_by_join_transaction_for_share() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let community_id = buzz_core::CommunityId::from_uuid(community);
+        let parent = make_test_channel(&pool, community, None).await;
+        let session = make_test_channel(&pool, community, None).await;
+        let creator = vec![0xAAu8; 32];
+        let event_id = vec![0xBBu8; 32];
+
+        // Insert the huddle_started event row.
+        let content = serde_json::json!({"ephemeral_channel_id": session.to_string()}).to_string();
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+             VALUES ($1, $2, $3, NOW(), $4, '[]', $5, $6, $7)",
+        )
+        .bind(community)
+        .bind(&event_id)
+        .bind(&creator)
+        .bind(KIND_HUDDLE_STARTED as i32)
+        .bind(&content)
+        .bind(vec![0u8; 64])
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .expect("insert huddle_started event");
+
+        // Signal: join transaction has acquired FOR SHARE, delete may attempt.
+        let delete_may_start = Arc::new(Notify::new());
+        // Signal: delete completed (or timed out).
+        let delete_completed = Arc::new(AtomicBool::new(false));
+        let link_gone_before_commit = Arc::new(AtomicBool::new(false));
+
+        let delete_may_start2 = delete_may_start.clone();
+        let delete_completed2 = delete_completed.clone();
+        let link_gone2 = link_gone_before_commit.clone();
+        let pool2 = pool.clone();
+        let event_id2 = event_id.clone();
+        let community2 = community_id;
+
+        // Spawn the deleter: waits for the join tx to hold FOR SHARE, then tries
+        // to delete. It should block until the join tx commits.
+        let delete_handle = tokio::spawn(async move {
+            delete_may_start2.notified().await;
+            // Record whether the link row is still live at delete time.
+            // Under FOR SHARE this call will block until the join tx commits.
+            let result = soft_delete_event(&pool2, community2, &event_id2)
+                .await
+                .expect("soft_delete_event should not error");
+            // Mark whether the link was deleted (not already gone).
+            link_gone2.store(result, Ordering::Relaxed);
+            delete_completed2.store(true, Ordering::Relaxed);
+        });
+
+        // Open the join transaction and acquire FOR SHARE.
+        let mut tx = pool.begin().await.expect("begin join tx");
+        let exists = huddle_started_link_exists_in_transaction(
+            &mut tx,
+            community_id,
+            parent,
+            session,
+            &creator,
+        )
+        .await
+        .expect("huddle_started_link_exists_in_transaction");
+        assert!(exists, "I4: link must exist before commit");
+
+        // Signal the deleter to attempt its UPDATE now.
+        delete_may_start.notify_one();
+
+        // Give the deleter a brief window to attempt the DELETE. Under correct
+        // FOR SHARE locking, it blocks here and `delete_completed` stays false.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(
+            !delete_completed.load(Ordering::Relaxed),
+            "I4: FOR SHARE must make soft_delete_event block — \
+             delete completed before the join transaction committed, \
+             which proves deletion can race past the re-read. \
+             Remove FOR SHARE from the SELECT in \
+             huddle_started_link_exists_in_transaction to reproduce."
+        );
+
+        // Commit the join transaction — delete should unblock.
+        tx.commit().await.expect("commit join tx");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), delete_handle)
+            .await
+            .expect("I4: delete must complete within 5s after join tx commit")
+            .expect("delete_handle must not panic");
+
+        // After the join tx commits, the delete should have succeeded.
+        assert!(
+            link_gone_before_commit.load(Ordering::Relaxed),
+            "I4: soft_delete_event must succeed once the join tx releases FOR SHARE"
+        );
+        assert!(
+            delete_completed.load(Ordering::Relaxed),
+            "I4: delete must complete after join tx commit"
+        );
     }
 
     #[test]
