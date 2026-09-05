@@ -269,6 +269,27 @@ const REST_RETRY_BASE_DELAYS: [Duration; 3] = [
     Duration::from_millis(2000),
 ];
 
+/// Ceiling on a relay-supplied `retry in Ns` hint.
+///
+/// The hint comes from the relay's own admission limiter, so it is trusted in
+/// the ordinary case; the cap only stops a pathological value from parking the
+/// harness for minutes.
+const RETRY_HINT_MAX: Duration = Duration::from_secs(30);
+
+/// Choose the wait before the next REST attempt.
+///
+/// The relay states how long the caller must wait when it rate-limits. Backing
+/// off for less than that guarantees another rejection, and a client that
+/// re-arrives early keeps its own limit window alive — so take the hint when
+/// it is longer than the schedule's delay, capped. A shorter hint never
+/// shortens the schedule, and no hint leaves it untouched.
+fn retry_delay(base: Duration, hint: Option<Duration>) -> Duration {
+    match hint {
+        Some(hint) => base.max(hint.min(RETRY_HINT_MAX)),
+        None => base,
+    }
+}
+
 fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -409,25 +430,42 @@ impl RestClient {
         Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
     {
         let mut last_err = None;
+        // Carried from a rate-limit rejection to the sleep that follows it.
+        let mut retry_hint: Option<Duration> = None;
 
         for (attempt, delay) in std::iter::once(None)
             .chain(REST_RETRY_BASE_DELAYS.iter().map(|d| Some(*d)))
             .enumerate()
         {
             if let Some(base) = delay {
-                let jittered = jittered_duration(base);
+                let wait = retry_delay(jittered_duration(base), retry_hint.take());
                 tracing::debug!(
                     "retrying {method} {path} (attempt {attempt}) in {:.1}s",
-                    jittered.as_secs_f64()
+                    wait.as_secs_f64()
                 );
-                tokio::time::sleep(jittered).await;
+                tokio::time::sleep(wait).await;
             }
 
             match build_request().await {
                 Ok(resp) if resp.status().is_success() => return Ok(resp),
                 Ok(resp) if is_retriable_status(resp.status()) => {
                     let status = resp.status();
-                    tracing::warn!("{method} {path} returned retriable HTTP {status}");
+                    // The relay states how long to wait when it rate-limits;
+                    // the subscription path already reads that hint, so read it
+                    // here too rather than backing off on our own schedule.
+                    retry_hint = resp
+                        .text()
+                        .await
+                        .ok()
+                        .and_then(|body| parse_rate_limit_retry_secs(&body))
+                        .map(Duration::from_secs);
+                    match retry_hint {
+                        Some(hint) => tracing::warn!(
+                            "{method} {path} returned retriable HTTP {status}; relay asked to retry in {}s",
+                            hint.as_secs()
+                        ),
+                        None => tracing::warn!("{method} {path} returned retriable HTTP {status}"),
+                    }
                     last_err = Some(RelayError::Http(format!(
                         "{method} {path} returned HTTP {status}"
                     )));
@@ -4391,6 +4429,53 @@ mod tests {
             .to_string()
             .contains("failed to fetch a usable NIP-11 document"));
         server.abort();
+    }
+
+    #[test]
+    fn without_a_hint_the_rest_schedule_is_unchanged() {
+        assert_eq!(
+            retry_delay(Duration::from_millis(500), None),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn a_longer_hint_wins_over_the_rest_schedule() {
+        // The schedule tops out at 2s, so a relay asking for 4s means retrying
+        // on schedule is a guaranteed second rejection.
+        assert_eq!(
+            retry_delay(Duration::from_millis(2000), Some(Duration::from_secs(4))),
+            Duration::from_secs(4)
+        );
+    }
+
+    #[test]
+    fn a_shorter_hint_does_not_shorten_the_backoff() {
+        assert_eq!(
+            retry_delay(Duration::from_millis(2000), Some(Duration::from_secs(1))),
+            Duration::from_millis(2000)
+        );
+    }
+
+    #[test]
+    fn a_pathological_hint_is_capped() {
+        assert_eq!(
+            retry_delay(Duration::from_millis(500), Some(Duration::from_secs(3600))),
+            RETRY_HINT_MAX
+        );
+    }
+
+    #[test]
+    fn the_relays_own_429_body_yields_a_delay() {
+        // The shape enforce_http_admission actually sends
+        // (crates/buzz-relay/src/api/bridge.rs).
+        let body = r#"{"error":"rate-limited: quota exceeded; retry in 6s"}"#;
+        let hint = parse_rate_limit_retry_secs(body).map(Duration::from_secs);
+        assert_eq!(hint, Some(Duration::from_secs(6)));
+        assert_eq!(
+            retry_delay(Duration::from_millis(500), hint),
+            Duration::from_secs(6)
+        );
     }
 
     #[test]
