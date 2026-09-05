@@ -132,7 +132,7 @@ void main() {
         [runtime, owned, allow],
         inspect: (session) {
           final query = session.queries.singleWhere(
-            (q) => q.kinds.contains(30177),
+            (q) => q.kinds.contains(30177) && q.tags.containsKey('#d'),
           );
           expect(query.authors, [owner.public]);
           expect(query.tags, {
