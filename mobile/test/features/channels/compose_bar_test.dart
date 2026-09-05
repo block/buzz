@@ -3216,12 +3216,15 @@ void main() {
         final signer = nostr.Keys.generate();
         final publishedEvents = <Map<String, dynamic>>[];
         final uploadResponse = Completer<http.Response>();
+        var uploadStarted = false;
+        var sends = 0;
         final uploadService = MediaUploadService(
           baseUrl: 'https://relay.example',
           nsec: signer.nsec,
-          httpClient: http_testing.MockClient(
-            (request) => uploadResponse.future,
-          ),
+          httpClient: http_testing.MockClient((request) {
+            uploadStarted = true;
+            return uploadResponse.future;
+          }),
           pickGalleryVideo: () async => null,
           pickGalleryImage: () async => null,
           pickGalleryImages: () async => [
@@ -3235,7 +3238,9 @@ void main() {
             currentPubkey: signer.public,
             relayAgents: [_testAgent(agentPubkey)],
             channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
-            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {
+              sends += 1;
+            },
           ),
         );
 
@@ -3256,7 +3261,12 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+        await tester.enterText(find.byType(TextField), 'hello @Helper Bot ');
+        await tester.pumpAndSettle();
+        final submittedText = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text;
         await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pump();
 
@@ -3266,6 +3276,7 @@ void main() {
         );
 
         await tester.pump(const Duration(milliseconds: 220));
+        expect(uploadStarted, isTrue);
         await tester.tap(find.byKey(const ValueKey('compose-upload-cancel')));
         uploadResponse.complete(
           http.Response(
@@ -3288,8 +3299,13 @@ void main() {
         );
         expect(
           tester.widget<TextField>(find.byType(TextField)).controller!.text,
-          'hello @Helper Bot',
+          submittedText,
         );
+        expect(sends, 0);
+        // Restoring the draft can start a new autocomplete debounce. Dispose
+        // its owner before draining fake time; do not leak a timer to teardown.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 300));
       },
     );
 
