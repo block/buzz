@@ -359,6 +359,10 @@ test-unit:
     set -euo pipefail
     ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
+        # Check confidentiality and domain isolation in both IFC crates.
+        # nextest skips doctests, including the compile-fail API checks.
+        cargo nextest run -p ifc-core -p buzz-ifc
+        cargo test -p ifc-core -p buzz-ifc --doc
         cargo nextest run -p buzz-core -p buzz-auth --lib
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
