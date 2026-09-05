@@ -141,17 +141,26 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('general'), findsOneWidget);
-    expect(find.text('design-forum'), findsNothing);
+    expect(find.text('design-forum'), findsOneWidget);
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('Channels'), findsOneWidget);
-    expect(find.text('FORUMS'), findsNothing);
+    expect(find.text('Forums'), findsOneWidget);
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
+    expect(find.byTooltip('Forums options'), findsOneWidget);
     expect(find.byIcon(LucideIcons.ellipsisVertical), findsWidgets);
     expect(find.byIcon(LucideIcons.arrowUpDown), findsNothing);
     expect(find.byTooltip('DMs options'), findsOneWidget);
+
+    await tester.tap(find.text('Forums'));
+    await tester.pumpAndSettle();
+    expect(find.text('design-forum'), findsNothing);
+
+    await tester.tap(find.text('Forums'));
+    await tester.pumpAndSettle();
+    expect(find.text('design-forum'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Channels options'));
     await tester.pumpAndSettle();

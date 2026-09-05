@@ -119,6 +119,9 @@ class _SliverChannelsList extends HookConsumerWidget {
     final streamChannels = visibleChannels
         .where((channel) => channel.isStream)
         .toList();
+    final forumChannels = visibleChannels
+        .where((channel) => channel.isForum)
+        .toList();
     final dmChannels = sortDmChannelsByDisplayLabel(
       visibleChannels.where((channel) => channel.isDm),
       currentPubkey: currentPubkey,
@@ -126,6 +129,7 @@ class _SliverChannelsList extends HookConsumerWidget {
 
     final starredExpanded = useState(true);
     final channelsExpanded = useState(true);
+    final forumsExpanded = useState(true);
     final dmsExpanded = useState(true);
     final sortState = ref.watch(channelSortProvider);
     final initialSeedComplete = useState(false);
@@ -200,6 +204,10 @@ class _SliverChannelsList extends HookConsumerWidget {
           )
           .toList(),
       sortState.sortModeFor('channels'),
+    );
+    final sortedForumChannels = sortChannelsForList(
+      forumChannels,
+      sortState.sortModeFor('forums'),
     );
     // DMs default to the display-label alphabetical order (labels can differ
     // from channel names); Recent mode reorders by last message time.
@@ -364,6 +372,21 @@ class _SliverChannelsList extends HookConsumerWidget {
               emptyLabel: 'No stream channels yet',
               sortMode: sortState.sortModeFor('channels'),
               onSortModeChange: (mode) => setSortMode('channels', mode),
+              onSelectChannel: onSelectChannel,
+            ),
+            _ChannelSection(
+              title: 'Forums',
+              icon: LucideIcons.messageSquareText,
+              showTopDivider: true,
+              expanded: forumsExpanded.value,
+              onToggle: () => forumsExpanded.value = !forumsExpanded.value,
+              channels: sortedForumChannels,
+              unreadChannelIds: unreadChannelIds,
+              mutedChannelIds: mutedChannelIds,
+              currentPubkey: currentPubkey,
+              emptyLabel: 'No forums yet',
+              sortMode: sortState.sortModeFor('forums'),
+              onSortModeChange: (mode) => setSortMode('forums', mode),
               onSelectChannel: onSelectChannel,
             ),
             _ChannelSection(
