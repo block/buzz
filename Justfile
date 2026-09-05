@@ -183,14 +183,8 @@ _ensure-sidecar-stubs:
 _ensure-services:
     #!/usr/bin/env bash
     set -euo pipefail
-    pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-postgres 2>/dev/null || echo "not_found")
-    redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-redis 2>/dev/null || echo "not_found")
-    if [[ "$pg" == "healthy" && "$redis" == "healthy" ]]; then
-        echo "Services already healthy"
-        exit 0
-    fi
-    echo "Starting services..."
-    docker compose up -d || true
+    echo "Starting or reconciling services..."
+    docker compose up -d
     echo -n "Waiting for services"
     for i in $(seq 1 40); do
         pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-postgres 2>/dev/null || echo "not_found")
@@ -345,9 +339,13 @@ desktop-e2e-pre-push: _ensure-migrations
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: check test-dev-service-ports test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
+
+# Verify default/custom host-port mappings and service reconciliation behavior
+test-dev-service-ports:
+    ./scripts/test-dev-service-ports.sh
 
 # Run all tests (unit + integration)
 test:
