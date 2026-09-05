@@ -30,6 +30,8 @@ import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+part 'compose_bar_test/publication_tests.dart';
+
 final _pngBytes = Uint8List.fromList([
   0x89,
   0x50,
@@ -174,6 +176,7 @@ Widget _buildComposeBar({
   required ComposeBarOnSend onSend,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
+  AgentAuthorizationReader? authorizationReader,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
@@ -210,6 +213,18 @@ Widget _buildComposeBar({
       channelMembersProvider(
         'channel-1',
       ).overrideWith((ref) => membersFuture ?? Future.value(members)),
+      agentAuthorizationReaderProvider.overrideWithValue(
+        authorizationReader ??
+            (keys, viewer, channel, current) async => [
+              for (final key in keys)
+                AgentDirectoryEntry(
+                  pubkey: key,
+                  respondTo: 'anyone',
+                  ownerPubkey: viewer,
+                  channelIds: [channel],
+                ),
+            ],
+      ),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
@@ -641,6 +656,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  _publicationTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -4235,7 +4251,7 @@ void main() {
       addMemberAcknowledgement.complete();
       await tester.pumpAndSettle();
 
-      expect(sentContent, 'hello @Helper Bot');
+      expect(sentContent, isNull);
       expect(
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         'newer draft',
