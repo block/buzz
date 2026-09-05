@@ -425,13 +425,15 @@ impl AcpClient {
         // ensures subprocesses (MCP servers, tool processes) are cleaned up
         // rather than orphaned to init.
         //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
-        match self.child.id() {
-            Some(pid) if kill_process_group(pid) => {}
-            _ => {
-                let _ = self.child.start_kill();
-            }
+        // Falls back to start_kill() (direct child only) on platforms with no
+        // tree kill, or if the child has been polled to completion (id()
+        // returns None).
+        let killed_tree = match self.child.id() {
+            Some(pid) => kill_process_group_async(pid).await,
+            None => false,
+        };
+        if !killed_tree {
+            let _ = self.child.start_kill();
         }
         // Bounded wait: if the child doesn't exit within 5s after SIGKILL,
         // give up and let Drop/OS handle it. An unbounded wait here would
@@ -2328,9 +2330,124 @@ fn kill_process_group(pid: u32) -> bool {
     killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
 }
 
-/// Fallback for non-Unix: process-group kill not available.
-/// Returns `false` so the caller falls back to `child.start_kill()`.
-#[cfg(not(unix))]
+/// Terminate the child's whole tree on Windows.
+///
+/// `start_kill()` ends only the direct child, so a harness that spawns its own
+/// workers (hermes-acp's python processes, MCP servers, tool subprocesses)
+/// leaves them running. Every cancel-drain timeout then leaks one tree, and
+/// they accumulate until the machine notices (#5849).
+///
+/// Windows has no process groups to signal, and the job-object API would need
+/// `unsafe`, which this crate denies. `taskkill /T /F` is the documented
+/// tree-terminating tool, ships with every supported Windows, and needs no
+/// privileges beyond the ones required to kill the child itself.
+///
+/// It is launched by absolute path. `CreateProcess` resolves a bare executable
+/// name against the application directory and the parent's *current* directory
+/// before the system directory, and the harness commonly runs with an
+/// agent-controlled repository as its current directory — a `taskkill.exe`
+/// committed to that repository would otherwise run as the Buzz user every
+/// time an agent is shut down or replaced.
+#[cfg(windows)]
+fn kill_process_group(pid: u32) -> bool {
+    let Some(program) = taskkill_program() else {
+        tracing::warn!(
+            "SystemRoot is not an absolute path — skipping tree kill, \
+             falling back to a direct-child kill"
+        );
+        return false;
+    };
+    std::process::Command::new(program)
+        .args(taskkill_tree_args(pid))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Absolute path to the system `taskkill.exe`, or `None` when it cannot be
+/// resolved — in which case the caller falls back to killing the direct child.
+#[cfg(windows)]
+fn taskkill_program() -> Option<String> {
+    taskkill_program_in(&std::env::var("SystemRoot").ok()?)
+}
+
+/// Join `system_root` with `System32\taskkill.exe`, rejecting any root that is
+/// not an absolute Windows path.
+///
+/// "Absolute" is checked by Windows' own rules rather than `Path::is_absolute`
+/// so the check is exercised by the test suite on every platform: a drive path
+/// (`C:\…`) or a UNC path (`\\server\share\…`). A relative or bare value would
+/// reintroduce the search-order hijack this exists to prevent, so it is
+/// rejected rather than passed through.
+#[cfg(any(windows, test))]
+fn taskkill_program_in(system_root: &str) -> Option<String> {
+    let root = system_root.trim_end_matches(['\\', '/']);
+    let bytes = root.as_bytes();
+    let drive_rooted = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let unc = root.starts_with("\\\\");
+    if !drive_rooted && !unc {
+        return None;
+    }
+    Some(format!("{root}\\System32\\taskkill.exe"))
+}
+
+/// The `taskkill` arguments that end `pid` and every descendant.
+///
+/// Split out so the flags are asserted on every platform: `/T` is what makes
+/// it a tree kill and `/F` is what makes it unconditional — a drain timeout
+/// means the agent already ignored a polite stop.
+#[cfg(any(windows, test))]
+fn taskkill_tree_args(pid: u32) -> [String; 4] {
+    [
+        "/PID".to_string(),
+        pid.to_string(),
+        "/T".to_string(),
+        "/F".to_string(),
+    ]
+}
+
+/// Await a tree kill without blocking the async worker it was called from.
+///
+/// On Unix this is `killpg`, a syscall that returns immediately. On Windows it
+/// shells out to `taskkill` and waits for it to exit, so it goes to the
+/// blocking pool under its own bound — otherwise a stalled system command
+/// would pin an executor thread indefinitely and slip past the caller's
+/// five-second child-wait timeout entirely.
+async fn kill_process_group_async(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || kill_process_group(pid)),
+        )
+        .await
+        {
+            Ok(Ok(killed)) => killed,
+            Ok(Err(e)) => {
+                tracing::debug!("taskkill task failed: {e}");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("taskkill did not return within 5s — falling back to start_kill()");
+                false
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        kill_process_group(pid)
+    }
+}
+
+/// Fallback for platforms that are neither Unix nor Windows: no tree kill
+/// available, so the caller falls back to `child.start_kill()`.
+#[cfg(not(any(unix, windows)))]
 fn kill_process_group(_pid: u32) -> bool {
     false
 }
@@ -5026,5 +5143,52 @@ mod tests {
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
         );
+    }
+}
+
+#[cfg(test)]
+mod process_tree_kill_tests {
+    use super::{taskkill_program_in, taskkill_tree_args};
+
+    #[test]
+    fn taskkill_targets_the_whole_tree_forcibly() {
+        // `/T` is what turns this into a tree kill — without it the harness's
+        // own workers survive, which is the leak in #5849. `/F` is what makes
+        // it unconditional: a drain timeout means the agent already ignored a
+        // polite stop.
+        assert_eq!(taskkill_tree_args(4242), ["/PID", "4242", "/T", "/F"]);
+    }
+
+    #[test]
+    fn taskkill_is_launched_from_an_absolute_system_directory() {
+        // A bare "taskkill" would let CreateProcess resolve it against the
+        // current directory, which is an agent-controlled repository.
+        assert_eq!(
+            taskkill_program_in(r"C:\Windows").as_deref(),
+            Some(r"C:\Windows\System32\taskkill.exe")
+        );
+        assert_eq!(
+            taskkill_program_in(r"D:\WINNT\").as_deref(),
+            Some(r"D:\WINNT\System32\taskkill.exe"),
+            "a trailing separator must not double up"
+        );
+        assert_eq!(
+            taskkill_program_in(r"\\host\share\win").as_deref(),
+            Some(r"\\host\share\win\System32\taskkill.exe"),
+            "a UNC root is absolute too"
+        );
+    }
+
+    #[test]
+    fn a_non_absolute_system_root_is_refused_rather_than_joined() {
+        // Falling back to the direct-child kill leaks the tree; running an
+        // attacker-placed taskkill.exe is worse, so these must return None.
+        for root in ["", "Windows", r"..\Windows", "/usr/bin", r"\Windows"] {
+            assert_eq!(
+                taskkill_program_in(root),
+                None,
+                "{root:?} is not an absolute Windows path"
+            );
+        }
     }
 }
