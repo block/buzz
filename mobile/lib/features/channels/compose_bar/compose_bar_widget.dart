@@ -40,6 +40,7 @@ class ComposeBar extends HookConsumerWidget {
     useEffect(() => controller.dispose, [controller]);
     final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
     final draftRevision = useRef(0);
+    final mentionMap = useRef(<String, MentionCandidate>{});
     final draftIdentity = _composerDraftIdentity(ref);
     final isComposerExpanded = useState(false);
     final androidImeTransitionStarted = useState(
@@ -94,6 +95,7 @@ class ComposeBar extends HookConsumerWidget {
       threadHeadId: threadHeadId,
       draftIdentity: draftIdentity,
       draftRevision: draftRevision,
+      mentionMap: mentionMap,
       attachments: attachments,
       uploadGeneration: uploadGeneration,
       activeUploadCancellation: activeUploadCancellation,
@@ -219,11 +221,6 @@ class ComposeBar extends HookConsumerWidget {
     // Map of displayName → selected mention candidate built as the user selects
     // mentions. Used to pass resolved pubkeys directly to onSend and to attach
     // selected non-member agents before the message is published.
-    final mentionMap = useRef(<String, MentionCandidate>{});
-    useEffect(() {
-      mentionMap.value.clear();
-      return null;
-    }, [draftIdentity, draftKey]);
 
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
@@ -413,6 +410,14 @@ class ComposeBar extends HookConsumerWidget {
       } finally {
         isModifyingText.value = false;
       }
+      _persistComposeDraft(
+        ref,
+        controller,
+        mentionMap.value,
+        draftKey,
+        channelId,
+        threadHeadId,
+      );
       mentionQuery.value = null;
     }
 
@@ -455,9 +460,9 @@ class ComposeBar extends HookConsumerWidget {
 
     void clearComposer() {
       draftRevision.value += 1;
+      mentionMap.value.clear();
       controller.clear();
       attachments.value = [];
-      mentionMap.value.clear();
       mentionQuery.value = null;
       channelQuery.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
@@ -620,12 +625,12 @@ class ComposeBar extends HookConsumerWidget {
             if (context.mounted &&
                 queueGeneration == uploadGeneration.value &&
                 draftRevision.value == clearedDraftRevision) {
-              controller.value = draftText;
-              attachments.value = draftAttachments;
-              retainedForRetry = true;
               mentionMap.value
                 ..clear()
                 ..addAll(draftMentions);
+              controller.value = draftText;
+              attachments.value = draftAttachments;
+              retainedForRetry = true;
               focusNode.requestFocus();
             }
           } finally {

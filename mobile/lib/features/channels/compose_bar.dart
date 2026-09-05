@@ -19,6 +19,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_bindings.dart';
+import '../../shared/mentions/draft_mention.dart';
 import '../../shared/huddle/huddle_session.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';

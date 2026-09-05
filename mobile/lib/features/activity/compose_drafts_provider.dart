@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import '../../shared/mentions/draft_mention.dart';
 import '../../shared/theme/theme_provider.dart';
 
 const _draftsPrefsKey = 'compose_drafts_v1';
@@ -22,6 +23,7 @@ class ComposeDraft {
   final String channelId;
   final String? threadHeadId;
   final String text;
+  final Map<String, DraftMention> mentions;
   final int updatedAt; // unix seconds
 
   const ComposeDraft({
@@ -29,6 +31,7 @@ class ComposeDraft {
     required this.channelId,
     required this.threadHeadId,
     required this.text,
+    this.mentions = const {},
     required this.updatedAt,
   });
 
@@ -37,6 +40,8 @@ class ComposeDraft {
     'channel_id': channelId,
     if (threadHeadId != null) 'thread_head_id': threadHeadId,
     'text': text,
+    if (mentions.isNotEmpty)
+      'mentions': {for (final e in mentions.entries) e.key: e.value.toJson()},
     'updated_at': updatedAt,
   };
 
@@ -53,6 +58,7 @@ class ComposeDraft {
       channelId: channelId,
       threadHeadId: raw['thread_head_id'] as String?,
       text: text,
+      mentions: DraftMention.decode(raw['mentions']),
       updatedAt: updatedAt is int ? updatedAt : 0,
     );
   }
@@ -108,18 +114,24 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     required String channelId,
     String? threadHeadId,
     required String text,
+    Map<String, DraftMention> mentions = const {},
   }) {
     if (text.trim().isEmpty) {
       remove(key);
       return;
     }
     final existing = state.where((d) => d.key == key).firstOrNull;
-    if (existing?.text == text) return;
+    if (existing?.text == text &&
+        jsonEncode(existing?.mentions.map((k, v) => MapEntry(k, v.toJson()))) ==
+            jsonEncode(mentions.map((k, v) => MapEntry(k, v.toJson())))) {
+      return;
+    }
     final draft = ComposeDraft(
       key: key,
       channelId: channelId,
       threadHeadId: threadHeadId,
       text: text,
+      mentions: Map.unmodifiable(mentions),
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     final next = [draft, ...state.where((d) => d.key != key)];
@@ -130,6 +142,9 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     if (!state.any((d) => d.key == key)) return;
     _persist([...state.where((d) => d.key != key)]);
   }
+
+  ComposeDraft? draftFor(String key) =>
+      state.where((d) => d.key == key).firstOrNull;
 
   String? textFor(String key) =>
       state.where((d) => d.key == key).firstOrNull?.text;
