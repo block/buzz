@@ -229,6 +229,10 @@ class ComposeBar extends HookConsumerWidget {
     // mentions. Used to pass resolved pubkeys directly to onSend and to attach
     // selected non-member agents before the message is published.
     final mentionMap = useRef(<String, MentionCandidate>{});
+    useEffect(() {
+      mentionMap.value.clear();
+      return null;
+    }, [draftIdentity, draftKey]);
 
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
@@ -253,9 +257,7 @@ class ComposeBar extends HookConsumerWidget {
     // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
-    final agentMentionLabels = _agentMentionLabels(
-      candidates: mentionMap.value.values,
-    );
+    final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
     final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
       '\u0000',
     );
@@ -304,6 +306,15 @@ class ComposeBar extends HookConsumerWidget {
         final text = editingValue.text;
         final sel = editingValue.selection;
         final textChanged = text != previousValue.text;
+        if (textChanged) {
+          // Formatting/code edits may temporarily hide a binding without
+          // deleting its literal. Rendering and send extraction remain separate.
+          final retained = mentionOccurrences(
+            text.replaceAll('`', ' '),
+            mentionMap.value.keys,
+          ).map((range) => range.label).toSet();
+          mentionMap.value.removeWhere((label, _) => !retained.contains(label));
+        }
 
         // Broadcast typing indicator (throttled).
         if (textChanged && text.isNotEmpty) {
@@ -391,7 +402,10 @@ class ComposeBar extends HookConsumerWidget {
 
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
-      final name = candidate.label;
+      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
+        for (final entry in mentionMap.value.entries)
+          entry.key: entry.value.pubkey,
+      });
       // Track the resolved candidate so we can pass its pubkey and prepare
       // selected non-member agents at send time.
       mentionMap.value[name] = candidate;
@@ -492,10 +506,9 @@ class ComposeBar extends HookConsumerWidget {
         final messenger = ScaffoldMessenger.maybeOf(context);
 
         // Extract pubkeys for mentions present in the final text.
-        final selectedMentions = <MentionCandidate>[
-          for (final entry in mentionMap.value.entries)
-            if (hasMention(text, entry.key)) entry.value,
-        ];
+        final selectedMentions = _resolveComposerMentions(
+          text, mentionMap.value, mentionCandidates.asData?.value ?? const [],
+        );
         final outgoing = _OutgoingMentions(selectedMentions);
         final intendedAgentKeys = {
           for (final mention in selectedMentions)

@@ -31,6 +31,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/publication_tests.dart';
+part 'compose_bar_test/exact_mention_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -657,6 +658,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   _publicationTests();
+  exactMentionTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
