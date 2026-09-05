@@ -3,7 +3,8 @@ use nostr::PublicKey;
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
-use crate::error::CliError;
+use crate::error::{is_retryable_error, CliError};
+use crate::schedule::{self, ScheduledMessage};
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
@@ -606,6 +607,48 @@ pub struct SendMessageParams {
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+    /// ISO8601 delivery time — when set, enqueue instead of sending now.
+    pub scheduled_at: Option<String>,
+}
+
+/// Enqueue a `--scheduled-at` delivery and print the queue receipt.
+///
+/// Validates the timestamp, channel UUID, and content up front so a bad
+/// scheduling request fails before anything is persisted. File attachments are
+/// not schedulable in the first cut — they would need the upload to be
+/// replayed at delivery time.
+fn cmd_enqueue_scheduled_message(p: &SendMessageParams, when: &str) -> Result<(), CliError> {
+    let scheduled_at = schedule::parse_scheduled_at(when)?;
+    parse_uuid(&p.channel_id)?;
+    if !p.files.is_empty() {
+        return Err(CliError::Usage(
+            "--scheduled-at cannot be combined with --file; schedule a text-only message instead"
+                .into(),
+        ));
+    }
+
+    let path = schedule::resolve_queue_path(None)?;
+    let msg = ScheduledMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        channel_id: p.channel_id.clone(),
+        content: p.content.clone(),
+        kind: p.kind,
+        reply_to: p.reply_to.clone(),
+        broadcast: Some(p.broadcast),
+        mentions: p.mentions.clone(),
+        scheduled_at,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    schedule::enqueue(&path, msg.clone())?;
+    let output = serde_json::json!({
+        "scheduled": true,
+        "id": msg.id,
+        "channel_id": msg.channel_id,
+        "scheduled_at": msg.scheduled_at,
+        "message": format!("scheduled for delivery at {when} (deliver with `buzz messages scheduled run`)"),
+    });
+    println!("{output}");
+    Ok(())
 }
 
 pub async fn cmd_send_message(
@@ -618,6 +661,9 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    if let Some(ref when) = p.scheduled_at {
+        return cmd_enqueue_scheduled_message(&p, when);
+    }
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -930,6 +976,106 @@ pub async fn cmd_vote_on_post(
     Ok(())
 }
 
+/// List pending scheduled messages from the local queue.
+///
+/// `--queue-file` overrides the store path (useful for tests and debugging).
+/// Output is the raw queue as a JSON array, newest-first by creation.
+pub fn cmd_scheduled_list(queue_file: Option<&str>) -> Result<(), CliError> {
+    let path = schedule::resolve_queue_path(queue_file)?;
+    let mut queue = schedule::load_queue(&path)?;
+    queue.sort_by_key(|m| std::cmp::Reverse(m.created_at));
+    let output = serde_json::json!(queue);
+    println!("{output}");
+    Ok(())
+}
+
+/// Cancel a pending scheduled message by id.
+///
+/// Removes the entry from the queue and prints a receipt. Cancelling a
+/// message that is already delivered (or was never scheduled) is a `Usage`
+/// error so callers can distinguish a real cancellation from a no-op.
+pub fn cmd_scheduled_cancel(queue_file: Option<&str>, id: &str) -> Result<(), CliError> {
+    let path = schedule::resolve_queue_path(queue_file)?;
+    let removed = schedule::cancel_by_id(&path, id)?;
+    match removed {
+        Some(msg) => {
+            let output = serde_json::json!({
+                "cancelled": true,
+                "id": msg.id,
+                "channel_id": msg.channel_id,
+                "scheduled_at": msg.scheduled_at,
+                "message": "scheduled delivery cancelled",
+            });
+            println!("{output}");
+            Ok(())
+        }
+        None => Err(CliError::Usage(format!(
+            "no pending scheduled message with id '{id}' (run `buzz messages scheduled list` to see pending deliveries)"
+        ))),
+    }
+}
+
+/// Deliver every scheduled message that is due.
+///
+/// Each due entry is sent through the normal `cmd_send_message` path (mentions
+/// are re-resolved and thread refs rebuilt at delivery time). Permanent
+/// failures drop the entry and are reported; transient failures (network /
+/// relay overload) are re-enqueued so a later sweep retries them. With
+/// `--watch`, keeps polling and delivers messages as they come due.
+pub async fn cmd_scheduled_run(
+    client: &BuzzClient,
+    watch: bool,
+    queue_file: Option<&str>,
+) -> Result<(), CliError> {
+    let path = schedule::resolve_queue_path(queue_file)?;
+    loop {
+        let due = schedule::take_due(&path, chrono::Utc::now().timestamp())?;
+        for msg in due {
+            let result = cmd_send_message(
+                client,
+                SendMessageParams {
+                    channel_id: msg.channel_id.clone(),
+                    content: msg.content.clone(),
+                    kind: msg.kind,
+                    reply_to: msg.reply_to.clone(),
+                    broadcast: msg.broadcast.unwrap_or(false),
+                    files: Vec::new(),
+                    mentions: msg.mentions.clone(),
+                    scheduled_at: None,
+                },
+            )
+            .await;
+            match result {
+                Ok(()) => {}
+                Err(e) if is_retryable_error(&e) => {
+                    crate::error::print_error(&e);
+                    // Put it back for a later sweep instead of dropping it.
+                    schedule::enqueue(&path, msg)?;
+                }
+                Err(e) => {
+                    crate::error::print_error(&e);
+                    eprintln!(
+                        "dropping scheduled message {}: permanent failure (re-enqueue manually)",
+                        msg.id
+                    );
+                }
+            }
+        }
+        if !watch {
+            return Ok(());
+        }
+        // Sleep until the next due timestamp (capped so newly scheduled
+        // messages are picked up promptly), or poll at a fixed cadence when
+        // the queue is empty.
+        let next = schedule::next_due(&path)?;
+        let seconds = match next {
+            Some(t) => (t - chrono::Utc::now().timestamp()).clamp(1, 30),
+            None => 30,
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(seconds as u64)).await;
+    }
+}
+
 pub async fn dispatch(
     cmd: crate::MessagesCmd,
     client: &BuzzClient,
@@ -942,6 +1088,7 @@ pub async fn dispatch(
             content,
             kind,
             reply_to,
+            scheduled_at,
             broadcast,
             files,
             mentions,
@@ -956,6 +1103,7 @@ pub async fn dispatch(
                     broadcast,
                     files,
                     mentions,
+                    scheduled_at,
                 },
             )
             .await
@@ -1078,6 +1226,17 @@ pub async fn dispatch(
         MessagesCmd::Vote { event, direction } => {
             cmd_vote_on_post(client, &event, &direction).await
         }
+        MessagesCmd::Scheduled(command) => match command {
+            crate::MessagesScheduledCmd::List { queue_file } => {
+                cmd_scheduled_list(queue_file.as_deref())
+            }
+            crate::MessagesScheduledCmd::Cancel { id, queue_file } => {
+                cmd_scheduled_cancel(queue_file.as_deref(), &id)
+            }
+            crate::MessagesScheduledCmd::Run { watch, queue_file } => {
+                cmd_scheduled_run(client, watch, queue_file.as_deref()).await
+            }
+        },
     }
 }
 
