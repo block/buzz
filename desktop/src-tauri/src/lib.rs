@@ -154,6 +154,11 @@ pub fn run() {
                     // on macOS/Windows.
                     linux_media::enable_media_capture(&webview);
 
+                    // Linux/WebKitGTK: surface renderer (WebKitWebProcess)
+                    // crashes as a log line instead of a silent dead window;
+                    // no-op on macOS/Windows. See #4359.
+                    linux_media::install_web_process_terminated_handler(&webview);
+
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
                     // commit the startup surface before revealing it.
