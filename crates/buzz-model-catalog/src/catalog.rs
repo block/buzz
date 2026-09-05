@@ -3,7 +3,7 @@
 //! Exposes [`discover_databricks_models`] — an async helper that lists
 //! available models for the `databricks` and `databricks_v2` providers
 //! without triggering a browser OAuth flow. Auth is acquired in-process via
-//! [`build_token_source`](crate::llm::build_token_source):
+//! the local `build_token_source`:
 //!
 //! - Static bearer (`DATABRICKS_TOKEN`): returned immediately.
 //! - PKCE cache hit: returned from disk without a network round-trip.
@@ -18,11 +18,25 @@ use reqwest::Client;
 use serde_json::Value;
 
 use crate::{
-    auth::TokenSource,
+    auth::{PkceOAuthTokenSource, StaticTokenSource, TokenSource},
     config::{Config, DatabricksModelFilter, Provider},
-    llm::build_token_source,
     types::AgentError,
 };
+
+/// Acquire a bearer for Databricks discovery without opening a browser.
+fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
+    match cfg.provider {
+        Provider::Anthropic | Provider::OpenAi => {
+            Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
+        }
+        Provider::Databricks | Provider::DatabricksV2 if !cfg.api_key.is_empty() => {
+            Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
+        }
+        Provider::Databricks | Provider::DatabricksV2 => Ok(PkceOAuthTokenSource::new(
+            crate::databricks_pkce_config(&cfg.base_url),
+        )?),
+    }
+}
 
 /// A discovered model entry: `id` is the picker value (the raw endpoint id or
 /// Unity Catalog model-service FQN, and the wire/config value), `name` is the
@@ -145,9 +159,9 @@ pub async fn discover_databricks_models_with_cache_dir(
     let token_source = if matches!(cfg.provider, Provider::Databricks | Provider::DatabricksV2)
         && cfg.api_key.is_empty()
     {
-        crate::auth::PkceOAuthTokenSource::new(crate::llm::databricks_pkce_config(
+        crate::auth::PkceOAuthTokenSource::new(crate::databricks_pkce_config_with_cache_dir(
             &cfg.base_url,
-            cache_dir.map(Path::to_path_buf),
+            cache_dir,
         ))?
     } else {
         build_token_source(cfg)?
@@ -385,10 +399,6 @@ fn catalog_error_kind(error: &AgentError) -> &'static str {
         AgentError::Llm(_) => "llm",
         AgentError::LlmAuth(_) => "auth",
         AgentError::LlmModelNotFound(_) => "model-not-found",
-        AgentError::LlmContextExceeded(_) => "context-exceeded",
-        AgentError::UnsupportedImageInput(_) => "unsupported-image",
-        AgentError::Mcp(_) => "mcp",
-        AgentError::Cancelled => "cancelled",
     }
 }
 

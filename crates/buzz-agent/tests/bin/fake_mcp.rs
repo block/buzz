@@ -13,6 +13,7 @@
 //!   FAKE_MCP_RESULT_SIZE=N   — `tools/call` returns an N-byte text result
 //!                              (default: the literal "ok"); grows history
 //!   FAKE_MCP_IMAGE_RESULT=1  — `tools/call` returns text plus a PNG image block
+//!   FAKE_MCP_TOOL_ERROR=1    — `tools/call` returns isError: true
 //!   FAKE_MCP_PID_FILE=path   — write the child PID to `path` on startup
 //!                              (for tests that want to verify the child died)
 //!   FAKE_MCP_SPAWN_GRANDCHILD=1
@@ -339,7 +340,10 @@ fn main() {
                 if tool_delay_secs > 0 {
                     std::thread::sleep(std::time::Duration::from_secs(tool_delay_secs));
                 }
-                let result_text = if result_size > 0 {
+                let tool_error = env_flag("FAKE_MCP_TOOL_ERROR");
+                let result_text = if tool_error {
+                    "boom: the tool failed".to_owned()
+                } else if result_size > 0 {
                     "x".repeat(result_size)
                 } else {
                     "ok".to_owned()
@@ -356,7 +360,7 @@ fn main() {
                     id,
                     json!({
                         "content": content,
-                        "isError": false,
+                        "isError": tool_error,
                     }),
                 );
             }

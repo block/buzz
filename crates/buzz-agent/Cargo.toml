@@ -43,12 +43,27 @@ name = "auth-worker"
 path = "tests/bin/auth_worker.rs"
 
 [dependencies]
+# For the `buzz-agent auth <provider>` subcommand only. Provider auth for the
+# agent loop itself is GDK-based; this is the interactive PKCE login that seeds
+# the token cache used by inference and the desktop model picker.
+buzz-model-catalog = { path = "../buzz-model-catalog" }
+# Keep all GDK crates on the exact same Goose revision so shared types stay unified.
+goose-agent = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-provider-types = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-context-management = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-sdk-types = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-providers = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+anyhow = "1"
+
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
-rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
+chrono = { workspace = true }
+rmcp = { version = "3", default-features = false, features = ["client", "transport-child-process"] }
 arc-swap = "1"
 getrandom = "0.4"
 tracing = { workspace = true }
@@ -63,16 +78,12 @@ url = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
 dirs = "6"
-# Cross-process advisory file lock (flock on Unix, LockFileEx on Windows) for
-# the auth coordinator's single-flight. Kept off std's `File::try_lock` so the
-# crate stays buildable on the repo's declared 1.88 MSRV (those std APIs are
-# 1.89+).
 fs2 = "0.4"
-
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
+fs2 = "0.4"
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 axum = { workspace = true }

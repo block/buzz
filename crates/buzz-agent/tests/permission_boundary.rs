@@ -508,10 +508,20 @@ async fn test_crossed_parallel_decisions_authorize_only_matching_call() {
     h.shutdown().await;
 }
 
-/// The built-in `load_skill` tool is not an MCP call and is exempt from the
-/// permission boundary: it executes with no `session/request_permission`.
+/// `load_skill` is gated like every other model-issued tool.
+///
+/// **Deliberate deviation from pre-goose buzz-agent**, where `load_skill` was
+/// an in-process built-in and therefore exempt. Under goose it is a real tool
+/// on the skills platform extension, dispatched through the same path as any
+/// MCP tool, so it is authorized the same way.
+///
+/// Keeping the gate uniform is the safer choice as well as the simpler one: the
+/// only way to exempt it would be an allowlist keyed on the tool *name*, and a
+/// name is exactly what an untrusted MCP server controls — it could register its
+/// own `load_skill` and inherit the exemption. There is no name-based bypass in
+/// the gate, so there is nothing to aim at.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_load_skill_emits_no_permission_request() {
+async fn test_load_skill_is_gated_like_any_other_tool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path();
     let skill_dir = cwd.join(".agents/skills/my-skill");
@@ -531,13 +541,25 @@ async fn test_load_skill_emits_no_permission_request() {
     // No MCP server: `load_skill` is a built-in, and skills come from `cwd`.
     let sid = init(&mut h, 1, cwd.to_str().unwrap(), &[]).await;
 
-    let (resp, requests) = drive(&mut h, &sid, "use my-skill", |_| {
-        panic!("load_skill must not trigger a permission request")
+    let (resp, requests) = drive(&mut h, &sid, "use my-skill", |req| {
+        Some(approve_permission(req))
     })
     .await;
 
     assert_eq!(stop_reason(&resp), "end_turn");
-    assert!(requests.is_empty(), "built-in load_skill is exempt");
+    assert_eq!(
+        requests.len(),
+        1,
+        "load_skill is a dispatched tool under goose and must be authorized"
+    );
+    let asked = requests[0]["params"]["toolCall"]["title"]
+        .as_str()
+        .or_else(|| requests[0]["params"]["subject"]["toolCall"]["title"].as_str())
+        .unwrap_or_default();
+    assert!(
+        asked.contains("load_skill"),
+        "the ask must name the tool it authorizes, got {asked:?}"
+    );
     h.shutdown().await;
 }
 

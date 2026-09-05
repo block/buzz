@@ -57,7 +57,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use buzz_agent::auth::{AuthIntent, BrowserOpener, PkceOAuthConfig, PkceOAuthTokenSource};
+use buzz_model_catalog::auth::{AuthIntent, BrowserOpener, PkceOAuthConfig, PkceOAuthTokenSource};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 

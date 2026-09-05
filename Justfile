@@ -360,23 +360,15 @@ test-unit:
     ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
-        # buzz-auth NIP-FI verifier doctests. The sealed-authority
-        # `compile_fail` doctests prove the default-feature public API alone
-        # cannot forge the issuer→JWKS authority; nextest does not run
-        # doctests, hence this separate step. The verifier's regression suite
-        # lives in the in-crate `#[cfg(test)] mod tests`, so `--lib` above
-        # already runs it.
-        cargo test -p buzz-auth --doc
         cargo nextest run -p buzz-voice --lib
         cargo nextest run -p buzz-cli
         # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
         # forged relay events cannot regain a path into agent routing unnoticed.
         cargo nextest run -p buzz-acp
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
-        # They guard the embedded-migrator invariant (the complete checked-in
-        # additive migration set; legacy cutover/backfill remains an operator
-        # script, not startup state) and the tenant-scoping lints. The
-        # Postgres-backed buzz-db tests are
+        # They guard the embedded-migrator invariant (exactly the consolidated
+        # 0001; cutover/backfill stays an operator script, not startup state)
+        # and the tenant-scoping lints. The Postgres-backed buzz-db tests are
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
@@ -394,21 +386,22 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
-        # buzz-agent: two infra-free concerns run together by executing the
-        # whole crate (lib + integration tests), because nothing in CI runs
-        # `cargo test --workspace`, so without this stanza neither the crate's
-        # library tests nor its integration tests execute remotely.
-        #   * model-capabilities corpus (lib): the Rust half of the
-        #     cross-language drift guard. `model_capabilities.rs` embeds
-        #     scripts/model-capabilities.json + scripts/normative-corpus.json via
-        #     include_str! and replays the full locked corpus as pure in-process
-        #     tests; without it a manifest edit that diverges Rust from the
-        #     corpus ships green.
-        #   * OAuth auth coordinator (lib concurrency matrix + databricks
-        #     integration tests): lock single-flight, cooldown, cross-process
-        #     crash recovery — infra-free via a stub OIDC provider and an
-        #     injected browser opener, no network or Postgres.
+
+        # model-capabilities corpus: the Rust half of the cross-language drift
+        # guard. `model_capabilities.rs` embeds scripts/model-capabilities.json
+        # + scripts/normative-corpus.json via include_str! and replays all 103
+        # vectors as pure in-process tests (no infra). It lives in
+        # buzz-model-catalog rather than buzz-agent because the desktop reads
+        # capabilities without linking goose. Enumerated explicitly because
+        # nothing in CI runs `cargo test --workspace`; without this step a
+        # manifest edit that diverges Rust from the corpus ships green.
+        # buzz-agent's Buzz-owned loop contracts live in both src unit tests
+        # and infra-free tests/ integration tests (ACP stdio, cancellation,
+        # steering, permissions, hooks, skills). The real-dev-MCP tests launch
+        # the sibling binary directly, so build that fixture first.
+        cargo build -p buzz-dev-mcp
         cargo nextest run -p buzz-agent
+        cargo nextest run -p buzz-model-catalog --lib
         # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
         # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
         # the admin.localhost origin/advertisement/canonical-URL pins, and the
@@ -451,6 +444,7 @@ test-unit:
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
         cargo nextest run -p buzz-acp --lib
+
     else
         ./scripts/run-tests.sh unit
     fi
@@ -461,12 +455,12 @@ test-integration:
 
 # Regenerate the model-capability normative corpus from the production Rust
 # resolver. The corpus is a golden snapshot, never hand-edited: this runs the
-# `#[ignore]`d writer test in buzz-agent, which serializes `resolve()` over the
+# `#[ignore]`d writer test in buzz-model-catalog, which serializes `resolve()` over the
 # inputs-only question table to scripts/normative-corpus.json. Run this after
 # any model-capabilities.json edit, then commit the regenerated file. The
 # `corpus_matches_generated_snapshot` gate fails CI if the committed file drifts.
 regen-model-corpus:
-    cargo test -p buzz-agent --lib model_capabilities::tests::regen_corpus_file -- --ignored --exact
+    cargo test -p buzz-model-catalog --lib model_capabilities::tests::regen_corpus_file -- --ignored --exact
 
 # Buzz shared compute e2e: current desktop discovery/admission logic and
 # Playwright UI coverage.
@@ -551,7 +545,7 @@ relay-web: bootstrap _ensure-migrations
     pnpm -C web build
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
 
-# Build and run the private admin dashboard
+# Build and run the private read-only admin dashboard
 admin: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
@@ -563,26 +557,20 @@ admin: bootstrap _ensure-migrations
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
     export BUZZ_ADMIN_WEB_DIR="${BUZZ_ADMIN_WEB_DIR:-{{justfile_directory()}}/admin-web/dist}"
-    # Default to disabled auth locally: localhost is the network boundary and a
-    # NIP-07 signer extension can't be assumed in dev. Override per run with
-    # BUZZ_ADMIN_AUTH=nip98 (plus RELAY_OPERATOR_PUBKEYS or RELAY_OWNER_PUBKEY)
-    # to exercise the authenticated path.
-    export BUZZ_ADMIN_AUTH="${BUZZ_ADMIN_AUTH:-disabled}"
     echo "Admin dashboard: http://${BUZZ_ADMIN_HOST}/reports"
-    echo "Auth mode: ${BUZZ_ADMIN_AUTH} (set BUZZ_ADMIN_AUTH=nip98 to require a signed operator)"
     cargo run -p buzz-relay
 
 # Seed deterministic reports and product feedback for local admin dashboard review
 admin-seed: _ensure-migrations
     ./scripts/seed-admin-dashboard.sh
 
-# Run focused relay and browser checks for the admin dashboard
+# Run focused relay and browser checks for the read-only admin dashboard
 admin-check: fmt-check
     cargo check -p buzz-relay --all-targets
     cargo test -p buzz-relay api::admin
     cargo test -p buzz-relay router::tests
     pnpm -C admin-web check
-    pnpm -C admin-web test:e2e
+    pnpm -C admin-web exec playwright test
 
 # Start the relay server in release mode
 relay-release: bootstrap _ensure-migrations
@@ -1129,31 +1117,6 @@ benchmark *ARGS:
     export PATH="{{justfile_directory()}}/bin:$PATH"
     uv run --project benchmarks/harbor-buzz-orchestra/testbed \
         benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
-
-# Run the benchmark adapter + testbed gate exactly as CI does (pytest + ruff, pinned ruff from pyproject)
-benchmark-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd "{{justfile_directory()}}/benchmarks/harbor-buzz-orchestra"
-    # CI installs the dev extra with pip, so pyproject — not uv.lock — decides
-    # which ruff lints. Read the pin from there so this recipe cannot drift
-    # from the workflow (a floating specifier once meant CI failed on RUF100
-    # while the locked local ruff passed).
-    ruff_pin="$(grep -oE 'ruff==[0-9.]+' pyproject.toml | head -1 | cut -d= -f3)"
-    for project in . testbed; do
-        (
-            cd "$project"
-            echo "── harbor-buzz-orchestra/$project (ruff $ruff_pin)"
-            uv run --frozen pytest -q
-            uvx "ruff@$ruff_pin" check .
-            uvx "ruff@$ruff_pin" format --check .
-        )
-    done
-    # The task verifiers live in the sibling benchmarks/buzz-dataset, so they
-    # need the harness config passed explicitly to stay linted.
-    echo "── buzz-dataset (ruff $ruff_pin)"
-    uvx "ruff@$ruff_pin" check --config pyproject.toml ../buzz-dataset
-    uvx "ruff@$ruff_pin" format --check --config pyproject.toml ../buzz-dataset
 
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:

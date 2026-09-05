@@ -33,8 +33,8 @@
 //!   absolute deadline computed at gate entry, so a saturated call cannot live
 //!   for two full timeout windows.
 //! - **Cancellation races inside the wait.** The waiter selects on the turn's
-//!   cancel receiver directly; resolution never depends on the outer abort
-//!   drain.
+//!   [`CancellationToken`] directly; resolution never depends on the outer
+//!   abort drain.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,10 +42,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
-use crate::types::ToolCall;
 use crate::wire::{self, WireSender, ALLOW_OPTION_ID};
 
 /// Model-visible tool error when a call is not authorized. Rides the normal
@@ -61,6 +61,21 @@ pub const PERMISSION_TIMEOUT_MSG: &str =
 /// left resident, since a closed wire can never carry a reply.
 pub const PERMISSION_WIRE_CLOSED_MSG: &str =
     "permission request undeliverable: the tool call was not authorized";
+
+/// The tool call an ask is about.
+///
+/// Grouped rather than passed as loose parameters so the ask carries one
+/// coherent subject: the id the client correlates its card against, the name it
+/// shows, and the arguments it displays.
+pub struct AskSubject<'a> {
+    /// Tool-call id, echoed to the client as `toolCallId` so its permission
+    /// card and its tool-call card are the same object.
+    pub tool_call_id: &'a str,
+    /// Qualified tool name (`<extension>__<tool>`), used as the ask title.
+    pub tool_name: &'a str,
+    /// Raw arguments, shown to the user so approval is informed.
+    pub arguments: &'a Value,
+}
 
 /// Outcome of asking the client to authorize one tool call.
 #[derive(Debug, PartialEq, Eq)]
@@ -189,19 +204,18 @@ impl PermissionBroker {
         wire: &WireSender,
         version: u32,
         session_id: &str,
-        call: &ToolCall,
-        cancel: &mut watch::Receiver<bool>,
+        subject: AskSubject<'_>,
+        cancel: &CancellationToken,
     ) -> PermissionDecision {
         let deadline = Instant::now() + self.timeout;
 
         // ── Admission ──────────────────────────────────────────────────────
-        // Early cancel check: watch::changed() only fires on NEW writes.
-        if *cancel.borrow() {
+        if cancel.is_cancelled() {
             return PermissionDecision::Cancelled;
         }
         let permit = tokio::select! {
             biased;
-            _ = cancel.changed() => return PermissionDecision::Cancelled,
+            _ = cancel.cancelled() => return PermissionDecision::Cancelled,
             _ = tokio::time::sleep_until(deadline) => {
                 return PermissionDecision::Denied(PERMISSION_TIMEOUT_MSG);
             }
@@ -221,9 +235,9 @@ impl PermissionBroker {
         let params = wire::request_permission_params(
             version,
             session_id,
-            &call.provider_id,
-            &call.name,
-            &call.arguments,
+            subject.tool_call_id,
+            subject.tool_name,
+            subject.arguments,
         );
         // ── Send (deadline- and cancel-governed) ───────────────────────────
         // Enqueue is the third phase under the single absolute deadline. A
@@ -236,7 +250,7 @@ impl PermissionBroker {
         let request = wire::request_permission(lease.id_value.clone(), params);
         tokio::select! {
             biased;
-            _ = cancel.changed() => return PermissionDecision::Cancelled,
+            _ = cancel.cancelled() => return PermissionDecision::Cancelled,
             _ = tokio::time::sleep_until(deadline) => {
                 return PermissionDecision::Denied(PERMISSION_TIMEOUT_MSG);
             }
@@ -248,14 +262,14 @@ impl PermissionBroker {
         }
 
         // ── Response wait ──────────────────────────────────────────────────
-        if *cancel.borrow() {
+        if cancel.is_cancelled() {
             return PermissionDecision::Cancelled;
         }
         #[cfg(test)]
         let id = lease.id;
         tokio::select! {
             biased;
-            _ = cancel.changed() => PermissionDecision::Cancelled,
+            _ = cancel.cancelled() => PermissionDecision::Cancelled,
             r = &mut lease.rx => match r {
                 Ok(result) => {
                     // The waiter observes delivery here. At this instant the
@@ -349,12 +363,20 @@ mod tests {
     const LONG: Duration = Duration::from_secs(30);
     const SHORT: Duration = Duration::from_millis(60);
 
-    fn tool_call() -> ToolCall {
-        ToolCall {
-            provider_id: "fake".into(),
-            name: "fake__shell".into(),
-            arguments: json!({ "command": "ls" }),
-            provider_extra: serde_json::Map::new(),
+    /// Owned backing for an [`AskSubject`]; borrowed via [`subject`].
+    fn tool_call() -> (String, String, Value) {
+        (
+            "call-1".into(),
+            "fake__shell".into(),
+            json!({ "command": "ls" }),
+        )
+    }
+
+    fn subject<'a>(parts: &'a (String, String, Value)) -> AskSubject<'a> {
+        AskSubject {
+            tool_call_id: &parts.0,
+            tool_name: &parts.1,
+            arguments: &parts.2,
         }
     }
 
@@ -473,12 +495,13 @@ mod tests {
     async fn test_deliver_allow_authorizes_and_frees_slot() {
         let broker = Arc::new(PermissionBroker::new(4, LONG));
         let (tx, mut rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
 
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
@@ -500,12 +523,13 @@ mod tests {
     async fn test_deliver_reject_denies_and_frees_slot() {
         let broker = Arc::new(PermissionBroker::new(4, LONG));
         let (tx, mut rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
 
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
@@ -529,12 +553,13 @@ mod tests {
     async fn assert_malformed_frame_denies(provider_id: &str, frame: Value) {
         let broker = Arc::new(PermissionBroker::new(4, LONG));
         let (tx, mut rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
 
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
@@ -593,12 +618,13 @@ mod tests {
     async fn test_unknown_id_does_not_unblock_waiter() {
         let broker = Arc::new(PermissionBroker::new(4, LONG));
         let (tx, mut rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
 
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
@@ -621,12 +647,12 @@ mod tests {
     async fn test_timeout_denies_and_removes_state() {
         let broker = Arc::new(PermissionBroker::new(4, SHORT));
         let (tx, _rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
-        let call = tool_call();
+        let cancel = CancellationToken::new();
+        let parts = tool_call();
 
         // No delivery ever arrives: the shared deadline denies.
         let decision = broker
-            .request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            .request_permission(&tx, 2, "ses_a", subject(&parts), &cancel)
             .await;
         assert_eq!(decision, PermissionDecision::Denied(PERMISSION_TIMEOUT_MSG));
         assert_eq!(
@@ -652,14 +678,14 @@ mod tests {
         // Drop the receiver so every send fails: the writer is gone.
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
-        let call = tool_call();
+        let cancel = CancellationToken::new();
+        let parts = tool_call();
 
         // Bound the whole call: correct behavior returns at once; a regression
         // that waits the deadline blows this timeout instead of hanging LONG.
         let decision = tokio::time::timeout(
             Duration::from_secs(2),
-            broker.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx),
+            broker.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel),
         )
         .await
         .expect("closed wire must deny immediately, not wait the deadline");
@@ -698,20 +724,22 @@ mod tests {
         // A live output channel; its frames are drained by `write_frames` into
         // the flush-failing sink, modelling the real writer over a broken pipe.
         let (wire_tx, wire_rx) = mpsc::channel(8);
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
 
         // Supervisor: run the writer over the failing sink; when it returns
         // (flush error → connection-fatal), propagate cancellation exactly like
         // `async_main`'s writer-death arm.
+        let cancel_for_writer = cancel.clone();
         let writer = tokio::spawn(async move {
             wire::write_frames(wire_rx, FlushFailSink).await;
-            let _ = cancel_tx.send(true);
+            cancel_for_writer.cancel();
         });
 
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&wire_tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&wire_tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
@@ -757,12 +785,12 @@ mod tests {
         tx.send(wire::WireMsg::Notify(json!({ "fill": 1 })))
             .await
             .unwrap();
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
-        let call = tool_call();
+        let cancel = CancellationToken::new();
+        let parts = tool_call();
 
         let decision = tokio::time::timeout(
             Duration::from_secs(2),
-            broker.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx),
+            broker.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel),
         )
         .await
         .expect("a stalled writer must not hold the send past the deadline");
@@ -795,17 +823,18 @@ mod tests {
         tx.send(wire::WireMsg::Notify(json!({ "fill": 1 })))
             .await
             .unwrap();
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
         // Give the task time to admit + block on the full channel, then cancel.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        cancel_tx.send(true).unwrap();
+        cancel.cancel();
         let decision = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("cancel must resolve a blocked enqueue promptly")
@@ -835,11 +864,12 @@ mod tests {
         }));
 
         let (tx, mut rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
@@ -859,18 +889,19 @@ mod tests {
     async fn test_cancel_while_waiting_returns_cancelled_and_removes_state() {
         let broker = Arc::new(PermissionBroker::new(4, LONG));
         let (tx, mut rx) = mpsc::channel(8);
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
 
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
         let _id = next_request_id(&mut rx).await;
         assert_eq!(broker.pending_count(), 1);
-        cancel_tx.send(true).unwrap();
+        cancel.cancel();
         assert_eq!(task.await.unwrap(), PermissionDecision::Cancelled);
         assert_eq!(broker.pending_count(), 0);
         assert_eq!(broker.available_permits(), 4);
@@ -880,11 +911,12 @@ mod tests {
     async fn test_precancelled_turn_never_sends_request() {
         let broker = Arc::new(PermissionBroker::new(4, LONG));
         let (tx, mut rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(true); // already cancelled
-        let call = tool_call();
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // already cancelled
+        let parts = tool_call();
 
         let decision = broker
-            .request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            .request_permission(&tx, 2, "ses_a", subject(&parts), &cancel)
             .await;
         assert_eq!(decision, PermissionDecision::Cancelled);
         assert_eq!(broker.pending_count(), 0, "no entry inserted");
@@ -898,12 +930,13 @@ mod tests {
     async fn test_abort_while_waiting_leaves_zero_pending_and_reusable_slot() {
         let broker = Arc::new(PermissionBroker::new(1, LONG));
         let (tx, mut rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
 
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
@@ -938,15 +971,15 @@ mod tests {
         // count + pending_count) and that every task ultimately resolves.
         let broker = Arc::new(PermissionBroker::new(2, LONG));
         let (tx, mut rx) = mpsc::channel(8);
-        let (_c, cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
 
         let spawn_req = |session: &'static str| {
             let b = Arc::clone(&broker);
             let tx = tx.clone();
-            let mut cancel = cancel_rx.clone();
-            let call = tool_call();
+            let cancel = cancel.clone();
+            let parts = tool_call();
             tokio::spawn(async move {
-                b.request_permission(&tx, 2, session, &call, &mut cancel)
+                b.request_permission(&tx, 2, session, subject(&parts), &cancel)
                     .await
             })
         };
@@ -997,11 +1030,12 @@ mod tests {
         assert_eq!(broker.available_permits(), 0);
 
         let (tx, mut rx) = mpsc::channel(8);
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let cancel = CancellationToken::new();
         let b = Arc::clone(&broker);
-        let call = tool_call();
+        let parts = tool_call();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            b.request_permission(&tx, 2, "ses_a", subject(&parts), &cancel_for_task)
                 .await
         });
 
@@ -1009,7 +1043,7 @@ mod tests {
         assert!(tokio::time::timeout(SHORT, rx.recv()).await.is_err());
         assert_eq!(broker.pending_count(), 0, "blocked before insert");
 
-        cancel_tx.send(true).unwrap();
+        cancel.cancel();
         assert_eq!(task.await.unwrap(), PermissionDecision::Cancelled);
         assert_eq!(
             broker.pending_count(),
@@ -1028,12 +1062,12 @@ mod tests {
         let held = Arc::clone(&broker.sem).acquire_owned().await.unwrap();
 
         let (tx, mut rx) = mpsc::channel(8);
-        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
-        let call = tool_call();
+        let cancel = CancellationToken::new();
+        let parts = tool_call();
 
         // Slot never frees within the deadline → admission times out.
         let decision = broker
-            .request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+            .request_permission(&tx, 2, "ses_a", subject(&parts), &cancel)
             .await;
         assert_eq!(decision, PermissionDecision::Denied(PERMISSION_TIMEOUT_MSG));
         assert_eq!(
