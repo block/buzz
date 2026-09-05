@@ -142,13 +142,17 @@ fn build_updated_repo_announcement(
         ))
     })?;
 
-    // Advance only the observed head. Using wall-clock time here would let a
-    // delayed writer leapfrog an intervening update and silently erase metadata.
-    let next_created_at = existing
+    // Stamp the replacement with max(now, existing + 1). The +1 floor keeps a
+    // delayed writer from leapfrogging an intervening update and silently
+    // erasing metadata; the wall-clock floor keeps a live writer inside the
+    // relay's MAX_TIMESTAMP_DRIFT_SECS (±900s) window, which `existing + 1`
+    // alone falls out of permanently 15 minutes after announcement (#2876).
+    let head_floor = existing
         .created_at
         .as_secs()
         .checked_add(1)
         .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    let next_created_at = Timestamp::now().as_secs().max(head_floor);
     buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
         .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
@@ -518,7 +522,9 @@ mod tests {
         .expect("sign update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        // Wall-clock now (2026+) exceeds the 100 base; the +1 floor is the
+        // only binding constraint. See the freshness regression tests below.
+        assert!(updated.created_at.as_secs() >= 101);
         assert!(!updated
             .tags
             .iter()
@@ -712,7 +718,7 @@ mod tests {
                 .expect("sign bind update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        assert!(updated.created_at.as_secs() >= 101);
         // Exactly one binding remains, and it is the requested one.
         let bindings: Vec<_> = updated
             .tags
@@ -738,6 +744,95 @@ mod tests {
             .tags
             .iter()
             .any(|tag| tag.as_slice() == ["name", "Demo"]));
+    }
+
+    #[test]
+    fn updated_announcement_stays_within_relay_drift_window_for_stale_head() {
+        // #2876: an announcement made >15 min ago must still produce a
+        // replacement inside the relay's ±900s MAX_TIMESTAMP_DRIFT_SECS window.
+        // `existing + 1` alone falls out permanently; the wall-clock floor is
+        // what keeps a live writer mergeable.
+        let stale = Timestamp::now().as_secs() - 7200; // 2h old
+        let existing = signed_repo(
+            vec![tag(&["d", "demo"]), tag(&["buzz-channel", "channel-id"])],
+            "repository content",
+            stale,
+        );
+        let replacement = build_protection_tag("refs/heads/main", Some("admin"), true, true, false)
+            .expect("valid replacement");
+
+        let updated = build_updated_repo_announcement(
+            &existing,
+            RepoChange::SetProtection(Box::new(replacement)),
+        )
+        .expect("build update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign update");
+
+        let now = Timestamp::now().as_secs();
+        let drift = (updated.created_at.as_secs() as i64 - now as i64).abs();
+        assert!(
+            drift <= 900,
+            "replacement drifted {drift}s from wall clock — relay would reject (limit 900)"
+        );
+        // and it advanced past the stale head
+        assert!(updated.created_at.as_secs() > stale);
+    }
+
+    #[test]
+    fn protection_set_preserves_metadata_and_protections() {
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["name", "Demo"]),
+                tag(&["buzz-channel", "channel-id"]),
+                tag(&["future-metadata", "preserve-me"]),
+                tag(&["auth", &"a".repeat(64), "kind=30617", &"b".repeat(128)]),
+                tag(&["buzz-protect", "refs/heads/main", "push:member"]),
+                tag(&["buzz-protect", "refs/tags/*", "no-delete"]),
+            ],
+            "repository content",
+            100,
+        );
+        let replacement = build_protection_tag("refs/heads/main", Some("admin"), true, true, false)
+            .expect("valid replacement");
+
+        let updated = build_updated_repo_announcement(
+            &existing,
+            RepoChange::SetProtection(Box::new(replacement)),
+        )
+        .expect("update announcement")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign update");
+
+        let now = Timestamp::now().as_secs();
+        assert!(updated.created_at.as_secs() >= 1000);
+        assert!(
+            (updated.created_at.as_secs() as i64 - now as i64).abs() <= 900,
+            "leapfrog assertion: timestamp should be now({now}) not future-pinned"
+        );
+        assert_eq!(updated.content, "repository content");
+        assert!(!updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("auth")));
+        // the pre-existing refs/heads/main rule (push:member) is REPLACED by the new one…
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| {
+                tag.as_slice()
+                    == ["buzz-protect", "refs/heads/main", "push:admin", "no-force-push", "no-delete"]
+            }));
+        // …while unrelated protections and metadata are preserved.
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-protect", "refs/tags/*", "no-delete"]));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["future-metadata", "preserve-me"]));
     }
 
     #[test]
