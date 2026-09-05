@@ -49,14 +49,20 @@ export function effortPickerState({
     })),
   ];
 
-  // Preselect the currently-configured effort when it maps to a known option;
-  // otherwise fall back to the adapter-default sentinel (also the null case).
+  // Preserve an explicit value when the adapter catalog changes. Presenting
+  // it as the default would hide the configured override without clearing it.
   const trimmed = currentEffort?.trim() ?? "";
-  const selectValue =
-    trimmed.length > 0 &&
-    (effortOptions ?? []).some((option) => option.value === trimmed)
-      ? trimmed
-      : EFFORT_DEFAULT_DROPDOWN_VALUE;
+  if (
+    trimmed &&
+    !(effortOptions ?? []).some((option) => option.value === trimmed)
+  ) {
+    options.push({
+      label: `${trimmed} (unavailable)`,
+      value: trimmed,
+      disabled: true,
+    });
+  }
+  const selectValue = trimmed || EFFORT_DEFAULT_DROPDOWN_VALUE;
 
   return { visible, options, selectValue };
 }
