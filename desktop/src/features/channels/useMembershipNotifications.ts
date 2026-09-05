@@ -26,8 +26,12 @@ export function useMembershipNotifications(currentPubkey?: string) {
   if (channelsInvalidateRef.current === null) {
     channelsInvalidateRef.current = createTrailingDebounce(() => {
       refreshChannelsWhenIdle({
+        // Scope the gate to the list query itself. A prefix match would also
+        // count ["channels", id, "detail"] and ["channels", id, "members"] —
+        // the very fetches this handler kicks off — so the list refresh would
+        // be held closed by its own siblings and re-armed indefinitely.
         isFetching: () =>
-          queryClient.isFetching({ queryKey: channelsQueryKey }),
+          queryClient.isFetching({ queryKey: channelsQueryKey, exact: true }),
         invalidate: () => {
           void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
         },
