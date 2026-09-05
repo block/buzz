@@ -5,7 +5,7 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::auth::verify_blossom_upload_auth;
+use crate::auth::verify_upload_hash_only;
 use crate::config::MediaConfig;
 use crate::error::MediaError;
 use crate::storage::{BlobMeta, MediaStorage};
@@ -74,15 +74,15 @@ where
     let auth = auth_event.clone();
     let bytes = body.clone();
     let cfg = config.clone();
-    // Validate the Blossom `server` tag against the host this request was bound
-    // to (the per-request tenant), not a process-global domain — a relay serves
-    // many tenant hosts.
-    let bound_host = ctx.host().to_string();
     let (mime, sha256, ext) = tokio::task::spawn_blocking(move || -> Result<_, MediaError> {
         let (mime, ext) = validate(&bytes, &cfg)?;
         let sha256 = hex::encode(Sha256::digest(&bytes));
-        // Buffered uploads (image + file): 10-minute auth window is plenty.
-        verify_blossom_upload_auth(&auth, &sha256, Some(bound_host.as_str()), 600)?;
+        // Post-body hash check only: the full auth event verification
+        // (signature, kind, freshness, server, cardinality) was already
+        // applied at the pre-body gate in the relay handler.  Re-running the
+        // full verifier here would fail any upload that takes longer than the
+        // minted token's expiration window (60 s in Strict mode).
+        verify_upload_hash_only(&auth, &sha256)?;
         Ok((mime, sha256, ext))
     })
     .await
@@ -404,12 +404,13 @@ pub async fn process_video_upload(
     // --- 3. Verify Blossom auth: x tag must match computed SHA-256 ---
     let auth = auth_event.clone();
     let sha256_for_auth = sha256_hex.clone();
-    // Validate the Blossom `server` tag against the bound tenant host (not a
-    // process-global domain) — a relay serves many tenant hosts.
-    let bound_host = ctx.host().to_string();
     tokio::task::spawn_blocking(move || {
-        // Videos: 1-hour window — large uploads on slow connections need headroom.
-        verify_blossom_upload_auth(&auth, &sha256_for_auth, Some(bound_host.as_str()), 3600)
+        // Post-body hash check only: the full auth event verification
+        // (signature, kind, freshness, server, cardinality) was already
+        // applied at the pre-body gate in the relay handler.  Re-running the
+        // full verifier here would reject any video upload that takes longer
+        // than the minted token's expiration window (60 s in Strict mode).
+        verify_upload_hash_only(&auth, &sha256_for_auth)
     })
     .await
     .map_err(|_| MediaError::Internal)??;

@@ -19,6 +19,17 @@ fn relay_http_url() -> String {
     std::env::var("RELAY_HTTP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
 }
 
+/// Extract the host:port authority from the relay URL for use as the `server` tag.
+fn relay_server_authority() -> String {
+    let url = relay_http_url();
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("localhost:3000")
+        .to_string()
+}
+
 fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(30))
@@ -28,11 +39,13 @@ fn http_client() -> Client {
 
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
-    let exp_str = (now + 300).to_string();
+    let exp_str = (now + 55).to_string();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "upload"]).expect("t tag"),
         Tag::parse(["x", sha256]).expect("x tag"),
         Tag::parse(["expiration", &exp_str]).expect("expiration tag"),
+        Tag::parse(["server", &server]).expect("server tag"),
     ];
     EventBuilder::new(Kind::from(24242), "Upload test")
         .tags(tags)
@@ -45,11 +58,13 @@ fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
 /// the 206 and 416 range behaviour below would never be reached.
 fn sign_blossom_get_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
-    let exp_str = (now + 300).to_string();
+    let exp_str = (now + 55).to_string();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "get"]).expect("t tag"),
         Tag::parse(["x", sha256]).expect("x tag"),
         Tag::parse(["expiration", &exp_str]).expect("expiration tag"),
+        Tag::parse(["server", &server]).expect("server tag"),
     ];
     EventBuilder::new(Kind::from(24242), "Get test")
         .tags(tags)
