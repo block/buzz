@@ -48,6 +48,7 @@ export type AppSidebarProps = {
     | "projects";
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
+  highPriorityUnreadChannelIds: ReadonlySet<string>;
   previewActivityChannelIds: ReadonlySet<string>;
   communities: Community[];
   onAddCommunity: (community: Community) => void;

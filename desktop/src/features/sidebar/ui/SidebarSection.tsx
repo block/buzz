@@ -247,7 +247,6 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
-  unreadCount = 0,
   activeWorking,
   isMuted,
   dmParticipants,
@@ -258,7 +257,6 @@ export function ChannelMenuButton({
   label?: string;
   isActive: boolean;
   hasUnread: boolean;
-  unreadCount?: number;
   activeWorking?: ActiveChannelTurnSummary;
   isMuted?: boolean;
   dmParticipants?: SidebarDmParticipant[];
@@ -267,35 +265,19 @@ export function ChannelMenuButton({
 }) {
   const resolvedLabel = label ?? channel.name;
   const ephemeralDisplay = getEphemeralChannelDisplay(channel);
-  const {
-    hasSidebarUnreadProjections,
-    topLevelUnreadChannelIds,
-    unreadThreadChannelIds,
-  } = useAppShell();
-  const hasTopLevelUnread =
-    channel.channelType === "dm"
-      ? hasUnread
-      : hasSidebarUnreadProjections
-        ? topLevelUnreadChannelIds.has(channel.id)
-        : hasUnread;
+  const { hasSidebarUnreadProjections, unreadThreadChannelIds } = useAppShell();
   const hasThreadUnread =
     channel.channelType !== "dm" &&
     (hasSidebarUnreadProjections
       ? unreadThreadChannelIds.has(channel.id)
       : hasUnread);
-  const showsUnreadCount =
-    !isActive && channel.channelType !== "dm" && unreadCount > 0;
   const showsEphemeralBadge =
-    Boolean(ephemeralDisplay) &&
-    !activeWorking &&
-    !isMuted &&
-    !showsUnreadCount &&
-    !hasThreadUnread;
+    Boolean(ephemeralDisplay) && !activeWorking && !isMuted && !hasThreadUnread;
   const inactiveContentOpacity = cn(
-    !isActive && !hasTopLevelUnread && !isMuted && "opacity-80",
+    !isActive && !hasUnread && !isMuted && "opacity-80",
     !isActive &&
       isMuted &&
-      !hasTopLevelUnread &&
+      !hasUnread &&
       !hasThreadUnread &&
       "sidebar-muted-content opacity-50 dark:opacity-45",
   );
@@ -307,7 +289,7 @@ export function ChannelMenuButton({
         isActive
           ? "group-hover/menu-item:bg-sidebar-active group-hover/menu-item:text-sidebar-active-foreground"
           : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-foreground",
-        hasTopLevelUnread &&
+        hasUnread &&
           "font-bold text-sidebar-foreground hover:text-sidebar-foreground data-[active=true]:font-bold",
       )}
       data-channel-id={channel.id}
@@ -373,13 +355,7 @@ export function ChannelMenuButton({
           )}
         />
       ) : null}
-      {showsUnreadCount ? (
-        <UnreadCountBadge
-          channelName={channel.name}
-          className="ml-auto"
-          count={unreadCount}
-        />
-      ) : hasThreadUnread ? (
+      {hasThreadUnread ? (
         <UnreadDotBadge channelName={channel.name} className="ml-auto" />
       ) : null}
     </SidebarMenuButton>
@@ -502,7 +478,6 @@ export function SidebarSection({
                       activeWorking={activeWorkingByChannelId?.get(channel.id)}
                       dmParticipants={dmParticipantsByChannelId?.[channel.id]}
                       hasUnread={unreadChannelIds.has(channel.id)}
-                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id
