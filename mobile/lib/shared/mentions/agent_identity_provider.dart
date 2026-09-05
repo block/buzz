@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 
@@ -11,6 +12,7 @@ import '../../shared/relay/relay.dart';
 part 'agent_policy.dart';
 part 'agent_authorization.dart';
 part 'agent_publication.dart';
+part 'agent_discovery.dart';
 
 /// A relay agent parsed from its kind:10100 agent-profile event.
 ///
@@ -63,27 +65,32 @@ Map<String, dynamic>? _tryDecodeJsonMap(String content) {
   }
 }
 
-/// Relay agent directory from kind:10100 agent-profile events.
+/// Relay directory, including verified owned agents without runtime records.
 ///
 /// Watches the session and only fetches after the WebSocket connects.
 final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   ref,
 ) async {
+  ref.watch(_agentDirectoryUpdatesProvider);
   final sessionState = ref.watch(relaySessionProvider);
   if (sessionState.status != SessionStatus.connected) return const [];
   final session = ref.read(relaySessionProvider.notifier);
-  final config = ref.read(relayConfigProvider);
+  final config = ref.watch(relayConfigProvider);
   var disposed = false;
   ref.onDispose(() => disposed = true);
-  final viewer = ref.read(myPubkeyProvider);
+  final viewer = ref.watch(myPubkeyProvider);
+  bool current() =>
+      !disposed && identical(config, ref.read(relayConfigProvider));
+  if (viewer == null) return [];
+  final owned = await _ownedAgentKeys(session, viewer, current);
+  if (!current()) return [];
   final events = await session.fetchHistory(NostrFilters.agentProfiles());
-  if (disposed) return [];
+  if (!current()) return [];
   return readAgentAuthorization(
     session,
-    events.map((event) => event.pubkey).toSet(),
+    {...owned, ...events.map((event) => event.pubkey)},
     viewer: viewer,
-    isCurrent: () =>
-        !disposed && identical(config, ref.read(relayConfigProvider)),
+    isCurrent: current,
   );
 });
 
