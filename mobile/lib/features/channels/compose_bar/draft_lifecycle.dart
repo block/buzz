@@ -1,11 +1,16 @@
 part of '../compose_bar.dart';
 
+class _ComposeSendCancelled implements Exception {
+  const _ComposeSendCancelled();
+}
+
 Future<void> _sendTextOnlyDraft({
   required BuildContext context,
   required _MarkdownEditingController controller,
   required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required ObjectRef<int> draftRevision,
   required int submittedDraftRevision,
+  required bool Function() ownsSource,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
   required Future<void> Function() addMentionedNonMembers,
@@ -19,7 +24,7 @@ Future<void> _sendTextOnlyDraft({
   int? clearedDraftRevision;
 
   void restoreClearedDraft() {
-    if (!context.mounted ||
+    if (!ownsSource() ||
         clearedDraftText == null ||
         clearedDraftMentions == null ||
         clearedDraftRevision == null ||
@@ -35,6 +40,7 @@ Future<void> _sendTextOnlyDraft({
 
   try {
     await addMentionedNonMembers();
+    if (!ownsSource()) return;
     // Clear before optimistic insertion so the outgoing row and draft never
     // appear simultaneously during the send transition. If the user edited
     // while membership changes were pending, preserve that newer draft.
@@ -49,6 +55,8 @@ Future<void> _sendTextOnlyDraft({
       outgoing.pubkeys,
       mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
     );
+  } on _ComposeSendCancelled {
+    restoreClearedDraft();
   } on StateError {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);

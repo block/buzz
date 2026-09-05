@@ -18,8 +18,10 @@ void presenceListTests(
     final avatar = find.byWidgetPredicate(
       (widget) => widget is AvatarImage && widget.radius == 9,
     );
-    final stack = find.ancestor(of: avatar, matching: find.byType(Stack)).first;
-    final dots = find.descendant(of: stack, matching: find.byType(Positioned));
+    final dots = find.byWidgetPredicate(
+      (widget) =>
+          widget is Positioned && widget.bottom == -1 && widget.right == -1,
+    );
     expect(dots, findsNothing);
     final bounds = tester.getRect(avatar);
     for (final status in ['online', 'away', 'offline']) {

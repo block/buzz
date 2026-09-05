@@ -869,15 +869,12 @@ class _MentionMd extends InlineMd {
       RegExp(r'\(([0-9a-f]{64})\)'),
       (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
     );
-    final pill = Semantics(
-      label: fullLabel,
-      excludeSemantics: true,
-      child: _MentionPill(
-        pubkey: pubkey,
-        label: visibleLabel,
-        isAgent: isAgent,
-        textStyle: config.style,
-      ),
+    final pill = _MentionPill(
+      pubkey: pubkey,
+      label: visibleLabel,
+      semanticsLabel: fullLabel,
+      isAgent: isAgent,
+      textStyle: config.style,
     );
 
     return WidgetSpan(
@@ -893,12 +890,14 @@ class _MentionMd extends InlineMd {
 class _MentionPill extends StatelessWidget {
   final String? pubkey;
   final String label;
+  final String? semanticsLabel;
   final bool isAgent;
   final TextStyle? textStyle;
 
   const _MentionPill({
     this.pubkey,
     required this.label,
+    this.semanticsLabel,
     required this.isAgent,
     this.textStyle,
   });
@@ -945,7 +944,7 @@ class _MentionPill extends StatelessWidget {
               offset: const Offset(0, -Grid.quarter),
               child: Text('@', style: style),
             ),
-          Text(label, style: style),
+          Text(label, style: style, semanticsLabel: semanticsLabel),
           AgentProvenance(pubkey: pubkey),
         ],
       ),
