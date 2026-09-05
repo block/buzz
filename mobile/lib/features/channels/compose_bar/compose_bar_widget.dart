@@ -40,6 +40,7 @@ class ComposeBar extends HookConsumerWidget {
     useEffect(() => controller.dispose, [controller]);
     final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
     final draftRevision = useRef(0);
+    final mentionMap = useRef(<String, MentionCandidate>{});
     final draftIdentity = _composerDraftIdentity(ref);
     final authorizationVisit = useRef<Object?>(null);
     final authorizationAttempt = useRef<Object?>(null);
@@ -103,6 +104,7 @@ class ComposeBar extends HookConsumerWidget {
       threadHeadId: threadHeadId,
       draftIdentity: draftIdentity,
       draftRevision: draftRevision,
+      mentionMap: mentionMap,
       attachments: attachments,
       uploadGeneration: uploadGeneration,
       activeUploadCancellation: activeUploadCancellation,
@@ -228,11 +230,6 @@ class ComposeBar extends HookConsumerWidget {
     // Map of displayName → selected mention candidate built as the user selects
     // mentions. Used to pass resolved pubkeys directly to onSend and to attach
     // selected non-member agents before the message is published.
-    final mentionMap = useRef(<String, MentionCandidate>{});
-    useEffect(() {
-      mentionMap.value.clear();
-      return null;
-    }, [draftIdentity, draftKey]);
 
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
@@ -422,6 +419,14 @@ class ComposeBar extends HookConsumerWidget {
       } finally {
         isModifyingText.value = false;
       }
+      _persistComposeDraft(
+        ref,
+        controller,
+        mentionMap.value,
+        draftKey,
+        channelId,
+        threadHeadId,
+      );
       mentionQuery.value = null;
     }
 
@@ -464,9 +469,9 @@ class ComposeBar extends HookConsumerWidget {
 
     void clearComposer() {
       draftRevision.value += 1;
+      mentionMap.value.clear();
       controller.clear();
       attachments.value = [];
-      mentionMap.value.clear();
       mentionQuery.value = null;
       channelQuery.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
@@ -507,8 +512,189 @@ class ComposeBar extends HookConsumerWidget {
 
         // Extract pubkeys for mentions present in the final text.
         final selectedMentions = _resolveComposerMentions(
-          text, mentionMap.value, mentionCandidates.asData?.value ?? const [],
+          text,
+          mentionMap.value,
+          buildMentionCandidates(
+            members: channelMembersForAutocomplete(
+              membersAsync: membersAsync,
+              sessionStatus: sessionStatus,
+              cachedMembers: cachedMembers,
+            ),
+            relayAgents: const [],
+            sharedChannelIds: const {},
+            userCache: userCache,
+            ownerByAgentPubkey: agentOwners ?? const {},
+          ),
         );
+      } on FormatException catch (error) {
+        messenger?.showSnackBar(SnackBar(content: Text(error.message)));
+        return;
+      }
+      final outgoing = _OutgoingMentions(selectedMentions);
+      final scan = await _scanNonMemberMentions(
+        ref,
+        channelId: channelId,
+        selectedMentions: selectedMentions,
+        currentPubkey: currentPubkey,
+      );
+
+      // Mentioning humans outside the channel prompts "Invite" / "Do
+      // nothing" (send without inviting) — mirrors desktop's
+      // NonMemberMentionDialog. Agents keep the existing silent auto-add.
+      if (scan.humans.isNotEmpty) {
+        if (!context.mounted) return;
+        final choice = await _promptNonMemberMention(
+          context,
+          names: [for (final candidate in scan.humans) candidate.label],
+          canInvite: scan.canAddMembers,
+        );
+        if (choice == null) return; // Dismissed — keep the draft, send nothing.
+        outgoing.resolveHumanChoice(choice, scan.humans);
+      }
+
+      final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
+      final channelActions = ref.read(channelActionsProvider);
+
+      // An add that was refused doesn't block the message: it is reported and
+      // the un-added mentions are demoted to reference tags so the send lands.
+      Future<void> addMentionedNonMembers() => outgoing.addNonMembers(
+        channelActions,
+        scan: scan,
+        messenger: messenger,
+      );
+
+      isSending.value = true;
+      try {
+        if (queuedAttachments.isEmpty) {
+          if (!context.mounted) return;
+          await _sendTextOnlyDraft(
+            context: context,
+            controller: controller,
+            mentionMap: mentionMap,
+            draftRevision: draftRevision,
+            submittedDraftRevision: submittedDraftRevision,
+            focusNode: focusNode,
+            clearComposer: clearComposer,
+            addMentionedNonMembers: addMentionedNonMembers,
+            payload: _ComposeDraftPayload.fromDraft(
+              text: text,
+              attachments: const [],
+              customEmoji: customEmoji,
+            ),
+            outgoing: outgoing,
+            onSend: onSend,
+            messenger: messenger,
+          );
+          return;
+        }
+
+        final draftText = controller.value;
+        final draftAttachments = List<_PendingAttachment>.of(attachments.value);
+        final draftMentions = Map<String, MentionCandidate>.of(
+          mentionMap.value,
+        );
+        clearComposer();
+        final clearedDraftRevision = draftRevision.value;
+        uploadingCount.value += 1;
+        uploadProgress.value = 0;
+        isSending.value = false;
+        final queueGeneration = uploadGeneration.value;
+        final cancellation = UploadCancellationToken();
+        final uploadService = ref.read(mediaUploadServiceProvider);
+        activeUploadCancellation.value = cancellation;
+        final delivery = onSend;
+        unawaited(() async {
+          var retainedForRetry = false;
+          try {
+            final uploaded = <BlobDescriptor>[];
+            for (var index = 0; index < queuedAttachments.length; index++) {
+              final attachment = queuedAttachments[index];
+              final descriptor = await _uploadPendingAttachment(
+                uploadService,
+                attachment,
+                onProgress: (progress) {
+                  if (context.mounted) {
+                    uploadProgress.value =
+                        (index + progress) / queuedAttachments.length;
+                  }
+                },
+                cancellationToken: cancellation,
+              );
+              if (queueGeneration != uploadGeneration.value) return;
+              uploaded.add(descriptor);
+              if (context.mounted) {
+                uploadProgress.value = (index + 1) / queuedAttachments.length;
+              }
+            }
+            final payload = _ComposeDraftPayload.fromDraft(
+              text: text,
+              attachments: uploaded,
+              customEmoji: customEmoji,
+            );
+            if (queueGeneration != uploadGeneration.value) return;
+            await addMentionedNonMembers();
+            if (queueGeneration != uploadGeneration.value) return;
+            await delivery(
+              payload.content,
+              outgoing.pubkeys,
+              mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
+            );
+          } catch (error) {
+            if (cancellation.isCancelled) return;
+            if (context.mounted) uploadError.value = _formatUploadError(error);
+            if (context.mounted &&
+                queueGeneration == uploadGeneration.value &&
+                draftRevision.value == clearedDraftRevision) {
+              controller.value = draftText;
+              attachments.value = draftAttachments;
+              retainedForRetry = true;
+              mentionMap.value
+                ..clear()
+                ..addAll(draftMentions);
+              focusNode.requestFocus();
+            }
+          } finally {
+            if (!retainedForRetry) {
+              await _deleteOwnedAttachments(queuedAttachments);
+            }
+            if (activeUploadCancellation.value == cancellation) {
+              activeUploadCancellation.value = null;
+            }
+            if (context.mounted && queueGeneration == uploadGeneration.value) {
+              uploadingCount.value = math.max(0, uploadingCount.value - 1);
+            }
+          }
+        }());
+      } finally {
+        if (context.mounted && isSending.value) isSending.value = false;
+      }
+    }
+
+    final queueAttachment = useCallback(
+      (
+        XFile file,
+        _PendingAttachmentKind kind, {
+        bool deleteAfterUse = false,
+      }) => _queueComposerAttachment(
+        file,
+        kind,
+        voiceNoteRef,
+        attachments,
+        uploadError,
+        draftRevision,
+        deleteAfterUse: deleteAfterUse,
+      ),
+      [voiceNoteRef, draftRevision, uploadError, attachments],
+    );
+    Future<void> pickThenQueue({
+      required Future<XFile?> Function() pick,
+      required _PendingAttachmentKind kind,
+    }) async {
+      uploadError.value = null;
+      try {
+        final picked = await pick();
+        if (picked == null || !context.mounted) return;
+        queueAttachment(picked, kind);
         final outgoing = _OutgoingMentions(selectedMentions);
         final intendedAgentKeys = {
           for (final mention in selectedMentions)
@@ -664,12 +850,12 @@ class ComposeBar extends HookConsumerWidget {
             if (context.mounted &&
                 queueGeneration == uploadGeneration.value &&
                 draftRevision.value == authorizationRevision) {
-              controller.value = draftText;
-              attachments.value = draftAttachments;
-              retainedForRetry = true;
               mentionMap.value
                 ..clear()
                 ..addAll(draftMentions);
+              controller.value = draftText;
+              attachments.value = draftAttachments;
+              retainedForRetry = true;
               focusNode.requestFocus();
             }
           } finally {

@@ -1,4 +1,5 @@
 import 'package:buzz/features/activity/compose_drafts_provider.dart';
+import 'package:buzz/shared/mentions/draft_mention.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -79,6 +80,57 @@ void main() {
     expect(drafts, hasLength(1));
     expect(drafts.single.text, 'hello there');
     expect(notifier.textFor('ch1'), 'hello there');
+  });
+
+  test(
+    'exact bindings persist atomically with text and binding-only replacements',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final container = await containerWithPrefs();
+      final notifier = container.read(composeDraftsProvider.notifier);
+      final first = 'a' * 64;
+      final second = 'b' * 64;
+      notifier.save(
+        key: 'ch1',
+        channelId: 'ch1',
+        text: '@Scout',
+        mentions: {'Scout': DraftMention(pubkey: first)},
+      );
+      notifier.save(
+        key: 'ch1',
+        channelId: 'ch1',
+        text: '@Scout',
+        mentions: {'Scout': DraftMention(pubkey: second, isAgent: true)},
+      );
+      final restarted = await containerWithPrefs();
+      final draft = restarted.read(composeDraftsProvider).single;
+      expect(draft.text, '@Scout');
+      expect(draft.mentions['Scout']!.pubkey, second);
+      expect(draft.mentions['Scout']!.isAgent, isTrue);
+      final other = await containerWithPrefs(pubkey: 'different');
+      expect(other.read(composeDraftsProvider), isEmpty);
+    },
+  );
+
+  test('malformed binding data never guesses keys or discards legacy text', () {
+    final draft = ComposeDraft.fromJson({
+      'key': 'c',
+      'channel_id': 'c',
+      'text': '@Scout',
+      'mentions': {
+        'Scout': {'pubkey': 'not-a-key'},
+      },
+    });
+    expect(draft!.text, '@Scout');
+    expect(draft.mentions, isEmpty);
+    expect(
+      ComposeDraft.fromJson({
+        'key': 'c',
+        'channel_id': 'c',
+        'text': '@Scout',
+      })!.mentions,
+      isEmpty,
+    );
   });
 
   test('empty text removes the draft', () async {
