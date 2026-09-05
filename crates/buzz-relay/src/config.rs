@@ -1187,7 +1187,17 @@ impl Config {
                     dir.display()
                 )));
             }
-            tracing::info!("BUZZ_WEB_DIR={} — serving web UI from relay", dir.display());
+            if serve_git_web_gui {
+                tracing::info!(
+                    "BUZZ_WEB_DIR={} — serving web UI at / and /repos (BUZZ_SERVE_GIT_WEB_GUI=true)",
+                    dir.display()
+                );
+            } else {
+                tracing::info!(
+                    "BUZZ_WEB_DIR={} — bundle validated; /invite/* works. Set BUZZ_SERVE_GIT_WEB_GUI=true to serve / and /repos as HTML (otherwise NIP-11 JSON).",
+                    dir.display()
+                );
+            }
         }
 
         // Reject explicitly-configured secrets that are too short.

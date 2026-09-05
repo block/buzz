@@ -2848,6 +2848,9 @@ async fn tokio_main() -> Result<()> {
     let mut heartbeat_in_flight = false;
 
     let mut presence_heartbeat = if config.presence_enabled {
+        // Renew presence every 60s. Relay TTL is buzz_pubsub::PRESENCE_TTL_SECS
+        // (180s = 3× this interval). Desktop uses the same 60s cadence — see
+        // desktop/src/features/presence/lib/presence.ts and ARCHITECTURE.md.
         let interval = Duration::from_secs(60);
         Some(tokio::time::interval_at(
             tokio::time::Instant::now() + interval,

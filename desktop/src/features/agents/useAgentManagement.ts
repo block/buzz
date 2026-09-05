@@ -49,11 +49,24 @@ function updateInputFromRequest(
       ? {
           behavior: {
             respondTo: changes.respondTo,
-            respondToAllowlist: [],
+            respondToAllowlist:
+              changes.respondTo === "allowlist"
+                ? (changes.respondToAllowlist ??
+                  current.behavior?.respondToAllowlist ??
+                  [])
+                : [],
             parallelism: current.behavior?.parallelism,
           },
         }
-      : {}),
+      : changes.respondToAllowlist
+        ? {
+            behavior: {
+              respondTo: current.behavior?.respondTo ?? "allowlist",
+              respondToAllowlist: changes.respondToAllowlist,
+              parallelism: current.behavior?.parallelism,
+            },
+          }
+        : {}),
   };
 }
 

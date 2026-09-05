@@ -30,6 +30,7 @@ export type AgentManagementUpdateRequest = {
     provider?: string;
     model?: string;
     respondTo?: RespondToMode;
+    respondToAllowlist?: string[];
   };
 };
 
@@ -42,7 +43,23 @@ function isText(value: unknown): value is string {
 }
 
 function isRespondTo(value: unknown): value is RespondToMode | undefined {
-  return value === undefined || value === "owner-only" || value === "anyone";
+  return (
+    value === undefined ||
+    value === "owner-only" ||
+    value === "allowlist" ||
+    value === "anyone"
+  );
+}
+
+function isAllowlistPubkeys(value: unknown): value is string[] | undefined {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every(
+    (entry) =>
+      typeof entry === "string" &&
+      entry.length === 64 &&
+      /^[0-9a-f]+$/i.test(entry),
+  );
 }
 
 function hasOnlyKeys(
@@ -94,6 +111,7 @@ export function parseAgentManagementRequest(
 
   if (
     !isRespondTo(request.respondTo) ||
+    !isAllowlistPubkeys(request.respondToAllowlist) ||
     !hasOnlyKeys(request, [
       "channelId",
       "agentName",
@@ -103,6 +121,7 @@ export function parseAgentManagementRequest(
       "provider",
       "model",
       "respondTo",
+      "respondToAllowlist",
     ]) ||
     !isText(request.channelId) ||
     !isText(request.agentName)
@@ -120,7 +139,20 @@ export function parseAgentManagementRequest(
     ...(isText(request.provider) ? { provider: request.provider } : {}),
     ...(isText(request.model) ? { model: request.model } : {}),
     ...(request.respondTo ? { respondTo: request.respondTo } : {}),
+    ...(Array.isArray(request.respondToAllowlist)
+      ? {
+          respondToAllowlist: request.respondToAllowlist.map((entry) =>
+            entry.toLowerCase(),
+          ),
+        }
+      : {}),
   };
+  if (
+    changes.respondTo === "allowlist" &&
+    (!changes.respondToAllowlist || changes.respondToAllowlist.length === 0)
+  ) {
+    return null;
+  }
   if (Object.keys(changes).length === 0) return null;
   return {
     type: AGENT_MANAGEMENT_REQUEST,

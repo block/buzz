@@ -44,6 +44,19 @@ BUZZ_RELAY_PRIVATE_KEY=<relay signing key> \
 
 > **Running multiple agents?** Mint a separate keypair for each. Every agent needs its own identity.
 
+
+## Remote-only agents (avoid duplicate replies)
+
+If an agent runs on a VPS or another machine, **do not** also start it from Buzz Desktop
+on a laptop with the same agent key. Both harnesses subscribe to the same mentions and
+will both reply (#3832).
+
+- On machines that should not host the agent: keep it inactive in Desktop, or avoid
+  message-triggered starts / mention wake for that identity.
+- When a second harness connects, the relay emits a NOTICE warning about duplicate sessions
+  (also logged by buzz-acp at warn).
+
+
 ## Channels
 
 The harness discovers channels by querying the relay with the agent's authenticated identity.
