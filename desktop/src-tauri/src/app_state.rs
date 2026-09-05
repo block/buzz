@@ -185,18 +185,18 @@ pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
 }
 
 pub fn build_app_state() -> AppState {
-    // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
-    // in setup() will replace the ephemeral placeholder with a persisted key.
-    let (keys, identity_storage) = match identity_from_env() {
-        Some(keys) => {
-            eprintln!(
-                "buzz-desktop: configured identity pubkey {}",
-                keys.public_key().to_hex()
-            );
-            (keys, IdentityStorage::Environment)
-        }
-        None => (Keys::generate(), IdentityStorage::Ephemeral),
-    };
+    // Env var takes precedence; setup() otherwise resolves a persisted identity.
+    let (keys, identity_storage) =
+        match crate::onboarding_preview::require_fixed_identity(identity_from_env()) {
+            Some(keys) => {
+                eprintln!(
+                    "buzz-desktop: configured identity pubkey {}",
+                    keys.public_key().to_hex()
+                );
+                (keys, IdentityStorage::Environment)
+            }
+            None => (Keys::generate(), IdentityStorage::Ephemeral),
+        };
 
     AppState {
         keys: Mutex::new(keys),

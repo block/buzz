@@ -4,12 +4,56 @@ import { motion, useReducedMotion } from "motion/react";
 
 import { cn } from "@/shared/lib/cn";
 
+type AnimatedCheckmarkProps = React.ComponentPropsWithoutRef<"svg"> & {
+  visible?: boolean;
+};
+
+function AnimatedCheckmark({
+  className,
+  visible = true,
+  ...props
+}: AnimatedCheckmarkProps) {
+  const shouldReduceMotion = useReducedMotion();
+
+  return (
+    <svg
+      aria-hidden="true"
+      className={cn("h-4 w-4", className)}
+      fill="none"
+      viewBox="0 0 24 24"
+      {...props}
+    >
+      <motion.path
+        animate={
+          visible
+            ? { opacity: 1, pathLength: 1 }
+            : { opacity: 0, pathLength: 0 }
+        }
+        d="m5 12 4 4L19 6"
+        initial={
+          shouldReduceMotion || !visible ? false : { opacity: 0, pathLength: 0 }
+        }
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+        transition={
+          shouldReduceMotion
+            ? { duration: 0 }
+            : {
+                duration: 0.18,
+                ease: [0.23, 1, 0.32, 1],
+              }
+        }
+      />
+    </svg>
+  );
+}
+
 const Checkbox = React.forwardRef<
   React.ElementRef<typeof CheckboxPrimitive.Root>,
   React.ComponentPropsWithoutRef<typeof CheckboxPrimitive.Root>
 >(({ className, ...props }, ref) => {
-  const shouldReduceMotion = useReducedMotion();
-
   return (
     <CheckboxPrimitive.Root
       ref={ref}
@@ -20,34 +64,11 @@ const Checkbox = React.forwardRef<
       {...props}
     >
       <CheckboxPrimitive.Indicator className="flex items-center justify-center text-current">
-        <svg
-          aria-hidden="true"
-          className="h-4 w-4"
-          fill="none"
-          viewBox="0 0 24 24"
-        >
-          <motion.path
-            animate={{ opacity: 1, pathLength: 1 }}
-            d="m5 12 4 4L19 6"
-            initial={shouldReduceMotion ? false : { opacity: 0, pathLength: 0 }}
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="2"
-            transition={
-              shouldReduceMotion
-                ? { duration: 0 }
-                : {
-                    duration: 0.18,
-                    ease: [0.23, 1, 0.32, 1],
-                  }
-            }
-          />
-        </svg>
+        <AnimatedCheckmark />
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
   );
 });
 Checkbox.displayName = CheckboxPrimitive.Root.displayName;
 
-export { Checkbox };
+export { AnimatedCheckmark, Checkbox };

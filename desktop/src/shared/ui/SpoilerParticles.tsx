@@ -53,6 +53,43 @@ const RANDOM_SEED = 4011505;
 const V_MIN = 2;
 const V_MAX = 12;
 
+/**
+ * The particle renderer targets APIs available in current Tauri webviews, but
+ * some managed or unusually old Windows/Linux runtimes can lag behind. Hosts
+ * with a non-particle concealment treatment can use this check to fall back
+ * before hidden content is mounted behind an unusable canvas.
+ */
+export function supportsSpoilerParticles(): boolean {
+  if (typeof window === "undefined" || typeof document === "undefined")
+    return false;
+  if (
+    typeof window.PointerEvent === "undefined" ||
+    typeof window.ResizeObserver === "undefined" ||
+    typeof window.MutationObserver === "undefined" ||
+    typeof window.IntersectionObserver === "undefined" ||
+    typeof window.matchMedia !== "function" ||
+    typeof window.requestAnimationFrame !== "function" ||
+    typeof window.cancelAnimationFrame !== "function" ||
+    typeof document.createRange !== "function"
+  ) {
+    return false;
+  }
+
+  const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  if (
+    typeof motionQuery.addEventListener !== "function" ||
+    typeof motionQuery.removeEventListener !== "function"
+  ) {
+    return false;
+  }
+
+  try {
+    return document.createElement("canvas").getContext("2d") !== null;
+  } catch {
+    return false;
+  }
+}
+
 export function SpoilerParticles({
   active,
   contentRef,

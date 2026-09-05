@@ -1,4 +1,14 @@
-import { Check, CircleHelp, Eye, EyeOff, FileKey2, FileUp } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  CircleHelp,
+  Download,
+  Eye,
+  EyeOff,
+  FileCheck2,
+  FileKey2,
+  FileUp,
+} from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { createPortal } from "react-dom";
@@ -11,13 +21,19 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
-import { Input } from "@/shared/ui/input";
 import { PubKey } from "@/shared/ui/PubKey";
 import { Spinner } from "@/shared/ui/spinner";
 import {
+  ONBOARDING_PRIMARY_CTA_CLASS,
   ONBOARDING_SECURITY_PRIMARY_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
 } from "./OnboardingChrome";
+import { OnboardingPreviewInput } from "./OnboardingPreviewInput";
+import { useOnboardingPreviewCardLayout } from "./OnboardingPreviewShell";
+import {
+  ONBOARDING_PREVIEW_CARD_INPUT_CLASS,
+  ONBOARDING_PREVIEW_SECONDARY_CTA_CLASS,
+} from "./onboardingPreviewCardStyles";
 
 type BackupTestStage = "drop" | "password" | "success";
 
@@ -65,6 +81,18 @@ type BackupTestFlowProps = {
   onProgressChange: React.Dispatch<React.SetStateAction<BackupTestProgress>>;
   /** Fired once when the user completes the test successfully. */
   onVerified?: () => void;
+  /** Replace native verification and identity reads in the dev-only preview. */
+  previewMode?: boolean;
+  /** Apply the experimental V3 presentation inside the safe preview. */
+  v3Presentation?: boolean;
+};
+
+const PREVIEW_BACKUP_FILENAME = "Buzz identity backup.ncryptsec";
+const PREVIEW_PRIVATE_KEY = `nsec1${"q".repeat(58)}`;
+const PREVIEW_VERIFICATION: BackupVerification = {
+  matchesCurrentIdentity: true,
+  npub: `npub1${"q".repeat(58)}`,
+  pubkey: "e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34",
 };
 
 const BURST_EMOJIS = ["🎉", "✨", "🐝", "🍯", "🔑", "💛"] as const;
@@ -204,8 +232,24 @@ export function BackupTestFlow({
   progress,
   onProgressChange,
   onVerified,
+  previewMode = false,
+  v3Presentation = false,
 }: BackupTestFlowProps) {
+  const cardLayout = useOnboardingPreviewCardLayout();
   const reduceMotion = useReducedMotion() ?? false;
+  const spotlightPrimaryActionClass = cardLayout
+    ? ONBOARDING_PRIMARY_CTA_CLASS
+    : ONBOARDING_SECURITY_PRIMARY_CTA_CLASS;
+  const stageEntrance = reduceMotion
+    ? false
+    : cardLayout
+      ? { opacity: 0 }
+      : { opacity: 0, y: 10 };
+  const successCopyEntrance = reduceMotion
+    ? false
+    : cardLayout
+      ? { opacity: 0 }
+      : { opacity: 0, y: 8 };
   const { stage, fileName, ncryptsec, result } = progress;
   // True while a file drag is anywhere over the window — the drop overlay
   // takes over the host surface only for the duration of the drag.
@@ -318,7 +362,9 @@ export function BackupTestFlow({
     // the typed password never lingers in the field.
     setAttempt("");
     try {
-      const verified = await verifyNcryptsecBackup(ncryptsec, password);
+      const verified = previewMode
+        ? PREVIEW_VERIFICATION
+        : await verifyNcryptsecBackup(ncryptsec, password);
       if (!mountedRef.current || requestId !== requestRef.current) return;
       onProgressChange((prev) => ({
         ...prev,
@@ -335,7 +381,14 @@ export function BackupTestFlow({
       if (mountedRef.current && requestId === requestRef.current)
         setIsVerifying(false);
     }
-  }, [attempt, isVerifying, ncryptsec, onProgressChange, onVerified]);
+  }, [
+    attempt,
+    isVerifying,
+    ncryptsec,
+    onProgressChange,
+    onVerified,
+    previewMode,
+  ]);
 
   const toggleSuccessNsec = React.useCallback(async () => {
     if (isSuccessNsecRevealed) {
@@ -349,7 +402,7 @@ export function BackupTestFlow({
     setIsLoadingSuccessNsec(true);
     setSuccessNsecError(null);
     try {
-      const value = await getNsec();
+      const value = previewMode ? PREVIEW_PRIVATE_KEY : await getNsec();
       if (!mountedRef.current) return;
       setSuccessNsec(value);
       setIsSuccessNsecRevealed(true);
@@ -361,9 +414,23 @@ export function BackupTestFlow({
     } finally {
       if (mountedRef.current) setIsLoadingSuccessNsec(false);
     }
-  }, [isSuccessNsecRevealed, successNsec]);
+  }, [isSuccessNsecRevealed, previewMode, successNsec]);
 
   const isSpotlight = variant === "spotlight";
+  const selectBackupFile = React.useCallback(() => {
+    if (previewMode && expectedNcryptsec) {
+      setError(null);
+      setAttempt("");
+      onProgressChange({
+        stage: "password",
+        fileName: PREVIEW_BACKUP_FILENAME,
+        ncryptsec: expectedNcryptsec,
+        result: null,
+      });
+      return;
+    }
+    fileInputRef.current?.click();
+  }, [expectedNcryptsec, onProgressChange, previewMode]);
 
   if (stage === "success" && result) {
     // The onboarding ceremony pins the exact file, so a success there is by
@@ -389,8 +456,8 @@ export function BackupTestFlow({
           <Check aria-hidden="true" className="h-8 w-8" strokeWidth={3} />
         </motion.div>
         <motion.div
-          animate={{ opacity: 1, y: 0 }}
-          initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+          animate={cardLayout ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          initial={successCopyEntrance}
           transition={
             reduceMotion ? { duration: 0 } : { delay: 0.15, duration: 0.35 }
           }
@@ -499,9 +566,9 @@ export function BackupTestFlow({
     >
       {stage === "drop" ? (
         <motion.div
-          animate={{ opacity: 1, y: 0 }}
+          animate={cardLayout ? { opacity: 1 } : { opacity: 1, y: 0 }}
           className="relative space-y-4"
-          initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+          initial={stageEntrance}
           key="drop"
           transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeOut" }}
         >
@@ -519,19 +586,69 @@ export function BackupTestFlow({
             tabIndex={-1}
             type="file"
           />
-          <Button
-            className={cn(
-              "mx-auto",
-              isSpotlight
-                ? ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
-                : "h-9 px-6 text-primary-foreground",
-            )}
-            data-testid="backup-test-dropzone"
-            onClick={() => fileInputRef.current?.click()}
-            type="button"
-          >
-            <span className="font-medium text-sm">Select your backup file</span>
-          </Button>
+          {v3Presentation && cardLayout ? (
+            <div className="-mx-2 flex w-[calc(100%+1rem)] flex-col gap-2">
+              <Button
+                className="group h-auto min-h-14 w-full justify-start gap-3 rounded-xl px-2 py-2 text-left text-sm font-medium text-foreground shadow-none hover:bg-foreground/[0.04] hover:text-foreground focus-visible:ring-2 focus-visible:ring-foreground/20"
+                data-testid="backup-test-dropzone"
+                onClick={selectBackupFile}
+                type="button"
+                variant="ghost"
+              >
+                <span className="flex size-8 shrink-0 items-center justify-start">
+                  <FileCheck2 aria-hidden className="!size-6" />
+                </span>
+                <span className="min-w-0 flex-1 truncate">
+                  Test your backup
+                </span>
+                <span className="ml-auto flex size-10 shrink-0 items-center justify-end">
+                  <ChevronRight
+                    aria-hidden
+                    className="size-4 text-muted-foreground transition-colors duration-150 ease-out group-hover:text-foreground motion-reduce:transition-none"
+                  />
+                </span>
+              </Button>
+              {onSaveCopy ? (
+                <Button
+                  className="group h-auto min-h-14 w-full justify-start gap-3 rounded-xl px-2 py-2 text-left text-sm font-medium text-foreground shadow-none hover:bg-foreground/[0.04] hover:text-foreground focus-visible:ring-2 focus-visible:ring-foreground/20"
+                  data-testid="encrypted-backup-save-copy"
+                  disabled={isSaving}
+                  onClick={onSaveCopy}
+                  type="button"
+                  variant="ghost"
+                >
+                  <span className="flex size-8 shrink-0 items-center justify-start">
+                    <Download aria-hidden className="!size-6" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">
+                    Download backup again
+                  </span>
+                  <span className="ml-auto flex size-10 shrink-0 items-center justify-end">
+                    <ChevronRight
+                      aria-hidden
+                      className="size-4 text-muted-foreground transition-colors duration-150 ease-out group-hover:text-foreground motion-reduce:transition-none"
+                    />
+                  </span>
+                </Button>
+              ) : null}
+            </div>
+          ) : (
+            <Button
+              className={cn(
+                "mx-auto",
+                isSpotlight
+                  ? spotlightPrimaryActionClass
+                  : "h-9 px-6 text-primary-foreground",
+              )}
+              data-testid="backup-test-dropzone"
+              onClick={selectBackupFile}
+              type="button"
+            >
+              <span className="font-medium text-sm">
+                Select your backup file
+              </span>
+            </Button>
+          )}
           {isWindowDragging ? (
             /*
              * Composer-style takeover: fills the nearest positioned host
@@ -570,13 +687,16 @@ export function BackupTestFlow({
               {error}
             </p>
           ) : null}
-          {onSaveCopy ? (
+          {onSaveCopy && !(v3Presentation && cardLayout) ? (
             <div className="flex flex-col items-center gap-2">
               <Button
                 className={cn(
                   "gap-1.5",
                   isSpotlight
-                    ? ONBOARDING_SECONDARY_CTA_CLASS
+                    ? cn(
+                        ONBOARDING_SECONDARY_CTA_CLASS,
+                        cardLayout && ONBOARDING_PREVIEW_SECONDARY_CTA_CLASS,
+                      )
                     : "h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15",
                 )}
                 data-testid="encrypted-backup-save-copy"
@@ -596,16 +716,19 @@ export function BackupTestFlow({
         </motion.div>
       ) : (
         <motion.div
-          animate={{ opacity: 1, y: 0 }}
+          animate={cardLayout ? { opacity: 1 } : { opacity: 1, y: 0 }}
           className="space-y-4"
-          initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+          initial={stageEntrance}
           key="password"
           transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeOut" }}
         >
           {(() => {
             const fileRow = (
               <div
-                className="flex max-w-full items-center gap-3 rounded-2xl border border-foreground/15 bg-foreground/10 px-4 py-3 text-foreground shadow-sm animate-in fade-in slide-in-from-bottom-1 duration-300 motion-reduce:animate-none"
+                className={cn(
+                  "flex max-w-full items-center gap-3 rounded-2xl border border-foreground/15 bg-foreground/10 px-4 py-3 text-foreground shadow-sm animate-in fade-in duration-300 motion-reduce:animate-none",
+                  !cardLayout && "slide-in-from-bottom-1",
+                )}
                 data-testid="backup-test-file-accepted"
               >
                 <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-foreground/10">
@@ -621,13 +744,18 @@ export function BackupTestFlow({
             );
             const passwordField = (
               <div className="relative w-full">
-                <Input
+                <OnboardingPreviewInput
                   aria-label="Backup password"
                   autoComplete="off"
                   className={cn(
                     "font-mono",
                     isSpotlight
-                      ? "h-14 rounded-2xl border-black/20 bg-white px-14 text-center text-lg text-black/80 shadow-none placeholder:text-black/55 focus-visible:ring-black/35"
+                      ? cardLayout
+                        ? cn(
+                            ONBOARDING_PREVIEW_CARD_INPUT_CLASS,
+                            "pr-12 font-mono",
+                          )
+                        : "h-14 rounded-2xl border-black/20 bg-white px-14 text-center text-lg text-black/80 shadow-none placeholder:text-black/55 focus-visible:ring-black/35"
                       : "h-10 bg-background pr-10",
                   )}
                   data-testid="backup-test-password"
@@ -639,6 +767,7 @@ export function BackupTestFlow({
                       void handleVerify();
                     }
                   }}
+                  smooth={cardLayout}
                   placeholder="Your backup password"
                   ref={passwordInputRef}
                   type={isRevealed ? "text" : "password"}
@@ -711,7 +840,7 @@ export function BackupTestFlow({
                 className={cn(
                   "font-medium",
                   isSpotlight
-                    ? ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
+                    ? spotlightPrimaryActionClass
                     : "h-9 px-6 text-sm text-primary-foreground",
                 )}
                 data-testid="backup-test-verify"

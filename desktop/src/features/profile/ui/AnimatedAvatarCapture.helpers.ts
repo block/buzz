@@ -4,10 +4,15 @@ import {
   type AvatarCameraDevice,
   type AvatarComposition,
   composeAvatarFrame,
+  composeAvatarFrames,
   DEFAULT_PERSON_SCALE,
+  encodeAvatarAnimation,
+  renderAvatarPosterPng,
 } from "@/features/profile/lib/animatedAvatarCapture";
 import { beginAvatarPresentation } from "@/features/profile/avatarPresentationStore";
+import type { AnimatedAvatarRecordingProcessor } from "@/features/profile/ui/AnimatedAvatarCapture.types";
 import { AVATAR_COLORS } from "@/features/profile/ui/ProfileAvatarEditor.utils";
+import { uploadMediaBytes } from "@/shared/api/tauri";
 import { buildAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 
 export type CapturePhase =
@@ -47,6 +52,40 @@ export function presentAnimatedAvatar(
     new Blob([Uint8Array.from(posterBytes).buffer], { type: "image/png" }),
   );
   return avatarUrl;
+}
+
+export async function saveAnimatedAvatar({
+  bitmaps,
+  composition,
+  posterIndex,
+  processRecording,
+}: {
+  bitmaps: ImageBitmap[];
+  composition: AvatarComposition;
+  posterIndex: number;
+  processRecording?: AnimatedAvatarRecordingProcessor;
+}): Promise<string> {
+  const composed = composeAvatarFrames(bitmaps, composition);
+  const posterFrame = composed[posterIndex] ?? composed[0];
+  if (!posterFrame) throw new Error("No frames were recorded.");
+
+  const animationBytes = encodeAvatarAnimation(composed);
+  const posterBytes = await renderAvatarPosterPng(posterFrame);
+  if (processRecording) {
+    return processRecording({ animationBytes, posterBytes });
+  }
+
+  const [animationUpload, posterUpload] = await Promise.all([
+    uploadMediaBytes([...animationBytes], "animated-avatar.png"),
+    uploadMediaBytes([...posterBytes], "animated-avatar-poster.png"),
+  ]);
+  if (
+    !animationUpload.type.startsWith("image/") ||
+    !posterUpload.type.startsWith("image/")
+  ) {
+    throw new Error("The relay rejected the recording. Try again.");
+  }
+  return presentAnimatedAvatar(posterUpload, animationUpload, posterBytes);
 }
 
 /** Keep things draggable but never fully lost off-frame. */
