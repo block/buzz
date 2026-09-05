@@ -116,6 +116,8 @@ pub(crate) enum RequirementPayload {
     },
     /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
+    /// A custom ACP harness command cannot be resolved in the desktop's PATH.
+    MissingBinary { command: String },
 }
 
 impl RequirementPayload {
@@ -190,6 +192,9 @@ impl RequirementPayload {
             RequirementPayload::GitBash => {
                 "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
             }
+            RequirementPayload::MissingBinary { command } => {
+                format!("install `{command}` or update PATH so Buzz Desktop can find it")
+            }
         }
     }
 }
@@ -258,24 +263,49 @@ impl SetupPayload {
                 .requirements
                 .iter()
                 .any(|r| matches!(r, RequirementPayload::GitBash));
-            let all_external = self
+            let has_missing_binary = self
                 .requirements
                 .iter()
-                .all(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
-            let any_external = self
+                .any(|r| matches!(r, RequirementPayload::MissingBinary { .. }));
+            let has_config_invalid = self
                 .requirements
                 .iter()
                 .any(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+            let all_external = self.requirements.iter().all(|r| {
+                matches!(
+                    r,
+                    RequirementPayload::CliConfigInvalid { .. }
+                        | RequirementPayload::MissingBinary { .. }
+                )
+            });
+            let any_external = self.requirements.iter().any(|r| {
+                matches!(
+                    r,
+                    RequirementPayload::CliConfigInvalid { .. }
+                        | RequirementPayload::MissingBinary { .. }
+                )
+            });
 
             let footer = if has_doctor_requirement {
                 "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
             } else if all_external {
-                // All requirements are external config files — Edit Agent cannot
-                // help. Don't send the user there.
-                "Fix the config file(s) and restart the agent.".to_string()
+                // External config and PATH failures cannot be fixed in Edit Agent.
+                match (has_missing_binary, has_config_invalid) {
+                    (true, true) => "Install the missing harness command(s) or update PATH, fix the config file(s), then restart the agent.".to_string(),
+                    (true, false) => "Install the missing harness command(s) or update PATH, then restart the agent.".to_string(),
+                    (false, true) => {
+                        "Fix the config file(s) and restart the agent.".to_string()
+                    }
+                    (false, false) => unreachable!("all_external requires an external requirement"),
+                }
             } else if any_external {
-                // Mixed: some Buzz-managed fields, some external config.
-                "Open Edit Agent in the Buzz app for the Buzz-managed fields; fix the external CLI config files manually and restart the agent.".to_string()
+                // Mixed: some Buzz-managed fields, plus external config or PATH.
+                match (has_missing_binary, has_config_invalid) {
+                    (true, true) => "Open Edit Agent in the Buzz app for the Buzz-managed fields; install the missing harness command(s) or update PATH, fix the external CLI config files manually, and restart the agent.".to_string(),
+                    (true, false) => "Open Edit Agent in the Buzz app for the Buzz-managed fields; install the missing harness command(s) or update PATH, then restart the agent.".to_string(),
+                    (false, true) => "Open Edit Agent in the Buzz app for the Buzz-managed fields; fix the external CLI config files manually and restart the agent.".to_string(),
+                    (false, false) => unreachable!("any_external requires an external requirement"),
+                }
             } else {
                 // All Buzz-managed — original footer unchanged.
                 "Open Edit Agent in the Buzz app to set these.".to_string()
@@ -820,6 +850,49 @@ mod tests {
         assert!(recipients.contains(&workflow_owner.as_str()));
         assert!(!recipients.contains(&relay_hex.as_str()));
         server.abort();
+    }
+
+    #[test]
+    fn setup_payload_accepts_missing_binary_requirement() {
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Custom Agent","agent_pubkey":"test","requirements":[{"surface":"missing_binary","command":"custom-acp"}]}"#,
+        )
+        .unwrap();
+
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("custom-acp"),
+            "missing-binary nudge must name the unresolved command; got: {body:?}"
+        );
+        assert!(
+            !body.contains("Open Edit Agent"),
+            "missing-binary setup cannot be fixed in Edit Agent; got: {body:?}"
+        );
+        assert!(
+            body.contains("restart the agent"),
+            "missing-binary nudge must tell the user to restart after fixing PATH; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_mixed_missing_binary_uses_split_footer() {
+        let payload = SetupPayload {
+            agent_name: "Custom Agent".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![
+                RequirementPayload::EnvKey {
+                    key: "CUSTOM_API_KEY".to_string(),
+                },
+                RequirementPayload::MissingBinary {
+                    command: "custom-acp".to_string(),
+                },
+            ],
+        };
+
+        let body = payload.nudge_body();
+        assert!(body.contains("Open Edit Agent"));
+        assert!(body.contains("update PATH"));
+        assert!(body.contains("restart the agent"));
     }
 
     #[test]
