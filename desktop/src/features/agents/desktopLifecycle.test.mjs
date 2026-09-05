@@ -238,3 +238,139 @@ test("receiver projects history without executing it and invalidates live work o
   assert.equal(f.errors.length, 1);
   close();
 });
+
+for (const stage of [
+  "subscription",
+  "history",
+  "projection",
+  "reconciliation",
+]) {
+  test(`receiver reports safe ${stage} failure and never admits queued work`, async () => {
+    const f = fixture();
+    const secret = "private key /home/private bearer secret";
+    if (stage === "subscription")
+      f.relay.subscribeLive = async () => {
+        throw Error(secret);
+      };
+    if (stage === "history")
+      f.relay.fetchEvents = async () => {
+        throw Error(secret);
+      };
+    const ipc = async (command, args) => {
+      if (
+        command === "observe_desktop_placement" &&
+        ((stage === "projection" && !args.reconcile) ||
+          (stage === "reconciliation" && args.reconcile))
+      )
+        throw Error(secret);
+      return f.ipc(command, args);
+    };
+    const started = receiveLifecycle(
+      scope,
+      () => true,
+      (e) => f.errors.push(e),
+      ipc,
+      f.relay,
+    );
+    f.deliver({ id: "queued", kind: 50182 });
+    await assert.rejects(started, (error) => {
+      assert.match(error.message, new RegExp(`${stage}: request failed`));
+      assert.doesNotMatch(error.message, /private|bearer|secret/);
+      return true;
+    });
+    await tick();
+    assert.equal(
+      f.calls.filter(([c]) => c === "receive_desktop_lifecycle").length,
+      0,
+    );
+    assert.deepEqual(
+      f.errors,
+      [],
+      "discarded callbacks cannot replace the startup diagnosis",
+    );
+  });
+}
+
+test("explicit receiver recovery discards old queued work and projects history without replay", async () => {
+  const f = fixture();
+  let rejectHistory;
+  f.relay.fetchEvents = () =>
+    new Promise((_, reject) => {
+      rejectHistory = reject;
+    });
+  const failed = receiveLifecycle(
+    scope,
+    () => true,
+    () => {},
+    f.ipc,
+    f.relay,
+  );
+  await tick();
+  f.deliver({ id: "old-live", kind: 50182 });
+  rejectHistory(Error("Timed out while loading channel history."));
+  await assert.rejects(failed, /history: history timed out/);
+  f.relay.fetchEvents = async () => [{ id: "old-live", kind: 50182 }];
+  const close = await receiveLifecycle(
+    scope,
+    () => true,
+    () => {},
+    f.ipc,
+    f.relay,
+  );
+  await tick();
+  assert.equal(
+    f.calls.filter(([c]) => c === "receive_desktop_lifecycle").length,
+    0,
+  );
+  f.deliver({ id: "new-live", kind: 50182 });
+  await tick();
+  assert.equal(
+    f.calls.filter(([c]) => c === "receive_desktop_lifecycle").length,
+    1,
+  );
+  f.deliver({ id: "closed-queue", kind: 50182 });
+  close();
+  await tick();
+  assert.equal(
+    f.calls.filter(([c]) => c === "receive_desktop_lifecycle").length,
+    1,
+  );
+});
+
+test("readiness timeout is distinct, late EOSE recovers, CLOSED retires old callbacks", async () => {
+  const f = fixture();
+  let notify, deliver;
+  let closed = 0,
+    ready = 0;
+  f.relay.subscribeLive = async (_filter, event, onReady, timeout) => {
+    assert.equal(timeout, 5000);
+    deliver = event;
+    notify = onReady;
+    notify("timeout");
+    return () => {
+      closed++;
+    };
+  };
+  const close = await receiveLifecycle(
+    scope,
+    () => true,
+    (e) => f.errors.push(e),
+    f.ipc,
+    f.relay,
+    () => ready++,
+  );
+  assert.match(f.errors[0], /readiness timed out/);
+  assert.equal(ready, 0);
+  notify("eose");
+  assert.equal(ready, 1);
+  notify("closed");
+  deliver({ id: "late", kind: 50182 });
+  await tick();
+  assert.equal(closed, 1);
+  assert.equal(
+    f.calls.filter(([c]) => c === "receive_desktop_lifecycle").length,
+    0,
+  );
+  assert.match(f.errors.at(-1), /subscription closed/);
+  close();
+});

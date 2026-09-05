@@ -9,6 +9,7 @@ import {
   type LifecycleOutcome,
 } from "../desktopLifecycle";
 import { useRelayAgentsQuery } from "../hooks";
+import { receiverErrorMessage } from "../desktopLifecycleDiagnostics";
 
 export function DesktopLifecycleReceiver({
   scope,
@@ -16,6 +17,7 @@ export function DesktopLifecycleReceiver({
   scope: DesktopScope | null;
 }) {
   const { owner, community } = scope ?? {};
+  const [attempt, retry] = useState(0);
   useEffect(() => {
     if (!owner || !community) return;
     let active = true;
@@ -30,22 +32,40 @@ export function DesktopLifecycleReceiver({
         id: notification,
         duration: Infinity,
         closeButton: true,
+        action: {
+          label: "Retry receiver",
+          onClick: () => {
+            if (!active) return;
+            active = false;
+            close?.();
+            retry(attempt + 1);
+          },
+        },
       });
     };
-    void receiveLifecycle({ owner, community }, () => active, reportError)
+    void receiveLifecycle(
+      { owner, community },
+      () => active,
+      reportError,
+      undefined,
+      undefined,
+      () => {
+        if (active && notification !== undefined) toast.dismiss(notification);
+      },
+    )
       .then((fn) => {
         if (active) close = fn;
         else fn();
       })
-      .catch(() => {
-        reportError("Desktop lifecycle receiver is unavailable.");
+      .catch((error) => {
+        reportError(receiverErrorMessage(error));
       });
     return () => {
       active = false;
       close?.();
       if (notification !== undefined) toast.dismiss(notification);
     };
-  }, [owner, community]);
+  }, [owner, community, attempt]);
   return null;
 }
 function message(outcome: LifecycleOutcome) {
