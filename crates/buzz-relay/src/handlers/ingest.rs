@@ -2099,6 +2099,24 @@ async fn author_type_label(
 /// from their transport-specific auth mechanism and maps the result to their
 /// transport-specific response format.
 ///
+/// Freshness window for an incoming event's `created_at`.
+///
+/// Most kinds get a tight ±15-minute window. NIP-59 gift-wraps (kind 1059)
+/// randomize their wrap `created_at` into the past (canonically up to two
+/// days) to thwart time-analysis attacks — the wrap's timestamp is
+/// deliberately meaningless. Checking it against the tight window breaks
+/// interop with every NIP-59-conformant client. Allow the wrap-kind up to
+/// NIP-59's two days plus a small skew margin. See issue #4192.
+pub(crate) fn max_timestamp_drift_secs(kind: u32) -> i64 {
+    const KIND_GIFT_WRAP_DRIFT_SECS: i64 = 2 * 24 * 3600 + 900; // 2 days + 15m skew
+    const KIND_DEFAULT_DRIFT_SECS: i64 = 900; // ±15 minutes
+    if kind == KIND_GIFT_WRAP {
+        KIND_GIFT_WRAP_DRIFT_SECS
+    } else {
+        KIND_DEFAULT_DRIFT_SECS
+    }
+}
+
 /// Builds a [`crate::conformance::EmitGuard`] around the actual ingest
 /// logic so the trace seam has fail-closed coverage: any exit path that
 /// doesn't emit a Write*/SanitizedError action will be caught by the
@@ -2231,10 +2249,10 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+    let max_drift = max_timestamp_drift_secs(kind_u32);
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    if (event_ts - now).abs() > max_drift {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -3293,6 +3311,21 @@ mod postgres_tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    #[test]
+    fn gift_wrap_drift_window_is_two_days_plus_skew() {
+        assert_eq!(
+            max_timestamp_drift_secs(KIND_GIFT_WRAP),
+            2 * 24 * 3600 + 900
+        );
+    }
+
+    #[test]
+    fn non_gift_wrap_drift_window_is_tight_15_minutes() {
+        assert_eq!(max_timestamp_drift_secs(1), 900);
+        assert_eq!(max_timestamp_drift_secs(9), 900); // CHANNEL_MESSAGE-ish
+        assert_eq!(max_timestamp_drift_secs(KIND_LONG_FORM), 900);
+    }
     use buzz_conformance::{TraceStep, Tracer};
     use buzz_core::kind::{
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
