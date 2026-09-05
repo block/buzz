@@ -551,20 +551,27 @@ export function MembersSidebar({
     return null;
   }
 
-  async function handleAddSearchResult(user: UserSearchResult) {
+  async function handleAddSearchResult(
+    user: UserSearchResult,
+    options: { ensureRunning?: boolean } = {},
+  ) {
     if (addingMemberPubkeys.has(user.pubkey)) {
       return;
     }
 
+    setInviteSubmissionErrors((prev) =>
+      prev.filter(
+        (error) =>
+          normalizePubkey(error.pubkey) !== normalizePubkey(user.pubkey),
+      ),
+    );
     setAddingMemberPubkeys((prev) => new Set(prev).add(user.pubkey));
 
     try {
-      // A local managed agent needs a running harness pair in this community,
-      // not just channel membership — a bare membership add leaves it deaf
-      // until someone @mentions it or manually starts the pair. Route it
-      // through the attach helper, which adds membership AND ensures the active
-      // community's pair is running (idempotent: a live pair is left alone).
-      // Humans and provider agents keep the plain membership add.
+      // Local managed agents offer two explicit owner actions: attach and
+      // start (the existing default), or attach while preserving a verified
+      // stopped state. Humans and provider agents keep the plain membership
+      // add.
       const managedAgent = managedAgentByPubkey.get(
         normalizePubkey(user.pubkey),
       );
@@ -572,9 +579,8 @@ export function MembersSidebar({
         try {
           await attachManagedAgentToChannel(channelId, {
             agent: managedAgent,
-            ensureRunning: true,
+            ensureRunning: options.ensureRunning ?? true,
           });
-          await invalidateChannelState(queryClient, channelId);
         } catch (error) {
           setInviteSubmissionErrors((prev) => [
             ...prev,
@@ -584,6 +590,11 @@ export function MembersSidebar({
                 error instanceof Error ? error.message : "Failed to add agent.",
             },
           ]);
+        } finally {
+          // Verification can fail after membership was accepted. Refresh even
+          // on error so partial success is visible instead of looking like a
+          // failed no-op.
+          await invalidateChannelState(queryClient, channelId);
         }
         return;
       }
@@ -776,23 +787,42 @@ export function MembersSidebar({
                             Not in this channel
                           </SearchResultSectionTitle>
                         ) : null}
-                        {addSearchResults.map((user) => (
-                          <AddMemberSearchResultRow
-                            disabled={
-                              addingMemberPubkeys.has(user.pubkey) || isArchived
-                            }
-                            key={user.pubkey}
-                            onSelect={(selectedUser) => {
-                              void handleAddSearchResult(selectedUser);
-                            }}
-                            ownerLabel={formatOwnerLabel(
-                              user.ownerPubkey,
-                              identityQuery.data?.pubkey,
-                              addSearchOwnerProfilesQuery.data?.profiles,
-                            )}
-                            user={user}
-                          />
-                        ))}
+                        {addSearchResults.map((user) => {
+                          const managedAgent = managedAgentByPubkey.get(
+                            normalizePubkey(user.pubkey),
+                          );
+                          const canAddWithoutStarting =
+                            managedAgent?.backend.type === "local" &&
+                            managedAgent.status === "stopped";
+
+                          return (
+                            <AddMemberSearchResultRow
+                              disabled={
+                                addingMemberPubkeys.has(user.pubkey) ||
+                                isArchived
+                              }
+                              key={user.pubkey}
+                              onSelect={(selectedUser) => {
+                                void handleAddSearchResult(selectedUser);
+                              }}
+                              onSelectWithoutStarting={
+                                canAddWithoutStarting
+                                  ? (selectedUser) => {
+                                      void handleAddSearchResult(selectedUser, {
+                                        ensureRunning: false,
+                                      });
+                                    }
+                                  : undefined
+                              }
+                              ownerLabel={formatOwnerLabel(
+                                user.ownerPubkey,
+                                identityQuery.data?.pubkey,
+                                addSearchOwnerProfilesQuery.data?.profiles,
+                              )}
+                              user={user}
+                            />
+                          );
+                        })}
                         {isAddSearchLoading ? (
                           <p className="px-4 py-3 text-sm text-muted-foreground">
                             Searching...

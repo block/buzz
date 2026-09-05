@@ -4343,6 +4343,82 @@ test("members sidebar can invite and remove managed agents", async ({
   await expectMembersTriggerCount(page, initialMemberCount);
 });
 
+test("members sidebar can add a stopped local agent without starting it", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+  await page.getByTestId("channel-management-search-users").fill("char");
+
+  const result = page.getByTestId(
+    `channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await expect(
+    result.getByRole("button", {
+      name: "Add charlie without starting",
+    }),
+  ).toBeVisible();
+  await expect(
+    result.getByRole("button", { name: "Add charlie and start" }),
+  ).toBeVisible();
+
+  const baselineCommands = await readCommandLog(page);
+  await result
+    .getByRole("button", { name: "Add charlie without starting" })
+    .click();
+
+  await expect(
+    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toContainText("charlie");
+
+  const commandsAfterAction = (await readCommandLog(page)).slice(
+    baselineCommands.length,
+  );
+  expect(commandsAfterAction).toContain("add_channel_members");
+  expect(commandsAfterAction).toContain("list_managed_agents");
+  expect(commandsAfterAction).not.toContain("start_managed_agent");
+  expect(commandsAfterAction).not.toContain("start_managed_agent_runtime");
+
+  const agents = await invokeMockCommand<
+    Array<{ pubkey: string; status: string }>
+  >(page, "list_managed_agents");
+  expect(
+    agents.find((agent) => agent.pubkey === TEST_IDENTITIES.charlie.pubkey)
+      ?.status,
+  ).toBe("stopped");
+
+  // Reload the isolated mock state and prove the same explicit action is
+  // keyboard-operable, not only pointer-operable.
+  await page.reload();
+  await openMembersSidebar(page, "general");
+  await page.getByTestId("channel-management-search-users").fill("char");
+  const keyboardResult = page.getByTestId(
+    `channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  const addWithoutStartingButton = keyboardResult.getByRole("button", {
+    name: "Add charlie without starting",
+  });
+  await addWithoutStartingButton.focus();
+  await expect(addWithoutStartingButton).toBeFocused();
+  await addWithoutStartingButton.press("Enter");
+  await expect(
+    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toContainText("charlie");
+  expect(await readCommandLog(page)).not.toContain("start_managed_agent");
+  expect(await readCommandLog(page)).not.toContain(
+    "start_managed_agent_runtime",
+  );
+});
+
 test("members sidebar pages add-member search beyond the first 50 people", async ({
   page,
 }) => {
