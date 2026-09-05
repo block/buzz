@@ -82,16 +82,38 @@ function UnreadCountBadge({
   );
 }
 
+/**
+ * The "this row needs attention" dot.
+ *
+ * `isActive` is not cosmetic here. The active row paints `bg-sidebar-active`,
+ * which every theme defines as `var(--sidebar-primary)` — the same hue the dot
+ * itself used unconditionally (`bg-primary`), so on the channel you currently
+ * have open the dot was drawing primary-on-primary and all but disappeared.
+ * That is precisely the thread-unread case: you are reading a channel when a
+ * reply lands in a thread you do not have open, and the one signal you get is
+ * invisible. Active rows therefore switch to the active row's *foreground*
+ * color, the same way the muted `BellOff` icon in this file already does.
+ *
+ * Sized at 10px rather than 8px: it sits at the far end of the row with no
+ * adjacent element to give it scale, and 8px read as a rendering artifact more
+ * than a deliberate indicator.
+ */
 function UnreadDotBadge({
   channelName,
   className,
+  isActive = false,
 }: {
   channelName: string;
   className?: string;
+  isActive?: boolean;
 }) {
   return (
     <span
-      className={cn("h-2 w-2 shrink-0 rounded-full bg-primary", className)}
+      className={cn(
+        "h-2.5 w-2.5 shrink-0 rounded-full",
+        isActive ? "bg-sidebar-active-foreground" : "bg-primary",
+        className,
+      )}
       data-testid={`channel-unread-dot-${channelName}`}
     >
       <span className="sr-only">unread</span>
@@ -356,7 +378,11 @@ export function ChannelMenuButton({
         />
       ) : null}
       {hasThreadUnread ? (
-        <UnreadDotBadge channelName={channel.name} className="ml-auto" />
+        <UnreadDotBadge
+          channelName={channel.name}
+          className="ml-auto"
+          isActive={isActive}
+        />
       ) : null}
     </SidebarMenuButton>
   );
