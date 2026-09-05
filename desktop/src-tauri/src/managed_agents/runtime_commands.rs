@@ -322,6 +322,7 @@ pub(crate) fn start_pair_locked(
         Some(super::remote_stop::capture_resume(
             &app,
             &key,
+            &relay_url,
             owner.as_deref().ok_or("Desktop owner unavailable")?,
         )?)
     } else {
@@ -330,7 +331,7 @@ pub(crate) fn start_pair_locked(
     let mut process = super::spawn_agent_child_with_broker(
         &app,
         record,
-        &key.relay_url,
+        &relay_url,
         lazy,
         owner.as_deref(),
         None,
@@ -355,7 +356,7 @@ pub(crate) fn start_pair_locked(
     record.last_stopped_at = None;
     record.last_error = None;
     runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
-    super::remote_stop::finish_resume(&app, &key, owner.as_deref(), resume.as_ref())?;
+    super::remote_stop::finish_resume(&app, &key, &relay_url, owner.as_deref(), resume.as_ref())?;
     let status = status_for(&app, record, &key, runtimes.get(&key), None);
     drop(runtimes);
     save_managed_agents(&app, &records)?;
@@ -462,7 +463,7 @@ async fn probe_agent_relay_access(
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;
-    let api_base = crate::relay::relay_http_base_url(&key.relay_url);
+    let api_base = crate::relay::relay_http_base_url(&requested_relay_url);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         crate::relay::query_relay_at_with_keys(
@@ -563,7 +564,7 @@ pub async fn reconcile_managed_agent_runtimes(
                 Ok((record, key, requested)) => {
                     match start_pair(
                         record.pubkey.clone(),
-                        key.relay_url.clone(),
+                        requested.clone(),
                         true,
                         Some(&record.updated_at),
                         false,

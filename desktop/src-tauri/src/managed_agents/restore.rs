@@ -21,7 +21,11 @@ use tauri::Manager;
 enum SpawnOutcome {
     /// Boxed: the spawned process carries its full spawn-config snapshot, so an
     /// inline variant would make every `Skipped`/`Failed` outcome pay for it.
-    Spawned(super::ManagedAgentRuntimeKey, Box<ManagedAgentProcess>),
+    Spawned(
+        super::ManagedAgentRuntimeKey,
+        String,
+        Box<ManagedAgentProcess>,
+    ),
     Skipped,
     Failed(String),
 }
@@ -341,7 +345,7 @@ pub async fn restore_managed_agents_on_launch(
                                             spawn_agent_child(
                                                 app,
                                                 record,
-                                                &key.relay_url,
+                                                &relay_url,
                                                 true,
                                                 owner_hex_ref,
                                                 None,
@@ -349,7 +353,7 @@ pub async fn restore_managed_agents_on_launch(
                                             )
                                         }) {
                                         Ok(process) => {
-                                            SpawnOutcome::Spawned(key, Box::new(process))
+                                            SpawnOutcome::Spawned(key, relay_url, Box::new(process))
                                         }
                                         Err(error) => SpawnOutcome::Failed(error),
                                     }
@@ -388,7 +392,7 @@ pub async fn restore_managed_agents_on_launch(
             // Skipped means a concurrent reconcile already owns a live child for
             // this pair; leave its runtime and record state untouched.
             SpawnOutcome::Skipped => continue,
-            SpawnOutcome::Spawned(key, mut process) => {
+            SpawnOutcome::Spawned(key, relay_url, mut process) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
                     continue;
                 };
@@ -416,11 +420,11 @@ pub async fn restore_managed_agents_on_launch(
                     key.clone(),
                     super::ManagedAgentPairRuntime::starting(*process),
                 );
-                // Carry the spawn key's relay into profile reconciliation so
+                // Carry the original launch community into profile reconciliation so
                 // the background task queries/publishes on the relay this
                 // spawn was actually keyed to — not whatever workspace is
                 // active when the task eventually executes.
-                successfully_spawned.push((pubkey, key.relay_url.clone()));
+                successfully_spawned.push((pubkey, relay_url));
             }
             SpawnOutcome::Failed(error) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
