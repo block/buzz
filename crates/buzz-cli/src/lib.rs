@@ -243,6 +243,12 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Non-mutating preflight diagnostics for the CLI environment and relay
+    Doctor {
+        /// Run only local checks; mark remote checks as skipped
+        #[arg(long, default_value_t = false)]
+        offline: bool,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2064,6 +2070,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
+    // Doctor runs its own credential/relay handling so that missing or
+    // malformed config surfaces as check results instead of argument-error
+    // exits.
+    if let Cmd::Doctor { offline } = cli.command {
+        return commands::doctor::run(&cli, offline).await;
+    }
+
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     let private_key_str = cli.private_key.ok_or_else(|| {
@@ -2125,6 +2138,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Doctor { .. } => unreachable!("handled above"),
     }
 }
 
@@ -2256,6 +2270,7 @@ mod tests {
             "canvas",
             "channels",
             "dms",
+            "doctor",
             "emoji",
             "feed",
             "gifs",
