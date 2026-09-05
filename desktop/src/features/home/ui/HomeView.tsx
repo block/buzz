@@ -14,6 +14,7 @@ import {
   formatInboxFullTimestamp,
   getInboxItemConversationId,
 } from "@/features/home/lib/inbox";
+import { usePersistentBoolean } from "@/features/home/usePersistentBoolean";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
 import { useInboxEditMessage } from "@/features/home/useInboxEditMessage";
 import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
@@ -110,7 +111,10 @@ export function HomeView({
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
-  const [unreadOnly, setUnreadOnly] = React.useState(false);
+  const [unreadOnly, setUnreadOnly] = usePersistentBoolean(
+    "buzz-home-inbox-unread-only.v1",
+    false,
+  );
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
   // restores the detail pane each history entry was showing and reloads
   // restore it from the URL. Default/automatic selection stays local-only —
