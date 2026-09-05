@@ -35,7 +35,10 @@ export function useMessageDeepLinks(enabled = true) {
       },
       async (payload) => {
         if (cancelled) return false;
-        openMessageLink({
+        // Resolving `true` acks the link and drops it from the durable pending
+        // queue, so the navigation has to have landed first — same contract the
+        // channel listener above keeps by awaiting `goChannel`.
+        await openMessageLink({
           channelId: payload.channelId,
           messageId: payload.messageId,
           threadRootId: payload.threadRootId,

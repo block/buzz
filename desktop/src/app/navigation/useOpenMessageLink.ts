@@ -15,28 +15,34 @@ import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
  *
  * Shared by the in-app markdown handler and the deep-link listener so both
  * route identically.
+ *
+ * Returns the navigation promise. The deep-link listener acks a pending link by
+ * resolving `true`, and that ack drops the link from the durable queue, so it
+ * has to await the navigation it claims to have performed — the channel-only
+ * listener beside it already awaits `goChannel`. Click handlers that have
+ * nothing to wait for can discard it.
  */
 export function useOpenMessageLink() {
   const { goChannel, goForumPost } = useAppNavigation();
 
   return React.useCallback(
-    (link: ParsedMessageLink) => {
-      void resolveMessageLinkDestination(
+    (link: ParsedMessageLink): Promise<void> =>
+      resolveMessageLinkDestination(
         link.channelId,
         link.messageId,
         link.threadRootId,
-      ).then((destination) => {
+      ).then(async (destination) => {
         if (destination.kind === "forum-post") {
-          return goForumPost(destination.channelId, destination.postId, {
+          await goForumPost(destination.channelId, destination.postId, {
             replyId: destination.replyId,
           });
+          return;
         }
-        return goChannel(destination.channelId, {
+        await goChannel(destination.channelId, {
           messageId: destination.messageId,
           threadRootId: destination.threadRootId,
         });
-      });
-    },
+      }),
     [goChannel, goForumPost],
   );
 }
