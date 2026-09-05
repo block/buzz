@@ -32,7 +32,16 @@ use nostr::{Event, EventBuilder, Kind, PublicKey, Tag, Timestamp, ToBech32};
 
 use crate::client::BuzzClient;
 use crate::error::CliError;
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 use crate::validate::validate_hex64;
+
+/// `notes ls` filters by `--author` / `--tag` only: no timestamp window, so
+/// the cap is the end of what it can return.
+const LS_LIMITS: ReadLimits = ReadLimits {
+    default: 50,
+    max: 200,
+    paging: Paging::None,
+};
 
 /// NIP-23 long-form content kind.
 pub const KIND_LONG_FORM: u16 = 30023;
@@ -672,9 +681,9 @@ pub async fn cmd_ls(
     client: &BuzzClient,
     author: Option<&str>,
     tag: Option<&str>,
-    limit: Option<u32>,
+    requested_limit: Option<u32>,
 ) -> Result<(), CliError> {
-    let limit = limit.unwrap_or(50).min(200);
+    let limit = LS_LIMITS.effective(requested_limit);
     let author = author.unwrap_or("me");
 
     let mut filter = serde_json::json!({
@@ -698,6 +707,9 @@ pub async fn cmd_ls(
     let mut snapshots = snapshots_from_events(parse_events(&raw)?)?;
     sort_snapshots_newest_first(&mut snapshots);
     print_snapshot_list_json(&snapshots)?;
+    if let Some(notice) = truncation_notice(snapshots.len(), requested_limit, LS_LIMITS) {
+        eprintln!("{notice}");
+    }
     Ok(())
 }
 

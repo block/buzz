@@ -2,12 +2,24 @@ use uuid::Uuid;
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 use crate::validate::{parse_uuid, sdk_err, validate_hex64};
 
+/// `dms list` exposes `--limit` and nothing else, so a caller who hits the cap
+/// has no older page to ask for.
+const LIST_LIMITS: ReadLimits = ReadLimits {
+    default: 50,
+    max: 200,
+    paging: Paging::None,
+};
+
 /// List DM conversations by querying kind:41001 (relay-confirmed DMs) filtered by our pubkey.
-pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
+pub async fn cmd_list_dms(
+    client: &BuzzClient,
+    requested_limit: Option<u32>,
+) -> Result<(), CliError> {
     let my_pk = client.keys().public_key().to_hex();
-    let limit = limit.unwrap_or(50).min(200);
+    let limit = LIST_LIMITS.effective(requested_limit);
     let filter = serde_json::json!({
         "kinds": [41001],
         "#p": [my_pk],
@@ -44,6 +56,9 @@ pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(),
         .collect();
     let output = serde_json::to_string(&dms).unwrap_or_default();
     println!("{output}");
+    if let Some(notice) = truncation_notice(dms.len(), requested_limit, LIST_LIMITS) {
+        eprintln!("{notice}");
+    }
     Ok(())
 }
 
