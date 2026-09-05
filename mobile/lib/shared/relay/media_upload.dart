@@ -58,6 +58,7 @@ const _allowedVideoMimeTypes = {'video/mp4'};
 const _allowedAudioMimeTypes = {'audio/mp4', 'audio/m4a', 'audio/aac'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
 const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
+const _maxCalendarSizeBytes = 10 * 1024 * 1024; // 10MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
@@ -526,21 +527,29 @@ class MediaUploadService {
     if (length == 0) {
       throw Exception('File is empty.');
     }
-    if (length > _maxFileSizeBytes) {
+    final isCalendar = _hasCalendarExtension(pickedFile.name);
+    final maxBytes = isCalendar ? _maxCalendarSizeBytes : _maxFileSizeBytes;
+    if (length > maxBytes) {
       throw Exception(
-        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
+        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). '
+        'Maximum is ${maxBytes ~/ 1024 ~/ 1024}MB.',
       );
     }
     final bytes = await pickedFile.readAsBytes();
     _throwIfCancelled(cancellationToken);
     final descriptor = await _uploadPreparedBytes(
       bytes,
-      mimeType: 'application/octet-stream',
+      mimeType: isCalendar ? 'text/calendar' : 'application/octet-stream',
       allowGenericFile: true,
+      fileExtension: isCalendar ? 'ics' : null,
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
-    return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
+    return descriptor.withFilename(
+      descriptor.type == 'text/calendar'
+          ? _safeCalendarAttachmentFilename(pickedFile.name)
+          : _safeAttachmentFilename(pickedFile.name),
+    );
   }
 
   Future<BlobDescriptor?> pickAndUploadFile() async {
@@ -577,6 +586,7 @@ class MediaUploadService {
     Uint8List bytes, {
     required String mimeType,
     bool allowGenericFile = false,
+    String? fileExtension,
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
@@ -591,16 +601,19 @@ class MediaUploadService {
     var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
+      fileExtension: fileExtension,
       sha256: sha256,
       path: _mediaUploadPath,
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
-    if (response.statusCode == HttpStatus.notFound ||
-        response.statusCode == HttpStatus.methodNotAllowed) {
+    if (fileExtension == null &&
+        (response.statusCode == HttpStatus.notFound ||
+            response.statusCode == HttpStatus.methodNotAllowed)) {
       response = await _sendUploadRequest(
         bytes: bytes,
         mimeType: mimeType,
+        fileExtension: null,
         sha256: sha256,
         path: _legacyMediaUploadPath,
         onProgress: onProgress,
@@ -626,6 +639,7 @@ class MediaUploadService {
   Future<http.Response> _sendUploadRequest({
     required Uint8List bytes,
     required String mimeType,
+    String? fileExtension,
     required String sha256,
     required String path,
     ValueChanged<double>? onProgress,
@@ -639,7 +653,11 @@ class MediaUploadService {
     );
     request.contentLength = bytes.length;
     request.headers.addAll(
-      _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
+      _buildUploadHeaders(
+        mimeType: mimeType,
+        sha256: sha256,
+        fileExtension: fileExtension,
+      ),
     );
     final writeRequest = request.sink
         .addStream(_uploadByteStream(bytes, onProgress))
@@ -659,11 +677,13 @@ class MediaUploadService {
   Map<String, String> _buildUploadHeaders({
     required String mimeType,
     required String sha256,
+    String? fileExtension,
   }) {
     final headers = <String, String>{
       'Authorization': _buildUploadAuthHeader(sha256),
       'Content-Type': mimeType,
       'X-SHA-256': sha256,
+      'X-Buzz-File-Extension': ?fileExtension,
     };
     return headers;
   }

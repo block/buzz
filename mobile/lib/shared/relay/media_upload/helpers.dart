@@ -1,5 +1,34 @@
 part of '../media_upload.dart';
 
+bool _hasCalendarExtension(String filename) {
+  return filename.toLowerCase().endsWith('.ics');
+}
+
+String _safeCalendarAttachmentFilename(String filename) {
+  final segments = filename.split(RegExp(r'[/\\]'));
+  final basename = segments.isEmpty ? '' : segments.last;
+  final extensionIndex = basename.lastIndexOf('.');
+  final stem = extensionIndex >= 0
+      ? basename.substring(0, extensionIndex)
+      : basename;
+  final sanitized = StringBuffer();
+  var byteLength = 0;
+
+  for (final rune in stem.runes) {
+    if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
+      continue;
+    }
+    final character = String.fromCharCode(rune);
+    final characterByteLength = utf8.encode(character).length;
+    if (byteLength + characterByteLength > 255 - '.ics'.length) break;
+    sanitized.write(character);
+    byteLength += characterByteLength;
+  }
+
+  final safeStem = sanitized.toString().trim();
+  return '${safeStem.isEmpty ? 'calendar' : safeStem}.ics';
+}
+
 bool _startsWith(Uint8List bytes, List<int> prefix) {
   if (bytes.length < prefix.length) return false;
   for (var i = 0; i < prefix.length; i++) {

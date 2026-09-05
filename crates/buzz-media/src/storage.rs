@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 
+use axum::http::{header::IF_NONE_MATCH, HeaderMap, HeaderValue};
 use buzz_core::tenant::{CommunityId, TenantContext};
 
 use crate::config::{MediaConfig, S3AddressingStyle};
@@ -206,6 +207,33 @@ pub struct MediaStorage {
     bucket: Box<Bucket>,
 }
 
+const CONDITIONAL_PUT_MAX_ATTEMPTS: usize = 3;
+
+async fn retry_conditional_put<F, Fut>(mut put: F) -> Result<bool, MediaError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), s3::error::S3Error>>,
+{
+    for attempt in 0..CONDITIONAL_PUT_MAX_ATTEMPTS {
+        match put().await {
+            Ok(()) => return Ok(true),
+            Err(s3::error::S3Error::HttpFailWithBody(412, _)) => return Ok(false),
+            Err(s3::error::S3Error::HttpFailWithBody(409, _))
+                if attempt + 1 < CONDITIONAL_PUT_MAX_ATTEMPTS =>
+            {
+                // Amazon S3 documents 409 ConditionalRequestConflict as a
+                // retryable outcome for conditional PutObject. Keep retries
+                // bounded and yield briefly so a competing request can finish;
+                // the next attempt will either create the object or observe 412.
+                tokio::time::sleep(std::time::Duration::from_millis(1 << attempt)).await;
+            }
+            Err(error) => return Err(MediaError::StorageError(error.to_string())),
+        }
+    }
+
+    Err(MediaError::Internal)
+}
+
 impl MediaStorage {
     /// Create a new storage client from config.
     ///
@@ -264,6 +292,40 @@ impl MediaStorage {
             .put_object_with_content_type(key, bytes, content_type)
             .await?;
         Ok(())
+    }
+
+    /// Atomically store a small object only when its key is absent.
+    pub(crate) async fn put_if_absent(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<bool, MediaError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_NONE_MATCH, HeaderValue::from_static("*"));
+        let bucket = self.bucket.clone();
+        let key = key.to_string();
+        let bytes = bytes.to_vec();
+        let content_type = content_type.to_string();
+        retry_conditional_put(move || {
+            let bucket = bucket.clone();
+            let key = key.clone();
+            let bytes = bytes.clone();
+            let content_type = content_type.clone();
+            let headers = headers.clone();
+            async move {
+                bucket
+                    .put_object_with_content_type_and_headers(
+                        key,
+                        &bytes,
+                        &content_type,
+                        Some(headers),
+                    )
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .await
     }
 
     /// Stream a file from disk into S3 without loading it into RAM.
@@ -452,6 +514,14 @@ impl MediaStorage {
         Self::sidecar_key(ctx.community(), sha256)
     }
 
+    /// Build the community-scoped classification-claim key for a SHA-256.
+    ///
+    /// Claims live beneath the existing tenant-owned `_meta/{community}/`
+    /// prefix but are not read by the media serve path.
+    pub fn classification_claim_key(ctx: &TenantContext, sha256: &str) -> String {
+        format!("_meta/{}/claims/{sha256}.json", ctx.community())
+    }
+
     /// Read community-scoped sidecar JSON for a given sha256 (bare hash).
     pub async fn get_sidecar(
         &self,
@@ -479,6 +549,58 @@ impl MediaStorage {
         let key = Self::ctx_sidecar_key(ctx, sha256);
         let meta_json = serde_json::to_vec(meta)?;
         self.put(&key, &meta_json, "application/json").await
+    }
+
+    /// Publish a community-scoped sidecar only when no sidecar exists yet.
+    ///
+    /// Returns `true` when this call created the sidecar and `false` when a
+    /// concurrent or earlier writer already published one. S3 evaluates the
+    /// `If-None-Match: *` precondition atomically, so callers can preserve the
+    /// first canonical classification for content-addressed bytes without a
+    /// racy HEAD-then-PUT sequence.
+    pub async fn put_sidecar_if_absent(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<bool, MediaError> {
+        let key = Self::ctx_sidecar_key(ctx, sha256);
+        self.put_blob_meta_if_absent(key, meta).await
+    }
+
+    /// Read the durable first-writer classification claim for a SHA-256.
+    pub async fn get_classification_claim(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+    ) -> Result<BlobMeta, MediaError> {
+        let key = Self::classification_claim_key(ctx, sha256);
+        let response = self.bucket.get_object(&key).await?;
+        Ok(serde_json::from_slice(&response.to_vec())?)
+    }
+
+    /// Atomically publish a first-writer classification claim.
+    ///
+    /// Returns `true` when this call created the claim and `false` when an
+    /// earlier or concurrent writer already established the classification.
+    pub async fn put_classification_claim_if_absent(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<bool, MediaError> {
+        let key = Self::classification_claim_key(ctx, sha256);
+        self.put_blob_meta_if_absent(key, meta).await
+    }
+
+    async fn put_blob_meta_if_absent(
+        &self,
+        key: String,
+        meta: &BlobMeta,
+    ) -> Result<bool, MediaError> {
+        let meta_json = serde_json::to_vec(meta)?;
+        self.put_if_absent(&key, &meta_json, "application/json")
+            .await
     }
 
     /// Convenience: read just the MIME type from the community sidecar.
@@ -678,6 +800,53 @@ fn fold_delete_result(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn conditional_put_retries_409_then_reports_created() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let calls = attempts.clone();
+        let created = retry_conditional_put(move || {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    Err(s3::error::S3Error::HttpFailWithBody(
+                        409,
+                        "conflict".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .expect("409 should be retried");
+
+        assert!(created);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn conditional_put_retries_409_then_reports_existing_sidecar() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let calls = attempts.clone();
+        let created = retry_conditional_put(move || {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let status = if attempt == 0 { 409 } else { 412 };
+                Err(s3::error::S3Error::HttpFailWithBody(
+                    status,
+                    "conditional write lost".to_string(),
+                ))
+            }
+        })
+        .await
+        .expect("409 retry followed by 412 is a lost race");
+
+        assert!(!created);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
 
     /// The bulk-delete fold is the retry-idempotence contract: legacy MinIO
     /// absent-key errors count as success, version artifacts are surfaced for
@@ -964,6 +1133,7 @@ mod tests {
             max_video_bytes: 524_288_000,
             max_file_bytes: 104_857_600,
             public_base_url: "http://localhost:3000/media".to_string(),
+            calendar_classification_enabled: false,
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
@@ -1028,10 +1198,11 @@ mod tests {
         let sha = "a".repeat(64);
         let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         let sidecar = MediaStorage::ctx_sidecar_key(&ctx, &sha);
+        let classification_claim = MediaStorage::classification_claim_key(&ctx, &sha);
         let upload = crate::upload_record::upload_record_key(&ctx, &sha, event_id);
         let prefixes = crate::bucket_index::tenant_prefixes(community);
 
-        for key in [sidecar, upload] {
+        for key in [sidecar, classification_claim, upload] {
             assert!(
                 prefixes.iter().any(|prefix| key.starts_with(prefix)),
                 "tenant writer key {key} is outside deletion prefixes"
@@ -1093,7 +1264,7 @@ pub struct BlobHeadMeta {
     pub size: u64,
 }
 
-/// Full blob metadata — stored as sidecar JSON in `_meta/{community}/{sha256}.json`.
+/// Full blob metadata stored in sidecars and immutable classification claims.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlobMeta {
     /// Pixel dimensions ("WxH").

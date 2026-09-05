@@ -40,6 +40,7 @@ fn minio_config(bucket: String) -> MediaConfig {
         max_video_bytes: 524_288_000,
         max_file_bytes: 104_857_600,
         public_base_url: "http://localhost:3000/media".to_string(),
+        calendar_classification_enabled: false,
         upload_records_enabled: false,
         upload_ip_header: None,
         upload_port_header: None,

@@ -1186,6 +1186,121 @@ void main() {
       expect(uploadRequested, isFalse);
     });
 
+    test(
+      'uploads ics with calendar metadata and preserves the filename',
+      () async {
+        final bytes = Uint8List.fromList(
+          utf8.encode('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n'),
+        );
+        http.Request? capturedRequest;
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: http_testing.MockClient((request) async {
+            capturedRequest = request;
+            return http.Response(
+              jsonEncode({
+                'url': 'https://relay.example/media/calendar.ics',
+                'sha256':
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'size': request.bodyBytes.length,
+                'type': 'text/calendar',
+                'uploaded': 1,
+              }),
+              HttpStatus.ok,
+            );
+          }),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          pickAttachmentFile: () async => _NamedXFile(bytes, 'Planning.ICS'),
+        );
+
+        final descriptor = await service.pickAndUploadFile();
+
+        expect(capturedRequest?.headers['Content-Type'], 'text/calendar');
+        expect(capturedRequest?.headers['X-Buzz-File-Extension'], 'ics');
+        expect(capturedRequest?.bodyBytes, bytes);
+        expect(descriptor?.filename, 'Planning.ics');
+        expect(
+          descriptor?.toMarkdownImage(),
+          '[Planning.ics](https://relay.example/media/calendar.ics)',
+        );
+      },
+    );
+
+    test(
+      'uses the returned calendar type to normalize generic filenames',
+      () async {
+        final bytes = Uint8List.fromList(
+          utf8.encode('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n'),
+        );
+        for (final testCase in const [
+          ['Planning.txt', 'Planning.ics'],
+          ['Agenda.markdown', 'Agenda.ics'],
+          ['Agenda', 'Agenda.ics'],
+        ]) {
+          http.Request? capturedRequest;
+          final service = MediaUploadService(
+            baseUrl: 'https://relay.example',
+            nsec: nostr.Keys.generate().nsec,
+            httpClient: http_testing.MockClient((request) async {
+              capturedRequest = request;
+              return http.Response(
+                jsonEncode({
+                  'url': 'https://relay.example/media/calendar.ics',
+                  'sha256':
+                      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                  'size': request.bodyBytes.length,
+                  'type': 'text/calendar',
+                  'uploaded': 1,
+                }),
+                HttpStatus.ok,
+              );
+            }),
+            pickGalleryVideo: () async => null,
+            pickGalleryImage: () async => null,
+            pickAttachmentFile: () async => _NamedXFile(bytes, testCase[0]),
+          );
+
+          final descriptor = await service.pickAndUploadFile();
+
+          expect(
+            capturedRequest?.headers['Content-Type'],
+            'application/octet-stream',
+          );
+          expect(
+            capturedRequest?.headers,
+            isNot(contains('X-Buzz-File-Extension')),
+          );
+          expect(descriptor?.filename, testCase[1]);
+          expect(descriptor?.toImetaTag(), contains('filename ${testCase[1]}'));
+        }
+      },
+    );
+
+    test('does not retry ics on the legacy media route', () async {
+      final paths = <String>[];
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          paths.add(request.url.path);
+          return http.Response('not found', HttpStatus.notFound);
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickAttachmentFile: () async => _NamedXFile(
+          Uint8List.fromList(
+            utf8.encode('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n'),
+          ),
+          'Planning.ics',
+        ),
+      );
+
+      await expectLater(service.pickAndUploadFile(), throwsException);
+      expect(paths, ['/upload']);
+    });
+
     test('sanitizes generic filenames to relay imeta constraints', () async {
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',

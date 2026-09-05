@@ -2802,7 +2802,7 @@ async fn live_fenced_tables_on(conn: &mut PgConnection) -> Result<BTreeSet<Strin
 
 /// Fail closed when a community-prefix inventory has an unsafe shape.
 pub fn validate_storage_manifest(manifest: &StorageManifest) -> Result<()> {
-    if !matches!(manifest.version, 4 | 5) {
+    if !matches!(manifest.version, 4..=6) {
         return Err(DbError::DeletionSafety(format!(
             "unsupported storage manifest version {}",
             manifest.version
