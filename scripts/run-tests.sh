@@ -81,6 +81,11 @@ run_unit_tests() {
   run_test_step "buzz-core tests" \
     cargo test -p buzz-core --lib -- --nocapture
 
+  # Broker request/response contracts are shared by every broker client and
+  # host. Mirrors the nextest path in `just test-unit`.
+  run_test_step "buzz-sdk tests" \
+    cargo test -p buzz-sdk -- --nocapture
+
   run_test_step "buzz-auth unit tests" \
     cargo test -p buzz-auth --lib -- --nocapture
 
