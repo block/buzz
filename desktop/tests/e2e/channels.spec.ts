@@ -571,6 +571,16 @@ test("shows presence in sidebar, DM header, and member list", async ({
     "Online",
   );
   await expect(page.getByTestId("channel-presence-alice-tyler")).toBeVisible();
+  const dmAvatarMask = page.getByTestId("channel-avatar-alice-tyler-mask");
+  await expect(dmAvatarMask).toHaveCSS("border-radius", "0px");
+  await expect(dmAvatarMask).toHaveCSS("clip-path", /polygon\(/);
+  await expect
+    .poll(() =>
+      dmAvatarMask.evaluate(
+        (element) => getComputedStyle(element).clipPath.split(",").length,
+      ),
+    )
+    .toBeGreaterThan(100);
 
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
@@ -2151,6 +2161,14 @@ test("shows and clears activity indicators for active channel agents", async ({
   }, TEST_IDENTITIES.alice.pubkey);
 
   await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
+  const activityAvatar = page.getByTestId(
+    `bot-activity-composer-avatar-${TEST_IDENTITIES.alice.pubkey}`,
+  );
+  await expect(activityAvatar).toHaveCSS("border-radius", "0px");
+  await expect(activityAvatar).toHaveCSS(
+    "clip-path",
+    'url("#agent-avatar-squircle-clip")',
+  );
   await expect(
     page.getByTestId("bot-activity-composer-trigger"),
   ).not.toContainText("View activity");

@@ -253,14 +253,20 @@ function unescapeSvgText(text: string) {
     .replace(/&amp;/gu, "&");
 }
 
-export function emojiAvatarDataUrl(
-  emoji: string,
-  color: string,
-  shape: "circle" | "rounded-square" = "circle",
-) {
-  const cornerRadius = shape === "rounded-square" ? 112 : 256;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="${cornerRadius}" fill="${color}"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="${EMOJI_AVATAR_FONT_SIZE}">${escapeSvgText(emoji)}</text></svg>`;
+export function emojiAvatarDataUrl(emoji: string, color: string) {
+  // Persist uncropped artwork. The consuming surface owns the silhouette:
+  // human profiles clip this square to a circle, while agents clip it to the
+  // shared squircle. Source-level rounding cannot be recovered by an outer
+  // clip and made legacy emoji agents look circular inside their squircles.
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" fill="${color}"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="${EMOJI_AVATAR_FONT_SIZE}">${escapeSvgText(emoji)}</text></svg>`;
   return `${EMOJI_AVATAR_DATA_URL_PREFIX}${encodeURIComponent(svg)}`;
+}
+
+export function squareEmojiAvatarDataUrl(avatarUrl: string) {
+  const descriptor = parseEmojiAvatarDataUrl(avatarUrl);
+  return descriptor
+    ? emojiAvatarDataUrl(descriptor.emoji, descriptor.color)
+    : avatarUrl;
 }
 
 export function parseEmojiAvatarDataUrl(

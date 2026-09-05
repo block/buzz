@@ -11,6 +11,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/agent_avatar_squircle.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
@@ -417,12 +418,7 @@ class _ProfileAvatar extends HookWidget {
                     fallback: _AvatarFallback(initial: initial),
                   );
             if (!isAgent) return ClipOval(child: avatar);
-            return ClipRRect(
-              borderRadius: BorderRadius.circular(
-                constraints.biggest.shortestSide * 0.3,
-              ),
-              child: avatar,
-            );
+            return AgentAvatarSquircle(child: avatar);
           },
         ),
       ),

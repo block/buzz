@@ -76,7 +76,9 @@ async function measureThreadSummaryGeometry(summaryRow: Locator) {
     const summarySurface = summaryButton.querySelector<HTMLElement>(
       '[data-testid="message-thread-summary-surface"]',
     );
-    const firstAvatar = firstParticipant?.firstElementChild;
+    const firstAvatar = firstParticipant?.querySelector<HTMLElement>(
+      '[data-testid^="message-thread-summary-avatar-"]',
+    );
 
     if (
       !summaryWrapper ||
@@ -385,6 +387,52 @@ test.beforeEach(async ({ page }, testInfo) => {
           : {}),
       };
   await installMockBridge(page, mock);
+});
+
+test("agent avatars use the one normalized SVG clip path", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const agentMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  const avatar = agentMessage.getByTestId("message-avatar");
+  await expect(avatar).toHaveClass(/agent-avatar-squircle/);
+  await expect(avatar).toHaveCSS("border-radius", "0px");
+  await expect(avatar).toHaveCSS("clip-path", /agent-avatar-squircle-clip/);
+  await expect(page.locator("#agent-avatar-squircle-clip")).toHaveCount(1);
+
+  const avatarBox = await avatar.boundingBox();
+  expect(avatarBox).toMatchObject({
+    width: expect.any(Number),
+    height: expect.any(Number),
+  });
+  if (avatarBox === null) {
+    throw new Error("agent message avatar has no rendered bounds");
+  }
+  expect(avatarBox.width).toBeGreaterThanOrEqual(24);
+  expect(avatarBox.height).toBeGreaterThanOrEqual(24);
+  expect(Math.abs(avatarBox.width - avatarBox.height)).toBeLessThanOrEqual(1);
+
+  await agentMessage.getByRole("button", { name: "A" }).first().click();
+  const profileAvatar = page
+    .getByTestId("user-profile-panel")
+    .locator(".agent-avatar-squircle")
+    .first();
+  await expect(profileAvatar).toBeVisible();
+  await expect(profileAvatar).toHaveCSS("border-radius", "0px");
+  await expect(profileAvatar).toHaveCSS(
+    "clip-path",
+    /agent-avatar-squircle-clip/,
+  );
+  await expect
+    .poll(() =>
+      profileAvatar.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width >= 80 && rect.height >= 80;
+      }),
+    )
+    .toBe(true);
 });
 
 test("agent owner label identifies the agent and owner", async ({ page }) => {
@@ -2760,6 +2808,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   const firstReply = `First threaded reply ${timestamp}`;
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
+  const nestedReplyFromAgent = `Nested reply from agent ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
   const fillerReplies = Array.from(
     { length: 14 },
@@ -2838,8 +2887,10 @@ test("opens a single-level thread panel with inline expansion", async ({
         .getByTestId("message-thread-summary-participant")
         .first()
         .evaluate((wrapper) => {
-          const avatar = wrapper.firstElementChild;
-          if (!(avatar instanceof HTMLElement)) return "missing";
+          const avatar = wrapper.querySelector<HTMLElement>(
+            '[data-testid^="message-thread-summary-avatar-"]',
+          );
+          if (!avatar) return "missing";
           const rect = avatar.getBoundingClientRect();
           return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
         }),
@@ -2877,7 +2928,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   );
   expect(
     Math.abs(
-      summaryGeometry.avatarLeft - summaryGeometry.summarySurfaceLeft - 4,
+      summaryGeometry.avatarLeft - summaryGeometry.summarySurfaceLeft - 8,
     ),
   ).toBeLessThanOrEqual(1);
   expect(
@@ -2997,6 +3048,27 @@ test("opens a single-level thread panel with inline expansion", async ({
     .first();
   await expect(nestedReplyFromBobRow).toBeVisible();
 
+  await page.evaluate(
+    ({ content, parentEventId, pubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content,
+        parentEventId,
+        pubkey,
+      });
+    },
+    {
+      content: nestedReplyFromAgent,
+      parentEventId: firstReplyId,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+  const nestedReplyFromAgentRow = threadReplies
+    .getByTestId("message-row")
+    .filter({ hasText: nestedReplyFromAgent })
+    .first();
+  await expect(nestedReplyFromAgentRow).toBeVisible();
+
   const firstReplySummaryRow = threadReplies.locator(
     `[data-testid="message-thread-summary"][data-thread-head-id="${firstReplyId}"]`,
   );
@@ -3006,10 +3078,10 @@ test("opens a single-level thread panel with inline expansion", async ({
   );
   await expect(firstReplyBranchGuide).not.toHaveCount(0);
 
-  await expect(rootSummaryRow).toContainText("18 replies");
+  await expect(rootSummaryRow).toContainText("19 replies");
   await expect(
     rootSummaryRow.getByTestId("message-thread-summary-participant"),
-  ).toHaveCount(2);
+  ).toHaveCount(3);
   await expect
     .poll(() =>
       rootSummaryRow
@@ -3020,13 +3092,57 @@ test("opens a single-level thread panel with inline expansion", async ({
             .join(","),
         ),
     )
-    .toBe("1,2");
+    .toBe("1,2,3");
+  const stackedParticipants = rootSummaryRow.getByTestId(
+    "message-thread-summary-participant",
+  );
+  const stackGeometry = await stackedParticipants.evaluateAll((participants) =>
+    participants.map((participant) => {
+      const avatar = participant.querySelector<HTMLElement>(
+        '[data-testid^="message-thread-summary-avatar-"]',
+      );
+      if (!avatar) throw new Error("Expected a stacked thread avatar.");
+      const rect = avatar.getBoundingClientRect();
+      return { left: rect.left, width: rect.width };
+    }),
+  );
+  expect(stackGeometry[1].left - stackGeometry[0].left).toBeCloseTo(
+    stackGeometry[0].width - 4,
+    1,
+  );
+  expect(stackGeometry[2].left - stackGeometry[1].left).toBeCloseTo(
+    stackGeometry[1].width - 4,
+    1,
+  );
+  let foregroundAgentIndex = -1;
+  await expect
+    .poll(async () => {
+      foregroundAgentIndex = await stackedParticipants.evaluateAll(
+        (participants) =>
+          participants.findIndex(
+            (participant, index) =>
+              index > 0 && participant.querySelector(".agent-avatar-squircle"),
+          ),
+      );
+      return foregroundAgentIndex;
+    })
+    .toBeGreaterThan(0);
+  const maskBehindAgent = rootSummaryRow.getByTestId(
+    `message-thread-summary-stack-mask-${foregroundAgentIndex - 1}`,
+  );
+  const stackMaskImage = await maskBehindAgent.evaluate(
+    (element) => getComputedStyle(element).maskImage,
+  );
+  expect(stackMaskImage).toContain("data:image/svg+xml");
+  expect(decodeURIComponent(stackMaskImage)).toContain(
+    'd="M .5 0 C .93 0 1 .07 1 .5',
+  );
 
   await expectThreadReplyUnobscured(nestedReplyRow);
 
   await firstReplyBranchGuide.first().click();
   await expect(firstReplySummaryRow).toHaveCount(1);
-  await expect(firstReplySummaryRow).toContainText("2 replies");
+  await expect(firstReplySummaryRow).toContainText("3 replies");
   await expect(
     threadReplies.getByTestId("message-row").filter({ hasText: nestedReply }),
   ).toHaveCount(0);
@@ -3034,6 +3150,11 @@ test("opens a single-level thread panel with inline expansion", async ({
     threadReplies
       .getByTestId("message-row")
       .filter({ hasText: nestedReplyFromBob }),
+  ).toHaveCount(0);
+  await expect(
+    threadReplies
+      .getByTestId("message-row")
+      .filter({ hasText: nestedReplyFromAgent }),
   ).toHaveCount(0);
 });
 

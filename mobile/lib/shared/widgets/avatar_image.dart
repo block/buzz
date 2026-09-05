@@ -12,6 +12,7 @@ import '../emoji/emoji_avatar.dart';
 import '../emoji/native_emoji_glyph.dart';
 import '../push/push_presentation_cache.dart';
 import '../relay/relay.dart';
+import 'agent_avatar_squircle.dart';
 
 /// An avatar that supports both remote URLs and inline image data.
 ///
@@ -53,10 +54,8 @@ class AvatarImage extends StatelessWidget {
       );
     }
 
-    final borderRadius = BorderRadius.circular(radius * 0.6);
-    return DecoratedBox(
-      decoration: BoxDecoration(color: color, borderRadius: borderRadius),
-      child: ClipRRect(borderRadius: borderRadius, child: content),
+    return AgentAvatarSquircle(
+      child: color == null ? content : ColoredBox(color: color, child: content),
     );
   }
 }

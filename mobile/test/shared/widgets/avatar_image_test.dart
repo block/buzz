@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:buzz/shared/widgets/agent_avatar_squircle.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:buzz/shared/push/push_presentation_cache.dart';
@@ -38,12 +39,26 @@ void main() {
     expect(isCacheablePushAvatarSource('data:image/png;base64,%%%'), isFalse);
   });
 
-  testWidgets('clips agents to a 30 percent squircle', (tester) async {
+  testWidgets('clips agent image and fallback with the normalized path', (
+    tester,
+  ) async {
     await tester.pumpWidget(subject(null, isAgent: true));
 
     expect(find.byType(CircleAvatar), findsNothing);
-    final clip = tester.widget<ClipRRect>(find.byType(ClipRRect));
-    expect(clip.borderRadius, BorderRadius.circular(9.6));
+    final clip = tester.widget<ClipPath>(find.byType(ClipPath));
+    expect(clip.clipper, isA<AgentAvatarSquircleClipper>());
+    final path = (clip.clipper! as AgentAvatarSquircleClipper).getClip(
+      const Size.square(32),
+    );
+    expect(path.getBounds(), const Rect.fromLTWH(0, 0, 32, 32));
+    expect(path.contains(const Offset(16, 0)), isTrue);
+    expect(path.contains(const Offset(0, 0)), isFalse);
+    expect(find.text('R'), findsOneWidget);
+  });
+
+  test('keeps the shared squircle source as one normalized SVG path', () {
+    expect(agentAvatarSquirclePath, startsWith('M 50,0'));
+    expect(agentAvatarSquirclePath, endsWith('50,0 Z'));
   });
 
   testWidgets('renders raccoon percent-encoded SVG data avatar', (
