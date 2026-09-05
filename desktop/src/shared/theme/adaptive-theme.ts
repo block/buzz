@@ -76,6 +76,35 @@ function overlay(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+function contrastRatio(hex1: string, hex2: string): number {
+  const l1 = luminance(hex1);
+  const l2 = luminance(hex2);
+  const [lighter, darker] = l1 >= l2 ? [l1, l2] : [l2, l1];
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/**
+ * Nudge `color` toward black (on light surfaces) or white (on dark surfaces)
+ * until it reaches `minRatio` contrast against `bg`. Bounded: mid-luminance
+ * surfaces where the ratio is unreachable get the closest achievable color.
+ *
+ * Git decoration colors feed `--destructive` and the status vars, which are
+ * rendered as text — but themes often define them only as pale diff-gutter
+ * tints, which are unreadable as foregrounds without this guard.
+ */
+export function ensureContrast(
+  color: string,
+  bg: string,
+  minRatio = 4.5,
+): string {
+  const step = luminance(bg) >= 0.5 ? -0.08 : 0.08;
+  let result = color;
+  for (let i = 0; i < 20 && contrastRatio(result, bg) < minRatio; i++) {
+    result = adjust(result, step);
+  }
+  return result;
+}
+
 // =============================================================================
 // Chrome Color Calculation
 // =============================================================================
@@ -201,14 +230,23 @@ export function createThemeVars(
 
   const dir = isDark ? 1 : -1;
   const elevate = (amount: number) => adjust(primaryBg, dir * amount);
+  const popoverBg = elevate(0.08);
 
-  // Git/accent colors with fallbacks
+  // Git/accent colors with fallbacks. Theme-derived colors are contrast-guarded
+  // against the popover surface — the worst-case background for both modes,
+  // since elevation shifts it toward the text color.
   const fallbackGreen = isDark ? "#3fb950" : "#1a7f37";
   const fallbackRed = isDark ? "#f85149" : "#cf222e";
   const fallbackOrange = isDark ? "#d29922" : "#9a6700";
 
-  const accentGreen = gitColors?.added ?? fallbackGreen;
-  const accentRed = gitColors?.deleted ?? fallbackRed;
+  const accentGreen = ensureContrast(
+    gitColors?.added ?? fallbackGreen,
+    popoverBg,
+  );
+  const accentRed = ensureContrast(
+    gitColors?.deleted ?? fallbackRed,
+    popoverBg,
+  );
   const accentOrange = fallbackOrange;
 
   // Derived colors
@@ -237,7 +275,7 @@ export function createThemeVars(
       // Backgrounds
       "--background": hexToHsl(primaryBg),
       "--card": hexToHsl(primaryBg),
-      "--popover": hexToHsl(elevate(0.08)),
+      "--popover": hexToHsl(popoverBg),
       "--muted": hexToHsl(hoverBg),
       "--accent": hexToHsl(hoverBg),
       "--secondary": hexToHsl(hoverBg),
