@@ -1776,3 +1776,35 @@ fn discovery_publish_path_drops_mid_flight_delete() {
         "discovery's publish must not resurrect a harness deleted mid-discovery"
     );
 }
+
+/// Regression for #4233 item C: an absolute-path `acp_command` that the user
+/// pinned to a non-workspace location must NOT be silently redirected to the
+/// cargo workspace's `target/{debug,release}` build. The workspace target is
+/// a last-resort fallback for dev convenience — it must never override a
+/// real user-installed binary.
+#[test]
+fn path_pinned_command_skips_workspace_target_resolution() {
+    // The bug shape: `resolve_workspace_command` previously ran first in
+    // `resolve_command_uncached`, AND itself early-returned for path inputs.
+    // That early return was the only reason absolute pins worked. If the
+    // order had been inverted (workspace-first for ALL inputs), any repave
+    // of `target/debug` would silently clobber the user's pinned binary.
+    //
+    // This test documents the contract, not just the behavior:
+    // resolve_command_uncached on a path that doesn't exist on disk must
+    // return None, not fall through to a workspace binary.
+    let missing_abs_path = if cfg!(windows) {
+        "C:\\definitely-not-on-this-machine\\buzz-acp.exe"
+    } else {
+        "/definitely-not-on-this-machine/buzz-acp"
+    };
+    // Workspace target may coincidentally have a binary with this basename;
+    // the result is meaningful only if resolution does NOT route through the
+    // workspace search path for a path-input command.
+    let result = super::resolve_command_uncached(missing_abs_path);
+    assert!(
+        result.is_none(),
+        "resolve_command_uncached must return None for a non-existent absolute path \
+         (got {result:?}) — never redirect a pinned-absolute acp_command to workspace target"
+    );
+}
