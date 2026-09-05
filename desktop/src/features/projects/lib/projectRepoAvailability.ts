@@ -4,6 +4,7 @@ export type ProjectRepoUnavailableReason =
   | "unbound"
   | "authentication"
   | "network"
+  | "path"
   | "ref"
   | "unknown";
 
@@ -41,6 +42,11 @@ const PROJECT_REPO_UNAVAILABLE_PRESENTATIONS: Record<
     description:
       "The Buzz git service could not be reached. Check your connection and try again.",
     title: "Couldn’t reach repository",
+  },
+  path: {
+    description:
+      "The repository contains paths longer than the local filesystem allows (Windows MAX_PATH). Enable long paths in your git config or Windows settings, then retry.",
+    title: "Paths exceed local limit",
   },
   ref: {
     description:
@@ -99,6 +105,9 @@ export function projectRepoUnavailableReason(
     )
   ) {
     return "network";
+  }
+  if (/filename too long|unable to checkout working tree/.test(message)) {
+    return "path";
   }
   return "unknown";
 }
