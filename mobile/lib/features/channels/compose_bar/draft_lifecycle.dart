@@ -26,10 +26,10 @@ Future<void> _sendTextOnlyDraft({
         draftRevision.value != clearedDraftRevision) {
       return;
     }
-    controller.value = clearedDraftText;
     mentionMap.value
       ..clear()
       ..addAll(clearedDraftMentions);
+    controller.value = clearedDraftText;
     focusNode.requestFocus();
   }
 
@@ -70,6 +70,7 @@ void _useComposeDraftLifecycle({
   required String? threadHeadId,
   required String draftIdentity,
   required ObjectRef<int> draftRevision,
+  required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required ValueNotifier<List<_PendingAttachment>> attachments,
   required ObjectRef<int> uploadGeneration,
   required ObjectRef<UploadCancellationToken?> activeUploadCancellation,
@@ -80,13 +81,34 @@ void _useComposeDraftLifecycle({
   required _IOSAttachmentPopoverController iosAttachmentPopover,
   required VoidCallback onDraftIdentityChanged,
 }) {
+  // Retire the old listener before restoring another scope's text: replacement
+  // effects can run before the previous effect's cleanup.
+  final owner = useMemoized(Object.new, [draftKey, draftIdentity]);
+  final currentOwner = useRef(owner)..value = owner;
   final lastDraftIdentity = useRef<String?>(null);
+  final lastDraftKey = useRef<String?>(null);
   useEffect(() {
     final identityChanged =
         lastDraftIdentity.value != null &&
-        lastDraftIdentity.value != draftIdentity;
+        (lastDraftIdentity.value != draftIdentity ||
+            lastDraftKey.value != draftKey);
     lastDraftIdentity.value = draftIdentity;
-    final saved = ref.read(composeDraftsProvider.notifier).textFor(draftKey);
+    lastDraftKey.value = draftKey;
+    final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
+    void restoreBindings() {
+      mentionMap.value
+        ..clear()
+        ..addAll({
+          for (final e
+              in (saved?.mentions ?? const <String, DraftMention>{}).entries)
+            e.key: MentionCandidate(
+              pubkey: e.value.pubkey,
+              displayName: e.key,
+              isAgent: e.value.isAgent,
+            ),
+        });
+    }
+
     if (identityChanged) {
       draftRevision.value += 1;
       onDraftIdentityChanged();
@@ -101,28 +123,60 @@ void _useComposeDraftLifecycle({
       final staleAttachments = attachments.value;
       attachments.value = const [];
       unawaited(_deleteOwnedAttachments(staleAttachments));
-      controller.text = saved ?? '';
+      restoreBindings();
+      controller.text = saved?.text ?? '';
     } else if (saved != null && controller.text.isEmpty) {
-      controller.text = saved;
+      restoreBindings();
+      controller.text = saved.text;
     }
 
     var lastPersistedText = controller.text;
     void persistDraft() {
+      if (!identical(currentOwner.value, owner)) return;
       final text = controller.text;
       if (text == lastPersistedText) return;
       lastPersistedText = text;
       draftRevision.value += 1;
-      ref
-          .read(composeDraftsProvider.notifier)
-          .save(
-            key: draftKey,
-            channelId: channelId,
-            threadHeadId: threadHeadId,
-            text: text,
-          );
+      _persistComposeDraft(
+        ref,
+        controller,
+        mentionMap.value,
+        draftKey,
+        channelId,
+        threadHeadId,
+      );
     }
 
     controller.addListener(persistDraft);
     return () => controller.removeListener(persistDraft);
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
+}
+
+void _persistComposeDraft(
+  WidgetRef ref,
+  TextEditingController controller,
+  Map<String, MentionCandidate> mentions,
+  String key,
+  String channelId,
+  String? threadHeadId,
+) {
+  final text = controller.text;
+  ref
+      .read(composeDraftsProvider.notifier)
+      .save(
+        key: key,
+        channelId: channelId,
+        threadHeadId: threadHeadId,
+        text: text,
+        mentions: {
+          for (final range in mentionOccurrences(
+            text.replaceAll('`', ' '),
+            mentions.keys,
+          ))
+            range.label: DraftMention(
+              pubkey: mentions[range.label]!.pubkey,
+              isAgent: mentions[range.label]!.isAgent,
+            ),
+        },
+      );
 }
