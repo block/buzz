@@ -36,8 +36,18 @@ export function useMembersSidebarModeration(open: boolean) {
     timeoutMutation.isPending ||
     untimeoutMutation.isPending;
 
+  const [nowMs, setNowMs] = React.useState(() => Date.now());
+
+  // Tick nowMs every second while the sidebar is open — ensures `timedOut`
+  // transitions from true→false reactively as TTLs expire without waiting for
+  // the next query refresh (staleTime: 15_000).
+  React.useEffect(() => {
+    if (!open) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [open]);
+
   const moderationStateByPubkey = React.useMemo(() => {
-    const nowMs = Date.now();
     const map = new Map<string, MemberModerationState>();
     for (const restriction of restrictionsQuery.data ?? []) {
       map.set(normalizePubkey(restriction.pubkey), {
@@ -46,7 +56,7 @@ export function useMembersSidebarModeration(open: boolean) {
       });
     }
     return map;
-  }, [restrictionsQuery.data]);
+  }, [restrictionsQuery.data, nowMs]);
 
   const runModerationAction = React.useCallback(
     async (action: () => Promise<unknown>, success: string) => {

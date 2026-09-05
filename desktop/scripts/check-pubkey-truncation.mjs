@@ -28,6 +28,8 @@ const overrides = new Set([
   "src/features/messages/lib/threadPanel.ts:395",
   "src/features/projects/ui/ProjectsView.tsx:166",
   "src/features/projects/ui/ProjectsOverviewPanel.tsx:209",
+  // Error message prefix in a console-internal action error (never rendered as identity).
+  "src/features/admin-console/AdminConsoleStaffingTab.tsx:108",
 ]);
 
 await runPubkeyTruncationCheck({

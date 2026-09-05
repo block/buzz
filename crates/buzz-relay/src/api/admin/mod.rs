@@ -205,7 +205,7 @@ async fn reports(
     .await?;
     validate(
         query.status.as_deref(),
-        &["open", "resolved", "dismissed", "escalated"],
+        REPORT_STATUS_ALLOWLIST,
         "invalid_status",
     )?;
     validate(query.scope.as_deref(), &["all"], "invalid_scope")?;
@@ -432,6 +432,11 @@ struct ResolveReportBody {
 /// client error, and the cap keeps `Utc::now() + Duration` well clear of the
 /// chrono/`i64` overflow range so the computation can never panic.
 const MAX_TIMEOUT_SECS: u64 = 365 * 24 * 60 * 60;
+
+/// Allowed explicit `status=` values for the `list_reports` endpoint.
+/// Mutation: remove "processing" here → `report_status_accepts_processing` goes RED.
+const REPORT_STATUS_ALLOWLIST: &[&str] =
+    &["open", "processing", "resolved", "dismissed", "escalated"];
 
 /// Convert an attacker-controlled `expiration_secs` into a future timeout
 /// instant, rejecting zero, the over-cap range, and any value that would
@@ -1546,6 +1551,33 @@ mod postgres_tests {
     fn report_filters_reject_unknown_values() {
         assert!(validate(Some("open"), &["open"], "invalid_status").is_ok());
         assert!(validate(Some("unknown"), &["open"], "invalid_status").is_err());
+    }
+
+    #[test]
+    fn report_status_accepts_processing() {
+        // Wes P2 round-6: explicit status=processing must be accepted by the
+        // allowlist used in list_reports. References the production constant so
+        // removing "processing" from REPORT_STATUS_ALLOWLIST makes this RED
+        // while the omitted-default and scope=all tests stay green.
+        assert!(
+            validate(
+                Some("processing"),
+                REPORT_STATUS_ALLOWLIST,
+                "invalid_status"
+            )
+            .is_ok(),
+            "status=processing must be in the production allowlist"
+        );
+        // Confirm the gate still rejects values outside the set.
+        assert!(
+            validate(
+                Some("unknown_state"),
+                REPORT_STATUS_ALLOWLIST,
+                "invalid_status"
+            )
+            .is_err(),
+            "status=unknown_state must be rejected by the production allowlist"
+        );
     }
 
     #[test]
