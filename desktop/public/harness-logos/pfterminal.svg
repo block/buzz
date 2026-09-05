@@ -1,0 +1,12 @@
+<svg viewBox="0 0 136 136" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PFTerminal">
+  <defs>
+    <filter id="pft-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.50 0 0 0 0 0.93 0 0 0 0 0.39 0 0 0 0.55 0"/>
+      <feBlend in="SourceGraphic"/>
+    </filter>
+  </defs>
+  <rect width="136" height="136" rx="20" fill="#071007" stroke="rgba(221,255,220,.28)" stroke-width="2"/>
+  <path d="M30 30 106 106m0-76L30 106" stroke="#ddffdc" stroke-width="14" stroke-linecap="round" fill="none" filter="url(#pft-glow)"/>
+  <line x1="30" y1="106" x2="106" y2="106" stroke="#ddffdc" stroke-width="14" stroke-linecap="round" filter="url(#pft-glow)"/>
+</svg>
