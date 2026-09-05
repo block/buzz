@@ -267,6 +267,22 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Persona pack directory. Requires `--persona`: the named persona's MCP
+    /// servers are added to every ACP session and its skills are materialized
+    /// into the working directory.
+    #[arg(long, env = "BUZZ_ACP_PERSONA_PACK", requires = "persona")]
+    pub persona_pack: Option<PathBuf>,
+
+    /// Persona name within `--persona-pack`.
+    #[arg(long, env = "BUZZ_ACP_PERSONA_NAME", requires = "persona_pack")]
+    pub persona: Option<String>,
+
+    /// Working directory for this harness and its agent subprocess. Give each
+    /// agent its own directory to keep skills and runtime config unshared.
+    /// Created if missing. Defaults to the process working directory.
+    #[arg(long, env = "BUZZ_ACP_WORKDIR")]
+    pub workdir: Option<PathBuf>,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -598,6 +614,18 @@ pub struct Config {
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
+    /// MCP servers declared by the configured persona (pack `.mcp.json` merged
+    /// with the persona's own `mcp_servers:`). Added to every ACP session
+    /// alongside the Buzz-managed server. Empty when no pack is configured.
+    pub persona_mcp_servers: Vec<buzz_persona::resolve::ResolvedMcpServer>,
+    /// Absolute source directories of the skills scoped to the configured
+    /// persona — the ones it claims plus the pack's unclaimed (shared) ones.
+    /// Materialized into the working directory at startup. Empty when no pack
+    /// is configured.
+    pub persona_skill_dirs: Vec<PathBuf>,
+    /// Working directory to switch into at startup. `None` keeps the process
+    /// working directory as inherited.
+    pub workdir: Option<PathBuf>,
     /// Whether `codex_network_env()` successfully injected a `CODEX_CONFIG` entry into
     /// `persona_env_vars`.  When true, `AcpClient::spawn` merges all `CODEX_CONFIG` entries
     /// and forces `sandbox_workspace_write.network_access = true` via `build_codex_config_env`.
@@ -794,6 +822,57 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
+}
+
+/// Resolve `--persona-pack` / `--persona` into the persona's MCP servers and
+/// the source directories of the skills scoped to it.
+///
+/// Skill scoping is [`buzz_persona::pack::resolve_skills`]: a skill claimed by
+/// any persona goes only to that persona, an unclaimed one goes to all of them.
+///
+/// Every failure is terminal. A pack that does not load, a persona that is not
+/// in it, or a skill directory that does not exist would otherwise start an
+/// agent with quietly fewer capabilities than its persona declares.
+fn resolve_persona_pack(
+    pack_dir: &std::path::Path,
+    persona: &str,
+) -> Result<(Vec<buzz_persona::resolve::ResolvedMcpServer>, Vec<PathBuf>), ConfigError> {
+    let pack_err = |e: buzz_persona::pack::PackError| {
+        ConfigError::ConfigFile(format!("persona pack {}: {e}", pack_dir.display()))
+    };
+
+    let loaded = buzz_persona::pack::load_pack(pack_dir).map_err(pack_err)?;
+    // Scoping reads the loaded personas; resolution reads the whole pack.
+    let mut skills_by_persona = buzz_persona::pack::resolve_skills(pack_dir, &loaded.personas);
+    let resolved = buzz_persona::resolve::resolve_loaded_pack(&loaded).map_err(pack_err)?;
+
+    let available: Vec<&str> = resolved.personas.iter().map(|p| p.name.as_str()).collect();
+    let selected = resolved
+        .personas
+        .iter()
+        .find(|p| p.name == persona)
+        .ok_or_else(|| {
+            ConfigError::ConfigFile(format!(
+                "persona '{persona}' not found in pack {} (available: {})",
+                pack_dir.display(),
+                available.join(", ")
+            ))
+        })?;
+
+    let skills_root = pack_dir.join("skills");
+    let mut skill_dirs = Vec::new();
+    for name in skills_by_persona.remove(persona).unwrap_or_default() {
+        let dir = skills_root.join(&name);
+        if !dir.is_dir() {
+            return Err(ConfigError::ConfigFile(format!(
+                "persona '{persona}' declares skill '{name}' but {} is not a directory",
+                dir.display()
+            )));
+        }
+        skill_dirs.push(dir);
+    }
+
+    Ok((selected.mcp_servers.clone(), skill_dirs))
 }
 
 /// Per-runtime environment defaults applied when Buzz owns the agent process.
@@ -1150,6 +1229,15 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        // Persona pack: MCP servers and skill sources for the named persona.
+        // `--persona-pack` and `--persona` require each other (clap), so both
+        // are present or neither is.
+        let (persona_mcp_servers, persona_skill_dirs) =
+            match (args.persona_pack.as_deref(), args.persona.as_deref()) {
+                (Some(pack_dir), Some(persona)) => resolve_persona_pack(pack_dir, persona)?,
+                _ => (Vec::new(), Vec::new()),
+            };
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
@@ -1195,6 +1283,9 @@ impl Config {
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
+            persona_mcp_servers,
+            persona_skill_dirs,
+            workdir: args.workdir,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
@@ -1571,6 +1662,9 @@ mod tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
+            persona_mcp_servers: vec![],
+            persona_skill_dirs: vec![],
+            workdir: None,
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
@@ -3187,6 +3281,166 @@ channels = "ALL"
             violations.is_empty(),
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod persona_pack_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Write a two-persona pack: `alpha` claims the `search` skill and declares
+    /// its own MCP server; `review` is unclaimed. `shared` belongs to nobody,
+    /// so it is scoped to both.
+    fn write_pack(root: &Path) {
+        std::fs::create_dir_all(root.join(".plugin")).unwrap();
+        std::fs::write(
+            root.join(".plugin/plugin.json"),
+            r#"{
+                "id": "test-pack",
+                "name": "Test Pack",
+                "version": "1.0.0",
+                "personas": ["personas/alpha.persona.md", "personas/beta.persona.md"]
+            }"#,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(root.join("personas")).unwrap();
+        std::fs::write(
+            root.join("personas/alpha.persona.md"),
+            r#"---
+name: alpha
+display_name: Alpha
+description: Alpha persona.
+skills:
+  - skills/search
+mcp_servers:
+  - name: semgrep
+    command: semgrep-mcp
+    args: ['--stdio']
+    env:
+      TOKEN: abc123
+---
+You are Alpha.
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("personas/beta.persona.md"),
+            "---\nname: beta\ndisplay_name: Beta\ndescription: Beta persona.\n---\nYou are Beta.\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            root.join(".mcp.json"),
+            r#"{"mcpServers": {"fetch": {"command": "fetch-mcp"}}}"#,
+        )
+        .unwrap();
+
+        for skill in ["search", "shared"] {
+            let dir = root.join("skills").join(skill);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!("---\nname: {skill}\n---\n")).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolves_persona_mcp_servers_merged_with_pack_shared() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pack(tmp.path());
+
+        let (servers, _) = resolve_persona_pack(tmp.path(), "alpha").unwrap();
+
+        let mut names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["fetch", "semgrep"]);
+        let semgrep = servers.iter().find(|s| s.name == "semgrep").unwrap();
+        assert_eq!(
+            semgrep.transport,
+            buzz_persona::resolve::McpTransport::Stdio {
+                command: "semgrep-mcp".to_string(),
+                args: vec!["--stdio".to_string()],
+                env: vec![("TOKEN".to_string(), "abc123".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn claimed_skill_is_scoped_to_its_persona_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pack(tmp.path());
+
+        let (_, alpha_skills) = resolve_persona_pack(tmp.path(), "alpha").unwrap();
+        let (_, beta_skills) = resolve_persona_pack(tmp.path(), "beta").unwrap();
+
+        let names = |dirs: &[PathBuf]| -> Vec<String> {
+            let mut n: Vec<String> = dirs
+                .iter()
+                .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(&alpha_skills), vec!["search", "shared"]);
+        assert_eq!(
+            names(&beta_skills),
+            vec!["shared"],
+            "a skill claimed by alpha must not reach beta"
+        );
+    }
+
+    #[test]
+    fn unknown_persona_is_a_config_error_listing_the_available_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pack(tmp.path());
+
+        let err = resolve_persona_pack(tmp.path(), "gamma").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("gamma"), "{msg}");
+        assert!(
+            msg.contains("alpha"),
+            "available names must be listed: {msg}"
+        );
+    }
+
+    #[test]
+    fn declared_but_missing_skill_directory_is_a_config_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pack(tmp.path());
+        std::fs::remove_dir_all(tmp.path().join("skills/search")).unwrap();
+
+        let err = resolve_persona_pack(tmp.path(), "alpha").unwrap_err();
+        assert!(
+            err.to_string().contains("search"),
+            "a persona must not start with a silently missing skill: {err}"
+        );
+    }
+
+    #[test]
+    fn pack_dir_without_a_manifest_is_a_config_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_persona_pack(tmp.path(), "alpha").unwrap_err();
+        assert!(err.to_string().contains("persona pack"), "{err}");
+    }
+
+    #[test]
+    fn persona_pack_and_persona_name_require_each_other() {
+        use clap::Parser;
+        let base = [
+            "buzz-acp",
+            "--private-key",
+            "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
+        ];
+
+        assert!(
+            CliArgs::try_parse_from(base.iter().copied().chain(["--persona-pack", "/tmp/pack"]))
+                .is_err(),
+            "--persona-pack alone must be rejected"
+        );
+        assert!(
+            CliArgs::try_parse_from(base.iter().copied().chain(["--persona", "alpha"])).is_err(),
+            "--persona alone must be rejected"
         );
     }
 }

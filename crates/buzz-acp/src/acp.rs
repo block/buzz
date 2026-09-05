@@ -24,14 +24,68 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
 /// An MCP server configuration passed to `session/new`.
 ///
-/// Corresponds to the `McpServerStdio` variant in the ACP schema.
-/// All four fields are **required** by the schema (`args` and `env` may be empty arrays).
+/// Corresponds to the `McpServerStdio` and `McpServerHttp` variants in the ACP
+/// schema. The stdio variant carries **no** `type` field: adapters route on its
+/// absence (`else if (!("type" in server))`), so emitting `"type":"stdio"` makes
+/// the entry match neither branch and the server is silently never started.
+/// Stdio's `command`/`args`/`env` are required by the schema (`args` and `env`
+/// may be empty arrays).
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct McpServer {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Vec<EnvVar>,
+#[serde(untagged)]
+pub enum McpServer {
+    Stdio {
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: Vec<EnvVar>,
+    },
+    Http {
+        #[serde(rename = "type")]
+        transport: HttpTransport,
+        name: String,
+        url: String,
+        headers: Vec<EnvVar>,
+    },
+}
+
+/// The `type` discriminant for an HTTP MCP server. Single-variant: SSE is
+/// rejected during pack resolution, so it can never reach the wire.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub enum HttpTransport {
+    #[serde(rename = "http")]
+    Http,
+}
+
+impl McpServer {
+    /// The server's name — the key adapters register it under, and the value
+    /// name collisions are resolved on.
+    pub fn name(&self) -> &str {
+        match self {
+            McpServer::Stdio { name, .. } | McpServer::Http { name, .. } => name,
+        }
+    }
+
+    /// Environment for a stdio server's subprocess. Empty for HTTP, which runs
+    /// elsewhere and is configured with headers instead.
+    ///
+    /// Test-only: production code pattern-matches the variant it needs, so
+    /// gating this keeps it from reading as unused production API.
+    #[cfg(test)]
+    pub fn env(&self) -> &[EnvVar] {
+        match self {
+            McpServer::Stdio { env, .. } => env,
+            McpServer::Http { .. } => &[],
+        }
+    }
+
+    /// The executable for a stdio server; `None` for HTTP. Test-only, as above.
+    #[cfg(test)]
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            McpServer::Stdio { command, .. } => Some(command),
+            McpServer::Http { .. } => None,
+        }
+    }
 }
 
 /// A single environment variable for an MCP server.
@@ -2524,7 +2578,7 @@ mod tests {
     #[test]
     fn session_new_mcp_server_has_required_fields() {
         // Schema requires name, command, args, env — all present, args/env may be empty.
-        let server = McpServer {
+        let server = McpServer::Stdio {
             name: "test-mcp".into(),
             command: "/usr/local/bin/test-mcp-server".into(),
             args: vec![],
@@ -3488,6 +3542,50 @@ mod tests {
             Some("Custom system prompt"),
             "systemPrompt should be included in params when Some"
         );
+    }
+
+    /// Persona MCP servers must reach the agent on the wire, not merely exist
+    /// in `Config` — this asserts the serialized `session/new` request the
+    /// adapter actually receives.
+    #[tokio::test]
+    async fn session_new_full_sends_mcp_servers_on_the_wire() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full(
+                "/tmp",
+                vec![McpServer::Stdio {
+                    name: "semgrep".into(),
+                    command: "semgrep-mcp".into(),
+                    args: vec!["--stdio".into()],
+                    env: vec![EnvVar {
+                        name: "TOKEN".into(),
+                        value: "abc123".into(),
+                    }],
+                }],
+                None,
+                None,
+            )
+            .await
+            .expect("session_new_full should succeed");
+
+        let server = &resp.raw["_receivedRequest"]["params"]["mcpServers"][0];
+        assert_eq!(server["name"], "semgrep");
+        assert_eq!(server["command"], "semgrep-mcp");
+        assert_eq!(server["args"][0], "--stdio");
+        assert_eq!(server["env"][0]["name"], "TOKEN");
+        assert_eq!(server["env"][0]["value"], "abc123");
     }
 
     #[tokio::test]
