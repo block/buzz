@@ -20,6 +20,10 @@ import {
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
+import {
+  getJobResultFeedPresentation,
+  getJobResultRequestId,
+} from "@/features/messages/lib/jobResult";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -110,6 +114,23 @@ function feedContent(item: FeedItem) {
   return "No additional details were attached to this event.";
 }
 
+function feedPresentation(item: FeedItem) {
+  if (item.kind === KIND_JOB_RESULT) {
+    const jobResultPresentation = getJobResultFeedPresentation(
+      item.content,
+      getJobResultRequestId(item.tags),
+    );
+    if (jobResultPresentation) {
+      return jobResultPresentation;
+    }
+  }
+
+  return {
+    content: feedContent(item),
+    headline: feedHeadline(item),
+  };
+}
+
 type FeedSectionProps = {
   title: string;
   emptyTitle: string;
@@ -163,6 +184,7 @@ export function FeedSection({
       ) : (
         <div className="divide-y divide-border/60 rounded-md border border-border/60">
           {items.map((item) => {
+            const presentation = feedPresentation(item);
             const channelId = item.channelId;
             const canOpenChannel =
               channelId !== null && availableChannelIds.has(channelId);
@@ -194,7 +216,7 @@ export function FeedSection({
                   <span
                     className={`text-sm font-medium ${isDone ? "line-through text-muted-foreground" : ""}`}
                   >
-                    {feedHeadline(item)}
+                    {presentation.headline}
                   </span>
                   <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
                     <UserAvatar
@@ -234,7 +256,7 @@ export function FeedSection({
                 <div className="pointer-events-none relative mt-0.5 line-clamp-2">
                   <Markdown
                     className="max-w-none text-sm leading-snug text-muted-foreground"
-                    content={feedContent(item)}
+                    content={presentation.content}
                     messageId={item.id}
                     linkPreviewsSuppressed={hasLinkPreviewSuppression(
                       item.tags,

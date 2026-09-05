@@ -1,15 +1,16 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (39 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    job::JobResultPayload,
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
+        KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_JOB_RESULT,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
         KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
@@ -260,6 +261,37 @@ pub fn build_message(
     Ok(EventBuilder::new(Kind::Custom(9), content)
         .tags(tags)
         .allow_self_tagging())
+}
+
+/// Build an inspectable agent job handoff (`kind:43004`).
+///
+/// The result is channel-scoped and references the originating job request as
+/// a direct NIP-10 reply. Payload validation happens before the event is built,
+/// including schema, artifact, disposition, and serialized-size checks.
+pub fn build_job_result(
+    channel_id: Uuid,
+    job_request: nostr::EventId,
+    payload: &JobResultPayload,
+) -> Result<EventBuilder, SdkError> {
+    let expected_job = job_request.to_hex();
+    if !payload.job_request.eq_ignore_ascii_case(&expected_job) {
+        return Err(SdkError::InvalidInput(
+            "payload jobRequest must match the referenced job event".into(),
+        ));
+    }
+    let content = payload
+        .to_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    check_content(&content, 64 * 1024)?;
+    let channel_id = channel_id.to_string();
+    let schema_version = payload.schema_version.to_string();
+    let tags = vec![
+        tag(&["h", &channel_id])?,
+        tag(&["e", &expected_job, "", "reply"])?,
+        tag(&["schema", "buzz.job-result", &schema_version])?,
+        tag(&["disposition", payload.disposition.as_str()])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_JOB_RESULT as u16), content).tags(tags))
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
@@ -2350,6 +2382,10 @@ pub fn build_delete_addressable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core::job::{
+        JobArtifact, JobArtifactKind, JobDisposition, JobVerification, JobVerificationStatus,
+        JOB_RESULT_SCHEMA_VERSION,
+    };
     use nostr::{EventId, Keys};
 
     fn keys() -> Keys {
@@ -2402,6 +2438,61 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    fn job_result(job_request: &EventId) -> JobResultPayload {
+        JobResultPayload {
+            schema_version: JOB_RESULT_SCHEMA_VERSION,
+            job_request: job_request.to_hex(),
+            requested_outcome: "Make the result inspectable".into(),
+            outcome: "The handoff is ready.".into(),
+            last_progress: Some("Full verification passed.".into()),
+            disposition: JobDisposition::Completed,
+            artifacts: vec![JobArtifact {
+                kind: JobArtifactKind::PullRequest,
+                label: "Pull request".into(),
+                reference: "https://github.com/block/buzz/pull/1".into(),
+                source_state: Some("a".repeat(40)),
+            }],
+            verification: vec![JobVerification {
+                label: "just ci".into(),
+                status: JobVerificationStatus::Passed,
+                evidence: Some("exit 0".into()),
+            }],
+            blocker: None,
+        }
+    }
+
+    #[test]
+    fn job_result_has_channel_job_schema_and_disposition_tags() {
+        let channel_id = uuid();
+        let job_request = event_id();
+        let payload = job_result(&job_request);
+        let event = sign(build_job_result(channel_id, job_request, &payload).unwrap());
+
+        assert_eq!(event.kind.as_u16(), KIND_JOB_RESULT as u16);
+        assert!(has_tag(&event, "h", &channel_id.to_string()));
+        assert!(has_tag(&event, "e", &payload.job_request));
+        assert!(has_tag(&event, "schema", "buzz.job-result"));
+        assert!(has_tag(&event, "disposition", "completed"));
+        let e_tag = event
+            .tags
+            .iter()
+            .find(|tag| tag.as_slice().first().map(String::as_str) == Some("e"))
+            .expect("job reference tag");
+        assert_eq!(e_tag.as_slice().get(3).map(String::as_str), Some("reply"));
+        let decoded: JobResultPayload =
+            serde_json::from_str(&event.content).expect("structured content");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn job_result_rejects_payload_for_different_job() {
+        let referenced_job = event_id();
+        let different_job = event_id();
+        let payload = job_result(&different_job);
+        let error = build_job_result(uuid(), referenced_job, &payload).unwrap_err();
+        assert!(matches!(error, SdkError::InvalidInput(_)));
     }
 
     #[test]

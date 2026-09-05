@@ -43,6 +43,10 @@ buzz messages delete --event <event-id>
 # Diffs
 buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/repo --commit abc123 < diff.patch
 
+# Agent job handoffs
+buzz jobs handoff --channel <uuid> --job <event-id> --manifest result.json
+generate-result-manifest | buzz jobs handoff --channel <uuid> --job <event-id> --manifest -
+
 # Channels
 buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
@@ -122,6 +126,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `thread` | Get a message thread |
 | | `search` | Full-text search, filterable by author |
 | | `vote` | Vote on a forum post |
+| `jobs` | `handoff` | Publish a validated, structured job result |
 | `channels` | `list` | List channels |
 | | `get` | Get channel details |
 | | `create` | Create a channel |
