@@ -5417,7 +5417,7 @@ async fn shutdown_agent_pool(pool: &mut AgentPool) {
 }
 
 struct PoolStartup {
-    agents: u32,
+    worker_count: u32,
     command: String,
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
@@ -5430,7 +5430,7 @@ struct PoolStartup {
 impl PoolStartup {
     fn from_config(config: &Config, observer: Option<observer::ObserverHandle>) -> Self {
         Self {
-            agents: config.agents,
+            worker_count: config.agents,
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
@@ -5446,10 +5446,11 @@ async fn initialize_agent_pool(
     startup: &PoolStartup,
     mut shutdown: Option<watch::Receiver<()>>,
 ) -> Result<AgentPool> {
-    // One agent failing to start must not kill the whole pool.
+    // One harness worker failing to start must not kill the whole pool.
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
-    let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
-    for i in 0..startup.agents as usize {
+    let mut agent_slots: Vec<Option<OwnedAgent>> =
+        Vec::with_capacity(startup.worker_count as usize);
+    for i in 0..startup.worker_count as usize {
         let spawn_result = AcpClient::spawn(
             &startup.command,
             &startup.args,
@@ -5513,19 +5514,22 @@ async fn initialize_agent_pool(
                         }));
                     }
                     Ok(Err(e)) => {
-                        tracing::error!(agent = i, "agent initialize failed: {e}");
+                        tracing::error!(worker = i, "ACP harness worker initialize failed: {e}");
                         acp.shutdown().await;
                         agent_slots.push(None);
                     }
                     Err(_) => {
-                        tracing::error!(agent = i, "agent timed out during init (60s)");
+                        tracing::error!(
+                            worker = i,
+                            "ACP harness worker timed out during init (60s)"
+                        );
                         acp.shutdown().await;
                         agent_slots.push(None);
                     }
                 }
             }
             Err(e) => {
-                tracing::error!(agent = i, "agent failed to spawn: {e}");
+                tracing::error!(worker = i, "ACP harness worker failed to spawn: {e}");
                 agent_slots.push(None);
             }
         }
@@ -5533,15 +5537,15 @@ async fn initialize_agent_pool(
     let live_count = agent_slots.iter().filter(|slot| slot.is_some()).count();
     if live_count == 0 {
         return Err(anyhow::anyhow!(
-            "all {} agents failed to start — cannot continue",
-            startup.agents
+            "all {} ACP harness workers failed to start — cannot continue",
+            startup.worker_count
         ));
     }
-    if live_count < startup.agents as usize {
+    if live_count < startup.worker_count as usize {
         tracing::warn!(
-            "started {}/{} agents — continuing with reduced pool",
+            "started {}/{} ACP harness workers — continuing with reduced pool",
             live_count,
-            startup.agents
+            startup.worker_count
         );
     }
     tracing::info!("agent_pool_ready agents={}", live_count);
@@ -5898,6 +5902,34 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             env
         },
     }]
+}
+
+#[cfg(test)]
+mod pool_startup_diagnostic_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn all_failed_workers_are_not_reported_as_separate_buzz_agents() {
+        let startup = PoolStartup {
+            worker_count: 2,
+            command: "buzz-acp-nonexistent-test-command".to_string(),
+            args: vec![],
+            extra_env: vec![],
+            has_generated_codex_config: false,
+            model: None,
+            observer: None,
+        };
+
+        let error = match initialize_agent_pool(&startup, None).await {
+            Ok(_) => panic!("a nonexistent harness command must fail every worker"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "all 2 ACP harness workers failed to start — cannot continue"
+        );
+    }
 }
 
 #[cfg(test)]
