@@ -20,12 +20,15 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/bouncing_dots_indicator.dart';
+import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/flapping_bee.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../shared/widgets/ios_native_navigation_shell.dart';
+import '../../shared/widgets/ios_status_bar_tap_listener.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -514,11 +517,14 @@ class ChannelDetailPage extends HookConsumerWidget {
         !resolvedChannel.isForum &&
         isConnectionInProgress &&
         !messagesNotifier.hasLoadedMessages;
-    final appBarTitleContentHeight = _twoLineAppBarTitleContentHeight(
-      context,
-      isDm: resolvedChannel.isDm,
-    );
+    final appBarTitleContentHeight =
+        _twoLineAppBarTitleContentHeight(context, isDm: resolvedChannel.isDm) +
+        (Theme.of(context).platform == TargetPlatform.iOS ? Grid.xxs : 0);
+    final usesNativeIosNavigationShell =
+        Theme.of(context).platform == TargetPlatform.iOS &&
+        IosNativeNavigationShellController.maybeOf(context) != null;
     final usesNativeIosGlassBackButton =
+        !usesNativeIosNavigationShell &&
         Navigator.canPop(context) &&
         Theme.of(context).platform == TargetPlatform.iOS;
     final readTimestamp = _channelReadTimestamp(
@@ -572,6 +578,10 @@ class ChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        automaticallyImplyLeading: !usesNativeIosNavigationShell,
+        horizontalInset: Theme.of(context).platform == TargetPlatform.iOS
+            ? iosGlassChannelHeaderHorizontalInset
+            : Grid.xxs,
         leading: usesNativeIosGlassBackButton
             ? IosGlassNavigationButton(
                 key: const ValueKey('channel-ios-glass-back'),
@@ -580,47 +590,55 @@ class ChannelDetailPage extends HookConsumerWidget {
                 onPressed: () => Navigator.of(context).maybePop(),
                 width: iosGlassChannelHeaderLeadingWidth,
                 buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                controlSize: buzzNavigationActionSize,
                 nativeViewSuppressed: messageActionBackdropActive,
               )
             : null,
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,
-        title: Padding(
-          padding: EdgeInsets.only(
-            left: usesNativeIosGlassBackButton
-                ? iosGlassChannelHeaderTitleSpacing
-                : 0,
-          ),
-          child: resolvedChannel.isDm
-              ? _DmAppBarTitle(
-                  channel: resolvedChannel,
-                  currentPubkey: currentPubkey,
-                )
-              : _ChannelAppBarTitle(
-                  channel: resolvedChannel,
-                  onTap: () async {
-                    final shouldClose = await showChannelDetailsPage(
-                      context: context,
-                      channel: resolvedChannel,
-                      currentPubkey: currentPubkey,
-                      onMemberTap: showUserProfileSheet,
-                      sectionId: ref
-                          .read(channelSectionsProvider)
-                          .store
-                          .assignments[resolvedChannel.id],
-                    );
-                    if (shouldClose == true && context.mounted) {
-                      Navigator.of(context).pop();
-                    }
-                  },
+        title: usesNativeIosNavigationShell
+            ? null
+            : Padding(
+                padding: EdgeInsets.only(
+                  left: usesNativeIosGlassBackButton
+                      ? iosGlassChannelHeaderTitleSpacing
+                      : 0,
                 ),
-        ),
-        actions: resolvedChannel.isDm
+                child: resolvedChannel.isDm
+                    ? _DmAppBarTitle(
+                        channel: resolvedChannel,
+                        currentPubkey: currentPubkey,
+                        nativeViewSuppressed: messageActionBackdropActive,
+                      )
+                    : _ChannelAppBarTitle(
+                        channel: resolvedChannel,
+                        nativeViewSuppressed: messageActionBackdropActive,
+                        onTap: () async {
+                          final shouldClose = await showChannelDetailsPage(
+                            context: context,
+                            channel: resolvedChannel,
+                            currentPubkey: currentPubkey,
+                            onMemberTap: showUserProfileSheet,
+                            sectionId: ref
+                                .read(channelSectionsProvider)
+                                .store
+                                .assignments[resolvedChannel.id],
+                          );
+                          if (shouldClose == true && context.mounted) {
+                            Navigator.of(context).pop();
+                          }
+                        },
+                      ),
+              ),
+        actions: usesNativeIosNavigationShell
+            ? const []
+            : resolvedChannel.isDm
             ? [
                 if (showsHuddleAction)
                   _HuddleButton(
                     channel: resolvedChannel,
+                    nativeViewSuppressed: messageActionBackdropActive,
                     events: [
                       ...messagesState.value ?? const [],
                       ...huddleLifecycle,
@@ -631,31 +649,18 @@ class ChannelDetailPage extends HookConsumerWidget {
                     channelId: resolvedChannel.id,
                     channel: resolvedChannel,
                     currentPubkey: currentPubkey,
+                    nativeViewSuppressed: messageActionBackdropActive,
                   ),
-                IconButton(
-                  color: context.colors.primary,
-                  onPressed: () async {
-                    final shouldClose = await showChannelActionsSheet(
-                      context: context,
-                      channel: resolvedChannel,
-                      isUnread: false,
-                      sectionId: ref
-                          .read(channelSectionsProvider)
-                          .store
-                          .assignments[resolvedChannel.id],
-                    );
-                    if (shouldClose == true && context.mounted) {
-                      Navigator.of(context).pop();
-                    }
-                  },
-                  tooltip: 'Channel actions',
-                  icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
+                _ChannelActionsButton(
+                  channel: resolvedChannel,
+                  nativeViewSuppressed: messageActionBackdropActive,
                 ),
               ]
             : [
                 if (showsComposer)
                   _HuddleButton(
                     channel: resolvedChannel,
+                    nativeViewSuppressed: messageActionBackdropActive,
                     events: [
                       ...messagesState.value ?? const [],
                       ...huddleLifecycle,
@@ -666,6 +671,17 @@ class ChannelDetailPage extends HookConsumerWidget {
       body: Stack(
         fit: StackFit.expand,
         children: [
+          if (usesNativeIosNavigationShell)
+            _NativeIosChannelNavigationBinding(
+              channel: resolvedChannel,
+              currentPubkey: currentPubkey,
+              showsComposer: showsComposer,
+              showsHuddleAction: showsHuddleAction,
+              huddleEvents: [
+                ...messagesState.value ?? const [],
+                ...huddleLifecycle,
+              ],
+            ),
           Column(
             children: [
               Expanded(

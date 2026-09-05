@@ -13,6 +13,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../shared/widgets/ios_status_bar_tap_listener.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -56,13 +57,7 @@ part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 part 'thread_detail_page/avatar.dart';
 
-const _landingHighlightDuration = Duration(seconds: 3);
-const _landingHighlightDelay = Duration(milliseconds: 50);
-const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
-const _landingHighlightOpacity = 0.12;
-
 /// Full-screen thread detail page.
-///
 /// Shows the thread head message, direct replies, typing indicators scoped to
 /// the thread, and a compose bar for replying.
 class ThreadDetailPage extends HookConsumerWidget {
@@ -263,6 +258,21 @@ class ThreadDetailPage extends HookConsumerWidget {
     final composerHasFocus = useListenable(composerFocusNode).hasFocus;
     final viewportHeight = useListenable(listViewport.height).value;
     final previousViewportHeight = useRef(viewportHeight);
+
+    Future<void> scrollToThreadTop() => scrollPositionedListFromIosStatusBarTap(
+      context: context,
+      controller: itemScrollController,
+      targetIndex: 0,
+      beforeScroll: () {
+        initialTailSettle.abandon();
+        isNavigatingToThreadTail.value = false;
+        userOptedOutOfTailFollow.value = true;
+        userDragDetachedTailFollow.value = true;
+        followsThreadTail.value = false;
+        isAtThreadTail.value = false;
+      },
+    );
+
     final settledImeLift = usesFixedAndroidImeViewport
         ? (settledImeBottomInset.value -
                   MediaQuery.viewPaddingOf(context).bottom)
@@ -824,6 +834,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     return FrostedScaffold(
       resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
       appBar: FrostedAppBar(
+        horizontalInset: Theme.of(context).platform == TargetPlatform.iOS
+            ? iosGlassChannelHeaderHorizontalInset
+            : Grid.xxs,
         leading: usesNativeIosGlassBackButton
             ? IosGlassNavigationButton(
                 key: const ValueKey('thread-ios-glass-back'),
@@ -849,6 +862,10 @@ class ThreadDetailPage extends HookConsumerWidget {
       body: Stack(
         fit: StackFit.expand,
         children: [
+          IosStatusBarTapListener(
+            onTap: () => unawaited(scrollToThreadTop()),
+            child: const SizedBox.shrink(),
+          ),
           Column(
             children: [
               Expanded(
@@ -964,24 +981,17 @@ class ThreadDetailPage extends HookConsumerWidget {
                 ),
               ),
             ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: navigationBottomInset + Grid.xs,
-            child: Center(
-              child: JumpToLatestSwitcher(
-                id: 'thread',
-                visible:
-                    threadViewportVisible &&
-                    hasFetchedReplies &&
-                    !isNavigatingToThreadTail.value &&
-                    !hidesLatestForInitialTailSettle.value &&
-                    !hidesLatestForComposerTailCorrection.value &&
-                    !(composerHasFocus && !userDragDetachedTailFollow.value) &&
-                    !isAtThreadTail.value,
-                onPressed: scrollToThreadLatest,
-              ),
-            ),
+          _ThreadJumpToLatest(
+            bottomInset: navigationBottomInset,
+            visible:
+                threadViewportVisible &&
+                hasFetchedReplies &&
+                !isNavigatingToThreadTail.value &&
+                !hidesLatestForInitialTailSettle.value &&
+                !hidesLatestForComposerTailCorrection.value &&
+                !(composerHasFocus && !userDragDetachedTailFollow.value) &&
+                !isAtThreadTail.value,
+            onPressed: scrollToThreadLatest,
           ),
         ],
       ),

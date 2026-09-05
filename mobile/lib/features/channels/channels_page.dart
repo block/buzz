@@ -12,22 +12,25 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/animated_avatar.dart';
 import '../../shared/community/community_icon_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/adaptive_glass_avatar_button.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/native_avatar_data_uri_provider.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
-import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -88,7 +91,6 @@ const double _kChannelLabelInset =
 const double _kDmAvatarSize = _kChannelIconSize;
 
 const double _kTopSectionCommunityAvatarSize = 40.0;
-const double _kTopSectionProfileAvatarSize = 36.0;
 const double _kTopSectionBottomPadding = Grid.xxs;
 
 /// The top section's avatars are 40dp circles, which fill their box edge to
@@ -163,6 +165,7 @@ class ChannelsPage extends HookConsumerWidget {
     required this.settingsPageBuilder,
     required this.onSettingsTransitionProgress,
     this.tabReselection,
+    this.isActive = true,
     super.key,
   });
 
@@ -174,6 +177,9 @@ class ChannelsPage extends HookConsumerWidget {
 
   /// Notifies this page when its already-selected tab is tapped again.
   final ValueListenable<int>? tabReselection;
+
+  /// Whether Home is the currently visible tab.
+  final bool isActive;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -196,6 +202,7 @@ class ChannelsPage extends HookConsumerWidget {
     final channelsScrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final headerFrostProgress = useState(0.0);
+    final nativeHeaderControlsSuppressed = useState(false);
     useEffect(() {
       void updateHeaderTreatment() {
         final nextProgress = !channelsScrollController.hasClients
@@ -304,12 +311,20 @@ class ChannelsPage extends HookConsumerWidget {
 
     void openCommunitySwitcher() {
       unawaited(HapticFeedback.selectionClick());
-      ref.invalidate(communityIconProvider);
-      showBuzzModalBottomSheet<void>(
-        context: context,
-        showCloseButton: false,
-        showDragHandle: false,
-        builder: (_) => const _CommunitySwitcherSheet(),
+      final communities = ref.read(communityListProvider).value ?? const [];
+      for (final community in communities) {
+        final icon = ref.read(communityIconProvider(community.relayUrl));
+        if (!icon.isLoading && icon.value == null) {
+          ref.invalidate(communityIconProvider(community.relayUrl));
+        }
+      }
+      unawaited(
+        showBuzzModalBottomSheet<void>(
+          context: context,
+          showCloseButton: false,
+          showDragHandle: false,
+          builder: (_) => const _CommunitySwitcherSheet(),
+        ),
       );
     }
 
@@ -317,6 +332,8 @@ class ChannelsPage extends HookConsumerWidget {
     final usesPinnedGradient = topSectionGradient != null;
 
     return FrostedScaffold(
+      statusBarScrollController: channelsScrollController,
+      statusBarScrollToTopEnabled: isActive,
       backgroundColor: usesPinnedGradient
           ? Colors.transparent
           : context.colors.surface,
@@ -334,31 +351,29 @@ class ChannelsPage extends HookConsumerWidget {
             ? _kHeaderFrostMaxBlurSigma * headerFrostProgress.value
             : 20,
         showBottomDivider: false,
-        leading: _CommunityIndicator(onTap: openCommunitySwitcher),
+        leading: _CommunityHeaderControl(
+          collapseProgress: headerFrostProgress.value,
+          onOpenSwitcher: openCommunitySwitcher,
+          nativeViewSuppressed: nativeHeaderControlsSuppressed,
+        ),
         centerTitle: false,
         titleStyle: headerTitleStyle,
-        title: _CommunityHeaderTitle(
-          style: headerTitleStyle,
-          onTap: openCommunitySwitcher,
-        ),
+        title: null,
         actions: [
-          SizedBox(
-            width: Grid.xl,
-            height: Grid.xl,
-            child: Center(
-              child: ProfileAvatar(
-                size: _kTopSectionProfileAvatarSize,
-                showPresence: false,
-                onTap: () {
-                  unawaited(HapticFeedback.lightImpact());
-                  final route = _SettingsPageRoute(
-                    builder: settingsPageBuilder,
-                    onTransitionProgress: onSettingsTransitionProgress,
-                  );
-                  Navigator.of(context).push(route);
-                },
-              ),
-            ),
+          _ProfileHeaderControl(
+            nativeViewSuppressed: nativeHeaderControlsSuppressed,
+            onTap: () async {
+              unawaited(HapticFeedback.lightImpact());
+              final route = _SettingsPageRoute(
+                builder: settingsPageBuilder,
+                onTransitionProgress: onSettingsTransitionProgress,
+              );
+              nativeHeaderControlsSuppressed.value = true;
+              await Navigator.of(context).push(route);
+              if (context.mounted) {
+                nativeHeaderControlsSuppressed.value = false;
+              }
+            },
           ),
         ],
         bottomHeight: _kTopSectionBottomPadding,

@@ -36,6 +36,7 @@ import 'shared/relay/relay.dart';
 import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
+import 'shared/widgets/ios_native_navigation_shell.dart';
 
 const _starterChannelNamespace = '3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0';
 
@@ -374,9 +375,11 @@ class App extends HookConsumerWidget {
       // Above the navigator, so a burst keeps playing over a pushed thread page
       // or a modal sheet — the same reason desktop pins its canvas to the
       // viewport rather than to the message row.
-      builder: (context, child) => MobileHuddleShell(
-        navigatorKey: _mobileRootNavigatorKey,
-        child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => IosNativeNavigationShellHost(
+        child: MobileHuddleShell(
+          navigatorKey: _mobileRootNavigatorKey,
+          child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+        ),
       ),
       home: authState.when(
         loading: () => const _SplashScreen(),

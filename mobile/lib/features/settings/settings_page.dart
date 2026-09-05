@@ -157,6 +157,7 @@ class SettingsPage extends HookConsumerWidget {
                   unawaited(HapticFeedback.lightImpact());
                   Navigator.of(context).pop();
                 },
+                buttonCenterX: 26,
                 foregroundColor: navigationPrimaryForeground(context),
               )
             : SizedBox(

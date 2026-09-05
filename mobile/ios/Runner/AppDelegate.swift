@@ -142,6 +142,15 @@ import os.log
       )
     }
 
+    if let nativeNavigationShellRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeNavigationShell"
+    ) {
+      nativeNavigationShellRegistrar.register(
+        NativeNavigationShellFactory(messenger: messenger),
+        withId: "buzz/native_navigation_shell"
+      )
+    }
+
     if let segmentedControlRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeSegmentedControl"
     ) {

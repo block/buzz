@@ -16,7 +16,6 @@ import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
-import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/auth/auth.dart';
@@ -24,9 +23,10 @@ import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:buzz/shared/widgets/adaptive_glass_avatar_button.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
-import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
+import 'package:buzz/shared/widgets/native_avatar_data_uri_provider.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
 void main() {
@@ -129,6 +129,15 @@ void main() {
       isMember: true,
     ),
   ];
+
+  Future<void> openCommunitySwitcher(WidgetTester tester) async {
+    await tester.tap(
+      find.byKey(const ValueKey('community-header-glass-control')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage'));
+    await tester.pumpAndSettle();
+  }
 
   testWidgets('shows grouped channel list when data loads', (tester) async {
     await tester.pumpWidget(
@@ -577,12 +586,19 @@ void main() {
     relaySession.connect();
     await tester.pumpAndSettle();
 
+    final communityControl = find.byKey(
+      const ValueKey('community-header-glass-control'),
+    );
+    final communityAvatar = find.descendant(
+      of: communityControl,
+      matching: find.byType(AvatarImage),
+    );
     final topLabelX = tester.getTopLeft(find.text('Community')).dx;
     final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
-    // The community title shares the leading row with its avatar. Channel
-    // labels stay aligned below it.
-    expect(topLabelX, Grid.twelve + 40 + Grid.xxs);
+    // The community title now sits inside the same padded glass capsule as its
+    // avatar, while channel labels retain their shared column below it.
+    expect(topLabelX, greaterThan(tester.getRect(communityAvatar).right));
     expect(sectionLabelX, rowLabelX);
 
     relaySession.setReconnecting();
@@ -604,7 +620,7 @@ void main() {
     expect(skeletonSectionLabelX, sectionLabelX);
   });
 
-  testWidgets('centers the smaller profile avatar beside the community', (
+  testWidgets('pads matching community and profile avatars inside glass', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -616,26 +632,311 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final appBar = find.byType(FrostedAppBar).last;
+    final communityControl = find.byKey(
+      const ValueKey('community-header-glass-control'),
+    );
+    final profileControl = find.byKey(
+      const ValueKey('profile-header-glass-control'),
+    );
     final communityAvatar = find.descendant(
-      of: appBar,
+      of: communityControl,
       matching: find.byType(AvatarImage),
     );
     final profileAvatar = find.descendant(
-      of: appBar,
-      matching: find.byType(MaskedAvatarBadge),
+      of: profileControl,
+      matching: find.byType(AvatarImage),
     );
 
-    expect(tester.getSize(communityAvatar), const Size.square(40));
+    expect(tester.getSize(communityAvatar), const Size.square(36));
     expect(tester.getSize(profileAvatar), const Size.square(36));
-    expect(
-      tester.widget<MaskedAvatarBadge>(profileAvatar).badge,
-      isNull,
-      reason: 'The current user does not need an online dot on Home.',
-    );
+    expect(tester.getSize(profileControl), const Size.square(48));
     final communityRect = tester.getRect(communityAvatar);
     final profileRect = tester.getRect(profileAvatar);
+    final communityControlRect = tester.getRect(communityControl);
+    expect(communityRect.left - communityControlRect.left, 6);
+    expect(communityRect.top - communityControlRect.top, 6);
+    expect(communityControlRect.bottom - communityRect.bottom, 6);
     expect(profileRect.center.dy, communityRect.center.dy);
+  });
+
+  testWidgets('keeps the source avatar while its native copy is prepared', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final conversion = Completer<String?>();
+    addTearDown(() {
+      if (!conversion.isCompleted) conversion.complete(null);
+    });
+    const source = 'https://example.com/community.png';
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          nativeAvatarDataUriProvider.overrideWith(
+            (ref, imageUrl) => conversion.future,
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: AdaptiveGlassAvatarButton(
+            imageUrl: source,
+            fallbackText: 'C',
+            semanticLabel: 'Community',
+            onPressed: () {},
+            width: 48,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final nativeView = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(nativeView.creationParams, containsPair('avatarImageUrl', source));
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('morphs the community capsule symmetrically with scroll', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 480);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier([
+              ...testChannels,
+              for (var index = 0; index < 20; index++)
+                Channel(
+                  id: 'extra-$index',
+                  name: 'channel-$index',
+                  channelType: 'stream',
+                  visibility: 'open',
+                  description: 'Extra channel',
+                  createdBy: 'abc',
+                  createdAt: DateTime(2025),
+                  memberCount: 2,
+                  isMember: true,
+                ),
+            ]),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    AdaptiveGlassAvatarButton control() => tester.widget(
+      find.byKey(const ValueKey('community-header-glass-control')),
+    );
+    expect(control().label, 'Community');
+    final expandedWidth = control().width;
+    expect(expandedWidth, greaterThan(48));
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    scrollable.position.jumpTo(32);
+    await tester.pumpAndSettle();
+    final collapsingWidth = control().width;
+    expect(collapsingWidth, inExclusiveRange(48, expandedWidth));
+
+    scrollable.position.jumpTo(64);
+    await tester.pump();
+    expect(control().width, closeTo(collapsingWidth, 0.01));
+    await tester.pump(const Duration(milliseconds: 70));
+    expect(control().width, inExclusiveRange(48, collapsingWidth));
+    await tester.pumpAndSettle();
+    expect(control().width, closeTo(48, 0.01));
+
+    scrollable.position.jumpTo(32);
+    await tester.pumpAndSettle();
+    expect(control().width, closeTo(collapsingWidth, 0.01));
+
+    scrollable.position.jumpTo(0);
+    await tester.pump();
+    expect(control().width, closeTo(collapsingWidth, 0.01));
+    await tester.pump(const Duration(milliseconds: 70));
+    expect(control().width, inExclusiveRange(collapsingWidth, expandedWidth));
+    await tester.pumpAndSettle();
+    expect(control().label, 'Community');
+    expect(control().width, closeTo(expandedWidth, 0.01));
+  });
+
+  testWidgets('provides avatar content and a contextual menu to native iOS', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final communities = [
+      Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      ),
+      Community(
+        id: 'bravo',
+        name: 'Bravo',
+        relayUrl: 'wss://bravo.example.com',
+        addedAt: DateTime(2025),
+      ),
+    ];
+
+    await tester.pumpWidget(
+      buildTestable(
+        communityIcons: const {
+          'wss://alpha.example.com':
+              'data:image/png;base64,'
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+          'wss://bravo.example.com':
+              'data:image/png;base64,'
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        },
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(
+            () => _FakeCommunityListNotifier(communities),
+          ),
+          activeCommunityProvider.overrideWith(
+            (ref) async => communities.first,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final nativeCommunity = tester.widget<UiKitView>(
+      find.descendant(
+        of: find.byKey(const ValueKey('community-header-glass-control')),
+        matching: find.byType(UiKitView),
+      ),
+    );
+    final params = nativeCommunity.creationParams! as Map<String, Object>;
+    expect(nativeCommunity.viewType, 'buzz/navigation_glass');
+    expect(params['icon'], 'avatar');
+    expect(params['label'], 'Alpha');
+    final items = params['menuItems']! as List<Object?>;
+    expect(items, hasLength(3));
+    expect(items.first, containsPair('selected', true));
+    expect(
+      (items.first! as Map<String, Object>)['avatarImageUrl'],
+      startsWith('data:image/png;base64,'),
+    );
+    expect(items.first, containsPair('avatarFallback', 'A'));
+    expect(items.last, containsPair('label', 'Manage'));
+    expect(items.last, containsPair('systemIconName', 'gearshape'));
+    expect(items.last, containsPair('keepsSingleLine', true));
+
+    final nativeProfile = tester.widget<UiKitView>(
+      find.descendant(
+        of: find.byKey(const ValueKey('profile-header-glass-control')),
+        matching: find.byType(UiKitView),
+      ),
+    );
+    expect(nativeProfile.creationParams, containsPair('icon', 'avatar'));
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('preserves native header glass beneath the community sheet', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final controlFinder = find.byKey(
+      const ValueKey('community-header-glass-control'),
+    );
+    final control = tester.widget<AdaptiveGlassAvatarButton>(controlFinder);
+    control.onIosMenuSelected!('manage');
+    await tester.pump();
+
+    expect(
+      find.descendant(of: controlFinder, matching: find.byType(UiKitView)),
+      findsOneWidget,
+    );
+    final fallbackOpacity = tester.widget<AnimatedOpacity>(
+      find.descendant(
+        of: controlFinder,
+        matching: find.byKey(
+          const ValueKey('ios-glass-navigation-fallback-layer'),
+        ),
+      ),
+    );
+    expect(fallbackOpacity.opacity, 0);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('profile-header-glass-control')),
+        matching: find.byType(UiKitView),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('community-switcher-sheet')), findsOneWidget);
+
+    Navigator.of(tester.element(find.text('Switch Community'))).pop();
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(of: controlFinder, matching: find.byType(UiKitView)),
+      findsOneWidget,
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('suppresses the Home profile glass beneath Settings', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final controlFinder = find.byKey(
+      const ValueKey('profile-header-glass-control'),
+    );
+    tester.widget<AdaptiveGlassAvatarButton>(controlFinder).onPressed();
+    await tester.pump();
+
+    expect(
+      find.descendant(of: controlFinder, matching: find.byType(UiKitView)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: controlFinder, matching: find.byType(AvatarImage)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: controlFinder, matching: find.byType(BackdropFilter)),
+      findsOneWidget,
+    );
+    await tester.pumpAndSettle();
+    Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(of: controlFinder, matching: find.byType(UiKitView)),
+      findsOneWidget,
+    );
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('reveals channel content from same-slot reconnect skeletons', (
@@ -746,7 +1047,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(Hero), findsNothing);
-    await tester.tap(find.byType(ProfileAvatar));
+    await tester.tap(
+      find.byKey(const ValueKey('profile-header-glass-control')),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Injected settings'), findsOneWidget);
@@ -770,7 +1073,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byType(ProfileAvatar));
+    await tester.tap(
+      find.byKey(const ValueKey('profile-header-glass-control')),
+    );
     await tester.pump();
     expect(progress, [0]);
     await tester.pump(const Duration(milliseconds: 16));
@@ -805,7 +1110,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byType(ProfileAvatar));
+    await tester.tap(
+      find.byKey(const ValueKey('profile-header-glass-control')),
+    );
     await tester.pump();
 
     final transition = find.byKey(
@@ -890,17 +1197,17 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byType(ProfileAvatar));
+    await tester.tap(
+      find.byKey(const ValueKey('profile-header-glass-control')),
+    );
     await tester.pumpAndSettle();
     expect(hapticCalls.single.arguments, 'HapticFeedbackType.lightImpact');
 
     Navigator.of(tester.element(find.text('Injected settings'))).pop();
     await tester.pumpAndSettle();
-    final communityAvatar = find.descendant(
-      of: find.byType(FrostedAppBar).last,
-      matching: find.byType(AvatarImage),
+    await tester.tap(
+      find.byKey(const ValueKey('community-header-glass-control')),
     );
-    await tester.tap(communityAvatar);
     await tester.pump();
     expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
   });
@@ -947,8 +1254,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
-    await tester.pumpAndSettle();
+    await openCommunitySwitcher(tester);
 
     expect(find.text('Switch Community'), findsOneWidget);
     final options = find.byKey(const Key('community-switcher-options'));
@@ -1115,10 +1421,51 @@ void main() {
     await tester.pumpAndSettle();
     final initialIconLoads = iconLoads;
 
-    await tester.tap(find.text('Alpha'));
-    await tester.pumpAndSettle();
+    await openCommunitySwitcher(tester);
 
     expect(iconLoads, greaterThan(initialIconLoads));
+  });
+
+  testWidgets('opening the community switcher preserves a loaded icon', (
+    tester,
+  ) async {
+    final community = Community(
+      id: 'alpha',
+      name: 'Alpha',
+      relayUrl: 'wss://alpha.example.com',
+      addedAt: DateTime(2025),
+    );
+    var iconLoads = 0;
+    const icon =
+        'data:image/png;base64,'
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+    await tester.pumpWidget(
+      buildTestable(
+        communityIcons: const {'wss://alpha.example.com': icon},
+        onCommunityIconLoad: (_) => iconLoads++,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(
+            () => _FakeCommunityListNotifier([community]),
+          ),
+          activeCommunityProvider.overrideWith((ref) async => community),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final initialIconLoads = iconLoads;
+
+    await openCommunitySwitcher(tester);
+
+    expect(iconLoads, initialIconLoads);
+    final avatar = tester.widget<AvatarImage>(
+      find.descendant(
+        of: find.byKey(const Key('community-switcher-avatar-alpha')),
+        matching: find.byType(AvatarImage),
+      ),
+    );
+    expect(avatar.imageUrl, icon);
   });
 
   testWidgets('community switcher header grows with accessible text', (
@@ -1145,8 +1492,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
-    await tester.pumpAndSettle();
+    await openCommunitySwitcher(tester);
 
     expect(tester.takeException(), isNull);
     expect(
@@ -1183,8 +1529,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
-    await tester.pumpAndSettle();
+    await openCommunitySwitcher(tester);
     await tester.tap(find.text('Edit'));
     await tester.pump();
 
@@ -2518,8 +2863,13 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 
 class _FakeProfileNotifier extends ProfileNotifier {
   @override
-  Future<UserProfile?> build() async =>
-      const UserProfile(pubkey: 'aabb', displayName: 'Test');
+  Future<UserProfile?> build() async => const UserProfile(
+    pubkey: 'aabb',
+    displayName: 'Test',
+    avatarUrl:
+        'data:image/png;base64,'
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  );
 }
 
 class _FakePresenceNotifier extends PresenceNotifier {

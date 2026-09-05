@@ -421,55 +421,199 @@ Future<void> _confirmRemoveCommunity(
   }
 }
 
-class _CommunityIndicator extends ConsumerWidget {
-  final VoidCallback onTap;
+class _CommunityHeaderControl extends ConsumerWidget {
+  const _CommunityHeaderControl({
+    required this.collapseProgress,
+    required this.onOpenSwitcher,
+    required this.nativeViewSuppressed,
+  });
 
-  const _CommunityIndicator({required this.onTap});
+  final double collapseProgress;
+  final VoidCallback onOpenSwitcher;
+  final ValueListenable<bool> nativeViewSuppressed;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final activeAsync = ref.watch(activeCommunityProvider);
+    final activeCommunity = ref.watch(activeCommunityProvider).value;
+    final communities = ref.watch(communityListProvider).value ?? const [];
+    final title = activeCommunity?.name.trim();
+    final displayName = title == null || title.isEmpty ? 'Community' : title;
+    final normalizedCollapse = collapseProgress.clamp(0.0, 1.0).toDouble();
+    final iconUrl = activeCommunity == null
+        ? null
+        : ref.watch(communityIconProvider(activeCommunity.relayUrl)).value;
+    final initial = displayName.characters.first.toUpperCase();
+    final textStyle = context.textTheme.titleMedium?.copyWith(
+      fontWeight: FontWeight.w600,
+    );
+    final textPainter = TextPainter(
+      text: TextSpan(text: displayName, style: textStyle),
+      maxLines: 1,
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+    )..layout(maxWidth: 190);
+    final maxExpandedWidth =
+        MediaQuery.sizeOf(context).width -
+        _kTopSectionInset * 2 -
+        AdaptiveGlassAvatarButton.height;
+    final expandedWidth =
+        (AdaptiveGlassAvatarButton.avatarSize + 22 + textPainter.width).clamp(
+          96.0,
+          maxExpandedWidth,
+        );
+    final width = MediaQuery.disableAnimationsOf(context)
+        ? normalizedCollapse >= 0.5
+              ? AdaptiveGlassAvatarButton.height
+              : expandedWidth
+        : lerpDouble(
+            expandedWidth,
+            AdaptiveGlassAvatarButton.height,
+            Curves.easeInOutCubic.transform(normalizedCollapse),
+          )!;
+    String? nativeMenuIcon(Community community) {
+      final source = ref.watch(communityIconProvider(community.relayUrl)).value;
+      return source == null
+          ? null
+          : ref.watch(nativeAvatarDataUriProvider(source)).value ?? source;
+    }
 
-    final activeCommunity = activeAsync.value;
+    final menuItems = [
+      for (final community in communities)
+        IosGlassNavigationMenuItem(
+          id: 'community:${community.id}',
+          label: community.name,
+          selected: community.id == activeCommunity?.id,
+          avatarImageUrl: nativeMenuIcon(community),
+          avatarFallback: community.name.trim().isEmpty
+              ? '?'
+              : community.name.characters.first.toUpperCase(),
+        ),
+      const IosGlassNavigationMenuItem(
+        id: 'manage',
+        label: 'Manage',
+        systemIconName: 'gearshape',
+        keepsSingleLine: true,
+      ),
+    ];
 
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: _CommunityAvatar(
-        name: activeCommunity?.name,
-        relayUrl: activeCommunity?.relayUrl,
+    Future<void> handleSelection(String selection) async {
+      if (selection == 'manage') {
+        onOpenSwitcher();
+        return;
+      }
+      if (!selection.startsWith('community:')) return;
+      final id = selection.substring('community:'.length);
+      if (id == activeCommunity?.id) return;
+      await ref.read(communityListProvider.notifier).switchCommunity(id);
+    }
+
+    return Builder(
+      builder: (buttonContext) => TweenAnimationBuilder<double>(
+        tween: Tween(end: width),
+        duration: MediaQuery.disableAnimationsOf(context)
+            ? Duration.zero
+            : const Duration(milliseconds: 140),
+        curve: Curves.easeOutCubic,
+        builder: (context, smoothedWidth, _) => AdaptiveGlassAvatarButton(
+          key: const ValueKey('community-header-glass-control'),
+          imageUrl: iconUrl,
+          fallbackText: initial,
+          label: displayName,
+          semanticLabel: '$displayName community. Double tap to switch.',
+          width: smoothedWidth,
+          iosMenuItems: menuItems,
+          nativeViewSuppressed: nativeViewSuppressed,
+          onIosMenuSelected: (selection) =>
+              unawaited(handleSelection(selection)),
+          onPressed: () async {
+            unawaited(HapticFeedback.selectionClick());
+            if (defaultTargetPlatform == TargetPlatform.iOS ||
+                communities.isEmpty) {
+              onOpenSwitcher();
+              return;
+            }
+            final selection = await showAnchoredPopover<String>(
+              context: buttonContext,
+              width: 280,
+              alignment: AnchoredPopoverAlignment.start,
+              offset: const Offset(0, Grid.xxs),
+              surfaceKey: const ValueKey('community-header-popover'),
+              items: [
+                for (final community in communities)
+                  PopupMenuItem<String>(
+                    value: 'community:${community.id}',
+                    child: Row(
+                      children: [
+                        _CommunityAvatar(
+                          name: community.name,
+                          relayUrl: community.relayUrl,
+                          size: 32,
+                        ),
+                        const SizedBox(width: Grid.xs),
+                        Expanded(
+                          child: Text(
+                            community.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (community.id == activeCommunity?.id)
+                          Icon(
+                            LucideIcons.check,
+                            size: 18,
+                            color: context.colors.primary,
+                          ),
+                      ],
+                    ),
+                  ),
+                const PopupMenuDivider(),
+                const PopupMenuItem<String>(
+                  value: 'manage',
+                  child: Row(
+                    children: [
+                      Icon(LucideIcons.settings2, size: 18),
+                      SizedBox(width: Grid.xs),
+                      Expanded(
+                        child: Text(
+                          'Manage',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+            if (selection != null) await handleSelection(selection);
+          },
+        ),
       ),
     );
   }
 }
 
-class _CommunityHeaderTitle extends ConsumerWidget {
-  final TextStyle? style;
-  final VoidCallback onTap;
+class _ProfileHeaderControl extends ConsumerWidget {
+  const _ProfileHeaderControl({
+    required this.onTap,
+    required this.nativeViewSuppressed,
+  });
 
-  const _CommunityHeaderTitle({required this.onTap, this.style});
+  final VoidCallback onTap;
+  final ValueListenable<bool> nativeViewSuppressed;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final name = ref.watch(activeCommunityProvider).value?.name;
-    final title = name?.trim();
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: SizedBox.expand(
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Padding(
-            padding: const EdgeInsets.only(left: Grid.xxs),
-            child: Text(
-              title == null || title.isEmpty ? 'Community' : title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: style,
-            ),
-          ),
-        ),
-      ),
+    final profile = ref.watch(profileProvider).value;
+    final animatedAvatar = parseAnimatedAvatarUrl(profile?.avatarUrl);
+    return AdaptiveGlassAvatarButton(
+      key: const ValueKey('profile-header-glass-control'),
+      imageUrl: animatedAvatar?.posterUrl ?? profile?.avatarUrl,
+      fallbackText: profile?.initial ?? '?',
+      semanticLabel: 'Open profile and settings',
+      onPressed: onTap,
+      width: AdaptiveGlassAvatarButton.height,
+      nativeViewSuppressed: nativeViewSuppressed,
     );
   }
 }

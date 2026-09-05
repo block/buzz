@@ -170,6 +170,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                         : () => _runComposerAction(onBack),
                     width: 40,
                     height: 40,
+                    controlSize: 40,
                   )
                 else
                   IconButton(

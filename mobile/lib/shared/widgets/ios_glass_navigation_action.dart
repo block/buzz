@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
+import 'buzz_navigation_metrics.dart';
 import 'ios_glass_navigation_button.dart';
 
 /// A native iOS glass capsule for a short navigation-bar text action.
@@ -90,6 +91,7 @@ class IosGlassNavigationAction extends HookWidget {
             'foregroundColor': foregroundValue,
             'enabled': enabled,
             'busy': isBusy,
+            'controlSize': buzzNavigationActionSize,
             'buttonCenterX': width / 2,
             'controlWidth': width - 8,
             'hitTargetWidth': width,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -5,6 +7,7 @@ import '../theme/theme.dart';
 import 'directional_transition_scope.dart';
 import 'frosted_app_bar.dart';
 import 'frosted_scroll_under_scope.dart';
+import 'ios_status_bar_tap_listener.dart';
 
 /// A convenience [Scaffold] that overlays a [FrostedAppBar] on top of its body.
 ///
@@ -36,6 +39,13 @@ class FrostedScaffold extends HookWidget {
   /// surface roles.
   final bool useUtilitySurfaceTheme;
 
+  /// Controller for a full-screen scroll view that opts into the shared iOS
+  /// status-bar scroll-to-top behavior.
+  final ScrollController? statusBarScrollController;
+
+  /// Whether this page is the visible owner of [statusBarScrollController].
+  final bool statusBarScrollToTopEnabled;
+
   const FrostedScaffold({
     super.key,
     required this.appBar,
@@ -45,6 +55,8 @@ class FrostedScaffold extends HookWidget {
     this.backgroundColor,
     this.backgroundGradient,
     this.useUtilitySurfaceTheme = false,
+    this.statusBarScrollController,
+    this.statusBarScrollToTopEnabled = true,
   });
 
   @override
@@ -97,10 +109,34 @@ class FrostedScaffold extends HookWidget {
         child: Stack(children: _stackChildren(observedBody)),
       ),
     );
-    if (!useUtilitySurfaceTheme) return scaffold;
-    return Theme(
-      data: utilitySurfaceThemeData(Theme.of(context)),
-      child: scaffold,
+    final themedScaffold = useUtilitySurfaceTheme
+        ? Theme(
+            data: utilitySurfaceThemeData(Theme.of(context)),
+            child: scaffold,
+          )
+        : scaffold;
+    final statusBarController = statusBarScrollController;
+    if (statusBarController == null || !statusBarScrollToTopEnabled) {
+      return themedScaffold;
+    }
+    return IosStatusBarTapListener(
+      onTap: () {
+        if (!statusBarController.hasClients) return;
+        final position = statusBarController.position;
+        if (position.pixels <= position.minScrollExtent + 0.5) return;
+        if (MediaQuery.disableAnimationsOf(context)) {
+          statusBarController.jumpTo(position.minScrollExtent);
+          return;
+        }
+        unawaited(
+          statusBarController.animateTo(
+            position.minScrollExtent,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      },
+      child: themedScaffold,
     );
   }
 

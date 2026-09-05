@@ -331,8 +331,15 @@ void main() {
     );
     expect(nativeClose.viewType, 'buzz/navigation_glass');
     expect(nativeClose.creationParams, containsPair('icon', 'close'));
+    expect(nativeClose.creationParams, containsPair('controlSize', 44.0));
+    expect(nativeClose.creationParams, containsPair('buttonCenterX', 26.0));
     expect(nativeEdit.viewType, 'buzz/navigation_glass');
     expect(nativeEdit.creationParams, containsPair('controlWidth', 56.0));
+    expect(nativeEdit.creationParams, containsPair('controlSize', 44.0));
+    expect(
+      (nativeClose.creationParams as Map<Object?, Object?>)['foregroundColor'],
+      (nativeEdit.creationParams as Map<Object?, Object?>)['foregroundColor'],
+    );
     expect(find.byTooltip('Close settings'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });

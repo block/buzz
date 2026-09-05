@@ -1,6 +1,5 @@
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/channels/channels_page.dart';
-import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -118,7 +117,9 @@ void main() {
     await tester.pumpWidget(await buildHome());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byType(ProfileAvatar));
+    await tester.tap(
+      find.byKey(const ValueKey('profile-header-glass-control')),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 95));
 
@@ -158,7 +159,9 @@ void main() {
         .transform
         .storage[0];
 
-    await tester.tap(find.byType(ProfileAvatar));
+    await tester.tap(
+      find.byKey(const ValueKey('profile-header-glass-control')),
+    );
     await tester.pump();
 
     final settingsTransition = find.byKey(

@@ -150,91 +150,122 @@ class _HuddleInvite {
   });
 }
 
+typedef _HuddleAction = ({String label, VoidCallback? onPressed});
+
+_HuddleAction _resolveHuddleAction({
+  required BuildContext context,
+  required WidgetRef ref,
+  required Channel channel,
+  required List<NostrEvent> events,
+}) {
+  final session = ref.watch(huddleSessionProvider);
+  final latestStart = _activeHuddleStart(events);
+  final unavailableFailure =
+      session.phase == HuddleSessionPhase.failed &&
+      _isUnavailableHuddleError(session.error);
+  final activeStart =
+      unavailableFailure &&
+          session.startedEventId == latestStart?.startedEventId
+      ? null
+      : latestStart;
+  final isCurrentParent =
+      session.parentChannelId == channel.id &&
+      session.ephemeralChannelId != null &&
+      session.phase != HuddleSessionPhase.idle &&
+      !unavailableFailure;
+  final disabledByOtherHuddle =
+      session.isInSession && session.parentChannelId != channel.id;
+
+  final label = disabledByOtherHuddle
+      ? 'Leave your current Huddle first'
+      : activeStart != null || isCurrentParent
+      ? 'Open Huddle'
+      : 'Start Huddle';
+  final onPressed = disabledByOtherHuddle
+      ? null
+      : () async {
+          if (isCurrentParent) {
+            _showMobileHuddleCall(
+              context: context,
+              ref: ref,
+              invite: _HuddleInvite(
+                parentChannelId: channel.id,
+                ephemeralChannelId: session.ephemeralChannelId!,
+                startedBy: session.isCreator ? session.currentPubkey ?? '' : '',
+                startedEventId: session.startedEventId ?? '',
+              ),
+            );
+            return;
+          }
+          if (activeStart != null) {
+            _openMobileHuddle(context: context, ref: ref, invite: activeStart);
+            return;
+          }
+          try {
+            await ref
+                .read(mobileHuddleControllerProvider.notifier)
+                .start(parentChannelId: channel.id);
+            if (!context.mounted) return;
+            final started = ref.read(huddleSessionProvider);
+            final ephemeralChannelId = started.ephemeralChannelId;
+            if (ephemeralChannelId == null) return;
+            _showMobileHuddleCall(
+              context: context,
+              ref: ref,
+              invite: _HuddleInvite(
+                parentChannelId: channel.id,
+                ephemeralChannelId: ephemeralChannelId,
+                startedBy: started.currentPubkey ?? '',
+                startedEventId: started.startedEventId ?? '',
+              ),
+            );
+          } catch (error) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(_huddleActionError(error))));
+          }
+        };
+  return (label: label, onPressed: onPressed);
+}
+
 class _HuddleButton extends ConsumerWidget {
-  const _HuddleButton({required this.channel, required this.events});
+  const _HuddleButton({
+    required this.channel,
+    required this.events,
+    this.nativeViewSuppressed,
+  });
 
   final Channel channel;
   final List<NostrEvent> events;
+  final ValueListenable<bool>? nativeViewSuppressed;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final session = ref.watch(huddleSessionProvider);
-    final latestStart = _activeHuddleStart(events);
-    final unavailableFailure =
-        session.phase == HuddleSessionPhase.failed &&
-        _isUnavailableHuddleError(session.error);
-    final activeStart =
-        unavailableFailure &&
-            session.startedEventId == latestStart?.startedEventId
-        ? null
-        : latestStart;
-    final isCurrentParent =
-        session.parentChannelId == channel.id &&
-        session.ephemeralChannelId != null &&
-        session.phase != HuddleSessionPhase.idle &&
-        !unavailableFailure;
-    final disabledByOtherHuddle =
-        session.isInSession && session.parentChannelId != channel.id;
+    final action = _resolveHuddleAction(
+      context: context,
+      ref: ref,
+      channel: channel,
+      events: events,
+    );
+
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        key: const ValueKey('channel-huddle-button'),
+        icon: IosGlassNavigationIcon.headphones,
+        semanticLabel: action.label,
+        onPressed: action.onPressed,
+        controlSize: buzzNavigationActionSize,
+        foregroundColor: context.colors.primary,
+        nativeViewSuppressed: nativeViewSuppressed,
+      );
+    }
 
     return IconButton(
       key: const ValueKey('channel-huddle-button'),
       color: context.colors.primary,
-      onPressed: disabledByOtherHuddle
-          ? null
-          : () async {
-              if (isCurrentParent) {
-                _showMobileHuddleCall(
-                  context: context,
-                  ref: ref,
-                  invite: _HuddleInvite(
-                    parentChannelId: channel.id,
-                    ephemeralChannelId: session.ephemeralChannelId!,
-                    startedBy: session.isCreator
-                        ? session.currentPubkey ?? ''
-                        : '',
-                    startedEventId: session.startedEventId ?? '',
-                  ),
-                );
-                return;
-              }
-              if (activeStart != null) {
-                _openMobileHuddle(
-                  context: context,
-                  ref: ref,
-                  invite: activeStart,
-                );
-                return;
-              }
-              try {
-                await ref
-                    .read(mobileHuddleControllerProvider.notifier)
-                    .start(parentChannelId: channel.id);
-                if (!context.mounted) return;
-                final started = ref.read(huddleSessionProvider);
-                final ephemeralChannelId = started.ephemeralChannelId;
-                if (ephemeralChannelId == null) return;
-                _showMobileHuddleCall(
-                  context: context,
-                  ref: ref,
-                  invite: _HuddleInvite(
-                    parentChannelId: channel.id,
-                    ephemeralChannelId: ephemeralChannelId,
-                    startedBy: started.currentPubkey ?? '',
-                    startedEventId: started.startedEventId ?? '',
-                  ),
-                );
-              } catch (error) {
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(_huddleActionError(error))),
-                );
-              }
-            },
-      tooltip: disabledByOtherHuddle
-          ? 'Leave your current Huddle first'
-          : activeStart != null || isCurrentParent
-          ? 'Open Huddle'
-          : 'Start Huddle',
+      onPressed: action.onPressed,
+      tooltip: action.label,
       icon: const Icon(LucideIcons.headphones, size: 22),
     );
   }

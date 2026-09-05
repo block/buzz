@@ -32,6 +32,7 @@
 		4A71C01F2F4100100A17E01 /* VoiceNotePackager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */; };
 		4A71C0212F4110100A17E01 /* MP4Canonicalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */; };
 		4A71C0232F4120100A17E01 /* NativeAttachmentPopoverMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0242F4120100A17E01 /* NativeAttachmentPopoverMenu.swift */; };
+		4A71C0252F4130100A17E01 /* NativeNavigationShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0262F4130100A17E01 /* NativeNavigationShell.swift */; };
 		331C809D294A63AB00263BE5 /* UIKitEncoded.png in Resources */ = {isa = PBXBuildFile; fileRef = 331C809C294A618700263BE5 /* UIKitEncoded.png */; };
 		331C809F294A63AB00263BE5 /* UIKitEncoded.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 331C809E294A618700263BE5 /* UIKitEncoded.jpg */; };
 		33ADD70AB275E0EC81295559 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8906419FB4E98B4B12B7A56F /* Pods_Runner.framework */; };
@@ -111,6 +112,7 @@
 		4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceNotePackager.swift; sourceTree = "<group>"; };
 		4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MP4Canonicalizer.swift; sourceTree = "<group>"; };
 		4A71C0242F4120100A17E01 /* NativeAttachmentPopoverMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAttachmentPopoverMenu.swift; sourceTree = "<group>"; };
+		4A71C0262F4130100A17E01 /* NativeNavigationShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeNavigationShell.swift; sourceTree = "<group>"; };
 		331C809C294A618700263BE5 /* UIKitEncoded.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = UIKitEncoded.png; sourceTree = "<group>"; };
 		331C809E294A618700263BE5 /* UIKitEncoded.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = UIKitEncoded.jpg; sourceTree = "<group>"; };
 		331C8081294A63A400263BE5 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -268,6 +270,7 @@
 				4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */,
 				4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */,
 				4A71C0242F4120100A17E01 /* NativeAttachmentPopoverMenu.swift */,
+				4A71C0262F4130100A17E01 /* NativeNavigationShell.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -595,6 +598,7 @@
 				4A71C01F2F4100100A17E01 /* VoiceNotePackager.swift in Sources */,
 				4A71C0212F4110100A17E01 /* MP4Canonicalizer.swift in Sources */,
 				4A71C0232F4120100A17E01 /* NativeAttachmentPopoverMenu.swift in Sources */,
+				4A71C0252F4130100A17E01 /* NativeNavigationShell.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 			);

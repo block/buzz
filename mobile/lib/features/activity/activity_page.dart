@@ -64,10 +64,13 @@ EdgeInsets _activityScrollPadding(
 /// navigation. Row taps deep-link to the represented message (oldest unread
 /// for grouped conversations) rather than just opening the channel.
 class ActivityPage extends HookConsumerWidget {
-  const ActivityPage({this.tabReselection, super.key});
+  const ActivityPage({this.tabReselection, this.isActive = true, super.key});
 
   /// Notifies this page when its already-selected tab is tapped again.
   final ValueListenable<int>? tabReselection;
+
+  /// Whether Activity is the currently visible tab.
+  final bool isActive;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -415,6 +418,8 @@ class ActivityPage extends HookConsumerWidget {
     }
 
     return FrostedScaffold(
+      statusBarScrollController: scrollController,
+      statusBarScrollToTopEnabled: isActive,
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
         automaticallyImplyLeading: false,

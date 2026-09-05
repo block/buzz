@@ -404,6 +404,27 @@ class _MessageList extends HookConsumerWidget {
       }
     }
 
+    Future<void> scrollToTimelineTop() async {
+      if (displayEntries.isEmpty ||
+          !itemScrollController.isAttached ||
+          isAutoScrolling.value) {
+        return;
+      }
+      isAutoScrolling.value = true;
+      followsLatest.value = false;
+      hasUserScrolled.value = true;
+      isAtLatest.value = false;
+      try {
+        await scrollPositionedListFromIosStatusBarTap(
+          context: context,
+          controller: itemScrollController,
+          targetIndex: displayEntries.length - 1,
+        );
+      } finally {
+        isAutoScrolling.value = false;
+      }
+    }
+
     bool latestIsAtBoundary() {
       // In this reversed list, item 0's leading edge is the visible bottom
       // boundary above the composer. Being merely visible is not enough: a
@@ -713,6 +734,10 @@ class _MessageList extends HookConsumerWidget {
 
     return Stack(
       children: [
+        IosStatusBarTapListener(
+          onTap: () => unawaited(scrollToTimelineTop()),
+          child: const SizedBox.shrink(),
+        ),
         NotificationListener<Notification>(
           onNotification: (notification) {
             if (notification is ScrollMetricsNotification &&

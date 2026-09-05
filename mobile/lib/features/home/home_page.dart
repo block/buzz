@@ -91,6 +91,7 @@ class HomePage extends HookConsumerWidget {
       ChannelsPage(
         settingsPageBuilder: settingsPageBuilder,
         tabReselection: homeReselection,
+        isActive: tabIndex.value == 0,
         onSettingsTransitionProgress: (progress) {
           if (settingsTransitionProgress.value != progress) {
             settingsTransitionProgress.value = progress;
@@ -98,7 +99,10 @@ class HomePage extends HookConsumerWidget {
         },
       ),
       if (visitedTabs.value.contains(1))
-        ActivityPage(tabReselection: activityReselection)
+        ActivityPage(
+          tabReselection: activityReselection,
+          isActive: tabIndex.value == 1,
+        )
       else
         const SizedBox.shrink(),
       if (visitedTabs.value.contains(2))

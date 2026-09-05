@@ -1,7 +1,9 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Border? _appBarBorder(WidgetTester tester) {
@@ -105,5 +107,85 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(_appBarBorder(tester)?.bottom.color.a, 0);
+  });
+
+  testWidgets('exposes an explicit page controller to iOS scroll-to-top', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: FrostedScaffold(
+          statusBarScrollController: controller,
+          appBar: const FrostedAppBar(title: Text('Home')),
+          body: ListView.builder(
+            controller: controller,
+            itemCount: 60,
+            itemBuilder: (_, index) =>
+                SizedBox(height: 48, child: Text('Item $index')),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    controller.jumpTo(600);
+    await tester.pump();
+    expect(controller.offset, 600);
+
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      SystemChannels.statusBar.name,
+      SystemChannels.statusBar.codec.encodeMethodCall(
+        const MethodCall('handleScrollToTop'),
+      ),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
+
+    expect(controller.offset, controller.position.minScrollExtent);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('does not scroll an inactive indexed page', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: FrostedScaffold(
+          statusBarScrollController: controller,
+          statusBarScrollToTopEnabled: false,
+          appBar: const FrostedAppBar(title: Text('Inactive')),
+          body: ListView.builder(
+            controller: controller,
+            itemCount: 60,
+            itemBuilder: (_, index) =>
+                SizedBox(height: 48, child: Text('Inactive item $index')),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    controller.jumpTo(600);
+    await tester.pump();
+
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      SystemChannels.statusBar.name,
+      SystemChannels.statusBar.codec.encodeMethodCall(
+        const MethodCall('handleScrollToTop'),
+      ),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
+
+    expect(controller.offset, 600);
+    debugDefaultTargetPlatformOverride = null;
   });
 }

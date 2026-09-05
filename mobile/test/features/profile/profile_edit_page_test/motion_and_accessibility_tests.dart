@@ -425,7 +425,57 @@ void runProfileEditMotionAndAccessibilityTests() {
     expect(selectedControls.single['icon'], 'palette');
     expect(
       selectedControls.single['foregroundColor'],
+      AppTheme.light().colorScheme.onPrimary.toARGB32(),
+    );
+    expect(
+      selectedControls.single['selectionColor'],
       AppTheme.light().colorScheme.primary.toARGB32(),
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('keeps the selected glass fallback icon above its fill', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final suppressNativeView = ValueNotifier(true);
+    addTearDown(suppressNativeView.dispose);
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: IosGlassNavigationButton(
+          icon: IosGlassNavigationIcon.emoji,
+          semanticLabel: 'Emoji',
+          onPressed: () {},
+          foregroundColor: AppTheme.light().colorScheme.onPrimary,
+          selectionColor: AppTheme.light().colorScheme.primary,
+          isSelected: true,
+          nativeViewSuppressed: suppressNativeView,
+        ),
+      ),
+    );
+
+    final fallback = find.byKey(
+      const ValueKey('ios-glass-navigation-flutter-fallback'),
+    );
+    final surface = tester.widget<DecoratedBox>(
+      find.descendant(of: fallback, matching: find.byType(DecoratedBox)),
+    );
+    expect(
+      (surface.decoration as BoxDecoration).color,
+      AppTheme.light().colorScheme.primary,
+    );
+    expect(
+      tester
+          .widget<Icon>(
+            find.descendant(
+              of: fallback,
+              matching: find.byIcon(Icons.emoji_emotions_rounded),
+            ),
+          )
+          .color,
+      AppTheme.light().colorScheme.onPrimary,
     );
     debugDefaultTargetPlatformOverride = null;
   });

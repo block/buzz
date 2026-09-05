@@ -93,8 +93,9 @@ class AvatarEditorOptionButton extends StatelessWidget {
             height: 64,
             controlSize: 64,
             foregroundColor: selected
-                ? context.colors.primary
+                ? context.colors.onPrimary
                 : context.colors.onSurface,
+            selectionColor: context.colors.primary,
             isSelected: selected,
           ),
           const SizedBox(height: avatarEditorOptionLabelGap),

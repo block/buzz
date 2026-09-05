@@ -237,7 +237,15 @@ void main() {
     expect(find.byType(UiKitView), findsOneWidget);
     expect(
       find.byKey(const ValueKey('ios-glass-navigation-flutter-fallback')),
-      findsNothing,
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(const ValueKey('ios-glass-navigation-fallback-layer')),
+          )
+          .opacity,
+      0,
     );
     expect(find.bySemanticsLabel('Back'), findsNothing);
 

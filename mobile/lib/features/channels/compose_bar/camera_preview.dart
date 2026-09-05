@@ -294,6 +294,7 @@ class _CameraCloseButton extends StatelessWidget {
         onPressed: () => _runComposerAction(onTap),
         width: emphasized ? _cameraBackSize : 40,
         height: emphasized ? _cameraBackSize : 40,
+        controlSize: emphasized ? _cameraBackSize : 40,
         foregroundColor: Colors.white,
       );
     }
