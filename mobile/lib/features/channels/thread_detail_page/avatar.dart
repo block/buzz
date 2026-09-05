@@ -18,6 +18,7 @@ class _Avatar extends StatelessWidget {
     final avatarUrl = profile?.avatarUrl;
 
     return AvatarImage(
+      pubkey: pubkey,
       imageUrl: avatarUrl,
       radius: messageAvatarSize / 2,
       backgroundColor: context.colors.primaryContainer,

@@ -470,6 +470,7 @@ class _RowAvatar extends StatelessWidget {
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     return AvatarImage(
+      pubkey: pubkey,
       imageUrl: profile?.avatarUrl,
       radius: activityAvatarSize / 2,
       backgroundColor: context.colors.primaryContainer,

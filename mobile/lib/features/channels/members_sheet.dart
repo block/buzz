@@ -228,6 +228,7 @@ class _MemberTile extends ConsumerWidget {
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: _MemberAvatar(
+        pubkey: member.pubkey,
         avatarUrl: profile?.avatarUrl,
         initial: initial,
         isAgent: member.isBot || profile?.isAgent == true,
@@ -441,11 +442,13 @@ class _RoleSelector extends StatelessWidget {
 }
 
 class _MemberAvatar extends StatelessWidget {
+  final String pubkey;
   final String? avatarUrl;
   final String initial;
   final bool isAgent;
 
   const _MemberAvatar({
+    required this.pubkey,
     required this.avatarUrl,
     required this.initial,
     required this.isAgent,
@@ -454,6 +457,7 @@ class _MemberAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AvatarImage(
+      pubkey: pubkey,
       imageUrl: avatarUrl,
       radius: 20,
       fallback: Text(initial),

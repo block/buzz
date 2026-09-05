@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/widgets/agent_provenance.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -852,6 +853,7 @@ class _MentionMd extends InlineMd {
     final isAgent =
         pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
     final pill = _MentionPill(
+      pubkey: pubkey,
       label: displayName ?? raw.substring(1),
       isAgent: isAgent,
       textStyle: config.style,
@@ -868,11 +870,13 @@ class _MentionMd extends InlineMd {
 }
 
 class _MentionPill extends StatelessWidget {
+  final String? pubkey;
   final String label;
   final bool isAgent;
   final TextStyle? textStyle;
 
   const _MentionPill({
+    this.pubkey,
     required this.label,
     required this.isAgent,
     this.textStyle,
@@ -921,6 +925,7 @@ class _MentionPill extends StatelessWidget {
               child: Text('@', style: style),
             ),
           Text(label, style: style),
+          AgentProvenance(pubkey: pubkey),
         ],
       ),
     );
