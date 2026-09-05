@@ -227,5 +227,5 @@
 - 现象：`59.77.33.59:6000` 的 Buzz 在用户点击退出登录并重启后挂住，持续保留 `.xyz.chemyibinjiang.buzz.codexlab.reset-pending`；stderr 报错为无法将整个 app-data 目录重命名为 `.reset-trash`，Windows 返回 `Access is denied (os error 5)`。
 - 定位：退出登录已经正确写入 reset sentinel，问题发生在下一次启动的两阶段清理。Buzz 有意让 Codex shared app-server 跨窗口退出继续运行，但旧版把该进程的 stdout/stderr 放在 app-data 下；现场独占锁探针确认只有 `agents/logs/codex-shared-runtime.stdout.log` 和 `codex-shared-runtime.stderr.log` 被长期 app-server 占用，因此 Windows 不允许重命名其父目录。shared backend 的生命周期策略正确，错误在于把电脑级服务日志放进了身份级 reset 边界。
 - 处理：Windows 新启动的 shared runtime 日志迁移到 app-data 同级的隐藏目录，避免长期进程锁住退出登录清理目标；错误诊断仍回退读取旧日志。为兼容已经运行旧 backend 的机器，整目录原子重命名失败时仅允许保留上述两个精确日志路径，其余数据先递归移动到 rollback trash，keychain 删除成功后清除，失败则完整恢复；任何其他锁定文件仍会失败并回滚。
-- 验证：新增 Windows 独占句柄回归测试，确认旧 shared-runtime 日志保持打开时身份数据仍被删除、sentinel 清除且 backend 无需退出；另一个测试确认 keychain 失败会恢复设置并保留 sentinel。reset 聚焦测试 16/16、Windows shared-runtime 聚焦测试 4/4 通过。
-- 版本/提交：分支 `codex/windows-signout-shared-runtime-logs`，待远端现场验收与提交。
+- 验证：新增 Windows 独占句柄回归测试，确认旧 shared-runtime 日志保持打开时身份数据仍被删除、sentinel 清除且 backend 无需退出；另一个测试确认 keychain 失败会恢复设置并保留 sentinel。reset 聚焦测试 16/16、Windows shared-runtime 聚焦测试 4/4 通过。随后在原问题机器安装 `0.5.18-local.2_c0572483dd83`：先用非交互 SSH 会话验证 keyring 不可用时全部数据正确回滚；再从已登录桌面会话启动，reset sentinel 和 rollback trash 均被清除，旧 Agent PID receipts 归零，两份锁定日志保留，shared app-server 始终保持原 PID `32764` 且 readiness 返回 HTTP 200。
+- 版本/提交：分支 `codex/windows-signout-shared-runtime-logs`；代码提交 `c0572483`，远端验收安装包 SHA-256 `69e5dcdd35a4d8aa81cb8e86ff0c8464b3698cb63f0cd4977af5d9a136b26071`。
