@@ -1,5 +1,128 @@
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
 
+#[cfg(unix)]
+const MARKED_CHILD_FIXTURE_ENV: &str = "BUZZ_TEST_MARKED_CHILD_FIXTURE";
+#[cfg(unix)]
+const MARKED_CHILD_READY_ENV: &str = "BUZZ_TEST_MARKED_CHILD_READY";
+
+/// Test-executable child whose environment is stable and directly observable
+/// through the production process-marker reader.
+#[cfg(unix)]
+pub(in crate::managed_agents) struct MarkedTestChild {
+    child: Option<std::process::Child>,
+    _ready_dir: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl MarkedTestChild {
+    pub(in crate::managed_agents) fn spawn(instance_id: &str) -> Result<Self, String> {
+        use std::os::unix::process::CommandExt as _;
+        use std::process::{Command, Stdio};
+
+        let ready_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ready_path = ready_dir.path().join("ready");
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let mut child = Command::new(executable)
+            .args([
+                "--exact",
+                "managed_agents::runtime::test_fixtures::marked_child_process_fixture",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(MARKED_CHILD_FIXTURE_ENV, "1")
+            .env(MARKED_CHILD_READY_ENV, &ready_path)
+            .env("BUZZ_MANAGED_AGENT", instance_id)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+
+        for _ in 0..100 {
+            if ready_path.is_file() {
+                return Ok(Self {
+                    child: Some(child),
+                    _ready_dir: ready_dir,
+                });
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "marked child fixture exited before readiness: {status}"
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = super::terminate_process(child.id());
+                    let _ = child.wait();
+                    return Err(format!("failed to inspect marked child fixture: {error}"));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = super::terminate_process(child.id());
+        let _ = child.wait();
+        Err("marked child fixture did not become ready".into())
+    }
+
+    pub(in crate::managed_agents) fn id(&self) -> u32 {
+        self.child.as_ref().expect("child is present").id()
+    }
+
+    pub(in crate::managed_agents) fn child_mut(&mut self) -> &mut std::process::Child {
+        self.child.as_mut().expect("child is present")
+    }
+
+    pub(in crate::managed_agents) fn into_child(mut self) -> std::process::Child {
+        self.child.take().expect("child is present")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MarkedTestChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = super::terminate_process(child.id());
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Backstop for children whose owned `Child` handle is moved into production
+/// runtime state. A failed assertion still terminates the complete process
+/// group; successful tests explicitly wait through the owned handle.
+#[cfg(unix)]
+pub(in crate::managed_agents) struct MarkedProcessGuard(u32);
+
+#[cfg(unix)]
+impl MarkedProcessGuard {
+    pub(in crate::managed_agents) fn new(pid: u32) -> Self {
+        Self(pid)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MarkedProcessGuard {
+    fn drop(&mut self) {
+        let _ = super::terminate_process(self.0);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn marked_child_process_fixture() {
+    if std::env::var_os(MARKED_CHILD_FIXTURE_ENV).is_none() {
+        return;
+    }
+    let ready_path = std::env::var_os(MARKED_CHILD_READY_ENV)
+        .expect("marked child fixture requires a readiness path");
+    std::fs::write(ready_path, b"ready").expect("write marked child readiness handshake");
+    loop {
+        std::thread::park_timeout(std::time::Duration::from_secs(60));
+    }
+}
+
 pub(super) const EXPECTED_ACCESS_ENV: &str = "BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY";
 
 pub(super) fn expected_owner_only() -> bool {
@@ -30,7 +153,7 @@ pub(super) fn expected_mode(oss_mode: &'static str) -> &'static str {
 }
 
 /// Construct a minimal record fixture for runtime tests.
-pub(super) fn fixture(
+pub(in crate::managed_agents) fn fixture(
     respond_to: RespondTo,
     allowlist: Vec<String>,
     auth_tag: Option<String>,

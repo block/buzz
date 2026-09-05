@@ -8,7 +8,7 @@ import {
   useManagedAgentRuntimesQuery,
 } from "@/features/agents/managedAgentRuntimeHooks";
 import {
-  canonicalRelayUrl,
+  canonicalBestieRelayUrl,
   findManagedAgentRuntime,
   managedAgentPairAction,
 } from "@/features/agents/managedAgentRuntimeStatus";
@@ -36,7 +36,7 @@ export function bestieAssignmentQueryKey(
 ) {
   return [
     "bestie-assignment",
-    canonicalRelayUrl(relayUrl) ?? relayUrl,
+    canonicalBestieRelayUrl(relayUrl) ?? relayUrl,
     ownerPubkey.toLowerCase(),
   ] as const;
 }

@@ -395,7 +395,9 @@ pub(crate) fn valid_agent_runtime_receipt(
 
 /// Injectable version of `valid_agent_runtime_receipt` for testing.
 /// `is_running(pid)` and `has_marker(pid, instance_id)` can be substituted by
-/// test doubles without spawning real processes.
+/// test doubles without spawning real processes. Validity here proves only
+/// instance ownership for global cleanup; pair actions must additionally use
+/// `select_pair_runtime_receipt_with` to establish authority provenance.
 pub(crate) fn valid_agent_runtime_receipt_with(
     path: &std::path::Path,
     receipt: &super::super::ManagedAgentRuntimeReceipt,
@@ -403,12 +405,21 @@ pub(crate) fn valid_agent_runtime_receipt_with(
     is_running: impl Fn(u32) -> bool,
     has_marker: impl Fn(u32, &str) -> bool,
 ) -> bool {
-    let Ok(canonical) =
+    let key_rendering_is_valid = if receipt.authority_version == 0 {
+        receipt.key.pubkey.len() == 64
+            && receipt
+                .key
+                .pubkey
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && receipt.key.pubkey == receipt.key.pubkey.to_ascii_lowercase()
+            && buzz_core_pkg::relay::normalize_relay_url(&receipt.key.relay_url)
+                .is_ok_and(|legacy| legacy == receipt.key.relay_url)
+    } else {
         ManagedAgentRuntimeKey::new(receipt.key.pubkey.clone(), &receipt.key.relay_url)
-    else {
-        return false;
+            .is_ok_and(|canonical| canonical == receipt.key)
     };
-    canonical == receipt.key
+    key_rendering_is_valid
         && path.file_name().and_then(|name| name.to_str())
             == Some(&format!("{}.json", receipt.key.runtime_id()))
         && receipt.desktop_instance_id == instance_id
@@ -441,20 +452,93 @@ pub(super) fn terminate_runtime_receipt_with(
     ))
 }
 
+fn receipt_has_proven_pair_authority(receipt: &super::super::ManagedAgentRuntimeReceipt) -> bool {
+    receipt.authority_version == super::super::RUNTIME_AUTHORITY_RECEIPT_VERSION
+}
+
+fn unversioned_receipt_may_ambiguously_match(
+    receipt: &super::super::ManagedAgentRuntimeReceipt,
+    key: &ManagedAgentRuntimeKey,
+) -> bool {
+    if receipt.authority_version != 0 || !receipt.key.pubkey.eq_ignore_ascii_case(&key.pubkey) {
+        return false;
+    }
+    buzz_core_pkg::relay::normalize_relay_url(&key.relay_url)
+        .is_ok_and(|legacy_relay| legacy_relay == receipt.key.relay_url)
+}
+
+/// Select a receipt only when it proves the requested pair authority.
+///
+/// Unversioned receipts used a lossy normalizer that folded loopback hosts and
+/// stripped every terminal slash. They can establish instance ownership for
+/// global cleanup but cannot prove which new runtime key a pair-scoped action
+/// owns, including an apparently exact root URL: `wss://h//` and `wss://h`
+/// share the V0 rendering but are distinct modern keys.
+pub(crate) fn select_pair_runtime_receipt_with(
+    entries: Vec<(std::path::PathBuf, super::super::ManagedAgentRuntimeReceipt)>,
+    key: &ManagedAgentRuntimeKey,
+    instance_id: &str,
+    is_running: impl Fn(u32) -> bool,
+    has_marker: impl Fn(u32, &str) -> bool,
+) -> Result<Option<(std::path::PathBuf, super::super::ManagedAgentRuntimeReceipt)>, String> {
+    let mut selected = None;
+    for (path, receipt) in entries {
+        if !valid_agent_runtime_receipt_with(&path, &receipt, instance_id, &is_running, &has_marker)
+            || !receipt.key.pubkey.eq_ignore_ascii_case(&key.pubkey)
+        {
+            continue;
+        }
+
+        let exact = receipt.key == *key;
+        if (exact && !receipt_has_proven_pair_authority(&receipt))
+            || unversioned_receipt_may_ambiguously_match(&receipt, key)
+        {
+            return Err(
+                "Runtime receipt cannot prove the requested community authority; quit Buzz Desktop normally, then reopen it before retrying this Start or Stop"
+                    .into(),
+            );
+        }
+        if exact {
+            selected = Some((path, receipt));
+        }
+    }
+    Ok(selected)
+}
+
+/// Run a pair action only after every live receipt that could name the pair
+/// has proven authority. The check itself performs no process termination.
+pub(crate) fn with_pair_runtime_receipt_authority<R: tauri::Runtime, T>(
+    app: &AppHandle<R>,
+    key: &ManagedAgentRuntimeKey,
+    effect: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let instance_id = current_instance_id(app);
+    select_pair_runtime_receipt_with(
+        super::super::read_all_agent_runtime_receipts(app),
+        key,
+        &instance_id,
+        process_is_running,
+        process_has_buzz_marker,
+    )?;
+    effect()
+}
+
 /// Replace a valid prior-session process before registering a new child for
 /// the same pair. The caller must hold the runtime transition lock so receipt
 /// inspection, termination, spawn, and registration cannot race shutdown or
 /// another start.
-pub(crate) fn terminate_untracked_pair_runtime(
-    app: &AppHandle,
+pub(crate) fn terminate_untracked_pair_runtime<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     key: &ManagedAgentRuntimeKey,
 ) -> Result<(), String> {
     let instance_id = current_instance_id(app);
-    let Some((path, receipt)) = super::super::read_all_agent_runtime_receipts(app)
-        .into_iter()
-        .find(|(path, receipt)| {
-            receipt.key == *key && valid_agent_runtime_receipt(path, receipt, &instance_id)
-        })
+    let Some((path, receipt)) = select_pair_runtime_receipt_with(
+        super::super::read_all_agent_runtime_receipts(app),
+        key,
+        &instance_id,
+        process_is_running,
+        process_has_buzz_marker,
+    )?
     else {
         return Ok(());
     };

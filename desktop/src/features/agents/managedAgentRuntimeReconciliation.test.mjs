@@ -47,3 +47,16 @@ test("startup reconcile preserves unrelated runtime rows", () => {
     [discovered, existing],
   );
 });
+
+test("startup reconcile keeps same-agent loopback authority rows distinct", () => {
+  const localhost = runtime({ relayUrl: "ws://localhost:3000" });
+  const numeric = runtime({
+    relayUrl: "ws://127.0.0.1:3000",
+    lifecycle: "ready",
+  });
+
+  assert.deepEqual(
+    mergeManagedAgentRuntimeStatuses([localhost], [localhost], [numeric]),
+    [numeric, localhost],
+  );
+});

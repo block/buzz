@@ -397,12 +397,12 @@ pub async fn restore_managed_agents_on_launch(
                     continue;
                 };
                 let now = util::now_iso();
-                let receipt = super::ManagedAgentRuntimeReceipt {
-                    key: key.clone(),
-                    pid: process.child.id(),
-                    desktop_instance_id: super::current_instance_id(app),
-                    started_at: now.clone(),
-                };
+                let receipt = super::ManagedAgentRuntimeReceipt::new(
+                    key.clone(),
+                    process.child.id(),
+                    super::current_instance_id(app),
+                    now.clone(),
+                );
                 if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
                     let _ = super::terminate_process(process.child.id());
                     let _ = process.child.wait();

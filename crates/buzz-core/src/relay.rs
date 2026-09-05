@@ -1,4 +1,4 @@
-//! Canonical relay identities shared by runtime components.
+//! Legacy canonical relay identities shared by compatibility consumers.
 
 use thiserror::Error;
 use url::{Host, Url};
@@ -23,17 +23,16 @@ pub enum NormalizeRelayUrlError {
     MissingHost,
 }
 
-/// Canonicalize a WebSocket relay URL for use as a runtime identity key.
+/// Canonicalize a WebSocket relay URL for legacy equivalence consumers.
 ///
-/// This is the sole normalizer for `(agent, relay)` process identity. It keeps
-/// the WebSocket scheme, lowercases DNS hosts, folds all loopback spellings to
-/// `127.0.0.1`, removes default ports and a root slash, and preserves non-root
-/// paths and queries. It deliberately is **not** the NIP-42 AUTH comparison
-/// helper in `buzz-auth`: AUTH validation is a security boundary with narrower
-/// equivalence rules and must not be widened by runtime-key canonicalization.
+/// Bestie scope and pollen/profile migration retain this historical behavior:
+/// keep the WebSocket scheme, lowercase DNS hosts, fold all loopback spellings
+/// to `127.0.0.1`, remove default ports and trailing slashes, and preserve
+/// queries. Managed-agent process identity intentionally uses a scoped
+/// host-preserving normalizer because relay hosts are tenant authorities.
 ///
-/// Connection code may retain the configured URL; this canonical form is for
-/// identity, receipts, status and deduplication.
+/// This deliberately is **not** the NIP-42 AUTH comparison helper in
+/// `buzz-auth`; changing either equivalence contract requires a separate review.
 pub fn normalize_relay_url(raw: &str) -> Result<String, NormalizeRelayUrlError> {
     let mut url = Url::parse(raw.trim())
         .map_err(|error| NormalizeRelayUrlError::InvalidUrl(error.to_string()))?;

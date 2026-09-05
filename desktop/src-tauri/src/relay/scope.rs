@@ -132,7 +132,7 @@ mod tests {
         let runtime =
             crate::managed_agents::ManagedAgentRuntimeKey::new("a".repeat(64), captured.as_str())
                 .unwrap();
-        assert_eq!(runtime.relay_url, "ws://127.0.0.1:3037");
+        assert_eq!(runtime.relay_url, relay);
         assert_eq!(captured.revalidate(relay.into()).unwrap().as_str(), relay);
     }
 

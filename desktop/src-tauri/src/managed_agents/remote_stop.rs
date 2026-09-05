@@ -267,7 +267,10 @@ mod tests {
         let community = "ws://localhost:3037";
         let agent = Keys::generate().public_key().to_hex();
         let key = ManagedAgentRuntimeKey::new(&agent, community).unwrap();
-        assert_ne!(key.relay_url, community);
+        assert_eq!(key.relay_url, community);
+        let numeric_community = "ws://127.0.0.1:3037";
+        let numeric_key = ManagedAgentRuntimeKey::new(&agent, numeric_community).unwrap();
+        assert_ne!(key, numeric_key);
         let scope = super::super::retention::RetentionScope {
             db_path: scoped_retention_db_path(&root.join("agents"), community, &owner),
             relay_url: community.into(),
@@ -293,9 +296,16 @@ mod tests {
         )
         .unwrap();
         assert!(check_launch(app.handle(), &key, community, Some(&owner), None).is_err());
-        // The numeric community is a different authority, even though the
-        // process bookkeeping key historically folds the two spellings.
-        assert!(check_launch(app.handle(), &key, &key.relay_url, Some(&owner), None).is_ok());
+        // The numeric community is a different authority with its own runtime
+        // identity and fence database.
+        assert!(check_launch(
+            app.handle(),
+            &numeric_key,
+            numeric_community,
+            Some(&owner),
+            None
+        )
+        .is_ok());
         let resume = capture_resume(app.handle(), &key, community, &owner).unwrap();
         assert!(check_launch(app.handle(), &key, community, Some(&owner), Some(&resume)).is_ok());
         let newer = request(&keys, &target, 101);
