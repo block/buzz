@@ -146,6 +146,8 @@ type MockRelayAgentSeed = {
   channelNames?: string[];
   channelIds?: string[];
   status?: PresenceStatus;
+  deviceId?: string | null;
+  deviceLabel?: string | null;
 };
 
 type MockPersonaSeed = {
@@ -931,6 +933,8 @@ type RawRelayAgent = {
   status: PresenceStatus | "unknown";
   respond_to?: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist?: string[];
+  device_id?: string | null;
+  device_label?: string | null;
 };
 
 type RawManagedAgent = {
@@ -1669,6 +1673,11 @@ const BOB_PUBKEY =
   "bb22a5299220cad76ffd46190ccbeede8ab5dc260faa28b6e5a2cb31b9aff260";
 const CHARLIE_PUBKEY =
   "554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea";
+// A second agent that shares the display name "alice" but lives on another
+// device of the same account. Fixture for the duplicate-name / which-device
+// mention flow.
+const ALICE_OTHER_DEVICE_PUBKEY =
+  "f6a1501f0a4e4d2c8b7a3e19d5c60b4471e8f2a3c9d0b6e5f4a3928170615243";
 const OUTSIDER_PUBKEY =
   "df8e91b86fda13a9a67896df77232f7bdab2ba9c3e165378e1ba3d24c13a328e";
 // A non-member human whose display name has a space in it. Multi-word names are
@@ -2563,6 +2572,8 @@ function resetMockRelayAgents(config?: E2eConfig) {
       status: seed.status ?? "online",
       respond_to: seed.respondTo ?? "owner-only",
       respond_to_allowlist: seed.respondToAllowlist ?? [],
+      device_id: seed.deviceId ?? null,
+      device_label: seed.deviceLabel ?? null,
     });
   }
 }
@@ -3877,6 +3888,20 @@ function initializeMockHuddle(
   persistMockHuddle();
 }
 const openedExternalUrls: string[] = [];
+const MOCK_DEVICE_ID = "e2edevice00000000000000000000aaaa";
+const MOCK_DEVICE_LABEL = "this-mac";
+const MOCK_OTHER_DEVICE_ID = "e2edevice00000000000000000000bbbb";
+const MOCK_OTHER_DEVICE_LABEL = "mfeth-win";
+const DEFAULT_MOCK_DEVICE_IDENTITY = {
+  deviceId: MOCK_DEVICE_ID,
+  deviceLabel: MOCK_DEVICE_LABEL,
+  createdAt: "2026-01-01T00:00:00Z",
+};
+let mockDeviceIdentity = { ...DEFAULT_MOCK_DEVICE_IDENTITY };
+// Stands in for the OS host name the settings card offers as an opt-in. Kept
+// distinct from MOCK_DEVICE_LABEL so a test can tell "suggested" from "applied".
+const MOCK_HOSTNAME_SUGGESTION = "marys-macbook";
+
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
     pubkey: ALICE_PUBKEY,
@@ -3891,6 +3916,25 @@ const defaultMockRelayAgents: RawRelayAgent[] = [
     status: "online",
     respond_to: "anyone",
     respond_to_allowlist: [],
+    device_id: MOCK_DEVICE_ID,
+    device_label: MOCK_DEVICE_LABEL,
+  },
+  {
+    // Same display name as the agent above, different secret-holding device.
+    pubkey: ALICE_OTHER_DEVICE_PUBKEY,
+    name: "alice",
+    agent_type: "goose",
+    channels: ["general", "agents"],
+    channel_ids: [
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+      "94a444a4-c0a3-5966-ab05-530c6ddc2301",
+    ],
+    capabilities: ["search", "summaries", "workflows"],
+    status: "online",
+    respond_to: "anyone",
+    respond_to_allowlist: [],
+    device_id: MOCK_OTHER_DEVICE_ID,
+    device_label: MOCK_OTHER_DEVICE_LABEL,
   },
   {
     pubkey: CHARLIE_PUBKEY,
@@ -3902,6 +3946,8 @@ const defaultMockRelayAgents: RawRelayAgent[] = [
     status: "away",
     respond_to: "anyone",
     respond_to_allowlist: [],
+    device_id: null,
+    device_label: null,
   },
 ];
 let mockRelayAgents: RawRelayAgent[] = defaultMockRelayAgents.map((agent) => ({
@@ -4250,6 +4296,9 @@ function syncMockRelayAgentsFromManagedAgents() {
             : "offline",
         respond_to: agent.respond_to,
         respond_to_allowlist: [...agent.respond_to_allowlist],
+        // A local managed agent's secret is, by construction, on this device.
+        device_id: mockDeviceIdentity.deviceId,
+        device_label: mockDeviceIdentity.deviceLabel,
       };
     },
   );
@@ -11367,6 +11416,7 @@ export function maybeInstallE2eTauriMocks() {
     ? { ...config.mock.globalAgentConfig }
     : null;
   resetMockRelayMembers(config);
+  mockDeviceIdentity = { ...DEFAULT_MOCK_DEVICE_IDENTITY };
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
   resetMockPersonas(config);
@@ -13551,6 +13601,17 @@ export function maybeInstallE2eTauriMocks() {
               agent.channel_ids.includes(channelId) ||
               agent.owner_pubkey === MOCK_IDENTITY_PUBKEY),
         );
+      }
+      case "get_device_identity":
+        return { ...mockDeviceIdentity };
+      case "get_device_name_suggestion":
+        return MOCK_HOSTNAME_SUGGESTION;
+      case "set_device_label": {
+        const label = (payload as { label?: unknown } | undefined)?.label;
+        if (typeof label === "string" && label.trim().length > 0) {
+          mockDeviceIdentity.deviceLabel = label.trim().slice(0, 32);
+        }
+        return { ...mockDeviceIdentity };
       }
       case "list_personas":
         return handleListPersonas();

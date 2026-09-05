@@ -26,6 +26,8 @@ import {
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
 import { useDetachedAgentStart } from "./useDetachedAgentStart";
 import { useEnsureAgentMentionsReady } from "./useEnsureAgentMentionsReady";
+import { useRelayAgentsQuery } from "@/features/agents/hooks";
+import type { RelayAgent } from "@/shared/api/relayDirectoryTypes";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
@@ -154,11 +156,24 @@ export function useMentionSendFlow({
     availableRuntimesQuery.isLoading,
     availableRuntimesQuery.refetch,
   ]);
+  // Deduped by React Query against the identical relayAgentsQueryKey already
+  // in flight from `useMentions`, so this costs no extra fetch. It feeds the
+  // only place a mention resolving to another computer's keypair can be named.
+  const relayAgentsQuery = useRelayAgentsQuery();
+  const relayAgentsByPubkey = React.useMemo(() => {
+    const byPubkey = new Map<string, RelayAgent>();
+    for (const agent of relayAgentsQuery.data ?? []) {
+      byPubkey.set(normalizePubkey(agent.pubkey), agent);
+    }
+    return byPubkey;
+  }, [relayAgentsQuery.data]);
   const ensureManagedAgentMentionsReady = useEnsureAgentMentionsReady({
     attachAgentToChannel: attachAgentMutation.mutateAsync,
     getManagedAgentsByPubkey,
     getPersonas,
     memberPubkeys: mentions.memberPubkeys,
+    getRelayAgentByPubkey: (pubkey) =>
+      relayAgentsByPubkey.get(normalizePubkey(pubkey)),
   });
   const createMentionedPersonaAgents = React.useCallback(
     async (
@@ -473,7 +488,7 @@ export function useMentionSendFlow({
           }
         }
         const agentReadiness = await ensureManagedAgentMentionsReady(
-          managedMentionPubkeys.filter(
+          agentMentionPubkeys.filter(
             (pubkey) => !readyAgentPubkeys.has(normalizePubkey(pubkey)),
           ),
           sendChannelId ?? "",
@@ -496,6 +511,11 @@ export function useMentionSendFlow({
         if (!isMountedRef.current) {
           persistPreflightDraft();
           return;
+        }
+        if (agentReadiness.notices.length > 0) {
+          // A notice, not an error: the message still sends, it just cannot be
+          // answered from here.
+          toast.info(agentReadiness.notices.join(" "));
         }
         if (agentReadiness.errors.length > 0) {
           const message =
