@@ -215,12 +215,15 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let retained = retain(&app, &state, &result)?;
             try_regenerate_nest(&app);
 
-            // If the avatar, display_name, or effective description changed,
-            // propagate to linked agent records and collect relay profile sync
-            // params for the async phase. An about-only change touches no
-            // record bytes but still republishes each linked kind:0 profile.
-            let sync_params: ProfileSyncParams = if avatar_changed || name_changed || about_changed
-            {
+            // If the avatar or display_name changed, propagate to linked agent
+            // records and collect relay profile sync params for the async phase.
+            // The respond_to propagation is handled by the frontend's
+            // personaManagedAgentUpdate, which builds a patch for the single
+            // linked agent whose profile the user edited — not a global
+            // backend overwrite of every linked instance (#6026).
+            let sync_params: ProfileSyncParams = if avatar_changed || name_changed {
+                // about_changed still triggers a profile republish below via
+                // the per-record sync path, but does not gate record loading.
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
@@ -255,6 +258,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                     );
 
                     agents_modified = agents_modified || update.record_changed;
+
                     if update.profile_sync_required {
                         if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
                             let relay_url = crate::relay::effective_agent_relay_url(
