@@ -8,8 +8,17 @@ import {
 /**
  * Process-wide store for the member's current community timeout, learned
  * reactively from send rejections (there is no proactive read in v1). A single
- * value suffices: the desktop app is bound to one community per relay
- * connection, and a timeout blocks every channel's writes at the auth seam.
+ * value suffices *within* a community: a timeout blocks every channel's writes
+ * at the auth seam, so there is nothing per-channel to track.
+ *
+ * It is community-scoped, though, and the value does not survive a switch: a
+ * timeout is issued by one relay against one membership and says nothing about
+ * any other community. `resetCommunityState` clears it on the relay boundary
+ * alongside the other community-scoped singletons. Leaving it set would disable
+ * the composer in a community the member was never timed out in — and because
+ * an unknown-expiry timeout (`expiresAtMs === null`) never lapses on its own,
+ * and the only other way to clear it is a send that the disabled composer will
+ * not let them make, that block had no exit.
  *
  * Kept as a tiny external store rather than React Query cache because the value
  * is written from a mutation's error path and read by the composer with a live
