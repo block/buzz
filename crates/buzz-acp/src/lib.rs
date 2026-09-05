@@ -3844,12 +3844,19 @@ async fn tokio_main() -> Result<()> {
                 //     the agent really is running more work, so the
                 //     channel's in-flight budget should reflect it.
                 //
-                //   Err(_) where the write never landed (Transport /
-                //   ExpectedRunIdMissing):
-                //     Delivery state of the underlying message is "never
-                //     attempted on the wire". Release withheld back to the
-                //     queue front AND issue the cancel+merge fallback so
-                //     the message still reaches the agent.
+                //   Err(ExpectedRunIdMissing):
+                //     Neither mid-turn steer transport is available (no
+                //     active_run_id and no `_session/steering` advertisement).
+                //     Release withheld for normal post-turn dispatch; do NOT
+                //     cancel+merge. Cancelling the in-flight turn permanently
+                //     suppresses the reply under concurrent same-channel
+                //     sibling traffic (root-i763f / openclaw OUHE-RT).
+                //
+                //   Err(Transport) / Err(OutcomeRejected { .. }):
+                //     The steer did not land after a write attempt (or an
+                //     unrecognized success outcome). Release withheld AND
+                //     fire cancel+merge so the message still reaches the
+                //     agent.
                 //
                 //   Err(OutcomeRejected { .. })
                 //     A `_session/steering` request returned a JSON-RPC
@@ -3858,8 +3865,7 @@ async fn tokio_main() -> Result<()> {
                 //     or a bare `{}` with no `outcome` at all). The steer
                 //     did not land, so this is treated exactly like a write
                 //     that never happened: release withheld AND fire the
-                //     cancel+merge fallback. Handled by the catch-all
-                //     `Err(_)` arm below.
+                //     cancel+merge fallback. Handled with Transport below.
                 //
                 //   Err(AgentError { code: -32601, .. })
                 //     The agent returned method_not_found — it does not
@@ -3899,31 +3905,8 @@ async fn tokio_main() -> Result<()> {
                 //     pending_steer on every return path. If it does,
                 //     treat as PromptCompletedNeutral to avoid leaking
                 //     the withheld event in `withheld_native_steer`.
-                let (release_withheld, drop_withheld, signal_fallback) = match &ack {
-                    Ok(pool::SteerAck::Success { .. }) => (false, true, false),
-                    // -32601 = method_not_found: agent does not implement the
-                    // steer extension. Fire cancel+merge so the message still
-                    // reaches the agent.
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. }))
-                        if *code == -32601 =>
-                    {
-                        (true, false, true)
-                    }
-                    // AgentError: write landed, agent rejected it at the
-                    // application level (e.g. wrong run id). Release for
-                    // normal dispatch; no fallback signal (the turn is still
-                    // running or just ended — either way there is nothing to
-                    // cancel).
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => {
-                        (true, false, false)
-                    }
-                    // Transport / ExpectedRunIdMissing / OutcomeRejected: the
-                    // steer did not land. Release and fire the cancel+merge
-                    // fallback so the message still reaches the agent.
-                    Ok(pool::SteerAck::Err(_)) => (true, false, true),
-                    Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
-                    Err(_recv_err) => (true, false, false),
-                };
+                let (release_withheld, drop_withheld, signal_fallback) =
+                    steer_ack_disposition(&ack);
                 tracing::info!(
                     channel = %channel_id,
                     event_id = %event_id,
@@ -4189,6 +4172,35 @@ fn is_owner_control_command(
 /// `OwnerInterrupt` re-checks authorship (owner-only) here.
 ///
 /// `owner` is the resolved owner pubkey hex, if known.
+/// Map a mid-turn steer ack to `(release_withheld, drop_withheld, signal_fallback)`.
+///
+/// `ExpectedRunIdMissing` deliberately does **not** fire cancel+merge: the
+/// agent cannot accept a mid-turn steer, so aborting the in-flight turn
+/// (root-i763f) permanently suppresses the reply under concurrent sibling
+/// traffic. The withheld event is released for normal post-turn dispatch.
+fn steer_ack_disposition(
+    ack: &std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError>,
+) -> (bool, bool, bool) {
+    match ack {
+        Ok(pool::SteerAck::Success { .. }) => (false, true, false),
+        // -32601 = method_not_found: agent does not implement the steer
+        // extension. Fire cancel+merge so the message still reaches the agent.
+        Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. })) if *code == -32601 => {
+            (true, false, true)
+        }
+        // AgentError: write landed, agent rejected it at the application
+        // level. Release for normal dispatch; no fallback signal.
+        Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => (true, false, false),
+        // No steer transport available — do not cancel the in-flight turn.
+        Ok(pool::SteerAck::Err(pool::SteerError::ExpectedRunIdMissing)) => (true, false, false),
+        // Transport / OutcomeRejected: steer did not land after a write
+        // attempt. Release and fire cancel+merge.
+        Ok(pool::SteerAck::Err(_)) => (true, false, true),
+        Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
+        Err(_recv_err) => (true, false, false),
+    }
+}
+
 fn mode_gate_signal(
     handling: MultipleEventHandling,
     author_hex: &str,
@@ -4521,7 +4533,8 @@ fn dispatch_pending(
         // Installed for every prompt task: the read loop picks the steer
         // transport at write time from `active_run_id` and the agent's
         // advertised `_session/steering` capability, and acks
-        // `ExpectedRunIdMissing` (→ cancel+merge) when it has neither.
+        // `ExpectedRunIdMissing` (→ release for post-turn dispatch, no
+        // cancel+merge) when it has neither.
         let (tx, rx) = tokio::sync::mpsc::channel::<pool::SteerRequest>(1);
         agent.acp.install_steer_rx(rx);
         let steer_tx = Some(tx);
@@ -6024,6 +6037,116 @@ mod owner_control_command_tests {
         assert!(
             mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &owner, None).is_none(),
             "owner-interrupt must not fire when the owner is unknown"
+        );
+    }
+
+    #[test]
+    fn expected_run_id_missing_does_not_signal_cancel_merge_fallback() {
+        // root-i763f: concurrent sibling reply while openclaw mid-turn acked
+        // ExpectedRunIdMissing; cancel+merge permanently suppressed the reply.
+        let (release, drop, fallback) = steer_ack_disposition(&Ok(pool::SteerAck::Err(
+            pool::SteerError::ExpectedRunIdMissing,
+        )));
+        assert!(release, "withheld sibling event must return to the queue");
+        assert!(!drop, "must not drop the sibling event as delivered");
+        assert!(
+            !fallback,
+            "must not cancel+merge — that aborts the in-flight turn"
+        );
+    }
+
+    #[test]
+    fn transport_and_method_not_found_still_signal_cancel_merge_fallback() {
+        let (_, _, transport_fb) = steer_ack_disposition(&Ok(pool::SteerAck::Err(
+            pool::SteerError::Transport("write failed".into()),
+        )));
+        assert!(transport_fb);
+
+        let (_, _, outcome_fb) = steer_ack_disposition(&Ok(pool::SteerAck::Err(
+            pool::SteerError::OutcomeRejected {
+                outcome: "failed".into(),
+            },
+        )));
+        assert!(outcome_fb);
+
+        let (_, _, mnf_fb) =
+            steer_ack_disposition(&Ok(pool::SteerAck::Err(pool::SteerError::AgentError {
+                code: -32601,
+                message: "method not found".into(),
+            })));
+        assert!(mnf_fb);
+    }
+
+    /// Adversarial concurrency: in-flight turn + withheld sibling steer that
+    /// acks `ExpectedRunIdMissing` must leave the control channel unsignalled
+    /// (no cancel) while releasing the sibling event back onto the queue.
+    #[tokio::test]
+    async fn sibling_steer_expected_run_id_missing_preserves_in_flight_turn() {
+        let keys = Keys::generate();
+        let sibling = EventBuilder::new(Kind::Custom(9), "@Openclaw sibling")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = Uuid::new_v4();
+        let scope = scope::SessionScope::Conversation { channel_id };
+        let event_id = sibling.id.to_hex();
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            scope: scope.clone(),
+            event: sibling,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        assert!(
+            queue.mark_native_steer_pending(&scope, &event_id),
+            "sibling event must be withheld like try_native_steer"
+        );
+
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (control_tx, mut control_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope.clone()),
+                turn_id: "in-flight".into(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let ack = Ok(pool::SteerAck::Err(pool::SteerError::ExpectedRunIdMissing));
+        let (release_withheld, drop_withheld, signal_fallback) = steer_ack_disposition(&ack);
+        assert!(release_withheld && !drop_withheld && !signal_fallback);
+
+        if drop_withheld {
+            queue.remove_event(&scope, &event_id);
+        }
+        if release_withheld {
+            queue.release_native_steer(&scope, &event_id);
+        }
+        if signal_fallback {
+            signal_in_flight_task_for_scope(&mut pool, &scope, ControlSignal::Steer);
+        }
+
+        // In-flight control channel must remain open — no cancel+merge.
+        assert!(
+            control_rx.try_recv().is_err(),
+            "ExpectedRunIdMissing must not signal Steer cancel to the in-flight turn"
+        );
+        assert!(
+            pool.task_map_mut().values().any(|m| m.control_tx.is_some()),
+            "control_tx must remain installed on the in-flight task"
+        );
+        // Sibling event is back on the live queue for post-turn dispatch.
+        assert!(
+            queue.queued_event_count(&scope) >= 1,
+            "released sibling event must be queued for post-turn delivery"
         );
     }
 

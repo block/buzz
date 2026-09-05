@@ -520,11 +520,13 @@ pub enum SteerError {
     /// `expectedRunId` (`AcpClient::active_run_id` was `None`, so the
     /// goose-native method could not be formed) and the agent did not
     /// advertise the cross-adapter `_session/steering` extension. The read
-    /// loop drops the request without writing anything; the main loop should
-    /// release any withheld event and fall back to the universal cancel+merge
-    /// `ControlSignal::Steer` path. This is in the same "Err-before-pending"
-    /// bucket as `Transport` write failures: no in-process state was
-    /// established, so no in-process cleanup is needed.
+    /// loop drops the request without writing anything; the main loop releases
+    /// any withheld event for normal post-turn dispatch and does **not** cancel
+    /// the in-flight turn (cancel+merge would permanently suppress the reply
+    /// under concurrent same-channel sibling traffic — root-i763f). This is in
+    /// the same "Err-before-pending" bucket as `Transport` write failures for
+    /// in-process cleanup (none needed), but deliberately diverges on the
+    /// cancel+merge decision.
     ExpectedRunIdMissing,
     /// A `_session/steering` request returned a JSON-RPC *success* whose
     /// `outcome` was not one of the two recognized delivery outcomes

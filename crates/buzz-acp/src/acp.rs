@@ -1444,7 +1444,8 @@ impl AcpClient {
                         None => {
                             tracing::warn!(
                                 "steer: no active_run_id and agent did not advertise \
-                                 {ACP_STEER_METHOD} — falling back to cancel+merge"
+                                 {ACP_STEER_METHOD} — releasing for post-turn dispatch \
+                                 (no cancel+merge)"
                             );
                             let _ = req.ack_tx.send(crate::pool::SteerAck::Err(
                                 crate::pool::SteerError::ExpectedRunIdMissing,
