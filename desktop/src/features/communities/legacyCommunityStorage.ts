@@ -1,3 +1,5 @@
+import { isTauri } from "@tauri-apps/api/core";
+
 import { invokeTauri } from "@/shared/api/tauri";
 import { getStorageItem } from "@/shared/lib/safeStorage";
 import { migrateLegacyCommunityStorage } from "./communityStorage";
@@ -113,6 +115,12 @@ export function applyLegacyCommunityStorage(
  */
 export async function migrateLegacyCommunityStorageBeforeRender(): Promise<void> {
   if (typeof window === "undefined") {
+    return;
+  }
+
+  // The legacy Sprout WebKit SQLite database only exists in the native shell
+  // — there is nothing to migrate from in a browser (web) runtime.
+  if (!isTauri()) {
     return;
   }
 
