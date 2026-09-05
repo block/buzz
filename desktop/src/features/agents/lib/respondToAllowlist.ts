@@ -61,3 +61,36 @@ export function mergeAllowlist(existing: string[], add: string[]): string[] {
   }
   return out;
 }
+
+/** The subset of a resolved profile the allowlist chip renders. */
+export type AllowlistChipProfile = {
+  displayName?: string | null;
+  nip05Handle?: string | null;
+  avatarUrl?: string | null;
+};
+
+export type AllowlistChipPresentation = {
+  /** Chip label, or `null` when no name resolved and the caller must fall
+   * back to the pubkey. */
+  name: string | null;
+  avatarUrl: string | null;
+};
+
+/**
+ * Resolve how one allowlist entry presents.
+ *
+ * The allowlist persists hex pubkeys, so a chip has no name of its own — it
+ * comes from a profile lookup. Precedence matches the people pickers
+ * (`formatShareRecipientName`): display name, then NIP-05 handle. A `null`
+ * name means nothing resolved, and the caller keeps showing the truncated
+ * pubkey — the right answer for a key pasted directly, for an entry whose
+ * profile has not been fetched yet, and for an identity with no kind-0 at all.
+ */
+export function allowlistChipPresentation(
+  profile: AllowlistChipProfile | null | undefined,
+): AllowlistChipPresentation {
+  return {
+    name: profile?.displayName?.trim() || profile?.nip05Handle?.trim() || null,
+    avatarUrl: profile?.avatarUrl ?? null,
+  };
+}

@@ -1,14 +1,22 @@
 import * as React from "react";
 import { AlertTriangle, ChevronDown, Search, X } from "lucide-react";
 import {
+  allowlistChipPresentation,
   mergeAllowlist,
   parsePubkeyInput,
 } from "@/features/agents/lib/respondToAllowlist";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
-import { useUserSearchQuery } from "@/features/profile/hooks";
-import type { RespondToMode, UserSearchResult } from "@/shared/api/types";
+import {
+  useUserSearchQuery,
+  useUsersBatchQuery,
+} from "@/features/profile/hooks";
+import type {
+  RespondToMode,
+  UserProfileSummary,
+  UserSearchResult,
+} from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
@@ -138,6 +146,14 @@ export function CreateAgentRespondToField({
     [allowlistSet, isArchivedDiscovery, userSearchQuery.data],
   );
 
+  // Chips persist as hex pubkeys, so their names come from a profile lookup.
+  // Only the selected keys are requested, and only while the picker is the
+  // visible mode.
+  const allowlistProfilesQuery = useUsersBatchQuery(allowlist, {
+    enabled: mode === "allowlist" && allowlist.length > 0,
+  });
+  const allowlistProfiles = allowlistProfilesQuery.data?.profiles;
+
   const pasteParsed = React.useMemo(
     () => parsePubkeyInput(pasteText),
     [pasteText],
@@ -248,6 +264,7 @@ export function CreateAgentRespondToField({
       {mode === "allowlist" ? (
         <AllowlistPicker
           allowlist={allowlist}
+          allowlistProfiles={allowlistProfiles}
           deferredQuery={deferredQuery}
           disabled={disabled}
           isDirectEntryOpen={isDirectEntryOpen}
@@ -282,6 +299,7 @@ const HEX_64_RE = /^[0-9a-f]{64}$/i;
 
 function AllowlistPicker({
   allowlist,
+  allowlistProfiles,
   deferredQuery,
   disabled,
   isDirectEntryOpen,
@@ -303,6 +321,8 @@ function AllowlistPicker({
   variant = "default",
 }: {
   allowlist: string[];
+  /** Resolved profiles keyed by lowercase hex pubkey; absent while loading. */
+  allowlistProfiles?: Record<string, UserProfileSummary>;
   deferredQuery: string;
   disabled?: boolean;
   isDirectEntryOpen: boolean;
@@ -374,29 +394,46 @@ function AllowlistPicker({
         </div>
         {allowlist.length > 0 ? (
           <div className="flex flex-wrap gap-1.5 border-t border-border/70 px-2.5 py-2">
-            {allowlist.map((pubkey) => (
-              <div
-                className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
-                data-testid={`agent-respond-to-chip-${pubkey}`}
-                key={pubkey}
-              >
-                <UserAvatar
-                  avatarUrl={null}
-                  displayName={truncatePubkey(pubkey)}
-                  size="xs"
-                />
-                <PubKey pubkey={pubkey} />
-                <button
-                  aria-label={`Remove ${truncatePubkey(pubkey)}`}
-                  className="text-muted-foreground transition-colors hover:text-foreground"
-                  disabled={disabled}
-                  onClick={() => onRemove(pubkey)}
-                  type="button"
+            {allowlist.map((pubkey) => {
+              const { avatarUrl, name } = allowlistChipPresentation(
+                allowlistProfiles?.[pubkey.toLowerCase()],
+              );
+              // The key stays on the chip even next to a name: this list
+              // decides who reaches the agent's host, and a display name is
+              // not unique enough to approve that against.
+              const label = name ?? truncatePubkey(pubkey);
+              return (
+                <div
+                  className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
+                  data-testid={`agent-respond-to-chip-${pubkey}`}
+                  key={pubkey}
                 >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
+                  <UserAvatar
+                    avatarUrl={avatarUrl}
+                    displayName={label}
+                    size="xs"
+                  />
+                  {name ? (
+                    <span
+                      className="max-w-32 truncate font-medium"
+                      data-testid={`agent-respond-to-chip-name-${pubkey}`}
+                    >
+                      {name}
+                    </span>
+                  ) : null}
+                  <PubKey pubkey={pubkey} />
+                  <button
+                    aria-label={`Remove ${label}`}
+                    className="text-muted-foreground transition-colors hover:text-foreground"
+                    disabled={disabled}
+                    onClick={() => onRemove(pubkey)}
+                    type="button"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         ) : null}
         {deferredQuery.length > 0 ? (
