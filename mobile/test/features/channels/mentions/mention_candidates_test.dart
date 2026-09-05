@@ -280,5 +280,87 @@ void main() {
       expect(candidates, hasLength(1));
       expect(candidates.single.isMember, isTrue);
     });
+
+    test('archived channel members are excluded', () {
+      final candidates = buildMentionCandidates(
+        members: [member(memberPubkey), member(userPubkey)],
+        relayAgents: const [],
+        sharedChannelIds: const {},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        archivedPubkeys: {memberPubkey},
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates.map((candidate) => candidate.pubkey), [userPubkey]);
+    });
+
+    test(
+      'archived directory agent is excluded while a live namesake remains',
+      () {
+        final liveAgentPubkey = '4' * 64;
+        final candidates = buildMentionCandidates(
+          members: const [],
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Nova',
+              respondTo: 'anyone',
+              channelIds: const ['chan-1'],
+            ),
+            AgentDirectoryEntry(
+              pubkey: liveAgentPubkey,
+              displayName: 'Nova',
+              respondTo: 'anyone',
+              channelIds: const ['chan-1'],
+            ),
+          ],
+          sharedChannelIds: const {'chan-1'},
+          userCache: const {},
+          ownerByAgentPubkey: const {},
+          archivedPubkeys: {agentPubkey},
+          currentPubkey: userPubkey,
+        );
+
+        expect(candidates, hasLength(1));
+        expect(candidates.single.pubkey, liveAgentPubkey);
+        expect(candidates.single.displayName, 'Nova');
+      },
+    );
+
+    test('archived global-search agents are excluded', () {
+      final candidates = buildMentionCandidates(
+        members: const [],
+        relayAgents: const [],
+        sharedChannelIds: const {},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        searchResults: [
+          UserProfile(
+            pubkey: agentPubkey,
+            displayName: 'Retired Nova',
+            ownerPubkey: userPubkey,
+          ),
+        ],
+        archivedPubkeys: {agentPubkey},
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates, isEmpty);
+    });
+
+    test('current user remains visible when the relay lists self archived', () {
+      final candidates = buildMentionCandidates(
+        members: [member(userPubkey)],
+        relayAgents: const [],
+        sharedChannelIds: const {},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        archivedPubkeys: {userPubkey},
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates.map((candidate) => candidate.pubkey), [userPubkey]);
+    });
   });
 }
