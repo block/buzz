@@ -10,7 +10,8 @@ void durableMentionTests() {
       var renamed = false;
       var fail = true;
       List<String>? sent;
-      Widget build() => _buildComposeBar(
+      Widget build({String? thread}) => _buildComposeBar(
+        threadHeadId: thread,
         uploadService: _testUploadService(keys.nsec),
         relayConfig: () => _SwitchableRelayConfigNotifier(
           RelayConfig(baseUrl: 'http://localhost:3000', nsec: keys.nsec),
@@ -46,6 +47,16 @@ void durableMentionTests() {
           .text;
       expect(draft, '@Scout @Scout ($second) ');
 
+      // Same mounted composer, different thread and back: old listeners may
+      // not erase the original persisted bindings while restoring another key.
+      await tester.pumpWidget(build(thread: 'other'));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(build());
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        draft,
+      );
       await tester.pumpWidget(const SizedBox.shrink());
       renamed = true;
       await tester.pumpWidget(build());
