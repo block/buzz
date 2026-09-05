@@ -342,10 +342,17 @@ test("readiness timeout is distinct, late EOSE recovers, CLOSED retires old call
   let notify, deliver;
   let closed = 0,
     ready = 0;
-  f.relay.subscribeLive = async (_filter, event, onReady, timeout) => {
+  f.relay.subscribeLive = async (
+    _filter,
+    event,
+    _onReady,
+    timeout,
+    options,
+  ) => {
     assert.equal(timeout, 5000);
     deliver = event;
-    notify = onReady;
+    assert.equal(options.closedRecovery, "explicit");
+    notify = options.onState;
     notify("timeout");
     return () => {
       closed++;

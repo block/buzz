@@ -16,6 +16,7 @@ import {
   getTextPayload,
   toRelayFrames,
   type ConnectionState,
+  type LiveSubscriptionOptions,
   type LiveSubscriptionReadiness,
   type PendingEvent,
   type RelaySubscription,
@@ -419,8 +420,15 @@ export class RelayClient {
     onEvent: (event: RelayEvent) => void,
     onReady?: (readiness: LiveSubscriptionReadiness) => void,
     readinessTimeoutMs?: number,
+    options?: LiveSubscriptionOptions,
   ) {
-    return this.subscribe(filter, onEvent, onReady, readinessTimeoutMs);
+    return this.subscribe(
+      filter,
+      onEvent,
+      onReady,
+      readinessTimeoutMs,
+      options,
+    );
   }
   async subscribeToChannelMentionEvents(
     channelId: string,
@@ -609,6 +617,7 @@ export class RelayClient {
     onEvent: (event: RelayEvent) => void,
     onReady?: (readiness: LiveSubscriptionReadiness) => void,
     readinessTimeoutMs = 250,
+    options: LiveSubscriptionOptions = {},
   ) {
     await this.ensureConnected();
 
@@ -621,16 +630,18 @@ export class RelayClient {
         resolve();
       };
     });
-    const fallbackTimeout = window.setTimeout(
-      () => resolveReady("timeout"),
-      readinessTimeoutMs,
-    );
+    const fallbackTimeout = window.setTimeout(() => {
+      options.onState?.("timeout");
+      resolveReady("timeout");
+    }, readinessTimeoutMs);
 
     this.subscriptions.set(subId, {
       mode: "live",
       filter,
       onEvent,
       resolveReady,
+      onState: options.onState,
+      closedRecovery: options.closedRecovery ?? "shared",
     });
 
     try {
@@ -1066,8 +1077,12 @@ export class RelayClient {
         continue;
       }
       subscription.resolveReady?.("closed");
+      subscription.onState?.("closed");
       subscription.resolveReady = undefined;
       clearClosedRetry(subscription);
+      if (subscription.closedRecovery === "explicit") {
+        this.subscriptions.delete(subId);
+      }
     }
     for (const [eventId, pendingEvent] of this.pendingEvents) {
       window.clearTimeout(pendingEvent.timeout);

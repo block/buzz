@@ -70,11 +70,26 @@ type FirstEventSubscription = {
 
 export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
 
+/**
+ * Optional lifecycle policy for a live subscription.
+ *
+ * Most subscriptions keep the shared reconnect/CLOSED recovery behavior. A
+ * command receiver can instead request explicit recovery: every CLOSED retires
+ * that subscription and `onState` remains observable after initial EOSE so the
+ * owning UI can offer a deliberate fresh subscription.
+ */
+export type LiveSubscriptionOptions = {
+  onState?: (state: LiveSubscriptionReadiness) => void;
+  closedRecovery?: "shared" | "explicit";
+};
+
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
+  onState?: (state: LiveSubscriptionReadiness) => void;
+  closedRecovery: "shared" | "explicit";
   lastSeenCreatedAt?: number;
   /**
    * Lower bound of a reconnect backfill window that has not yet completed.
