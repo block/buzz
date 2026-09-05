@@ -94,6 +94,7 @@ import {
   isValidLinkPreviewSnapshotCanonicalUrl,
   parseLinkPreviewSnapshots,
 } from "@/shared/lib/linkPreviewSnapshot";
+import { expireUserStatusQueries } from "@/features/user-status/hooks";
 
 type TestIdentity = {
   privateKey: string;
@@ -1280,6 +1281,12 @@ declare global {
       expiresAt?: number;
       createdAt?: number;
     }) => RelayEvent;
+    /**
+     * Force-expire all tracked user-status entries by running the expiry sweep
+     * with a future timestamp. Eliminates the wall-clock wait in tests that
+     * verify UI behaviour after a status expires.
+     */
+    __BUZZ_E2E_EXPIRE_USER_STATUS_QUERIES__?: () => void;
     /** Explicit presence evidence; independent of managed-agent runtime state. */
     __BUZZ_E2E_EMIT_MOCK_PRESENCE__?: (input: {
       pubkey: string;
@@ -11562,6 +11569,15 @@ export function maybeInstallE2eTauriMocks() {
     return event;
   };
   window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;
+  window.__BUZZ_E2E_EXPIRE_USER_STATUS_QUERIES__ = () => {
+    const qc = (window as { __BUZZ_E2E_QUERY_CLIENT__?: QueryClient })
+      .__BUZZ_E2E_QUERY_CLIENT__;
+    if (qc) {
+      // Sweep with a far-future nowSeconds so every entry with an expiresAt is
+      // considered expired — deterministically removes wall-clock dependency.
+      expireUserStatusQueries(qc, Math.floor(Date.now() / 1_000) + 86_400);
+    }
+  };
   window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({
     channelName,
     createdAt,

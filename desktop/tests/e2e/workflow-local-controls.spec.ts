@@ -26,9 +26,16 @@ async function openCreateWorkflow(
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
   const channelList = page.getByTestId("channel-combobox-list");
-  if (!(await channelList.isVisible())) {
-    await dialog.getByRole("combobox", { name: "Channel" }).click();
-  }
+  // The combobox list auto-opens on dialog mount, but wait for it to stabilize
+  // before deciding whether a manual click is needed: avoids a one-shot
+  // isVisible() read during the mount transition.
+  await expect
+    .poll(async () => {
+      if (await channelList.isVisible()) return true;
+      await dialog.getByRole("combobox", { name: "Channel" }).click();
+      return false;
+    })
+    .toBe(true);
   await channelList
     .getByRole("option", { name: "agents", exact: true })
     .click();
@@ -51,10 +58,18 @@ async function openTriggerInspector(
   dialog: import("@playwright/test").Locator,
 ) {
   const menu = dialog.getByRole("button", { name: "Trigger event" });
-  if (!(await menu.isVisible())) {
-    await dialog.getByRole("button", { name: /^Trigger:/ }).click();
-  }
-  await expect(menu).toBeVisible();
+  // The inspector may already be open (e.g. immediately after openCreateWorkflow)
+  // or collapsed (e.g. after reopenWorkflow). Poll so the DOM stabilizes before
+  // we decide whether a click is needed — avoids a one-shot isVisible() race
+  // during tab-switch or dialog-mount transitions.
+  await expect
+    .poll(async () => {
+      if (await menu.isVisible()) return true;
+      const trigger = dialog.getByRole("button", { name: /^Trigger:/ });
+      if (await trigger.isVisible()) await trigger.click();
+      return false;
+    })
+    .toBe(true);
 }
 
 async function addMessageStep(
@@ -74,18 +89,39 @@ async function createEnabled(
   const confirmation = page.getByRole("alertdialog", {
     name: "This workflow may run often",
   });
-  if (await confirmation.isVisible()) {
-    await confirmation.getByRole("button", { name: "Turn on" }).click();
-  }
+  // Wide triggers (message_posted) always show the activation dialog.
+  // Narrow triggers (schedule, reaction_added, webhook) skip it and close the
+  // create dialog directly. Poll so we wait for whichever state arrives first
+  // rather than reading a one-shot isVisible() during the animation frame.
+  await expect
+    .poll(async () => {
+      if (await confirmation.isVisible()) {
+        await confirmation.getByRole("button", { name: "Turn on" }).click();
+        return true;
+      }
+      return !(await dialog.isVisible());
+    })
+    .toBe(true);
+  // Await dialog closure regardless of path taken.
+  await expect(dialog).not.toBeVisible();
 }
 
 async function reopenWorkflow(
   page: import("@playwright/test").Page,
   name: string,
 ) {
-  const card = page
-    .locator('[data-testid^="workflow-card-"]')
-    .filter({ hasText: name });
+  // Filter by the child workflow-card-name element to avoid a strict-mode
+  // violation: `[data-testid^="workflow-card-"]` prefix-matches the container
+  // div AND the inner <p data-testid="workflow-card-name">, so a bare hasText
+  // filter resolves to 2 elements. Scoping with `has` ensures only the
+  // container (which contains the name child) is selected.
+  const card = page.locator('[data-testid^="workflow-card-"]').filter({
+    has: page.getByTestId("workflow-card-name").filter({ hasText: name }),
+  });
+  // Await the card before addressing its action: createEnabled() returns only
+  // after dialog closure, but the card render is async and may not be in the
+  // DOM yet when execution reaches here.
+  await expect(card).toBeVisible();
   await card.getByRole("button", { name: "Workflow actions" }).click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
   return page.getByRole("dialog", { name: "Edit workflow" });
@@ -288,18 +324,28 @@ test("round-trips and reopens structured message-text conditions", async ({
   await openTriggerInspector(dialog);
   const matchControls = dialog.getByRole("group", { name: "Match" });
   const operatorButtons = matchControls.getByRole("button");
-  const firstOperatorBox = await operatorButtons.nth(0).boundingBox();
-  const secondOperatorBox = await operatorButtons.nth(1).boundingBox();
-  const thirdOperatorBox = await operatorButtons.nth(2).boundingBox();
-  expect(firstOperatorBox).not.toBeNull();
-  expect(secondOperatorBox).not.toBeNull();
-  expect(thirdOperatorBox).not.toBeNull();
-  expect(secondOperatorBox?.x).toBeGreaterThan(firstOperatorBox?.x ?? 0);
-  expect(
-    Math.abs((secondOperatorBox?.y ?? 0) - (firstOperatorBox?.y ?? 0)),
-  ).toBeLessThan(1);
-  expect(thirdOperatorBox?.y).toBeGreaterThan(firstOperatorBox?.y ?? 0);
+  // Await all three operator buttons before reading geometry: ensures the
+  // inspector has fully rendered after the tab switch and openTriggerInspector
+  // before any bounding-box reads (one-shot reads during transitions were the
+  // source of intermittent null / reversed-coordinate failures).
+  await expect(operatorButtons.nth(0)).toBeVisible();
+  await expect(operatorButtons.nth(1)).toBeVisible();
+  await expect(operatorButtons.nth(2)).toBeVisible();
   await waitForAnimations(page);
+  // Use poll-based layout assertions so a render frame between measurement and
+  // assertion cannot produce a stale reading.
+  await expect
+    .poll(async () => {
+      const b0 = await operatorButtons.nth(0).boundingBox();
+      const b1 = await operatorButtons.nth(1).boundingBox();
+      const b2 = await operatorButtons.nth(2).boundingBox();
+      if (!b0 || !b1 || !b2) return null;
+      return {
+        row: Math.abs(b1.y - b0.y) < 1 && b1.x > b0.x,
+        col: b2.y > b0.y,
+      };
+    })
+    .toEqual({ row: true, col: true });
   await matchControls.screenshot({
     path: "test-results/workflow-message-condition-operators.png",
   });
