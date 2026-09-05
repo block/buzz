@@ -14161,6 +14161,10 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
         }
       };
     }
+    if (!filter.kinds.contains(39002)) {
+      onStatusChanged(RelaySubscriptionStatus.ready);
+      return () {};
+    }
     _membershipListener = onEvent;
     _membershipStatusListener = onStatusChanged;
     onStatusChanged(RelaySubscriptionStatus.ready);

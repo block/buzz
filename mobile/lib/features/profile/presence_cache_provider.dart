@@ -59,7 +59,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
           _schedule(generation);
         }
       });
-      unawaited(_subscribe(generation));
+      // A transport may report ready synchronously; initialize state first.
+      Future.microtask(() => _subscribe(generation));
     }
     return {};
   }
