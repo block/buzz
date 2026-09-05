@@ -9,7 +9,7 @@ import { absorbStandaloneProjectRepositories } from "./lib/projectCollection";
 import { findProjectHomeByChannelId } from "./lib/projectHomeSelection";
 import { buildProjectReadModels, type Project } from "./projectModels";
 
-const PROJECT_ENUMERATION_PAGE_SIZE = 500;
+export const PROJECT_ENUMERATION_PAGE_SIZE = 500;
 
 // Relays commonly cap filter tag-value lists; chunk `#a` scoping well below
 // any such cap.
