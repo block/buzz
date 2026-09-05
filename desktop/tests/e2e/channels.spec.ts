@@ -2174,9 +2174,18 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(page.getByTestId("agent-session-stop-turn")).toBeVisible();
   await expect(page.getByTestId("agent-session-stop-turn")).toBeDisabled();
   await page.keyboard.press("Escape");
+  // The mock bridge resolves an owner_p subscription but never finishes an
+  // archive hydration pass for this channel, so archive completeness cannot be
+  // established and the pane must not claim there was no activity. It reports
+  // what it can actually see instead — see getUncertainHistoryCopy /
+  // agentSessionHistoryCertainty, whose "unknown-archive-loading" variant owns
+  // this wording.
   await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
-    "No ACP activity yet",
+    "Earlier activity may still be loading",
   );
+  await expect(
+    page.getByTestId("agent-session-thread-panel"),
+  ).not.toContainText("No ACP activity yet");
   await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
 
   await page.evaluate((pubkey) => {

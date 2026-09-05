@@ -140,7 +140,7 @@ export function AgentSessionThreadPanel({
       ? undefined
       : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
 
-  const { fetchOlderArchived, hasOlderArchived } =
+  const { fetchOlderArchived, hasOlderArchived, historyCertainty } =
     useLoadArchivedObserverEvents(
       // Archive history must load regardless of live status — an idle agent's
       // channel should still show its archived observer history. Enable whenever
@@ -523,6 +523,9 @@ export function AgentSessionThreadPanel({
               sessionChannelId
                 ? `Mention ${agent.name} in the channel to see its work here.`
                 : `Mention ${agent.name} in any channel to see its work here.`
+            }
+            emptyState={
+              historyCertainty === "known-empty" ? "idle" : historyCertainty
             }
             profiles={profiles}
             rawLayout="exclusive"
