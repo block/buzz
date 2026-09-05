@@ -53,46 +53,47 @@ The `.env` should have `BUZZ_REQUIRE_AUTH_TOKEN=false` for local dev.
 
 ---
 
-## 4. Mint Test Credentials
 
-### Option A: buzz-admin (full scopes including admin)
+## 4. Bootstrap Test Credentials
 
-This mints a token with all CLI-relevant scopes (including `admin:channels`)
-via direct DB access. Use this for testing admin operations (archive,
-delete-channel, add/remove-channel-member).
+The CLI authenticates via NIP-42 (WebSocket) and NIP-98 (HTTP) using a
+Nostr keypair — there is no `mint-token` command. Use `buzz-admin
+generate-key` to create a keypair, then `buzz-admin add-member` to
+register it with the relay.
+
+### Generate a keypair and register as a member
 
 ```bash
-DATABASE_URL="${DATABASE_URL:?set DATABASE_URL for the local Buzz database}" \
-cargo run -p buzz-admin -- mint-token \
-  --name "cli-test" \
-  --scopes "messages:read,messages:write,channels:read,channels:write,users:read,users:write,files:read,files:write,admin:channels"
+cargo run -p buzz-admin -- generate-key
 ```
 
-This generates a keypair and prints:
-- **Private key (nsec)** — save for `BUZZ_PRIVATE_KEY` testing
+Copy the printed **nsec** (private key) and **npub** (public key).
 
-Export:
+```bash
+cargo run -p buzz-admin -- add-member --pubkey <npub1...> --role member
+# Use --role admin for admin operations (archive, delete-channel, etc.)
+```
+
+### Export for CLI use
 
 ```bash
 export BUZZ_RELAY_URL="http://localhost:3000"
-export BUZZ_PRIVATE_KEY="nsec1..."   # from the mint output
+export BUZZ_PRIVATE_KEY="nsec1..."   # from generate-key output
 ```
 
-### Scope reference
+### Authorization model
 
-| Scope | Self-mintable | Needed for |
-|-------|:---:|------------|
-| `messages:read` | ✅ | `messages get`, `messages thread`, `messages search`, `feed get` |
-| `messages:write` | ✅ | `messages send`, `messages edit`, `messages delete`, `reactions`, `messages vote` |
-| `channels:read` | ✅ | `channels list`, `channels get`, `channels members` |
-| `channels:write` | ✅ | `channels create`, `channels update`, `channels join`, `channels leave`, `channels topic`, `channels purpose` |
-| `users:read` | ✅ | `users get`, `users presence` |
-| `users:write` | ✅ | `users set-profile`, `users set-presence`, `users set-status` |
-| `files:read` | ✅ | — |
-| `files:write` | ✅ | — |
-| `admin:channels` | ❌ | `channels archive`, `channels unarchive`, `channels delete`, `channels add-member`, `channels remove-member` |
+The relay authenticates the event's key (NIP-42 over WebSocket, NIP-98 over
+HTTP) and authorizes against the relay membership and per-channel role.
+Without `BUZZ_PRIVATE_KEY`, every relay command exits with error code 3
+(`CliError::Auth`). Scoped API tokens exist in the schema
+(`buzz-db/src/api_token.rs`) but are not exposed through any CLI command
+or relay route in the current release.
 
----
+| Role | Needed for |
+|------|------------|
+| `member` | `messages get`, `messages thread`, `messages search`, `feed get`, `messages send`, `messages edit`, `messages delete`, `reactions`, `messages vote`, `channels list`, `channels get`, `channels members`, `channels create`, `channels update`, `channels join`, `channels leave`, `channels topic`, `channels purpose`, `users get`, `users presence`, `users set-profile`, `users set-presence`, `users set-status` |
+| `admin` | Everything `member` can do, plus `channels archive`, `channels unarchive`, `channels delete`, `channels add-member`, `channels remove-member` |
 
 ## 5. Unit Tests
 
