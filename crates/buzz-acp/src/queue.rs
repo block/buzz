@@ -1646,8 +1646,12 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
+        }
+        if let Some(event_id) = reply_anchor {
+            if is_reply {
                 append_reply_instruction(&mut s, event_id);
+            } else {
+                append_new_thread_reply_instruction(&mut s, event_id);
             }
         }
         crate::prompt_framing::semantic_section("context", &s)
@@ -2020,10 +2024,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // there. DMs are always 1:1 with a human, so they always anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        Some(last_event.event.id.to_hex())
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4032,23 +4033,28 @@ mod tests {
                                 "Scope: channel"
                             }));
                         }
+                        // DMs anchor every human-facing turn, same as
+                        // non-DM scopes, but always to the triggering
+                        // event itself (DM replies nest by message, not
+                        // by thread root — see the `reply_anchor` comment
+                        // above). Non-DM anchors to the thread root when
+                        // already a reply, else to the triggering event.
                         assert_eq!(
                             prompt.contains("This is a new top-level message"),
-                            !is_dm && !is_reply
+                            !is_reply
                         );
-                        if !is_dm || is_reply {
-                            let anchor = if is_dm {
+                        let anchor = if is_dm {
+                            if is_reply {
                                 reply.id.to_hex()
-                            } else if is_reply {
-                                root.to_uppercase()
                             } else {
                                 root.clone()
-                            };
-                            assert!(prompt.contains(&format!("--reply-to {anchor}")));
+                            }
+                        } else if is_reply {
+                            root.to_uppercase()
                         } else {
-                            assert!(!prompt.contains("--reply-to"));
-                            assert!(prompt.contains("buzz messages get"));
-                        }
+                            root.clone()
+                        };
+                        assert!(prompt.contains(&format!("--reply-to {anchor}")));
                     }
                 }
             }
@@ -5330,9 +5336,13 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_reply_instruction_present_for_dm_non_reply() {
+        // Regression test: a DM's first (top-level) message used to get no
+        // reply-anchor at all, so the agent was never told to post via
+        // `buzz messages send` and its answer was silently never published.
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             scope: conv(ch),
@@ -5360,8 +5370,9 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "DM non-reply should still include a reply instruction, anchored \
+             to the triggering event"
         );
     }
 
