@@ -6,9 +6,17 @@ type Stage =
   | "projection"
   | "reconciliation";
 
+export type LifecycleReceiverFailureClassification = "retryable" | "terminal";
+
 export class LifecycleReceiverError extends Error {
+  readonly recoveryClassification: LifecycleReceiverFailureClassification;
+
   constructor(stage: Stage, error: unknown) {
     const value = error instanceof Error ? error.message : error;
+    const recoveryClassification =
+      value === "Relay session is terminal; cannot reconnect."
+        ? "terminal"
+        : "retryable";
     const reason =
       value === "closed"
         ? "subscription closed"
@@ -20,6 +28,7 @@ export class LifecycleReceiverError extends Error {
               ? "history timed out"
               : "request failed";
     super(`Desktop lifecycle receiver is unavailable (${stage}: ${reason}).`);
+    this.recoveryClassification = recoveryClassification;
   }
 }
 
