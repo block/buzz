@@ -43,6 +43,7 @@ import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewMod
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
+import { useThreadComposerWorkingPubkeys } from "@/features/channels/ui/useThreadComposerWorkingPubkeys";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
@@ -52,7 +53,6 @@ import {
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
 import {
   mentionsKnownAgent,
-  selectThreadComposerBotTypingPubkeys,
   shouldPrioritizeIdleAuxiliary,
   shouldUseFocusIdleDrawer,
 } from "@/features/channels/ui/ChannelPane.helpers";
@@ -340,13 +340,13 @@ export const ChannelPane = React.memo(function ChannelPane({
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
     hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
-  const threadComposerBotTypingPubkeys = React.useMemo(
-    () =>
-      selectThreadComposerBotTypingPubkeys(botTypingEntries, openThreadHeadId),
-    [botTypingEntries, openThreadHeadId],
+  const threadComposerWorkingBotPubkeys = useThreadComposerWorkingPubkeys(
+    activeChannel?.id ?? null,
+    openThreadHeadId ?? null,
+    botTypingEntries,
   );
   const hasThreadComposerBotActivity =
-    threadComposerBotTypingPubkeys.length > 0;
+    threadComposerWorkingBotPubkeys.length > 0;
   const directMessageIntro = React.useMemo(
     () =>
       buildDirectMessageIntro({
@@ -899,10 +899,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                     <BotActivityComposerAction
                       agents={activityAgents}
                       channelId={activeChannel?.id ?? null}
+                      threadRootId={openThreadHeadId ?? null}
                       onOpenAgentSession={onOpenAgentSession}
                       openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}
-                      workingBotPubkeys={threadComposerBotTypingPubkeys}
+                      workingBotPubkeys={threadComposerWorkingBotPubkeys}
                       variant="inline"
                     />
                   ) : null
