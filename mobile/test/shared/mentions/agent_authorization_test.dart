@@ -99,7 +99,6 @@ void main() {
       final filter = session.queries.first;
       expect(filter.authors, [relay.public]);
       expect(filter.tags, {
-        '#p': [owner.public],
         '#d': ['room'],
       });
       expect(
@@ -133,6 +132,13 @@ void main() {
           NostrEvent.fromJson({...members().toJson(), 'content': 'tampered'}),
         ],
         [members(), members(time: 101, includeAgent: false)],
+        [
+          members(),
+          NostrEvent.fromJson({
+            ...members(time: 101).toJson(),
+            'content': 'tampered',
+          }),
+        ],
         [members(), members(time: 101, includeViewer: false)],
       ]) {
         final result = await read(

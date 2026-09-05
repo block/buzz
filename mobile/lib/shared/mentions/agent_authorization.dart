@@ -46,9 +46,7 @@ Future<List<AgentDirectoryEntry>> readAgentAuthorization(
   check();
   final latest = <String, NostrEvent>{};
   for (final event in membership) {
-    if (event.kind != 39002 ||
-        event.pubkey != authority ||
-        !verifySignedEvent(event)) {
+    if (event.kind != 39002 || event.pubkey != authority) {
       continue;
     }
     final destination = event.getTagValue('d');
@@ -66,6 +64,13 @@ Future<List<AgentDirectoryEntry>> readAgentAuthorization(
     final owned = agent.ownerPubkey == viewer;
     final channels = <String>[];
     for (final entry in latest.entries) {
+      if (!verifySignedEvent(entry.value) ||
+          entry.value.tags
+                  .where((tag) => tag.isNotEmpty && tag[0] == 'd')
+                  .length !=
+              1) {
+        continue;
+      }
       final people = entry.value.tags.where(
         (tag) => tag.length >= 2 && tag[0] == 'p',
       );
@@ -109,7 +114,7 @@ Future<List<NostrEvent>> _membershipPages(
         kinds: const [39002],
         authors: [authority],
         tags: {
-          '#p': [viewer],
+          if (channelId == null) '#p': [viewer],
           if (channelId != null) '#d': [channelId],
         },
         limit: 500,
