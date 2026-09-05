@@ -526,6 +526,94 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     );
     let state = Arc::new(app_state);
 
+    // NIP-FI JWKS warm + background refresh.
+    //
+    // Per [FI-TRACE-DEPENDENCY-FAIL-CLOSED]: a JWKS warm fetch failure at
+    // startup must NOT abort the process — relay availability cannot be
+    // hostage to IdP availability. The relay starts and denies admissions
+    // with `authorization_unavailable` (503) until a snapshot lands. The
+    // background refresh loop owns recovery.
+    //
+    // The state holds `nip_fi_jwks_source` (shared via `Arc`) alongside
+    // `nip_fi_verifier` (which holds a clone of the same `Arc`). Warming the
+    // source delivers snapshots to the verifier at every upgrade check.
+    //
+    // The refresh task is owned: a `CancellationToken` + `JoinHandle` let
+    // the process cancel it cleanly on shutdown instead of leaking the task.
+    let jwks_refresh_cancel = CancellationToken::new();
+    let jwks_refresh_handle: Option<tokio::task::JoinHandle<()>>;
+    if let Some(jwks_source) = state.nip_fi_jwks_source.clone() {
+        let jwks_configs = state.config.nip_fi.jwks_configs.clone();
+        info!(
+            issuer_count = jwks_configs.len(),
+            "NIP-FI: warming JWKS snapshots"
+        );
+
+        // Startup warm: call `get_snapshot` for each issuer concurrently and
+        // record the result so the background loop can initialize each issuer's
+        // warm state from the actual startup outcome rather than always starting
+        // cold. Concurrent warming prevents a single slow issuer from blocking
+        // the relay from accepting traffic for all other issuers.
+        let warm_futures: Vec<_> = jwks_configs
+            .iter()
+            .map(|cfg| {
+                let source = Arc::clone(&jwks_source);
+                let issuer = cfg.issuer.clone();
+                async move {
+                    let warmed = match source.get_snapshot(&issuer).await {
+                        Some(_) => {
+                            info!(issuer = %issuer, "NIP-FI: JWKS snapshot warmed");
+                            true
+                        }
+                        None => {
+                            warn!(
+                                issuer = %issuer,
+                                "NIP-FI: JWKS warm failed — admissions will deny with 503 \
+                                 until a snapshot lands; background refresh will retry"
+                            );
+                            false
+                        }
+                    };
+                    (issuer, warmed)
+                }
+            })
+            .collect();
+        let warm_results = futures_util::future::join_all(warm_futures).await;
+        let mut startup_warm: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
+        for (issuer, warmed) in warm_results {
+            startup_warm.insert(issuer, warmed);
+        }
+
+        // Background refresh loop: per-issuer independent cadence/backoff; supervised so
+        // an unexpected panic restarts rather than silently disabling refresh.
+        // A panic kills only the inner task; the supervisor restarts it with
+        // backoff, keeping the relay alive (denying with 503) while recovering.
+        // The outer cancellation token terminates the supervisor cleanly.
+        //
+        // Each issuer tracks its own `next_attempt_at` (a tokio Instant) so a
+        // warm issuer on a short interval never causes a cold issuer to ignore
+        // its own backoff — only issuers whose deadline is due are refreshed on
+        // any given tick. Warm state is initialized from the startup results so
+        // a successfully-warmed issuer starts on its normal cadence, not cold backoff.
+        //
+        // Cold-start backoff ceiling: 300 seconds (`(v * 2).min(300)`).
+        let refresh_source = Arc::clone(&jwks_source);
+        let refresh_cancel = jwks_refresh_cancel.clone();
+        // One-line seam: the outer spawn drives exactly `run_jwks_refresh_supervisor`,
+        // which owns the restart loop and spawns `run_jwks_refresh_inner_task` per
+        // iteration. The witness test drives this same function — replacing it with
+        // a no-op leaves the witness red.
+        jwks_refresh_handle = Some(tokio::spawn(run_jwks_refresh_supervisor(
+            refresh_source,
+            jwks_configs.clone(),
+            startup_warm.clone(),
+            refresh_cancel,
+        )));
+    } else {
+        jwks_refresh_handle = None;
+    }
+
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the
     // relay behaves byte-identically to a build without the mesh. When
@@ -1214,7 +1302,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         });
     }
 
-    serve(router, health_router, Arc::clone(&state)).await?;
+    serve(
+        router,
+        health_router,
+        Arc::clone(&state),
+        jwks_refresh_cancel,
+        jwks_refresh_handle,
+    )
+    .await?;
     state.community_revalidator_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
@@ -1232,6 +1327,278 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Compute the per-issuer retry cadence after a failed JWKS refresh attempt.
+///
+/// Returns `(new_warmed, new_backoff_secs, retry_secs)`.
+///
+/// Determine the new cadence state after a failed JWKS refresh (`get_snapshot`
+/// returned `None` — no usable snapshot exists).
+///
+/// Production only ever calls this from the `None` arm of `get_snapshot`.
+/// When the snapshot is dead, recovery is urgent: the issuer drops to cold
+/// fast-retry cadence (5 s initial, doubling on each subsequent failure)
+/// regardless of prior warm state.
+///
+/// ## Returns `(new_warmed, new_backoff_secs, retry_secs)`
+///
+/// - `new_warmed`: always `false` — the relay is failing closed.
+/// - `new_backoff_secs`: the backoff value to store for the next cold failure.
+/// - `retry_secs`: how many seconds until the next attempt.
+///
+/// ## Mutation oracle
+///
+/// Old code: `if !warmed { double backoff }` else `retry_secs = interval_secs`.
+/// Old code leaves `warmed = true` and uses the slow warm interval (e.g. 300 s)
+/// when the snapshot dies, so `retry_secs = 300`. The
+/// `hard_dead_warm_issuer_resets_to_fast_cadence` test expects `retry_secs ≤ 5`
+/// and panics with old code.
+fn jwks_next_retry_after_failed_refresh(
+    was_warmed: bool,
+    current_backoff_secs: u64,
+) -> (bool, u64, u64) {
+    // Snapshot is dead — recover urgently via cold fast-retry cadence.
+    if was_warmed {
+        // Previously warm but now dead: reset to initial cold backoff (5 s).
+        (false, 5u64, 5u64)
+    } else {
+        // Already cold: double the backoff, capped at 300 s.
+        let new_backoff = (current_backoff_secs * 2).min(300);
+        (false, new_backoff, new_backoff)
+    }
+}
+
+/// One refresh tick for a single JWKS issuer.
+///
+/// Calls `source.get_snapshot(issuer)`. On success (`Some`) the issuer is
+/// marked warm and scheduled `interval_secs` in the future. On failure
+/// (`None`) [`jwks_next_retry_after_failed_refresh`] determines the new
+/// cadence: a previously warm issuer resets to the 5-second fast-retry
+/// cadence, a cold issuer doubles its backoff.
+///
+/// This function owns the mutable per-issuer state (the tuple fields) and
+/// returns `next_attempt_at` so the supervisor can sleep until the earliest
+/// deadline across all issuers. Extracting this unit allows controlled-clock
+/// tests to drive the full warm → hard-dead → fast-retry → recovery cycle
+/// against the real state-transition logic used by the supervisor.
+///
+/// ## Production seam
+///
+/// The supervisor's inner loop calls this function for each issuer whose
+/// `next_attempt_at` has arrived. Removing or short-circuiting this call
+/// from the supervisor leaves the `warmed`, `backoff_secs`, and
+/// `next_attempt_at` fields unmutated — tests that verify those fields
+/// through the supervisor will go red.
+async fn run_jwks_refresh_step<S>(
+    source: &S,
+    issuer: &str,
+    interval_secs: u64,
+    warmed: &mut bool,
+    backoff_secs: &mut u64,
+    next_attempt_at: &mut tokio::time::Instant,
+) where
+    S: JwksRefreshSource + ?Sized,
+{
+    let now = tokio::time::Instant::now();
+    if source.snapshot_available(issuer).await {
+        tracing::debug!(issuer = %issuer, "NIP-FI: JWKS snapshot refreshed");
+        *warmed = true;
+        *next_attempt_at = now + std::time::Duration::from_secs(interval_secs);
+    } else {
+        tracing::warn!(issuer = %issuer, "NIP-FI: JWKS refresh failed — will retry");
+        let (new_warmed, new_backoff, retry_secs) =
+            jwks_next_retry_after_failed_refresh(*warmed, *backoff_secs);
+        *warmed = new_warmed;
+        *backoff_secs = new_backoff;
+        *next_attempt_at = now + std::time::Duration::from_secs(retry_secs);
+    }
+}
+
+/// The inner JWKS refresh scheduling loop — runs per-issuer due-selection,
+/// sleeps until the earliest deadline, and calls [`run_jwks_refresh_step`] for
+/// each issuer whose deadline has arrived.
+///
+/// Extracted from the supervisor's `inner_task` so it can be driven directly
+/// in tests with paused Tokio time and a controllable source. The supervisor
+/// spawns exactly this function in production; removing that call site breaks
+/// the scheduling loop and leaves every per-issuer `next_attempt_at` unmutated.
+///
+/// ## Type layout for `state`
+///
+/// Each entry is `(issuer, interval_secs, backoff_secs, warmed, next_attempt_at)`.
+/// The caller (the supervisor) builds this vec from `jwks_configs` before
+/// spawning the inner task. Mutability is owned by this function for the
+/// duration of the loop.
+///
+/// ## Cancellation
+///
+/// The loop selects on `cancel.cancelled()` before each sleep. A clean
+/// cancellation returns immediately; the supervisor interprets `Ok(())` as a
+/// clean exit and does not restart.
+async fn run_jwks_refresh_loop<S>(
+    source: Arc<S>,
+    mut state: Vec<(String, u64, u64, bool, tokio::time::Instant)>,
+    cancel: tokio_util::sync::CancellationToken,
+) where
+    S: JwksRefreshSource + Send + Sync + ?Sized,
+{
+    loop {
+        // Sleep until the earliest per-issuer next_attempt_at so no issuer is
+        // woken earlier than needed and a cold issuer's own backoff governs its
+        // retry cadence.
+        let earliest = state
+            .iter()
+            .map(|(_, _, _, _, t)| *t)
+            .min()
+            .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(300));
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                tracing::debug!("NIP-FI: JWKS refresh loop cancelled");
+                return;
+            }
+            _ = tokio::time::sleep_until(earliest) => {}
+        }
+
+        let now = tokio::time::Instant::now();
+        for (issuer, interval_secs, backoff_secs, warmed, next_attempt_at) in &mut state {
+            // Skip issuers whose own deadline has not arrived.
+            if now < *next_attempt_at {
+                continue;
+            }
+            run_jwks_refresh_step(
+                source.as_ref(),
+                issuer,
+                *interval_secs,
+                warmed,
+                backoff_secs,
+                next_attempt_at,
+            )
+            .await;
+        }
+    }
+}
+
+/// Supervisor for the JWKS refresh worker: restarts [`run_jwks_refresh_inner_task`]
+/// with exponential backoff if it exits unexpectedly (panic or abort). Clean
+/// cancellation terminates both the inner task and this supervisor.
+///
+/// Extracted as a named function so the production spawn is a one-line seam and
+/// the witness test can drive this exact unit — meaning the test fails if
+/// [`run_jwks_refresh_inner_task`] is removed from this function.
+async fn run_jwks_refresh_supervisor<S>(
+    source: Arc<S>,
+    configs: Vec<buzz_auth::IssuerJwksConfig>,
+    startup_warm: HashMap<String, bool>,
+    cancel: tokio_util::sync::CancellationToken,
+) where
+    S: JwksRefreshSource + Send + Sync + 'static + ?Sized,
+{
+    let mut supervisor_backoff_secs: u64 = 1;
+    loop {
+        let inner_source = Arc::clone(&source);
+        let inner_cancel = cancel.clone();
+        let inner_task = tokio::spawn(run_jwks_refresh_inner_task(
+            inner_source,
+            configs.clone(),
+            startup_warm.clone(),
+            inner_cancel,
+        ));
+
+        match inner_task.await {
+            Ok(()) => {
+                // Clean return — cancellation fired; supervisor exits too.
+                return;
+            }
+            Err(join_err) => {
+                // Unexpected exit (panic or abort). Log, back off, restart.
+                tracing::error!(
+                    error = %join_err,
+                    retry_secs = supervisor_backoff_secs,
+                    "NIP-FI: JWKS refresh worker exited unexpectedly — restarting"
+                );
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(
+                        supervisor_backoff_secs,
+                    )) => {}
+                }
+                // Supervisor backoff: 1s → 2s → 4s → … → 60s ceiling.
+                supervisor_backoff_secs = (supervisor_backoff_secs * 2).min(60);
+            }
+        }
+    }
+}
+
+/// The body of the supervisor's inner task: builds per-issuer state from
+/// `configs` and `startup_warm`, then drives [`run_jwks_refresh_loop`] to
+/// completion or cancellation.
+///
+/// Extracted as a named function so [`run_jwks_refresh_supervisor`] can spawn
+/// exactly this unit — making "remove the inner task invocation" a mutation that
+/// fails both production and the witness test (which drives the supervisor).
+///
+/// Tuple layout: `(issuer, interval_secs, backoff_secs, warmed, next_attempt_at)`.
+async fn run_jwks_refresh_inner_task<S>(
+    source: Arc<S>,
+    configs: Vec<buzz_auth::IssuerJwksConfig>,
+    startup_warm: HashMap<String, bool>,
+    cancel: tokio_util::sync::CancellationToken,
+) where
+    S: JwksRefreshSource + Send + Sync + ?Sized,
+{
+    let now = tokio::time::Instant::now();
+    let per_issuer_state: Vec<(String, u64, u64, bool, tokio::time::Instant)> = configs
+        .iter()
+        .map(|c| {
+            let interval = c.contract.refresh_interval_seconds();
+            let warmed = *startup_warm.get(&c.issuer).unwrap_or(&false);
+            // Warm issuers schedule their first refresh at +interval;
+            // cold issuers start with a short initial backoff of 5s.
+            let initial_delay = if warmed { interval } else { 5u64 };
+            (
+                c.issuer.clone(),
+                interval,
+                5u64, // initial cold backoff
+                warmed,
+                now + std::time::Duration::from_secs(initial_delay),
+            )
+        })
+        .collect();
+    run_jwks_refresh_loop(source, per_issuer_state, cancel).await;
+}
+
+/// Seam trait used to drive [`run_jwks_refresh_step`] and
+/// [`run_jwks_refresh_loop`] in tests without spawning a real HTTP server.
+/// Returns `true` when a live snapshot is available, `false` when not — the
+/// supervisor cares only about availability, never about key material. The
+/// production implementation maps `ProductionJwksSource::get_snapshot(…).is_some()`.
+///
+/// Using a boolean outcome (rather than `Option<AssertionKeySet>`) keeps
+/// `AssertionKeySet` construction crate-private in buzz-auth: a relay-side
+/// mock never needs to build a real key set, so no public test constructor
+/// (`empty_for_test()`) is required.
+#[async_trait::async_trait]
+trait JwksRefreshSource: Send + Sync {
+    /// Returns `true` if a live snapshot is available for `issuer` after this
+    /// refresh attempt, `false` if the source is unavailable or the fetch
+    /// failed.
+    async fn snapshot_available(&self, issuer: &str) -> bool;
+}
+
+#[async_trait::async_trait]
+impl<F> JwksRefreshSource for buzz_auth::ProductionJwksSource<F>
+where
+    F: buzz_auth::JwksFetcher + Send + Sync + 'static,
+{
+    async fn snapshot_available(&self, issuer: &str) -> bool {
+        buzz_auth::ProductionJwksSource::get_snapshot(self, issuer)
+            .await
+            .is_some()
+    }
 }
 
 #[cfg(test)]
@@ -1365,6 +1732,8 @@ async fn serve(
     router: axum::Router,
     health_router: axum::Router,
     state: Arc<AppState>,
+    jwks_refresh_cancel: CancellationToken,
+    jwks_refresh_handle: Option<tokio::task::JoinHandle<()>>,
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
@@ -1493,6 +1862,13 @@ async fn serve(
             .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
         uds_handle.abort();
         hard_shutdown.abort();
+        // Cancel and join the JWKS refresh task so it doesn't outlive the process.
+        jwks_refresh_cancel.cancel();
+        if let Some(h) = jwks_refresh_handle {
+            if let Err(e) = h.await {
+                tracing::warn!(error = %e, "NIP-FI: JWKS refresh supervisor join error on shutdown");
+            }
+        }
         return Ok(());
     }
 
@@ -1517,6 +1893,13 @@ async fn serve(
         .await
         .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
     hard_shutdown.abort();
+    // Cancel and join the JWKS refresh task so it doesn't outlive the process.
+    jwks_refresh_cancel.cancel();
+    if let Some(h) = jwks_refresh_handle {
+        if let Err(e) = h.await {
+            tracing::warn!(error = %e, "NIP-FI: JWKS refresh supervisor join error on shutdown");
+        }
+    }
     Ok(())
 }
 
@@ -2128,8 +2511,9 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, connect_audit_pool, dropped_in_memory_keys, idle_timeout_secs,
-        refresh_legacy_active_gauge_recency, relay_keypair_from_config,
-        run_periodic_until_cancelled, EmissionScope, InMemoryMetricKey,
+        jwks_next_retry_after_failed_refresh, refresh_legacy_active_gauge_recency,
+        relay_keypair_from_config, run_jwks_refresh_supervisor, run_periodic_until_cancelled,
+        EmissionScope, InMemoryMetricKey, JwksRefreshSource,
     };
     use buzz_db::DbConfig;
     use metrics::GaugeFn;
@@ -2333,5 +2717,273 @@ mod tests {
     fn test_idle_timeout_is_at_least_three_usage_intervals() {
         assert_eq!(idle_timeout_secs(None, 300), 900);
         assert_eq!(idle_timeout_secs(Some(10), 1_000), 3_000);
+    }
+
+    // ── F1: JWKS hard-dead recovery cadence ──────────────────────────────────
+    //
+    // After a warmed snapshot passes its hard deadline and `get_snapshot`
+    // returns `None` (the relay is now failing closed), the next retry MUST
+    // use fast cold-backoff cadence — not the slow warm refresh interval.
+    //
+    // Without the fix, the old code checked `if !warmed { double backoff }`
+    // and used `interval_secs` for warm issuers, so a hard-dead warm issuer
+    // would wait a full refresh interval (e.g. 300 s) before retrying.
+    //
+    // ## Unit mutation oracle
+    //
+    // Revert `jwks_next_retry_after_failed_refresh` to the old behavior
+    // (always use `was_warmed` for cadence, ignore snapshot state):
+    //   - `hard_dead_warm_issuer_resets_to_fast_cadence` → `retry_secs = 300`
+    //     but assertion expects `retry_secs <= 5` → panics.
+    //   - `cold_issuer_doubles_backoff` and `backoff_capped_at_300` unaffected.
+    //
+    // ## Production-seam coverage
+    //
+    // These unit tests call `jwks_next_retry_after_failed_refresh` directly.
+    // The production-seam test `f1_supervisor_loop_drives_recovery_and_restores_admission`
+    // drives `run_jwks_refresh_supervisor` — the exact function the production spawn calls —
+    // through the full warm → hard-dead → fast-retry → recovery cycle using a
+    // real `ProductionJwksSource<ToggleJwksFetcher>`, and asserts that
+    // `IssuerKeySource::key_set` returns `Some` after recovery.
+
+    #[test]
+    fn hard_dead_warm_issuer_resets_to_fast_cadence() {
+        // A previously warm issuer (warmed=true) whose snapshot just died
+        // must reset to cold fast-retry cadence.
+        // Old code: `retry_secs = interval_secs` (e.g. 300). New code: 5 s.
+        let (new_warmed, new_backoff, retry_secs) =
+            jwks_next_retry_after_failed_refresh(true, 5u64);
+        assert!(
+            !new_warmed,
+            "F1: warmed must be reset to false when snapshot is dead; old code leaves it true"
+        );
+        assert_eq!(
+            retry_secs, 5,
+            "F1: retry_secs must be 5 s (fast cadence) after hard death; \
+             old code returns interval_secs (e.g. 300) — mutation turns this red"
+        );
+        assert_eq!(
+            new_backoff, 5,
+            "F1: backoff_secs must be reset to 5 s after hard death"
+        );
+    }
+
+    #[test]
+    fn cold_issuer_doubles_backoff() {
+        // Already cold (warmed=false), snapshot still unavailable: backoff doubles.
+        let (new_warmed, new_backoff, retry_secs) =
+            jwks_next_retry_after_failed_refresh(false, 10u64);
+        assert!(!new_warmed);
+        assert_eq!(new_backoff, 20, "cold backoff doubles");
+        assert_eq!(retry_secs, 20);
+    }
+
+    #[test]
+    fn cold_issuer_backoff_capped_at_300() {
+        let (_, new_backoff, retry_secs) = jwks_next_retry_after_failed_refresh(false, 200u64);
+        assert_eq!(new_backoff, 300, "cold backoff capped at 300 s");
+        assert_eq!(retry_secs, 300);
+    }
+
+    // ── F1 production-seam test ───────────────────────────────────────────────
+    //
+    // Drives `run_jwks_refresh_supervisor` — the exact function the production
+    // spawn calls — through the warm → hard-dead → fast-retry → recovery cycle,
+    // then proves that the verifier's admission gate sees the recovered snapshot.
+    //
+    // ## What this test proves
+    //
+    // 1. `run_jwks_refresh_supervisor` builds per-issuer state (via its call to
+    //    `run_jwks_refresh_inner_task`) and owns the sleep/due-selection
+    //    scheduling via `run_jwks_refresh_loop`. With paused Tokio time the loop
+    //    only wakes when auto-advance crosses `next_attempt_at` — so each step
+    //    fires because the function's own due-selection allowed it, not because
+    //    the test hand-invoked it.
+    //
+    // 2. After the supervisor drives a recovery, `IssuerKeySource::key_set`
+    //    returns `Some(...)` for the recovered issuer. `key_set` is the exact
+    //    method `FederatedAssertionVerifier` calls on each token verification;
+    //    `Some` means the verifier proceeds to token parsing rather than
+    //    returning `AuthorizationUnavailable` (503). This is the equivalent
+    //    admission assertion — building a full `FederatedAssertionVerifier`
+    //    + signed JWT would re-test buzz-auth's own verified paths, not the
+    //    relay scheduler behavior this witness exists for.
+    //
+    // The source is a real `ProductionJwksSource<ToggleJwksFetcher>` shared
+    // between the supervisor (as `JwksRefreshSource`) and the verifier (as
+    // `IssuerKeySource`). This is the same composition the production supervisor
+    // uses; the source's internal snapshot cache is the shared state that
+    // connects the refresh loop to the admission gate.
+    //
+    // ## Deterministic handshake and timing oracle
+    //
+    // `ToggleJwksFetcher::fetch_done` fires `notify_one()` after every fetch
+    // attempt. The test awaits `fetch_done.notified()` for each attempt:
+    // Tokio's `start_paused` auto-advances time to fire the next scheduled
+    // sleep when all tasks are blocked on timers — so each `notified().await`
+    // resolves exactly when the loop's due-selection wakes the spawned task.
+    //
+    // The timing oracle for mutation 2: measure the Tokio clock time between
+    // attempt 1 and attempt 2. With correct 5-s fast-retry cadence, the gap is
+    // ≤ 10 s. With the mutated 300-s cadence, the gap is 300 s. Asserting
+    // `elapsed ≤ 10 s` fails deterministically under the 300-s mutation without
+    // relying on scheduler preference — it reads the Tokio clock after
+    // auto-advance, not wall-clock time.
+    //
+    // ## Mutation oracle
+    //
+    // 1. Remove the `run_jwks_refresh_inner_task` call from
+    //    `run_jwks_refresh_supervisor` (or stub it to a no-op): the source cache
+    //    is never updated → `key_set` stays `None` after recovery → the
+    //    `assert!(key_set.is_some())` panics.
+    //
+    // 2. Revert `jwks_next_retry_after_failed_refresh` for the warm→dead case
+    //    to stay on warm interval (300 s) instead of resetting to 5 s: the
+    //    loop schedules the retry at +300 s → Tokio auto-advances 300 s to fire
+    //    attempt 2 → `tokio::time::Instant::now()` after `notified2` is 300 s
+    //    after `notified1` → `assert!(elapsed_secs ≤ 10)` panics.
+    //
+    // 3. Stub `ToggleJwksFetcher::fetch_jwks` to always return `Err` (so
+    //    `snapshot_available` always returns `false`): cache is never warmed
+    //    after toggle → `key_set` stays `None` → `assert!(key_set.is_some())`
+    //    panics.
+    #[tokio::test(start_paused = true)]
+    async fn f1_supervisor_loop_drives_recovery_and_restores_admission() {
+        use buzz_auth::{
+            IssuerJwksConfig, IssuerKeySource, JwksSourceContract, ProductionJwksSource,
+            ToggleJwksFetcher,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        const ISSUER: &str = "https://idp.loop-test.example";
+        const INTERVAL: u64 = 300; // normal warm refresh interval
+
+        // ── Build a real ProductionJwksSource backed by ToggleJwksFetcher ─────
+        // The fetcher starts unavailable so the first loop tick is a hard-dead
+        // failure. `toggle` flips availability; `fetch_done` is notified after
+        // every fetch attempt so the test can await each iteration deterministically.
+        let fetcher = ToggleJwksFetcher::new(false);
+        let toggle = Arc::clone(&fetcher.available);
+        let fetch_done = Arc::clone(&fetcher.fetch_done);
+        let config = IssuerJwksConfig {
+            issuer: ISSUER.to_string(),
+            contract: JwksSourceContract::new(
+                format!("https://{ISSUER}/.well-known/jwks.json"),
+                INTERVAL,
+                3600,
+            )
+            .expect("valid test contract"),
+        };
+        let source = Arc::new(
+            ProductionJwksSource::new(vec![config.clone()], fetcher).expect("non-empty config"),
+        );
+
+        // ── Pre-condition: no snapshot → key_set returns None (503 territory) ─
+        // IssuerKeySource::key_set is the exact method FederatedAssertionVerifier
+        // calls on each token verification. None → verifier returns
+        // AuthorizationUnavailable (503).
+        assert!(
+            IssuerKeySource::key_set(source.as_ref(), ISSUER).is_none(),
+            "F1: key_set must be None before recovery (fetcher unavailable)"
+        );
+
+        // ── Build startup_warm: issuer was warm, simulating a previously healthy
+        //    issuer whose snapshot just expired. The supervisor uses startup_warm
+        //    to seed the per-issuer warm state, so the first refresh attempt is
+        //    scheduled at now+INTERVAL (300 s) — the normal warm cadence.
+        let mut startup_warm = HashMap::new();
+        startup_warm.insert(ISSUER.to_string(), true);
+
+        let cancel = CancellationToken::new();
+
+        // ── Spawn run_jwks_refresh_supervisor — the exact function the production
+        //    spawn calls. It owns the restart loop and invokes
+        //    run_jwks_refresh_inner_task, which builds per-issuer state and drives
+        //    the scheduling loop.
+        //
+        // Mutation 1 oracle: remove the run_jwks_refresh_inner_task call from
+        // run_jwks_refresh_supervisor (or stub it to a no-op) → cache never
+        // updates → key_set stays None after recovery → assert!(key_set.is_some()) panics.
+        let task_source = Arc::clone(&source) as Arc<dyn JwksRefreshSource + Send + Sync>;
+        let task_cancel = cancel.clone();
+        let configs = vec![config];
+        let supervisor_task = tokio::spawn(run_jwks_refresh_supervisor(
+            task_source,
+            configs,
+            startup_warm,
+            task_cancel,
+        ));
+
+        // ── Wait for attempt 1: the hard-dead tick ────────────────────────────
+        // `run_jwks_refresh_supervisor` starts the inner task sleeping at now+300s
+        // (warm cadence). `notified().await` relies on `start_paused` auto-advance:
+        // when the test blocks on a non-timer future, Tokio auto-advances time to
+        // fire the next pending timer — here, to the task's sleep_until(now+300s).
+        // The task wakes, runs snapshot_available (fetcher=false) → hard-dead →
+        // resets cadence to 5 s → fires `notify_one` → notified() resolves.
+        //
+        // Mutation 1 failure mode: no fetches ever run → notify_one is never
+        // called → the 1000-s timeout is the only pending timer → Tokio
+        // auto-advances to it → timeout fires → test panics deterministically.
+        tokio::time::timeout(std::time::Duration::from_secs(1000), fetch_done.notified())
+            .await
+            .expect(
+                "F1: attempt 1 must fire within 1000 virtual seconds; \
+                 mutation 1: removing run_jwks_refresh_inner_task from \
+                 run_jwks_refresh_supervisor prevents any fetch → no notify_one → timeout",
+            );
+        let clock_after_attempt1 = tokio::time::Instant::now();
+
+        // Verify attempt 1 left the cache empty (hard-dead with unavailable fetcher).
+        assert!(
+            IssuerKeySource::key_set(source.as_ref(), ISSUER).is_none(),
+            "F1: key_set must still be None after the first failed tick"
+        );
+
+        // ── Toggle the fetcher on; wait for attempt 2: the recovery tick ──────
+        // The hard-dead path scheduled the next retry at +5 s. With toggle=true,
+        // `notified().await` auto-advances again to fire that 5-s sleep, runs
+        // snapshot_available (fetcher=true) → warms cache → fires `notify_one`.
+        //
+        // Mutation 2 timing oracle: after `notified2` resolves, the Tokio clock
+        // is exactly at the retry deadline. With 5-s cadence: clock_after_attempt2
+        // ≈ clock_after_attempt1 + 5s (≤ 10s gap). With the 300-s mutation:
+        // the gap is 300s → assert!(elapsed_secs ≤ 10) panics.
+        toggle.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(1000), fetch_done.notified())
+            .await
+            .expect("F1: attempt 2 must fire within 1000 virtual seconds");
+        let clock_after_attempt2 = tokio::time::Instant::now();
+
+        let elapsed_secs = (clock_after_attempt2 - clock_after_attempt1).as_secs();
+        assert!(
+            elapsed_secs <= 10,
+            "F1: attempt 2 must fire within 10 s of attempt 1 (fast-retry cadence = 5 s); \
+             mutation 2: reverting jwks_next_retry_after_failed_refresh to 300-s cadence causes \
+             Tokio to auto-advance 300 s between attempts — elapsed={elapsed_secs}s, expected ≤10s"
+        );
+
+        // ── Post-condition: supervisor drove recovery; key_set now returns Some ─
+        // IssuerKeySource::key_set reads the snapshot cache populated by
+        // run_jwks_refresh_supervisor → run_jwks_refresh_inner_task via
+        // ProductionJwksSource::get_snapshot. Some(…) here means a real
+        // FederatedAssertionVerifier would proceed to token parsing rather than
+        // returning AuthorizationUnavailable (503).
+        //
+        // Mutation 3 oracle: stub ToggleJwksFetcher::fetch_jwks to always return Err
+        // → snapshot_available always false → cache never warms after toggle → key_set stays None → panics.
+        let key_set = IssuerKeySource::key_set(source.as_ref(), ISSUER);
+        assert!(
+            key_set.is_some(),
+            "F1: after supervisor-driven recovery key_set must return Some (admission restored); \
+             mutation 1: removing run_jwks_refresh_inner_task from run_jwks_refresh_supervisor → cache never updates → None; \
+             mutation 2: reverting cadence to 300 s → elapsed oracle (above) catches it first; \
+             mutation 3: ToggleJwksFetcher::fetch_jwks always Err → cache never warms → None"
+        );
+
+        cancel.cancel();
+        let _ = supervisor_task.await;
     }
 }
