@@ -52,7 +52,7 @@ pub use nip_fi::{
     IssuerJwksConfig, IssuerKeySource, IssuerPolicy, IssuerPolicyError, IssuerRegistry,
     JwksFetchError, JwksFetcher, JwksSourceContract, NipFiMode, NipFiStartupError,
     ProductionJwksSource, RevalidationDependencies, SubjectClass, SubjectClassContract, TokenClass,
-    TransportContractId, VerifiedAssertion, VerifierError, CLIENT_ATTACHED_HEADER,
+    TransportContractId, VerifiedAssertion, VerifierError, VerifyAssertion, CLIENT_ATTACHED_HEADER,
     NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
 };
 
@@ -60,6 +60,8 @@ pub use nip_fi::{
 pub use access::MockAccessChecker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use nip98_replay::AlwaysFreshReplayGuard;
+#[cfg(any(test, feature = "test-utils"))]
+pub use nip_fi::StaticIssuerKeySource;
 #[cfg(any(test, feature = "test-utils"))]
 pub use rate_limit::AlwaysAllowRateLimiter;
 

@@ -104,6 +104,12 @@ impl AssertionPolicyId {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// All-zeros sentinel for use in tests only.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn zero() -> Self {
+        Self([0u8; 32])
+    }
 }
 
 impl fmt::Debug for AssertionPolicyId {
@@ -143,6 +149,12 @@ impl TransportContractId {
     /// The stable 32-byte transport-contract digest.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// All-zeros sentinel for use in tests only.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn zero() -> Self {
+        Self([0u8; 32])
     }
 }
 

@@ -199,6 +199,31 @@ impl VerifiedAssertion {
     pub const fn revalidation_dependencies(&self) -> &RevalidationDependencies {
         &self.revalidation_dependencies
     }
+
+    /// Test-only constructor: mint a minimal `VerifiedAssertion` for a given
+    /// `asserted_key`.  All other fields are set to safe, arbitrary defaults.
+    ///
+    /// Used in unit tests that need to supply a `VerifiedAssertion` with a
+    /// specific `asserted_key` without performing a real JWKS verification.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_test(asserted_key: nostr::PublicKey) -> Self {
+        use chrono::Duration;
+        Self::seal(
+            "https://test.issuer.example".to_owned(),
+            "test-subject".to_owned(),
+            Some(asserted_key),
+            CanonicalCapabilities::from_pairs(vec![]),
+            vec![Utc::now() + Duration::seconds(3600)],
+            AssertionPolicyId::zero(),
+            TransportContractId::zero(),
+            RevalidationDependencies::new(
+                "test-kid".to_owned(),
+                1,
+                Utc::now() + Duration::seconds(3600),
+                "test.header.sig".to_owned(),
+            ),
+        )
+    }
 }
 
 impl fmt::Debug for VerifiedAssertion {

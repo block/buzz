@@ -526,6 +526,80 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     );
     let state = Arc::new(app_state);
 
+    // NIP-FI JWKS warm + background refresh.
+    //
+    // Per [FI-TRACE-DEPENDENCY-FAIL-CLOSED]: a JWKS warm failure at startup
+    // MUST NOT abort the relay. The relay starts and HTTP-protected routes deny
+    // with `authorization_unavailable` (503) until a snapshot lands. The
+    // background loop retries automatically.
+    //
+    // The background task is cancelled cleanly on shutdown via a
+    // CancellationToken so it does not outlive the process.
+    let nip_fi_jwks_cancel = tokio_util::sync::CancellationToken::new();
+    if let Some(ref jwks_source) = state.nip_fi_jwks_source.clone() {
+        let jwks_configs = state.config.nip_fi.jwks_configs.clone();
+        info!(
+            issuer_count = jwks_configs.len(),
+            "NIP-FI: warming JWKS snapshots for HTTP enforcement"
+        );
+        for cfg in &jwks_configs {
+            match jwks_source.get_snapshot(&cfg.issuer).await {
+                Some(_) => {
+                    info!(issuer = %cfg.issuer, "NIP-FI: JWKS snapshot warmed");
+                }
+                None => {
+                    warn!(
+                        issuer = %cfg.issuer,
+                        "NIP-FI: JWKS warm failed — HTTP ingress will deny 503 until \
+                         a snapshot lands; background refresh will retry"
+                    );
+                }
+            }
+        }
+        // Background refresh loop: independent per-issuer cadence.
+        let refresh_source = Arc::clone(jwks_source);
+        let refresh_configs = jwks_configs.clone();
+        let refresh_cancel = nip_fi_jwks_cancel.clone();
+        tokio::spawn(async move {
+            let mut intervals: Vec<(String, u64, tokio::time::Instant)> = refresh_configs
+                .iter()
+                .map(|c| {
+                    (
+                        c.issuer.clone(),
+                        c.contract.refresh_interval_seconds(),
+                        tokio::time::Instant::now(),
+                    )
+                })
+                .collect();
+            loop {
+                // Sleep until the next scheduled refresh across all issuers.
+                let next = intervals
+                    .iter()
+                    .map(|(_, interval, last)| *last + std::time::Duration::from_secs(*interval))
+                    .min()
+                    .unwrap_or_else(|| {
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(300)
+                    });
+                tokio::select! {
+                    _ = tokio::time::sleep_until(next) => {}
+                    _ = refresh_cancel.cancelled() => break,
+                }
+                let now = tokio::time::Instant::now();
+                for (issuer, interval, last) in &mut intervals {
+                    if now >= *last + std::time::Duration::from_secs(*interval) {
+                        if refresh_source.get_snapshot(issuer).await.is_none() {
+                            warn!(
+                                %issuer,
+                                "NIP-FI: background JWKS refresh returned no snapshot"
+                            );
+                        }
+                        *last = now;
+                    }
+                }
+            }
+        });
+    }
+
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the
     // relay behaves byte-identically to a build without the mesh. When

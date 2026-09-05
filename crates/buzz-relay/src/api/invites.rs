@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
+use crate::nip_fi_http::admit_nip_fi_http_on_state;
 use buzz_core::invite::{
     hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
     MIN_INVITE_TTL_SECS, V2_PREFIX,
@@ -251,14 +252,7 @@ async fn authenticate(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_bridge_auth_with_options(
-        headers,
-        "POST",
-        &url,
-        Some(body),
-        true, // invites always require NIP-98; no X-Pubkey dev fallback
-        true, // POST bodies must be covered by a payload tag
-    )?;
+    } = bridge::verify_nip98_exempt_invite_claim(headers, "POST", &url, Some(body))?;
     bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
 
     Ok((tenant, pubkey))
@@ -285,9 +279,75 @@ pub async fn mint_invite(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites", &body).await?;
+) -> axum::response::Response {
+    // NIP-FI gate wraps the entire handler so the denial is emitted as exact
+    // text/plain bytes. [FI-TRACE-AUTHORITY-UNIFORM]
+    mint_invite_checked(state, headers, body).await
+}
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+async fn mint_invite_checked(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+        Ok(t) => t,
+        Err(_) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+            .into_response()
+        }
+    };
+
+    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, "/api/invites");
+
+    // NIP-FI admission: NIP-98 extraction runs inside the closure, followed by
+    // assertion verify → pair → deny-map in fixed order. The proven pubkey is
+    // only available through the returned NipFiAdmission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let admission = match admit_nip_fi_http_on_state(
+        &state,
+        &headers,
+        bridge::make_nip98_closure_for_admission(
+            headers.clone(),
+            "POST",
+            url,
+            Some(body.to_vec()),
+            true, // invites always require NIP-98; no X-Pubkey dev fallback
+            true, // POST bodies must be covered by a payload tag
+        ),
+    ) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    let pubkey = *admission.proven_pubkey();
+    let (event_id_bytes, _signed_created_at) = admission.into_extra();
+
+    // Replay detection runs after NIP-98+assertion admission (both proofs verified).
+    if let Err(e) = bridge::check_nip98_replay(&state, &tenant, event_id_bytes).await {
+        return e.into_response();
+    }
+
+    match mint_invite_inner(&state, body, tenant, pubkey).await {
+        Ok(json) => json.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn mint_invite_inner(
+    state: &AppState,
+    body: axum::body::Bytes,
+    tenant: buzz_core::TenantContext,
+    pubkey: nostr::PublicKey,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
     let member = state
@@ -1812,5 +1872,66 @@ mod postgres_tests {
 
         let response = get_page(state, "/api/join-policy/privacy").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── NIP-FI production-seam test: POST /api/invites ────────────────────────
+    //
+    // Gate under test: `check_nip_fi_http_on_state` called in `mint_invite_checked`
+    // (invites.rs:309).  Seam test: valid NIP-98 + no assertion → 401 in Enforce
+    // mode.
+    //
+    // Falsifying mutation: delete the `check_nip_fi_http_on_state` call from
+    // `mint_invite_checked`.  Without the gate the request proceeds to authz
+    // and returns 403 (not an owner/admin) or another non-401 status — the
+    // assert_eq! fails.
+    //
+    // Infrastructure: same `#[ignore = "requires Postgres"]` + tokio::test.
+    // The invites harness already has Postgres support (`invite_test_state`);
+    // NIP-FI enforce mode is enabled by patching the config after state
+    // construction so we can reuse the existing community setup.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_enforce_mint_invite_no_assertion_is_401() {
+        let host = format!("nip-fi-invites-seam-{}.local", Uuid::new_v4().simple());
+        let Some(state_base) = invite_test_state(&host).await else {
+            return;
+        };
+
+        // Clone AppState and patch config to enable NIP-FI Enforce mode.
+        // nip_fi_verifier = None (no issuers configured) is correct: the seam
+        // test fires at the missing-assertion check before any verifier lookup.
+        let mut state_inner = (*state_base).clone();
+        let mut config = (*state_inner.config).clone();
+        config.require_auth_token = true;
+        config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+
+        let keys = Keys::generate();
+        let url = format!("https://{host}/api/invites");
+        // Valid NIP-98 event with payload tag; no Nostr-Federated-Identity header.
+        let auth = nip98_auth_header(&keys, &url, b"{}");
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/invites")
+                    .header(header::HOST, &host)
+                    .header(header::AUTHORIZATION, auth)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "NIP-FI enforce mode: POST /api/invites with valid NIP-98 + no assertion MUST deny \
+             401 [FI-TRACE-HTTP-INGRESS]; if this fails the check_nip_fi_http_on_state gate was \
+             removed from mint_invite_checked"
+        );
     }
 }

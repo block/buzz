@@ -778,6 +778,27 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
+
+    /// NIP-FI federated-identity assertion verifier, shared across all HTTP
+    /// ingress checks.
+    ///
+    /// `None` when `config.nip_fi.mode` is `Off`. When present, the verifier
+    /// is the single offline authority for assertion validation on every
+    /// protected HTTP surface. The backing `ProductionJwksSource` is also
+    /// shared and performs bounded periodic JWKS refresh internally.
+    ///
+    /// The field uses `dyn VerifyAssertion` (type erasure) so that
+    /// integration tests can inject a `StaticIssuerKeySource`-backed verifier
+    /// without requiring a live JWKS fetch.  Production code always stores a
+    /// `FederatedAssertionVerifier<Arc<ProductionJwksSource>>` here; the type
+    /// erased form costs one vtable dispatch per request, which is negligible
+    /// relative to the JWT crypto.
+    pub nip_fi_verifier: Option<Arc<dyn buzz_auth::VerifyAssertion>>,
+
+    /// The shared JWKS source backing `nip_fi_verifier`, exposed so `main.rs`
+    /// can warm it at startup and drive the background refresh loop.
+    /// `None` iff `nip_fi_verifier` is `None`.
+    pub nip_fi_jwks_source: Option<Arc<buzz_auth::ProductionJwksSource>>,
 }
 
 impl AppState {
@@ -866,6 +887,8 @@ impl AppState {
         let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
+        // Build NIP-FI components before moving config into the state Arc.
+        let (nip_fi_verifier, nip_fi_jwks_source) = build_nip_fi_components(&config);
         let state = Self {
             config: Arc::new(config),
             db,
@@ -955,6 +978,8 @@ impl AppState {
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
+            nip_fi_verifier,
+            nip_fi_jwks_source,
         };
         (
             state,
@@ -1367,6 +1392,50 @@ impl AuditShutdownHandle {
             ),
         }
     }
+}
+
+/// Construct the NIP-FI assertion verifier + JWKS source from `config.nip_fi`.
+///
+/// Returns `(None, None)` when the mode is `Off`. In `Enforce` or
+/// `DenyProtected` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
+/// and a `FederatedAssertionVerifier` over a clone of that `Arc`.
+/// The source starts empty; HTTP admission returns `authorization_unavailable`
+/// (503) until the startup warm in `main.rs` succeeds. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
+type NipFiComponents = (
+    Option<Arc<dyn buzz_auth::VerifyAssertion>>,
+    Option<Arc<buzz_auth::ProductionJwksSource>>,
+);
+
+fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
+    use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, NipFiMode, ProductionJwksSource};
+
+    if matches!(
+        config.nip_fi.mode,
+        NipFiMode::Off | NipFiMode::DenyProtected
+    ) {
+        // Off: no enforcement. DenyProtected: verifier never consulted (always 503).
+        return (None, None);
+    }
+
+    let source =
+        match ProductionJwksSource::new(config.nip_fi.jwks_configs.clone(), HttpJwksFetcher::new())
+        {
+            Some(s) => Arc::new(s),
+            None => {
+                tracing::error!(
+                    "nip-fi: ProductionJwksSource construction returned None despite \
+                     passing startup validation — HTTP enforcement unavailable"
+                );
+                return (None, None);
+            }
+        };
+
+    let verifier: Arc<dyn buzz_auth::VerifyAssertion> = Arc::new(FederatedAssertionVerifier::new(
+        config.nip_fi.registry.clone(),
+        Arc::clone(&source),
+    ));
+
+    (Some(verifier), Some(source))
 }
 
 /// Log a single audit entry with metrics. Extracted so the normal loop

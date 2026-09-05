@@ -22,6 +22,7 @@ buzz-db = { workspace = true }
 buzz-datastore-tracing = { workspace = true }
 buzz-deletion = { workspace = true }
 buzz-auth = { workspace = true }
+jsonwebtoken = { workspace = true }
 buzz-pubsub = { workspace = true }
 buzz-audit = { workspace = true }
 buzz-search = { workspace = true }
@@ -39,6 +40,7 @@ tower-http = { workspace = true }
 nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_urlencoded = "0.7"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -86,6 +88,7 @@ async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
+http-body-util = "0.1"
 mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
 mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
 # Relay-driven mesh lifecycle smoke (examples/mesh_relay_lifecycle_smoke.rs):
@@ -94,7 +97,7 @@ mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag 
 buzz-test-client = { path = "../buzz-test-client" }
 ed25519-dalek = "=3.0.0-rc.0"
 buzz-core = { workspace = true, features = ["test-utils"] }
-buzz-auth = { workspace = true, features = ["dev"] }
+buzz-auth = { workspace = true, features = ["dev", "test-utils"] }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures = "0.3"

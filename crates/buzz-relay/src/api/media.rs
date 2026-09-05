@@ -62,6 +62,7 @@ fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
 
 struct MediaReadAuth {
     tenant: TenantContext,
+    pubkey: nostr::PublicKey,
 }
 
 const MEDIA_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -317,8 +318,42 @@ fn serving_lease_lost(error: anyhow::Error) -> MediaError {
 /// Returns a [`BlobDescriptor`] JSON on success.
 // TODO(v2): Add persistent per-pubkey storage quotas. Admission limits below
 // bound active parser/storage work, but they do not cap durable bytes stored.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub async fn upload_blob(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUpload,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
+
+    // NIP-FI admission: the Blossom extractor already verified the NIP-98
+    // auth event; the closure supplies the proven pubkey.  The admission
+    // function then runs assertion verify → pair → deny-map in fixed order.
+    // [FI-TRACE-AUTHORITY-UNIFORM]
+    let proven_pubkey = auth.auth_event.pubkey;
+    match admit_nip_fi_http_on_state(&state, &headers, || Ok(Nip98Proof::new(proven_pubkey, ()))) {
+        Ok(_) => {}
+        Err(resp) => return resp,
+    }
+
+    upload_blob_inner(state, auth, headers, body).await
+}
+
+async fn upload_blob_inner(
+    state: Arc<AppState>,
+    auth: AuthenticatedUpload,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    upload_blob_result(state, auth, headers, body)
+        .await
+        .into_response()
+}
+
+async fn upload_blob_result(
+    state: Arc<AppState>,
     auth: AuthenticatedUpload,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -546,7 +581,8 @@ async fn authenticate_media_read(
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
 
-    Ok(MediaReadAuth { tenant })
+    let pubkey = auth_event.pubkey;
+    Ok(MediaReadAuth { tenant, pubkey })
 }
 
 fn blob_cache_control() -> &'static str {
@@ -632,6 +668,7 @@ const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 ///   - Chunk capped at 16 MiB; clients request additional ranges for the rest
 ///
 /// All responses include `Accept-Ranges: bytes` so video players know seeking is supported.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub async fn get_blob(
     State(state): State<Arc<AppState>>,
     Path(sha256_ext): Path<String>,
@@ -639,6 +676,14 @@ pub async fn get_blob(
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
     let media_auth = authenticate_media_read(&state, &req_headers, &sha256_ext).await?;
+    // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
+    let proven_pubkey = media_auth.pubkey;
+    if let Err(resp) = admit_nip_fi_http_on_state(&state, &req_headers, || {
+        Ok(Nip98Proof::new(proven_pubkey, ()))
+    }) {
+        return Ok(resp);
+    }
     serve_blob_for_tenant(&state, &media_auth.tenant, &sha256_ext, &req_headers).await
 }
 
@@ -897,6 +942,7 @@ fn parse_byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
 /// Content-type is derived from the validated sidecar only — never from raw S3
 /// object metadata — to prevent MIME spoofing via tampered storage. If the sidecar
 /// is missing, we return 404 rather than fall back to untrusted metadata.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub async fn head_blob(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -904,6 +950,14 @@ pub async fn head_blob(
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
     let media_auth = authenticate_media_read(&state, &headers, &sha256_ext).await?;
+    // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
+    let proven_pubkey = media_auth.pubkey;
+    if let Err(resp) =
+        admit_nip_fi_http_on_state(&state, &headers, || Ok(Nip98Proof::new(proven_pubkey, ())))
+    {
+        return Ok(resp);
+    }
     let tenant = media_auth.tenant;
     let cache_control = blob_cache_control();
 
