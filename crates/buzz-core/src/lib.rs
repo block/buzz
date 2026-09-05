@@ -32,6 +32,8 @@ pub mod nip10;
 pub mod observer;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
+/// Arrival-independent desired placement, separate from lifecycle execution.
+pub mod placement;
 /// Presence status types shared across crates.
 pub mod presence;
 /// NIP-PMA owner-encrypted private managed-agent wire codec.
