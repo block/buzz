@@ -396,14 +396,25 @@ pub fn build_delete_compat(
 
 // ── Reactions ────────────────────────────────────────────────────────────────
 
-/// Kind 7 — NIP-25 reaction.
-pub fn build_reaction(target_event_id: EventId, emoji: &str) -> Result<EventBuilder, String> {
+/// Kind 7 — NIP-25 reaction. Carries the target event's author as a `p` tag
+/// when known, so relay-side notification filters (`#p`) can match it
+/// (#2568). The author is resolved at the call-site; if the target event
+/// cannot be fetched, the tag is omitted for that reaction rather than
+/// failing the submit.
+pub fn build_reaction(
+    target_event_id: EventId,
+    emoji: &str,
+    target_author_pubkey: Option<&str>,
+) -> Result<EventBuilder, String> {
     if emoji.chars().count() > MAX_EMOJI_CHARS {
         return Err(format!(
             "emoji exceeds maximum length of {MAX_EMOJI_CHARS} characters"
         ));
     }
-    let tags = vec![tag(vec!["e", &target_event_id.to_hex()])?];
+    let mut tags = vec![tag(vec!["e", &target_event_id.to_hex()])?];
+    if let Some(author) = target_author_pubkey {
+        tags.push(tag(vec!["p", author])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(7), emoji).tags(tags))
 }
 
@@ -774,6 +785,46 @@ mod tests {
         let channel_id = Uuid::new_v4();
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
         assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
+    }
+
+    /// #2568 — a reaction must carry the target author's pubkey as a `p` tag
+    /// when known, so relay notification filters (`#p`) match it; and must
+    /// omit the tag (degrade, not fail) when the author is unknown.
+    #[test]
+    fn reaction_carries_target_author_p_tag_when_known() {
+        const AUTHOR_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let target =
+            EventId::from_hex("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+                .unwrap();
+        // Sign with a DIFFERENT key than the target author: nostr 0.44 build()
+        // discards self-referential `p` tags (a user doesn't notify themselves
+        // of their own reaction), which would silently drop the tag here.
+        let signer = Keys::generate();
+        let event = build_reaction(target, "👍", Some(AUTHOR_HEX))
+            .unwrap()
+            .sign_with_keys(&signer)
+            .unwrap();
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(event.kind, Kind::Custom(7));
+        assert_eq!(event.content, "👍");
+        assert_eq!(tags[0], vec!["e".to_string(), target.to_hex()]);
+        assert_eq!(tags[1], vec!["p".to_string(), AUTHOR_HEX.to_string()]);
+        assert_eq!(tags.len(), 2);
+    }
+
+    #[test]
+    fn reaction_omits_p_tag_when_author_unknown() {
+        let target =
+            EventId::from_hex("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+                .unwrap();
+        let event = build_reaction(target, "👍", None)
+            .unwrap()
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(event.kind, Kind::Custom(7));
+        assert_eq!(tags.len(), 1, "author unknown → only the e tag is emitted");
+        assert_eq!(tags[0], vec!["e".to_string(), target.to_hex()]);
     }
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.
