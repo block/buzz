@@ -6,6 +6,7 @@ import {
   removePersistentAgentAudienceMembersIfUnchanged,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
+import { shouldPromoteExplicitAddress } from "@/features/messages/lib/shouldPromoteExplicitAddress";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 const CONFIRMATION_DURATION_MS = 4_000;
@@ -195,7 +196,19 @@ export function useAutoPinMentionedAgents({
     [promoteAgents],
   );
   const promoteExplicitlyAddressedAgents = React.useCallback(
-    (promotion: { expectedRevision?: number; pubkeys: readonly string[] }) => {
+    (promotion: {
+      expectedRevision?: number;
+      persist?: boolean;
+      pubkeys: readonly string[];
+    }) => {
+      // Ordinary @mentions stay one-shot when auto-mention is off. An intentional
+      // "Always address" / pin action passes persist:true and must still opt in.
+      if (
+        !promotion.persist &&
+        !shouldPromoteExplicitAddress(enabled)
+      ) {
+        return;
+      }
       promoteAgents({
         ...promotion,
         reinstateExcluded: true,
@@ -203,7 +216,7 @@ export function useAutoPinMentionedAgents({
       });
       requestPreferenceChange(true);
     },
-    [promoteAgents, requestPreferenceChange],
+    [enabled, promoteAgents, requestPreferenceChange],
   );
 
   const dismissConfirmation = clearConfirmation;
