@@ -152,9 +152,9 @@ Beyond chat: channels are workspaces.
 
 The relay hosts git repos. Smart HTTP — standard `git clone`, `git push`, nothing special. Your npub signs pushes. Same domain, same auth, same identity as everything else on the relay.
 
-The target is **one room, many views**. Projects, tasks, repositories, branches, and documents resolve to canonical conversation rooms; a task and its branch can share the same channel UUID. Time-bound projects can span durable repositories, each with its own ongoing room. See [VISION_ROOMS.md](VISION_ROOMS.md) for the shared model, nested relationships, and backend specification.
+The target is **one channel, many views**. Projects, tasks, repositories, branches, and documents resolve to canonical conversation channels; a task and its branch can share the same channel UUID. Time-bound projects can span durable repositories, each with its own ongoing channel. See [VISION_CHANNELS.md](VISION_CHANNELS.md) for the shared model, nested relationships, and backend specification.
 
-In that model, creating a feature branch creates or reuses its room — CI results, review comments, and the merge decision belong there. A completed branch-only room can archive into a permanent record; merging a branch must not archive other active work sharing the room.
+In that model, creating a feature branch creates or reuses its channel — CI results, review comments, and the merge decision belong there. A completed branch-only channel can archive into a permanent record; merging a branch must not archive other active work sharing the channel.
 
 See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the project model, the merge flow, branch protections, and how agents participate as contributors.
 

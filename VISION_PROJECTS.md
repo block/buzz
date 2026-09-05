@@ -1,6 +1,6 @@
 # 🐝 Buzz Projects — A Nostr-Native Forge
 
-> Someone pushes a fix. Buzz creates or reuses the branch’s canonical room, which can already be the task’s room. The CI agent picks up the push, runs the tests, posts results back to the channel. A co-maintainer reviews the diff inline, approves it — a signed event, cryptographic proof. Merge. The workflow runs the integration. Once all work sharing the room is finished, it can archive into a permanent record of why that code exists.
+> Someone pushes a fix. Buzz creates or reuses the branch’s canonical channel, which can already be the task’s channel. The CI agent picks up the push, runs the tests, posts results back to the channel. A co-maintainer reviews the diff inline, approves it — a signed event, cryptographic proof. Merge. The workflow runs the integration. Once all work sharing the channel is finished, it can archive into a permanent record of why that code exists.
 >
 > Bug report to merged patch. One place. One search index. One identity system. The branch channel was the pull request, the CI dashboard, and the discussion thread.
 
@@ -10,10 +10,10 @@ This document is the software-forge slice of the broader Buzz platform. [VISION.
 
 ## The Project Model
 
-The shared room contract is [VISION_ROOMS.md](VISION_ROOMS.md): a project, repo,
-task, branch, or document is a facet of a canonical room, not an exclusive channel
-type. Several facets may share one conversation. Projects organize time-bound
-outcomes across repositories; repository rooms support ongoing code and
+The shared channel contract is [VISION_CHANNELS.md](VISION_CHANNELS.md): a project, repo,
+task, branch, or document has a home channel, not an exclusive channel
+type. Several objects may share one conversation. Projects organize time-bound
+outcomes across repositories; repository channels support ongoing code and
 maintenance discussion.
 
 A project lives on the relay. `myproject.com` in a browser shows the project home. Click a repo and you're at `repoa.myproject.com` — README rendered, file tree navigable, code syntax-highlighted, clone URL at the top. The same URL serves HTML to a browser and git protocol to `git clone`. Content negotiation. One URL, two audiences.
@@ -84,9 +84,9 @@ The cost is stated plainly: a third-party NIP-34 client sees the member repos in
 
 A feature branch is a conversation.
 
-When you create a branch, Buzz should create or reuse its canonical room. If the branch implements a task in an existing room, task details and the branch diff can be views of that same channel UUID. The branch's patches, review comments, CI results, and merge decision belong to that conversation, not a parallel branch chat. Room nesting preserves the task/subtask structure; a separate branch-to-repository reference preserves code ownership.
+When you create a branch, Buzz should create or reuse its canonical channel. If the branch implements a task in an existing channel, task details and the branch diff can be views of that same channel UUID. The branch's patches, review comments, CI results, and merge decision belong to that conversation, not a parallel branch chat. Channel nesting preserves the task/subtask structure; a separate branch-to-repository reference preserves code ownership.
 
-When a branch-only room's work finishes, it can archive as the permanent record of why that code exists. A merge must not automatically archive a shared room whose task or other facets are still active. The example below is the branch-only case.
+When a branch-only channel's work finishes, it can archive as the permanent record of why that code exists. A merge must not automatically archive a shared channel whose task or other objects are still active. The example below is the branch-only case.
 
 ```
 #feat-auth-fix
@@ -134,7 +134,7 @@ Push          CI              Review          Merge
   │            │                │               │ Merge to main
   │            │                │               │ kind:1631
   │            │                │               │
-  │            │                │               │ Branch-only room archives
+  │            │                │               │ Branch-only channel archives
 ```
 
 The approval event is signed by the maintainer's npub. The merge status references the approval. The audit log chains them together. Cryptographic proof of who approved what.
@@ -192,7 +192,7 @@ Every step traced. Every trace a signed event. Change the project CI once and ev
 
 ### Issues → Forum + NIP-34
 
-Bug reports and tasks retain their NIP-34 kind:1621 identity. In the target model, task details, forum presentation, and branch work can open the same canonical room; subtasks can have nested rooms. A forum is a view, not a reason to fork the conversation.
+Bug reports and tasks retain their NIP-34 kind:1621 identity. In the target model, task details, forum presentation, and branch work can open the same canonical channel; subtasks can have nested channels. A forum is a view, not a reason to fork the conversation.
 
 Threaded comments use NIP-22 kind:1111. Labels, assignees, and milestones are nostr tags. Design discussions and RFCs use the forum's long-form async surface.
 
@@ -200,8 +200,8 @@ NIP-34 clients can discover and interact with issues. Buzz's forum gives them a 
 
 ### Docs → Canvases
 
-A channel canvas is the initial document facet of a room. A document may share
-its project's or task's room, or have a dedicated nested room; opening the
+A canvas is the initial document view in a channel. A document may share
+its project's or task's channel, or have a dedicated nested channel; opening the
 document should not create a parallel discussion stream.
 
 Living documents, collaboratively editable by humans and agents via MCP tools. Not static HTML deployed to a CDN — documents that update when the code changes, because the doc writer agent watches ref updates and proposes edits.
