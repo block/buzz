@@ -30,6 +30,8 @@ import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+part 'compose_bar_test/send_lifecycle_tests.dart';
+
 final _pngBytes = Uint8List.fromList([
   0x89,
   0x50,
@@ -174,6 +176,7 @@ Widget _buildComposeBar({
   required ComposeBarOnSend onSend,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
+  Future<List<ChannelMember>> Function()? membersLoader,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
@@ -190,6 +193,7 @@ Widget _buildComposeBar({
   ValueChanged<VoidCallback>? onFocusRestorerChanged,
   AppLifecycleNotifier Function()? appLifecycle,
   String composeBarKey = 'compose-bar',
+  String? threadHeadId,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
 }) {
@@ -207,9 +211,10 @@ Widget _buildComposeBar({
         ),
       photoLibraryProvider.overrideWithValue(photoLibrary),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
-      channelMembersProvider(
-        'channel-1',
-      ).overrideWith((ref) => membersFuture ?? Future.value(members)),
+      channelMembersProvider('channel-1').overrideWith(
+        (ref) =>
+            membersLoader?.call() ?? membersFuture ?? Future.value(members),
+      ),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
@@ -253,6 +258,7 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
+                  threadHeadId: threadHeadId,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
@@ -641,6 +647,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  sendLifecycleTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -3278,6 +3285,10 @@ void main() {
         expect(
           publishedEvents.where((event) => event['kind'] == 9000),
           isEmpty,
+        );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'hello @Helper Bot',
         );
       },
     );

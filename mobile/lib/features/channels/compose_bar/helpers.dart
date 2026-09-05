@@ -447,10 +447,11 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   required List<String> agentPubkeys,
   required List<String> humanPubkeys,
   required bool canAddMembers,
+  required VoidCallback ensureCurrent,
 }) async {
   final pending = [
-    if (agentPubkeys.isNotEmpty) (agentPubkeys, 'bot'),
-    if (humanPubkeys.isNotEmpty) (humanPubkeys, 'member'),
+    for (final pubkey in agentPubkeys) ([pubkey], 'bot'),
+    for (final pubkey in humanPubkeys) ([pubkey], 'member'),
   ];
   if (pending.isEmpty) return _NonMemberAddOutcome.empty;
 
@@ -467,11 +468,15 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   final errors = <String>[];
   for (final (pubkeys, role) in pending) {
     try {
+      ensureCurrent();
       await channelActions.addMembers(
         channelId: channelId,
         pubkeys: pubkeys,
         role: role,
       );
+      ensureCurrent();
+    } on _ComposeSendCancelled {
+      rethrow;
     } on StateError {
       rethrow;
     } catch (error) {
@@ -518,12 +523,13 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   );
   if (selectedMentions.isEmpty) return none;
 
-  final channel = (await ref.read(
-    channelsProvider.future,
-  )).firstWhere((candidate) => candidate.id == channelId);
+  // Capture both reads before yielding: WidgetRef may be disposed while waiting.
+  final (channels, members) = await (
+    ref.read(channelsProvider.future),
+    ref.read(channelMembersProvider(channelId).future),
+  ).wait;
+  final channel = channels.firstWhere((candidate) => candidate.id == channelId);
   if (channel.isDm) return none;
-
-  final members = await ref.read(channelMembersProvider(channelId).future);
   final memberPubkeys = {
     for (final member in members) member.pubkey.toLowerCase(),
   };
@@ -607,6 +613,7 @@ class _OutgoingMentions {
     ChannelActions channelActions, {
     required _NonMemberMentionScan scan,
     required ScaffoldMessengerState? messenger,
+    required VoidCallback ensureCurrent,
   }) async {
     final outcome = await _addMentionedNonMembers(
       channelActions,
@@ -614,6 +621,7 @@ class _OutgoingMentions {
       agentPubkeys: scan.agentPubkeys,
       humanPubkeys: _invitedHumanPubkeys,
       canAddMembers: scan.canAddMembers,
+      ensureCurrent: ensureCurrent,
     );
     demote(outcome.notAdded);
     if (outcome.errors.isNotEmpty) {
