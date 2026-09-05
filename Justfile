@@ -451,6 +451,15 @@ test-unit:
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
         cargo nextest run -p buzz-acp --lib
+        # buzz-dev-mcp: the temp-dir orphan sweep (#6025) decides whether to
+        # delete a directory from process-group liveness and a file lock, and
+        # both of those are Unix primitives with Windows analogues rather than
+        # shared code. Only the Windows CI job ran this crate's
+        # tests, so the Unix half of that logic — the half that guards a live
+        # agent's shim directory — shipped unexecuted. Same reasoning as
+        # buzz-backend-kubernetes above: infra-free, and workspace membership
+        # alone buys clippy, not a single executed test.
+        cargo nextest run -p buzz-dev-mcp
     else
         ./scripts/run-tests.sh unit
     fi
