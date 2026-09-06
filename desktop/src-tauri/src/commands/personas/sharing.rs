@@ -146,6 +146,7 @@ mod tests {
 
     fn persona() -> AgentDefinition {
         AgentDefinition {
+            permission_policy: None,
             description: None,
             id: "catalog-reviewer".to_string(),
             display_name: "Catalog Reviewer".to_string(),

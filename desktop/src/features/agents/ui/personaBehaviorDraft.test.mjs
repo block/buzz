@@ -92,6 +92,7 @@ test("edit with a changed quad submits the full group", () => {
     respondTo: "allowlist",
     respondToAllowlist: [HEX, "b".repeat(64)],
     parallelism: undefined,
+    permissionPolicy: undefined,
   });
 });
 
@@ -115,10 +116,52 @@ test("draftFromBehavior round-trips a full quad and copies the list", () => {
     respondTo: "allowlist",
     respondToAllowlist: [HEX],
     parallelism: "3",
+    permissionPolicy: null,
   });
   draft.respondToAllowlist.push("mutated");
   assert.deepEqual(behavior.respondToAllowlist, [HEX], "list must be copied");
   assert.deepEqual(draftFromBehavior(undefined), emptyPersonaBehaviorDraft);
+});
+
+// ── Permission policy (definition default, resolver tier 2) ──────────────────
+
+test("a policy-only draft submits just the policy on create", () => {
+  const group = behaviorForSubmit(
+    { ...emptyPersonaBehaviorDraft, permissionPolicy: "reject" },
+    emptyPersonaBehaviorDraft,
+    false,
+  );
+  assert.deepEqual(group, {
+    respondTo: undefined,
+    respondToAllowlist: undefined,
+    parallelism: undefined,
+    permissionPolicy: "reject",
+  });
+});
+
+test("changing only the policy on edit submits the full group", () => {
+  const seed = { ...emptyPersonaBehaviorDraft, permissionPolicy: "ask" };
+  const group = behaviorForSubmit(
+    { ...seed, permissionPolicy: "allow" },
+    seed,
+    true,
+  );
+  assert.equal(group.permissionPolicy, "allow");
+});
+
+test("clearing the policy on edit submits an explicit clear, not nothing", () => {
+  // A definition whose only behavioral field is a policy, cleared to inherit,
+  // must submit `{}` — "submit nothing" would silently no-op the clear and the
+  // stored default would resurrect on reopen (same contract as respondTo).
+  const seed = { ...emptyPersonaBehaviorDraft, permissionPolicy: "allow" };
+  const group = behaviorForSubmit(emptyPersonaBehaviorDraft, seed, true);
+  assert.deepEqual(group, {}, "full clear must submit a replace-with-empty");
+});
+
+test("draftFromBehavior round-trips a policy-only behavior group", () => {
+  const draft = draftFromBehavior({ permissionPolicy: "reject" });
+  assert.equal(draft.permissionPolicy, "reject");
+  assert.equal(draft.respondTo, null);
 });
 
 test("edit full-clear submits an explicit empty group, not nothing", () => {

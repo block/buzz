@@ -262,6 +262,10 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     respondTo: "allowlist",
     respondToAllowlist: ["a".repeat(64)],
     parallelism: 4,
+    // No definition-default policy on this persona, so the seed carries it as
+    // undefined alongside the other unset fields (matches the `?? undefined`
+    // pattern the whole group uses; JSON.stringify drops it on submit).
+    permissionPolicy: undefined,
   };
   assert.deepEqual(
     editPersonaDialogState(persona).initialValues.behavior,
@@ -271,6 +275,65 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     duplicatePersonaDialogState(persona).initialValues.behavior,
     expected,
   );
+});
+
+test("edit and duplicate seed the definition permission policy into the behavior group", () => {
+  // Regression companion to the behaviorEntry fix: a stored definition-default
+  // policy must reach the dialog's behavior draft, or editing an unrelated
+  // field would submit a group without it and silently clear the default.
+  const persona = {
+    id: "persona-policy",
+    displayName: "Gated",
+    avatarUrl: null,
+    systemPrompt: "Guarded.",
+    runtime: null,
+    model: null,
+    provider: null,
+    isBuiltIn: false,
+    isActive: true,
+    permissionPolicy: "reject",
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  };
+
+  assert.equal(
+    editPersonaDialogState(persona).initialValues.behavior?.permissionPolicy,
+    "reject",
+  );
+  assert.equal(
+    duplicatePersonaDialogState(persona).initialValues.behavior
+      ?.permissionPolicy,
+    "reject",
+  );
+});
+
+test("a policy-only persona still seeds a behavior group", () => {
+  // The behaviorEntry guard must treat permissionPolicy as behavior-bearing:
+  // a persona whose only behavioral field is the policy default must NOT be
+  // seeded as behavior-less, or the default would never reach the dialog.
+  const persona = {
+    id: "persona-policy-only",
+    displayName: "PolicyOnly",
+    avatarUrl: null,
+    systemPrompt: "Just a policy.",
+    runtime: null,
+    model: null,
+    provider: null,
+    isBuiltIn: false,
+    isActive: true,
+    respondTo: null,
+    parallelism: null,
+    permissionPolicy: "allow",
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  };
+
+  assert.deepEqual(editPersonaDialogState(persona).initialValues.behavior, {
+    respondTo: undefined,
+    respondToAllowlist: undefined,
+    parallelism: undefined,
+    permissionPolicy: "allow",
+  });
 });
 
 test("a linked instance overrides stale definition access in the edit dialog", () => {
@@ -300,6 +363,10 @@ test("a linked instance overrides stale definition access in the edit dialog", (
     respondTo: "allowlist",
     respondToAllowlist: ["c".repeat(64)],
     parallelism: 2,
+    // No definition-default policy on this persona, so the seed carries it as
+    // undefined alongside the other unset fields (JSON.stringify drops it on
+    // submit); the access override only rewrites respondTo/respondToAllowlist.
+    permissionPolicy: undefined,
   });
 });
 

@@ -8,6 +8,7 @@ import {
   OWNER_ONLY_ACCESS_DISABLED_REASON,
 } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
+import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   isBuzzAgentRuntime,
   BUZZ_AGENT_THINKING_EFFORT,
@@ -27,12 +28,24 @@ import {
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./agentConfigOptions";
-import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import type {
+  AcpRuntimeCatalogEntry,
+  PermissionPolicy,
+} from "@/shared/api/types";
 import {
   deriveNumericDescriptors,
   structuredEnvKeys,
   type RuntimeCatalogStatus,
 } from "../lib/agentConfigCore";
+
+/** The definition-default policy dropdown. `""` is the inherit sentinel —
+ *  it maps to a `null` draft value (defer to global/built-in `ask`). */
+const PERMISSION_POLICY_OPTIONS: readonly { label: string; value: string }[] = [
+  { label: "Inherit (global default, else ask)", value: "" },
+  { label: "Ask — show Allow/Deny card", value: "ask" },
+  { label: "Allow — auto-approve (explicit opt-in)", value: "allow" },
+  { label: "Reject — auto-deny", value: "reject" },
+];
 
 export function PersonaAdvancedFields({
   behaviorDraft,
@@ -203,6 +216,35 @@ export function PersonaAdvancedFields({
             </p>
           ) : null}
         </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <label
+          className="text-sm font-medium text-foreground"
+          htmlFor="persona-permission-policy"
+        >
+          Permission policy
+          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+        </label>
+        <PersonaDropdownField
+          disabled={disabled}
+          id="persona-permission-policy"
+          onValueChange={(value) =>
+            onBehaviorDraftChange({
+              ...behaviorDraft,
+              permissionPolicy:
+                value === "" ? null : (value as PermissionPolicy),
+            })
+          }
+          options={PERMISSION_POLICY_OPTIONS}
+          placeholder="Inherit (global default, else ask)"
+          value={behaviorDraft.permissionPolicy ?? ""}
+        />
+        <p className="text-xs text-muted-foreground">
+          How instances answer permission requests by default. A per-agent
+          override still wins; leaving this on Inherit defers to the global
+          default.
+        </p>
       </div>
 
       <div className="space-y-1.5">

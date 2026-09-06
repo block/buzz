@@ -9,6 +9,7 @@ fn bare_agent_record(
     use crate::managed_agents::{BackendKind, RespondTo};
     use std::collections::BTreeMap;
     ManagedAgentRecord {
+        definition_permission_policy: None,
         description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
@@ -61,6 +62,8 @@ fn bare_agent_record(
         catalog_source: None,
         team_catalog_source: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
@@ -71,6 +74,7 @@ fn bare_agent_record(
 fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     use std::collections::BTreeMap;
     AgentDefinition {
+        permission_policy: None,
         description: None,
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
@@ -611,6 +615,7 @@ fn deploy_payload_matches_the_shared_full_launch_fixture() {
         None,
         Some("gpt-5"),
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
     );
     let agent = deploy_payload_json(
         &record,

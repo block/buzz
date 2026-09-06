@@ -254,6 +254,9 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
         parallelism: content.parallelism,
+        // Not published in persona events (authority grant stays local), so a
+        // persona parsed from the relay carries no definition-scoped policy.
+        permission_policy: None,
         created_at: created_at.clone(),
         updated_at: created_at,
     })

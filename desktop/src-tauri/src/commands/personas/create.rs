@@ -78,6 +78,7 @@ pub async fn create_persona(
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            permission_policy: None,
             created_at: now.clone(),
             updated_at: now,
         };

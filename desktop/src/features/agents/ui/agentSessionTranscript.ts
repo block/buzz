@@ -28,6 +28,13 @@ import {
   parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers";
 import { friendlyTurnErrorCopy } from "../lib/friendlyAgentLastError";
+import {
+  describePermissionRequest,
+  retireLivePermissionCardsForTurn,
+  handlePermissionTerminal,
+  handlePermissionWrite,
+  handlePermissionDecisionResult,
+} from "./agentSessionTranscriptPermissions";
 
 export { describeRawEvent } from "./agentSessionTranscriptHelpers";
 
@@ -47,6 +54,14 @@ export type TranscriptState = {
     string,
     { itemId: string; optionNames: Map<string, string> }
   >;
+  /**
+   * Maps `requestNonce` → `itemId` for actionable permission cards.
+   * Populated alongside `pendingPermissions` when the `authorization` envelope
+   * is present on the `acp_read` frame. Used by the nonce-correlated `acp_write`
+   * terminal handler and the `permission_terminal` event handler to retire the
+   * card on any terminal outcome (applied, timed_out, cancelled, uncertain).
+   */
+  pendingPermissionsByNonce: Map<string, string>;
   continuationSeq: number;
   latestSessionId: string | null;
 };
@@ -59,6 +74,7 @@ export function createEmptyTranscriptState(): TranscriptState {
     sealedKeys: new Set(),
     triggeringEventIdsByTurn: new Map(),
     pendingPermissions: new Map(),
+    pendingPermissionsByNonce: new Map(),
     continuationSeq: 0,
     latestSessionId: null,
   };
@@ -79,6 +95,7 @@ type TranscriptDraft = {
     string,
     { itemId: string; optionNames: Map<string, string> }
   >;
+  pendingPermissionsByNonce: Map<string, string>;
   continuationSeq: number;
   latestSessionId: string | null;
   changed: boolean;
@@ -92,6 +109,7 @@ function draftFrom(state: TranscriptState): TranscriptDraft {
     sealedKeys: state.sealedKeys,
     triggeringEventIdsByTurn: state.triggeringEventIdsByTurn,
     pendingPermissions: state.pendingPermissions,
+    pendingPermissionsByNonce: state.pendingPermissionsByNonce,
     continuationSeq: state.continuationSeq,
     latestSessionId: state.latestSessionId,
     changed: false,
@@ -171,88 +189,8 @@ function stringifyPayload(value: unknown) {
   }
 }
 
-function describePermissionRequest(payload: Record<string, unknown>) {
-  const params = asRecord(payload.params);
-  const title =
-    asString(params.title) ??
-    asString(params.message) ??
-    asString(params.reason) ??
-    "Permission requested";
-  const toolCallId =
-    asString(params.toolCallId) ?? asString(params.tool_call_id);
-  const options = Array.isArray(params.options)
-    ? params.options
-        .map((option) => {
-          const record = asRecord(option);
-          return (
-            asString(record.name) ??
-            asString(record.kind) ??
-            asString(record.optionId)
-          );
-        })
-        .filter((option): option is string => Boolean(option))
-    : [];
-  const detail: string[] = [];
-  if (title !== "Permission requested") detail.push(title);
-  if (toolCallId) detail.push(`Tool call: ${toolCallId}`);
-  if (options.length > 0) detail.push(`Options: ${options.join(", ")}`);
-
-  // Build optionId → kind map for outcome labeling on the response.
-  const optionNames = new Map<string, string>();
-  if (Array.isArray(params.options)) {
-    for (const option of params.options) {
-      const record = asRecord(option);
-      const optionId = asString(record.optionId);
-      const kind = asString(record.kind);
-      if (optionId && kind) {
-        optionNames.set(optionId, kind);
-      }
-    }
-  }
-
-  return {
-    title,
-    text: detail.join("\n"),
-    optionNames,
-    descriptor: {
-      renderClass: "permission" as const,
-      label: "Permission requested",
-      preview: title,
-      action: { verb: "Requested", object: title },
-      tone: "admin" as const,
-      operation: "session/request_permission",
-      object: title,
-      source: "acp" as const,
-      groupKey: "permission:request",
-    },
-  };
-}
-
-/**
- * Format a human-readable outcome label from a permission response.
- * kind values from ACP: allow_once, allow_always, reject_once, reject_always.
- * "reject_*" kinds are denials; anything else that is selected is an approval.
- */
-function describePermissionOutcome(
-  outcome: string,
-  optionId: string | null,
-  optionNames: Map<string, string>,
-): string {
-  if (outcome === "cancelled") {
-    return "Cancelled";
-  }
-  if (outcome === "selected" && optionId) {
-    const kind = optionNames.get(optionId) ?? optionId;
-    const isDenial = kind.startsWith("reject");
-    const verb = isDenial ? "Denied" : "Approved";
-    return `${verb} (${kind})`;
-  }
-  return outcome;
-}
-
 /**
  * Stable map key for a JSON-RPC id, which may be a string or a finite number
- * per the spec. Using JSON.stringify avoids collisions between the number 1 and
  * the string "1". Returns null for null, undefined, or non-id values (objects,
  * booleans) so callers can gate on presence without a separate type check.
  */
@@ -786,13 +724,36 @@ export function processTranscriptEvent(
       ctx,
       event.kind,
     );
+    // Backstop: retire permission cards belonging to this terminating turn so
+    // missing telemetry and archive replay never reconstruct live controls
+    // after a terminal turn/process state.  Scoped to `event.turnId` so that
+    // sibling threads' pending cards are not retired — each concurrent turn owns
+    // its own cards.  Falls back to channel-wide retirement only when no turn
+    // identity is present (legacy archive frames).
+    retireLivePermissionCardsForTurn(d, ch, event.turnId);
+  } else if (event.kind === "turn_completed") {
+    // Backstop: retire permission cards belonging to this completing turn.
+    // Applied/timed-out/cancelled cards should already be retired via their
+    // nonce-correlated acp_write frames, but uncertain (process-poison) cards
+    // may only receive a turn_completed — this ensures they are not left
+    // actionable in live state or archive replay.  Scoped to `event.turnId`;
+    // channel-wide backstop kept only when no turn identity exists on the event.
+    retireLivePermissionCardsForTurn(d, ch, event.turnId);
+  } else if (event.kind === "permission_terminal") {
+    handlePermissionTerminal(d, event.authorization, event.payload, ch, ctx);
   } else if (event.kind === "acp_read" || event.kind === "acp_write") {
     const payload = asRecord(event.payload);
     const method = asString(payload.method);
 
     if (method === "session/request_permission") {
       const request = describePermissionRequest(payload);
-      const itemId = `permission:${ch}:${event.turnId ?? event.seq}`;
+      // Key by nonce when the authorization envelope is present — this gives
+      // each concurrent ACP request its own card. Fall back to the turn-based
+      // key for legacy/non-ask paths where no nonce is emitted.
+      const auth = event.authorization;
+      const itemId = auth?.requestNonce
+        ? `permission:${ch}:nonce:${auth.requestNonce}`
+        : `permission:${ch}:${event.turnId ?? event.seq}`;
       upsertLifecycleItem(
         d,
         itemId,
@@ -804,40 +765,41 @@ export function processTranscriptEvent(
         "permission_request",
         request.descriptor,
       );
-      // Index by JSON-RPC id so the response (acp_write with result.outcome,
-      // no method) can correlate by id rather than by turn/seq.
+
+      // Attach authorization-envelope fields to the item. The `authorization`
+      // object is on the ObserverEvent itself (not the payload — payloads are
+      // raw ACP with no `_buzz` wrapper).
+      if (auth) {
+        const existing = d.itemsById.get(itemId);
+        if (existing?.type === "lifecycle") {
+          replaceItem(d, itemId, {
+            ...existing,
+            requestNonce: auth.requestNonce,
+            actionable: auth.actionable,
+            authorizationReason: auth.reason,
+            expiresAt: auth.expiresAt,
+            options: request.options,
+          });
+        }
+        // Index by nonce so acp_write terminal frames can retire the card.
+        d.pendingPermissionsByNonce = new Map(d.pendingPermissionsByNonce);
+        d.pendingPermissionsByNonce.set(auth.requestNonce, itemId);
+      }
+
+      // Legacy id index: keyed by compound (channel, session, turn, id) to
+      // prevent cross-channel / cross-session JSON-RPC id collisions.
+      // Only used by authorized frames that carry NO nonce (non-ask paths).
       const requestId = jsonRpcId(payload.id);
       if (requestId) {
+        const legacyKey = `${ch}:${ctx.sessionId ?? ""}:${ctx.turnId ?? ""}:${requestId}`;
         d.pendingPermissions = new Map(d.pendingPermissions);
-        d.pendingPermissions.set(requestId, {
+        d.pendingPermissions.set(legacyKey, {
           itemId,
           optionNames: request.optionNames,
         });
       }
     } else if (event.kind === "acp_write" && !method) {
-      // Permission response: {"id": <same as request>, "result": {"outcome": {...}}}
-      const responseId = jsonRpcId(payload.id);
-      const result = asRecord(asRecord(payload.result).outcome);
-      const outcomeKind = asString(result.outcome);
-      const pending = responseId ? d.pendingPermissions.get(responseId) : null;
-      if (pending && outcomeKind && responseId) {
-        const optionId = asString(result.optionId) ?? null;
-        const outcomeText = describePermissionOutcome(
-          outcomeKind,
-          optionId,
-          pending.optionNames,
-        );
-        const existing = d.itemsById.get(pending.itemId);
-        if (existing?.type === "lifecycle") {
-          replaceItem(d, pending.itemId, {
-            ...existing,
-            outcome: outcomeText,
-          });
-          // Remove from pending map — the outcome is now recorded.
-          d.pendingPermissions = new Map(d.pendingPermissions);
-          d.pendingPermissions.delete(responseId);
-        }
-      }
+      handlePermissionWrite(d, event.authorization, payload, ch, ctx);
     } else if (event.kind === "acp_write" && method === "session/prompt") {
       const promptBlocks = extractPromptBlocks(payload);
       if (promptBlocks.length > 0) {
@@ -1138,6 +1100,8 @@ export function processTranscriptEvent(
         );
       }
     }
+  } else if (event.kind === "control_result") {
+    handlePermissionDecisionResult(d, asRecord(event.payload));
   }
 
   if (!d.changed && d.latestSessionId === state.latestSessionId) {
@@ -1151,6 +1115,7 @@ export function processTranscriptEvent(
     sealedKeys: d.sealedKeys,
     triggeringEventIdsByTurn: d.triggeringEventIdsByTurn,
     pendingPermissions: d.pendingPermissions,
+    pendingPermissionsByNonce: d.pendingPermissionsByNonce,
     continuationSeq: d.continuationSeq,
     latestSessionId: d.latestSessionId,
   };

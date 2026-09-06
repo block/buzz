@@ -164,6 +164,7 @@ mod tests {
 
     fn sample_agent() -> ManagedAgentRecord {
         ManagedAgentRecord {
+            definition_permission_policy: None,
             description: None,
             pubkey: "agentpubkeyhex".to_string(),
             name: "Test Agent".to_string(),
@@ -225,6 +226,8 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            permission_policy: None,
+            applied_permission_policy: None,
             effort_level: None,
         }
     }

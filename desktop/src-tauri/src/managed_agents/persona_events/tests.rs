@@ -5,6 +5,7 @@ use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 /// state right after creation, before any snapshot apply.
 pub(super) fn sample_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        definition_permission_policy: None,
         description: None,
         pubkey: "p".repeat(64),
         name: "agent".into(),
@@ -61,6 +62,8 @@ pub(super) fn sample_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         effort_level: None,
     }
 }
@@ -145,6 +148,7 @@ fn preview_passes_through_unchanged_when_persona_missing() {
 
 pub(super) fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         description: None,
         id: "test-persona".to_string(),
         display_name: "Test Persona".to_string(),
@@ -374,29 +378,11 @@ fn content_matches_nip_ap_vector() {
     // An event built from this content carries the byte-exact vector as its
     // signed content, so a second implementer following the spec computes
     // the same NIP-01 id.
-    let record = AgentDefinition {
-        description: None,
-        id: "test-agent".to_string(),
-        display_name: "Test Agent".to_string(),
-        avatar_url: Some("https://example.com/avatar.png".to_string()),
-        system_prompt: "You are a test assistant.".to_string(),
-        runtime: Some("goose".to_string()),
-        model: Some("claude-opus-4".to_string()),
-        provider: Some("anthropic".to_string()),
-        name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
-        is_builtin: false,
-        is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        team_catalog_source: None,
-        env_vars: BTreeMap::new(),
-        respond_to: None,
-        respond_to_allowlist: Vec::new(),
-        parallelism: None,
-        created_at: "2025-01-01T00:00:00Z".to_string(),
-        updated_at: "2025-01-01T00:00:00Z".to_string(),
+    let record = {
+        let mut p = sample_persona();
+        p.id = "test-agent".to_string();
+        p.display_name = "Test Agent".to_string();
+        p
     };
     let event = build_persona_event(&record)
         .unwrap()
@@ -408,6 +394,7 @@ fn content_matches_nip_ap_vector() {
 #[test]
 fn round_trip_minimal_persona() {
     let record = AgentDefinition {
+        permission_policy: None,
         description: None,
         id: "minimal".to_string(),
         display_name: "Minimal".to_string(),
@@ -507,6 +494,7 @@ fn behavioral_defaults_survive_record_round_trip() {
 #[test]
 fn quad_absent_definition_hash_stable_across_activation() {
     let record = AgentDefinition {
+        permission_policy: None,
         description: None,
         id: "quad-absent".to_string(),
         display_name: "Test".to_string(),
@@ -549,10 +537,29 @@ fn quad_absent_definition_hash_stable_across_activation() {
     );
 }
 
+/// The definition permission policy is a local authority grant, never
+/// published. `persona_content_hash` is computed over `PersonaEventContent`
+/// which has no policy field — flipping the definition's policy must not
+/// move the hash (no spurious drift badge or republish wave).
+#[test]
+fn definition_permission_policy_does_not_affect_content_hash() {
+    let base = sample_persona();
+    let mut with_policy = base.clone();
+    with_policy.permission_policy =
+        Some(crate::managed_agents::permission_policy::PermissionPolicy::Allow);
+
+    assert_eq!(
+        persona_content_hash(&persona_event_content(&base)),
+        persona_content_hash(&persona_event_content(&with_policy)),
+        "setting a definition permission policy must not change the published content hash"
+    );
+}
+
 /// Test-only bridge: build an AgentDefinition from parsed content the same
 /// way `persona_from_event` maps fields, without needing a signed event.
 fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         description: content.description,
         id: "staged".to_string(),
         display_name: content.display_name,

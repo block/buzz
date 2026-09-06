@@ -2,6 +2,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import type {
   AgentPersona,
   CreatePersonaInput,
+  PermissionPolicy,
   RespondToMode,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -31,6 +32,12 @@ export type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  /**
+   * Definition-level default permission policy (resolver tier 2). Local
+   * authority grant — never present in a published/imported persona event,
+   * so it is absent on catalog and team-imported personas.
+   */
+  permission_policy?: PermissionPolicy | null;
   created_at: string;
   updated_at: string;
   /** Non-null when the pack `.persona.md` write-back failed (non-fatal). */
@@ -62,6 +69,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
     parallelism: persona.parallelism ?? null,
+    permissionPolicy: persona.permission_policy ?? null,
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,
   };

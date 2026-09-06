@@ -487,6 +487,7 @@ fn sample_agent_record() -> ManagedAgentRecord {
 
 fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        permission_policy: None,
         description: None,
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
@@ -761,6 +762,10 @@ fn summary_fixture(
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),
+        permission_policy: crate::managed_agents::permission_policy::PermissionPolicy::Ask,
+        permission_policy_source:
+            crate::managed_agents::permission_policy::PermissionPolicySource::BuiltIn,
+        applied_permission_policy: None,
     }
 }
 
@@ -799,5 +804,33 @@ fn summary_with_drift_serializes_restart_diff_entries() {
             "field": "model",
             "change": { "kind": "value", "before": "gpt-5", "after": "claude-4" },
         }]))
+    );
+}
+
+#[test]
+fn applied_permission_policy_drift_serializes_correctly() {
+    // When applied_permission_policy differs from permission_policy, both values
+    // must reach the wire so the frontend can detect drift and prompt a redeploy.
+    let mut summary = summary_fixture(Vec::new());
+    summary.permission_policy = crate::managed_agents::permission_policy::PermissionPolicy::Reject;
+    summary.applied_permission_policy =
+        Some(crate::managed_agents::permission_policy::PermissionPolicy::Allow);
+
+    let wire = serde_json::to_value(&summary).expect("summary serializes");
+    assert_eq!(wire["permission_policy"], serde_json::json!("reject"));
+    assert_eq!(
+        wire["applied_permission_policy"],
+        serde_json::json!("allow")
+    );
+}
+
+#[test]
+fn applied_permission_policy_none_omitted_from_wire() {
+    // For local agents and never-deployed remote agents, applied_permission_policy
+    // is None — it must be omitted from the wire (skip_serializing_if = "Option::is_none").
+    let wire = serde_json::to_value(summary_fixture(Vec::new())).expect("summary serializes");
+    assert!(
+        wire.get("applied_permission_policy").is_none(),
+        "absent applied_permission_policy must be omitted, got: {wire}"
     );
 }
