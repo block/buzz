@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { projectCloneErrorPresentation } from "./projectGitError.ts";
 
-test("explains unsupported authenticated GitHub clones without exposing git output", () => {
+test("explains authenticated GitHub clone failures without exposing git output", () => {
   assert.deepEqual(
     projectCloneErrorPresentation(
       new Error(
@@ -14,7 +14,23 @@ test("explains unsupported authenticated GitHub clones without exposing git outp
     {
       title: "Repository access required",
       description:
-        "This repository requires GitHub authentication. Buzz currently clones public GitHub repositories without credentials.",
+        "This repository requires GitHub authentication. Sign in with the GitHub CLI and try again.",
+    },
+  );
+});
+
+test("explains authenticated GitLab clone failures with glab login guidance", () => {
+  assert.deepEqual(
+    projectCloneErrorPresentation(
+      new Error(
+        "Cloning into '/Users/person/repos/app'... remote: HTTP Basic: Access denied fatal: Authentication failed for 'https://gitlab.onlyarag.com/group/private-repo.git/'",
+      ),
+      "https://gitlab.onlyarag.com/group/private-repo.git",
+    ),
+    {
+      title: "Repository access required",
+      description:
+        "This repository requires GitLab authentication. Sign in with the GitLab CLI (`glab auth login`) and try again.",
     },
   );
 });

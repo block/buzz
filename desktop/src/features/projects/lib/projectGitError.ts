@@ -18,6 +18,19 @@ function isGitHubUrl(cloneUrl: string | null | undefined) {
   }
 }
 
+// Operator-trusted external origins beyond github.com (see
+// `BUZZ_TRUSTED_EXTERNAL_GIT_ORIGINS` in project_git_exec.rs) are typically
+// self-hosted GitLab instances, authenticated via `glab`. The frontend has
+// no visibility into the exact trust list, so this is a hostname heuristic
+// rather than an exact match.
+function isGitLabUrl(cloneUrl: string | null | undefined) {
+  try {
+    return new URL(cloneUrl ?? "").hostname.toLowerCase().includes("gitlab");
+  } catch {
+    return false;
+  }
+}
+
 export function projectCloneErrorPresentation(
   error: unknown,
   cloneUrl?: string | null,
@@ -25,6 +38,7 @@ export function projectCloneErrorPresentation(
 ): ProjectGitErrorPresentation {
   const message = errorText(error);
   const github = isGitHubUrl(cloneUrl);
+  const gitlab = isGitLabUrl(cloneUrl);
 
   if (unavailableReason === "access") {
     return {
@@ -41,8 +55,10 @@ export function projectCloneErrorPresentation(
     return {
       title: "Repository access required",
       description: github
-        ? "This repository requires GitHub authentication. Buzz currently clones public GitHub repositories without credentials."
-        : "Buzz could not authenticate with this repository. Check your access and try again.",
+        ? "This repository requires GitHub authentication. Sign in with the GitHub CLI and try again."
+        : gitlab
+          ? "This repository requires GitLab authentication. Sign in with the GitLab CLI (`glab auth login`) and try again."
+          : "Buzz could not authenticate with this repository. Check your access and try again.",
     };
   }
   if (/\b404\b|repository not found|repository does not exist/.test(message)) {

@@ -3,6 +3,12 @@
 //! Runs the system `git` with an ephemeral, env-only auth configuration:
 //! the identity nsec is handed to `git-credential-nostr` via environment
 //! variables so nothing key-related ever touches disk or global git config.
+//!
+//! External (non-Buzz) remotes are restricted to the github.com built-in
+//! plus any exact HTTPS origins the operator lists in
+//! `BUZZ_TRUSTED_EXTERNAL_GIT_ORIGINS` (see [`parse_trusted_external_origins`]).
+//! Those remotes authenticate through the OS-keyring-backed `gh`/`glab` CLI
+//! rather than the Buzz identity — never a value read from that env var.
 
 use crate::{app_state::AppState, managed_agents::resolve_command};
 use nostr::{Keys, ToBech32};
@@ -46,9 +52,14 @@ fn git_needs_credentials(args: &[&str]) -> bool {
 
 pub(crate) struct GitAuthConfig {
     git_path: std::path::PathBuf,
-    credential_helper: Option<std::path::PathBuf>,
-    nsec: String,
+    credential_entries: Vec<(String, String)>,
+    nsec: Option<String>,
     allow_file_transport: bool,
+    /// Set when an external remote is trusted but its credential helper
+    /// (`gh`/`glab`) is not on PATH. The clone/fetch still runs anonymously
+    /// (so public repositories keep working); this records which helper to
+    /// point the user at if the operation then fails on a private repo.
+    missing_credential_helper: Option<&'static str>,
 }
 
 fn read_pipe_lossy(pipe: Option<impl Read>) -> String {
@@ -119,11 +130,23 @@ pub(crate) fn run_git(
     let stderr = stderr_thread.join().unwrap_or_default();
     if !status.success() {
         let stderr = stderr.trim().to_string();
-        return Err(if stderr.is_empty() {
+        let mut message = if stderr.is_empty() {
             format!("git exited with status {status}")
         } else {
             stderr
-        });
+        };
+        // An external remote with no `gh`/`glab` on PATH runs anonymously
+        // (see `missing_credential_helper`), so a private repo fails here
+        // rather than at auth-config time. Point the user at the fix instead
+        // of surfacing a bare git 401/403.
+        if needs_credentials {
+            if let Some(helper_name) = auth.missing_credential_helper {
+                message.push_str(&format!(
+                    "\n\nIf this repository is private, install the {helper_name} CLI and run `{helper_name} auth login`, then try again."
+                ));
+            }
+        }
+        return Err(message);
     }
     Ok(stdout)
 }
@@ -169,15 +192,14 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
         ),
     ];
     if needs_credentials {
-        let Some(cred_helper) = &auth.credential_helper else {
-            return apply_git_config(command, &entries);
-        };
-        command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
-        entries.push((
-            "credential.helper",
-            credential_helper_config_value(cred_helper),
-        ));
-        entries.push(("credential.useHttpPath", "true".to_string()));
+        if let Some(nsec) = &auth.nsec {
+            command.env("NOSTR_PRIVATE_KEY", nsec);
+        }
+        entries.extend(
+            auth.credential_entries
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone())),
+        );
     }
     apply_git_config(command, &entries);
 }
@@ -185,9 +207,17 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
 /// Format a path for git `credential.helper`.
 ///
 /// Git for Windows invokes helpers via MinGW bash, which treats `\` as
-/// escapes. Forward slashes work on every platform git supports.
+/// escapes, so paths need forward slashes there. On POSIX platforms a
+/// backslash is an ordinary (if unusual) filename character, so it must be
+/// left alone here — blanket-replacing it would corrupt any POSIX path that
+/// legitimately contains one.
 fn credential_helper_config_value(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let value = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        value.replace('\\', "/")
+    } else {
+        value
+    }
 }
 
 fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
@@ -203,20 +233,42 @@ pub(crate) fn build_git_auth_config(state: &AppState) -> Result<GitAuthConfig, S
     build_git_auth_config_for_keys(&keys)
 }
 
-pub(crate) fn build_git_clone_auth_config(
+/// Builds the auth config to use for network git operations against
+/// `clone_url`, which may be a Buzz repository or a trusted external HTTPS
+/// remote (see [`external_https_remote`]). Falls back to the viewer's Buzz
+/// identity for anything that isn't an external remote.
+pub(crate) fn build_git_auth_config_for_url(
     clone_url: &str,
     state: &AppState,
 ) -> Result<GitAuthConfig, String> {
-    if validate_github_clone_url(clone_url).is_ok() {
-        return Ok(GitAuthConfig {
-            git_path: resolve_command("git")
-                .ok_or_else(|| "git was not found on PATH".to_string())?,
-            credential_helper: None,
-            nsec: String::new(),
-            allow_file_transport: false,
-        });
+    if let Some(remote) = external_https_remote(clone_url)? {
+        return build_external_auth_for_remote(&remote);
     }
     build_git_auth_config(state)
+}
+
+/// As [`build_git_auth_config_for_url`], but for Buzz repositories the auth
+/// is scoped to a specific identity (e.g. a managed agent acting as a
+/// repository owner) instead of the viewer's own signing keys.
+pub(crate) fn build_git_auth_config_for_url_with_keys(
+    clone_url: &str,
+    keys: &Keys,
+) -> Result<GitAuthConfig, String> {
+    if let Some(remote) = external_https_remote(clone_url)? {
+        return build_external_auth_for_remote(&remote);
+    }
+    build_git_auth_config_for_keys(keys)
+}
+
+/// Missing `gh`/`glab` does not fail here — it degrades to an anonymous
+/// clone/fetch (see [`GitAuthConfig::missing_credential_helper`]), so public
+/// repositories on a trusted external origin still work without either CLI
+/// installed. A private repository then fails naturally at the git call,
+/// where `run_git` attaches setup guidance.
+fn build_external_auth_for_remote(remote: &ExternalHttpsRemote) -> Result<GitAuthConfig, String> {
+    let helper_name = external_helper_name(remote);
+    let helper = resolve_command(helper_name);
+    build_external_git_auth_config(remote, helper)
 }
 
 pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfig, String> {
@@ -226,11 +278,29 @@ pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfi
         .secret_key()
         .to_bech32()
         .map_err(|error| format!("encode identity key: {error}"))?;
+    let credential_entries = credential_helper
+        .as_ref()
+        .map(|helper| {
+            vec![
+                (
+                    // Wrapped in `!'...'` (shell-quoted) rather than assigned
+                    // as a bare path: git always runs a slash-containing
+                    // `credential.helper` value through the shell, so an
+                    // unquoted path containing a space would be split into
+                    // multiple argv words.
+                    "credential.helper".to_string(),
+                    credential_helper_command(helper, &[]),
+                ),
+                ("credential.useHttpPath".to_string(), "true".to_string()),
+            ]
+        })
+        .unwrap_or_default();
     Ok(GitAuthConfig {
         git_path,
-        credential_helper,
-        nsec,
+        credential_entries,
+        nsec: credential_helper.is_some().then_some(nsec),
         allow_file_transport: false,
+        missing_credential_helper: None,
     })
 }
 
@@ -304,51 +374,215 @@ pub(crate) fn validate_clone_url(clone_url: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_github_clone_url(clone_url: &str) -> Result<(), String> {
+struct ExternalHttpsRemote {
+    host: String,
+    credential_url: String,
+}
+
+fn external_helper_name(remote: &ExternalHttpsRemote) -> &'static str {
+    if remote.host == "github.com" {
+        "gh"
+    } else {
+        "glab"
+    }
+}
+
+/// Operator-configured allowlist of additional external git origins, beyond
+/// the github.com built-in. A value, not a secret: it names hosts, never
+/// credentials — `gh`/`glab` own the actual auth. See
+/// [`parse_trusted_external_origins`] for the exact grammar.
+const TRUSTED_EXTERNAL_GIT_ORIGINS_ENV: &str = "BUZZ_TRUSTED_EXTERNAL_GIT_ORIGINS";
+
+fn trusted_external_origins_env() -> Vec<String> {
+    std::env::var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV)
+        .ok()
+        .map(|value| parse_trusted_external_origins(&value))
+        .unwrap_or_default()
+}
+
+/// Parses a comma-separated list of exact HTTPS origins the operator has
+/// chosen to trust for external git remotes (e.g.
+/// `https://gitlab.onlyarag.com`), in addition to the github.com built-in.
+/// Each entry must be a bare origin: https scheme, no userinfo, no path
+/// beyond `/`, no query, no fragment. Matching against a clone URL later is
+/// by exact origin string (see [`Url::origin`]'s `ascii_serialization`),
+/// which normalizes away a default `:443` on both sides — so an origin's
+/// explicit non-default port is significant, and an omitted port matches
+/// only the HTTPS default. A malformed entry is dropped with a warning
+/// rather than failing the whole list, since this is operator configuration
+/// rather than attacker input.
+fn parse_trusted_external_origins(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let parsed = Url::parse(entry).ok().filter(|parsed| {
+                parsed.scheme() == "https"
+                    && parsed.host_str().is_some()
+                    && parsed.username().is_empty()
+                    && parsed.password().is_none()
+                    && parsed.query().is_none()
+                    && parsed.fragment().is_none()
+                    && matches!(parsed.path(), "" | "/")
+            });
+            let Some(parsed) = parsed else {
+                // Do not echo malformed configuration: an operator may have
+                // accidentally included URL credentials, and diagnostics must
+                // never turn that mistake into a log leak.
+                eprintln!(
+                    "buzz-desktop: ignoring an invalid {TRUSTED_EXTERNAL_GIT_ORIGINS_ENV} entry"
+                );
+                return None;
+            };
+            Some(parsed.origin().ascii_serialization())
+        })
+        .collect()
+}
+
+fn external_https_remote(clone_url: &str) -> Result<Option<ExternalHttpsRemote>, String> {
+    external_https_remote_with_trusted(clone_url, &trusted_external_origins_env())
+}
+
+fn external_https_remote_with_trusted(
+    clone_url: &str,
+    trusted_origins: &[String],
+) -> Result<Option<ExternalHttpsRemote>, String> {
+    if validate_clone_url(clone_url).is_ok() {
+        return Ok(None);
+    }
     let parsed = Url::parse(clone_url).map_err(|error| format!("invalid clone URL: {error}"))?;
     if parsed.scheme() != "https"
-        || parsed.host_str() != Some("github.com")
-        || parsed.port().is_some()
+        || parsed.host_str().is_none()
         || !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        return Err("GitHub clone URL must use public https://github.com/owner/repository".into());
+        return Err(
+            "external clone URL must use https without credentials, a query, or fragment".into(),
+        );
     }
-    let segments = parsed
-        .path_segments()
-        .map(|segments| {
-            segments
-                .filter(|segment| !segment.is_empty())
-                .collect::<Vec<_>>()
-        })
+    let raw_path = clone_url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| path))
         .unwrap_or_default();
+    if raw_path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err("external clone URL must not contain path traversal".into());
+    }
+    let mut segments = parsed
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    if segments.last() == Some(&"") {
+        // A trailing slash produces one trailing empty segment (e.g.
+        // `owner/repo/`); drop it instead of counting it as a path
+        // component.
+        segments.pop();
+    }
     let valid_segment = |segment: &&str| {
-        !segment.starts_with('-')
+        !segment.is_empty()
+            && !segment.starts_with('-')
             && !segment.contains("..")
             && segment.chars().all(|character| {
                 character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
             })
     };
-    if segments.len() != 2 || !segments.iter().all(valid_segment) {
+    if segments.len() < 2 || !segments.iter().all(valid_segment) {
+        return Err("external clone URL must name a repository with safe path segments".into());
+    }
+    let host = parsed
+        .host_str()
+        .expect("checked above")
+        .to_ascii_lowercase();
+    if host == "github.com" && segments.len() != 2 {
         return Err("GitHub clone URL must name one owner and repository".into());
     }
-    Ok(())
+    let origin = parsed.origin().ascii_serialization();
+    let is_trusted = host == "github.com" || trusted_origins.contains(&origin);
+    if !is_trusted {
+        return Err(
+            "external clone URL host must be github.com or a host listed in \
+             BUZZ_TRUSTED_EXTERNAL_GIT_ORIGINS"
+                .into(),
+        );
+    }
+    Ok(Some(ExternalHttpsRemote {
+        host,
+        credential_url: origin,
+    }))
+}
+
+fn external_credential_entries(
+    remote: &ExternalHttpsRemote,
+    helper: &std::path::Path,
+) -> Vec<(String, String)> {
+    let scope = format!("credential.{}", remote.credential_url);
+    vec![
+        (
+            format!("{scope}.helper"),
+            credential_helper_command(helper, &["auth", "git-credential"]),
+        ),
+        (format!("{scope}.useHttpPath"), "true".to_string()),
+    ]
+}
+
+fn build_external_git_auth_config(
+    remote: &ExternalHttpsRemote,
+    helper: Option<std::path::PathBuf>,
+) -> Result<GitAuthConfig, String> {
+    let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
+    match helper {
+        Some(helper) => Ok(GitAuthConfig {
+            git_path,
+            credential_entries: external_credential_entries(remote, &helper),
+            nsec: None,
+            allow_file_transport: false,
+            missing_credential_helper: None,
+        }),
+        // No `gh`/`glab` on PATH: proceed anonymously so a public repository
+        // still clones/fetches. `run_git` attaches setup guidance if a
+        // credentialed operation then fails.
+        None => Ok(GitAuthConfig {
+            git_path,
+            credential_entries: Vec::new(),
+            nsec: None,
+            allow_file_transport: false,
+            missing_credential_helper: Some(external_helper_name(remote)),
+        }),
+    }
+}
+
+/// Builds a `!'<path>' [args...]` credential.helper value. Git runs any
+/// slash-containing `credential.helper` value through the shell (appending
+/// the get/store/erase operation as the final word), so the path is always
+/// single-quoted here — an unquoted path containing a space would otherwise
+/// be split into multiple argv words. `args` are trusted literals (fixed
+/// gh/glab subcommands), never caller-supplied values.
+fn credential_helper_command(path: &std::path::Path, args: &[&str]) -> String {
+    let escaped_path = credential_helper_config_value(path).replace('\'', "'\"'\"'");
+    let mut command = format!("!'{escaped_path}'");
+    for arg in args {
+        command.push(' ');
+        command.push_str(arg);
+    }
+    command
 }
 
 pub(crate) fn validate_local_clone_url(clone_url: &str) -> Result<(), String> {
-    if validate_clone_url(clone_url).is_ok() || validate_github_clone_url(clone_url).is_ok() {
+    if validate_clone_url(clone_url).is_ok() || external_https_remote(clone_url)?.is_some() {
         return Ok(());
     }
-    Err("clone URL must point at a Buzz repository or public GitHub repository".into())
+    Err("clone URL must point at a Buzz repository or a safe external HTTPS repository".into())
 }
 
 pub(crate) fn validate_local_clone_url_for_workspace(
     clone_url: &str,
     state: &AppState,
 ) -> Result<(), String> {
-    if validate_github_clone_url(clone_url).is_ok() {
+    if external_https_remote(clone_url)?.is_some() {
         return Ok(());
     }
     validate_workspace_clone_url(clone_url, state)
@@ -393,19 +627,275 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
-        validate_local_clone_url,
+        build_external_git_auth_config, clean_branch, clean_target_ref, credential_helper_command,
+        credential_helper_config_value, external_credential_entries, external_helper_name,
+        external_https_remote, external_https_remote_with_trusted, git_needs_credentials,
+        git_subcommand, parse_trusted_external_origins, run_git, trusted_external_origins_env,
+        validate_clone_url, validate_clone_url_against_relay, validate_local_clone_url,
+        TRUSTED_EXTERNAL_GIT_ORIGINS_ENV,
     };
 
+    // Guards tests that mutate `BUZZ_TRUSTED_EXTERNAL_GIT_ORIGINS`: env vars
+    // are process-global, so parallel `cargo test` threads must serialize
+    // around it (same pattern as `app_state_tests::ENV_LOCK`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(windows)]
     #[test]
-    fn credential_helper_config_value_uses_forward_slashes() {
+    fn credential_helper_config_value_uses_forward_slashes_on_windows() {
         let path =
             std::path::PathBuf::from(r"C:\Users\x\AppData\Local\Buzz\git-credential-nostr.exe");
         assert_eq!(
             credential_helper_config_value(&path),
             "C:/Users/x/AppData/Local/Buzz/git-credential-nostr.exe",
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn credential_helper_config_value_preserves_posix_backslashes() {
+        // A backslash is an ordinary filename character on POSIX; blanket
+        // replacement would corrupt a path that legitimately contains one.
+        let path = std::path::PathBuf::from("/opt/weird\\name/git-credential-nostr");
+        assert_eq!(
+            credential_helper_config_value(&path),
+            "/opt/weird\\name/git-credential-nostr",
+        );
+    }
+
+    #[test]
+    fn credential_helper_command_has_no_trailing_space_with_no_args() {
+        assert_eq!(
+            credential_helper_command(
+                std::path::Path::new("/usr/local/bin/git-credential-nostr"),
+                &[]
+            ),
+            "!'/usr/local/bin/git-credential-nostr'"
+        );
+    }
+
+    #[test]
+    fn credential_helper_command_escapes_embedded_single_quotes() {
+        assert_eq!(
+            credential_helper_command(std::path::Path::new("/opt/it's/glab"), &["auth"]),
+            "!'/opt/it'\"'\"'s/glab' auth"
+        );
+    }
+
+    #[test]
+    fn external_helpers_are_origin_scoped_and_never_receive_credentials_in_argv() {
+        let trusted = ["https://gitlab.onlyarag.com".to_string()];
+        let remote = external_https_remote_with_trusted(
+            "https://gitlab.onlyarag.com/group/private-repo.git",
+            &trusted,
+        )
+        .unwrap()
+        .expect("external remote");
+        let entries = external_credential_entries(
+            &remote,
+            std::path::Path::new("/Applications/GitLab CLI/glab"),
+        );
+        assert_eq!(
+            entries[0].0,
+            "credential.https://gitlab.onlyarag.com.helper"
+        );
+        assert_eq!(
+            entries[0].1,
+            "!'/Applications/GitLab CLI/glab' auth git-credential"
+        );
+        assert_eq!(
+            entries[1],
+            (
+                "credential.https://gitlab.onlyarag.com.useHttpPath".into(),
+                "true".into()
+            )
+        );
+        assert_eq!(
+            credential_helper_command(std::path::Path::new("/bin/gh"), &["auth", "git-credential"]),
+            "!'/bin/gh' auth git-credential"
+        );
+        let github = external_https_remote("https://github.com/block/buzz.git")
+            .unwrap()
+            .expect("GitHub remote");
+        assert_eq!(external_helper_name(&github), "gh");
+        assert_eq!(external_helper_name(&remote), "glab");
+    }
+
+    #[test]
+    fn missing_helper_yields_anonymous_auth_with_setup_hint() {
+        let remote = external_https_remote_with_trusted(
+            "https://gitlab.onlyarag.com/group/private-repo.git",
+            &["https://gitlab.onlyarag.com".to_string()],
+        )
+        .unwrap()
+        .expect("external remote");
+        let auth = build_external_git_auth_config(&remote, None).expect("build anonymous auth");
+        assert!(auth.credential_entries.is_empty());
+        assert!(auth.nsec.is_none());
+        assert_eq!(auth.missing_credential_helper, Some("glab"));
+    }
+
+    #[test]
+    fn run_git_appends_setup_guidance_when_credential_helper_is_missing() {
+        let remote = external_https_remote_with_trusted(
+            "https://gitlab.onlyarag.com/group/private-repo.git",
+            &["https://gitlab.onlyarag.com".to_string()],
+        )
+        .unwrap()
+        .expect("external remote");
+        let mut auth = build_external_git_auth_config(&remote, None).expect("build anonymous auth");
+        auth.allow_file_transport = true;
+        let repo = tempfile::tempdir().expect("create test directory");
+        let repo_path = repo.path().to_str().expect("repo path");
+        run_git(&["init", "--bare", "--", repo_path], None, &auth).expect("init bare repo");
+
+        let error = run_git(
+            &["fetch", "--end-of-options", "origin", "main"],
+            Some(repo.path()),
+            &auth,
+        )
+        .expect_err("fetch against a repo with no configured remote fails");
+        assert!(
+            error.contains("install the glab CLI") && error.contains("glab auth login"),
+            "expected setup guidance in error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_trusted_external_origins_accepts_bare_https_origins_only() {
+        assert_eq!(
+            parse_trusted_external_origins("https://gitlab.onlyarag.com"),
+            vec!["https://gitlab.onlyarag.com".to_string()],
+        );
+        // Trailing slash, mixed case host, and a redundant default port all
+        // normalize to the same bare origin.
+        assert_eq!(
+            parse_trusted_external_origins("https://GitLab.OnlyArag.com/"),
+            vec!["https://gitlab.onlyarag.com".to_string()],
+        );
+        assert_eq!(
+            parse_trusted_external_origins("https://gitlab.onlyarag.com:443"),
+            vec!["https://gitlab.onlyarag.com".to_string()],
+        );
+        // An explicit non-default port stays significant.
+        assert_eq!(
+            parse_trusted_external_origins("https://gitlab.onlyarag.com:8443"),
+            vec!["https://gitlab.onlyarag.com:8443".to_string()],
+        );
+        // Multiple entries, whitespace-tolerant.
+        assert_eq!(
+            parse_trusted_external_origins(" https://a.example , https://b.example "),
+            vec![
+                "https://a.example".to_string(),
+                "https://b.example".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_trusted_external_origins_drops_invalid_entries() {
+        // http (not https), a path beyond `/`, userinfo, query, and
+        // fragment are all invalid — dropped, not fatal for the rest of the
+        // list.
+        assert_eq!(
+            parse_trusted_external_origins(
+                "http://gitlab.onlyarag.com,\
+                 https://gitlab.onlyarag.com/group,\
+                 https://user@gitlab.onlyarag.com,\
+                 https://gitlab.onlyarag.com?x=1,\
+                 https://gitlab.onlyarag.com#frag,\
+                 not a url,\
+                 ,\
+                 https://good.example"
+            ),
+            vec!["https://good.example".to_string()],
+        );
+    }
+
+    #[test]
+    fn external_https_remote_rejects_hosts_outside_the_trusted_list() {
+        let trusted = ["https://gitlab.onlyarag.com".to_string()];
+        // gitlab.com is not on the trusted list, so it is rejected outright
+        // rather than silently treated as a Buzz repo.
+        assert!(
+            external_https_remote_with_trusted("https://gitlab.com/block/buzz", &trusted).is_err()
+        );
+        // A lookalike host is not the trusted origin.
+        assert!(external_https_remote_with_trusted(
+            "https://gitlab.onlyarag.com.evil.test/block/buzz",
+            &trusted
+        )
+        .is_err());
+        // Trusted host, but the wrong port — no implicit match.
+        assert!(external_https_remote_with_trusted(
+            "https://gitlab.onlyarag.com:8443/block/buzz",
+            &trusted
+        )
+        .is_err());
+        // Configuring the exact port allows it.
+        let trusted_with_port = ["https://gitlab.onlyarag.com:8443".to_string()];
+        assert!(external_https_remote_with_trusted(
+            "https://gitlab.onlyarag.com:8443/block/buzz",
+            &trusted_with_port
+        )
+        .unwrap()
+        .is_some());
+        // github.com is always trusted, independent of the configured list.
+        assert!(
+            external_https_remote_with_trusted("https://github.com/block/buzz", &[])
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn external_https_remote_filters_trailing_slash_empty_segment() {
+        let trusted = ["https://gitlab.onlyarag.com".to_string()];
+        // A trailing slash must not count as an extra path segment.
+        let remote = external_https_remote_with_trusted("https://github.com/block/buzz/", &trusted)
+            .unwrap()
+            .expect("trailing slash still names owner/repo");
+        assert_eq!(remote.host, "github.com");
+        // An empty segment from a doubled slash elsewhere in the path is
+        // still rejected.
+        assert!(external_https_remote_with_trusted(
+            "https://gitlab.onlyarag.com/group//repo",
+            &trusted
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn trusted_external_origins_env_reads_the_configured_variable() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV).ok();
+
+        std::env::set_var(
+            TRUSTED_EXTERNAL_GIT_ORIGINS_ENV,
+            "https://gitlab.onlyarag.com, not a url, https://gitlab.com",
+        );
+        assert_eq!(
+            trusted_external_origins_env(),
+            vec![
+                "https://gitlab.onlyarag.com".to_string(),
+                "https://gitlab.com".to_string(),
+            ],
+        );
+        assert!(
+            external_https_remote("https://gitlab.onlyarag.com/group/repo")
+                .unwrap()
+                .is_some()
+        );
+        assert!(external_https_remote("https://not-configured.example/group/repo").is_err());
+
+        std::env::remove_var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV);
+        assert_eq!(trusted_external_origins_env(), Vec::<String>::new());
+        assert!(external_https_remote("https://gitlab.onlyarag.com/group/repo").is_err());
+
+        match previous {
+            Some(value) => std::env::set_var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV, value),
+            None => std::env::remove_var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV),
+        }
     }
 
     #[test]
@@ -510,13 +1000,61 @@ mod tests {
     }
 
     #[test]
-    fn local_clone_url_allows_only_public_github_https_urls() {
+    fn local_clone_url_allows_safe_external_https_urls() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV).ok();
+        std::env::remove_var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV);
+
         assert!(validate_local_clone_url("https://github.com/block/buzz").is_ok());
         assert!(validate_local_clone_url("https://github.com/block/buzz.git").is_ok());
         assert!(validate_local_clone_url("http://github.com/block/buzz").is_err());
         assert!(validate_local_clone_url("https://github.com/block/buzz/issues").is_err());
         assert!(validate_local_clone_url("https://user@github.com/block/buzz").is_err());
-        assert!(validate_local_clone_url("https://github.com.evil.test/block/buzz").is_err());
+        assert!(validate_local_clone_url("https://github.com/block/../buzz").is_err());
+        assert!(validate_local_clone_url("https://github.com/-upload-pack/buzz").is_err());
+        assert!(validate_local_clone_url("ssh://git@github.com/block/buzz").is_err());
+        // With no operator-configured trust entry, any external host other
+        // than the github.com built-in is rejected outright — this is the
+        // fix for the regression that had accepted every https host.
+        assert!(
+            validate_local_clone_url("https://gitlab.onlyarag.com/group/private-repo.git").is_err()
+        );
         assert!(validate_local_clone_url("https://gitlab.com/block/buzz").is_err());
+        assert!(validate_local_clone_url("https://github.com.evil.test/block/buzz").is_err());
+
+        match previous {
+            Some(value) => std::env::set_var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV, value),
+            None => std::env::remove_var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV),
+        }
+    }
+
+    #[test]
+    fn local_clone_url_allows_operator_trusted_external_origin() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV).ok();
+        std::env::set_var(
+            TRUSTED_EXTERNAL_GIT_ORIGINS_ENV,
+            "https://gitlab.onlyarag.com",
+        );
+
+        assert!(
+            validate_local_clone_url("https://gitlab.onlyarag.com/group/private-repo.git").is_ok()
+        );
+        assert!(validate_local_clone_url(
+            "https://gitlab.onlyarag.com/group/subgroup/private-repo.git"
+        )
+        .is_ok());
+        assert!(
+            validate_local_clone_url("https://gitlab.onlyarag.com/group/buzz?token=secret")
+                .is_err()
+        );
+        assert!(validate_local_clone_url("https://gitlab.onlyarag.com/group/buzz#branch").is_err());
+        // Still not github.com or the trusted origin.
+        assert!(validate_local_clone_url("https://gitlab.com/block/buzz").is_err());
+
+        match previous {
+            Some(value) => std::env::set_var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV, value),
+            None => std::env::remove_var(TRUSTED_EXTERNAL_GIT_ORIGINS_ENV),
+        }
     }
 }

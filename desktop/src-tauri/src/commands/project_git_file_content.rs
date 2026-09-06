@@ -1,7 +1,7 @@
 use super::project_git::first_output_line;
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
-    GitAuthConfig,
+    build_git_auth_config_for_url, clean_branch, clean_target_ref, run_git,
+    validate_local_clone_url_for_workspace, GitAuthConfig,
 };
 use super::project_repo_paths::find_local_repo_dir;
 use crate::app_state::AppState;
@@ -130,9 +130,9 @@ pub async fn get_project_repo_file_content(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
+    validate_local_clone_url_for_workspace(&clone_url, &state)?;
     validate_repo_file_path(&path)?;
-    let auth = build_git_auth_config(&state)?;
+    let auth = build_git_auth_config_for_url(&clone_url, &state)?;
     let branch = clean_branch(default_branch);
     let target_ref = clean_target_ref(target_ref);
     let target_commit = target_commit

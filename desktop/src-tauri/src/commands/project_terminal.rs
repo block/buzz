@@ -10,8 +10,8 @@ use crate::app_state::AppState;
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
-    build_git_auth_config, build_git_clone_auth_config, run_git,
-    validate_local_clone_url_for_workspace, validate_workspace_clone_url,
+    build_git_auth_config, build_git_auth_config_for_url, run_git,
+    validate_local_clone_url_for_workspace,
 };
 use super::project_git_workflow::clone_project_repository_blocking;
 use super::project_repo_paths::find_local_repo_dir;
@@ -115,11 +115,11 @@ pub async fn open_project_terminal(
     if let Some(clone_url) = clone_url.as_deref() {
         validate_local_clone_url_for_workspace(clone_url, &state)?;
     }
-    // Public GitHub clones stay anonymous; Buzz remotes use the workspace
-    // identity. Keep the result outside the blocking task so it borrows no
-    // Tauri state.
+    // External HTTPS clones use the OS-keyring-backed `gh` or `glab` helper;
+    // Buzz remotes use the workspace identity. Keep the result outside the
+    // blocking task so it borrows no Tauri state.
     let auth = if let Some(clone_url) = clone_url.as_deref() {
-        build_git_clone_auth_config(clone_url, &state)
+        build_git_auth_config_for_url(clone_url, &state)
     } else {
         build_git_auth_config(&state)
     };
@@ -170,15 +170,19 @@ pub async fn open_project_merge_recovery_terminal(
     input: ProjectMergeRecoveryTerminalInput,
     state: State<'_, AppState>,
 ) -> Result<ProjectMergeRecoveryTerminalResult, String> {
-    validate_workspace_clone_url(&input.target_clone_url, &state)?;
-    validate_workspace_clone_url(&input.source_clone_url, &state)?;
+    validate_local_clone_url_for_workspace(&input.target_clone_url, &state)?;
+    validate_local_clone_url_for_workspace(&input.source_clone_url, &state)?;
     let target_branch = normalize_branch_option(Some(&input.target_branch))
         .ok_or_else(|| "Invalid target branch.".to_string())?;
     let source_branch = normalize_branch_option(Some(&input.source_branch))
         .ok_or_else(|| "Invalid source branch.".to_string())?;
     let expected_commit = clean_commit(Some(input.expected_commit.trim().to_ascii_lowercase()))
         .ok_or_else(|| "Invalid pull request commit.".to_string())?;
-    let auth = build_git_auth_config(&state)?;
+    // Target and source may be different hosts (e.g. a Buzz-hosted target
+    // with an externally-mirrored source), so each gets its own auth scoped
+    // to its own clone URL.
+    let target_auth = build_git_auth_config_for_url(&input.target_clone_url, &state)?;
+    let source_auth = build_git_auth_config_for_url(&input.source_clone_url, &state)?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let existing_dir = find_local_repo_dir(
@@ -196,7 +200,7 @@ pub async fn open_project_merge_recovery_terminal(
                 &input.project_dtag,
                 &input.target_clone_url,
                 Some(&target_branch),
-                &auth,
+                &target_auth,
             )?;
             (std::path::PathBuf::from(clone_result.path), true)
         };
@@ -211,9 +215,9 @@ pub async fn open_project_merge_recovery_terminal(
                 target_branch.as_str(),
             ],
             Some(&repo_dir),
-            &auth,
+            &target_auth,
         )?;
-        let target_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
+        let target_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &target_auth)
             .ok()
             .and_then(|output| first_output_line(&output))
             .ok_or_else(|| "Could not resolve the target branch.".to_string())?;
@@ -221,7 +225,7 @@ pub async fn open_project_merge_recovery_terminal(
         run_git(
             &["update-ref", target_ref.as_str(), target_head.as_str()],
             Some(&repo_dir),
-            &auth,
+            &target_auth,
         )?;
 
         run_git(
@@ -234,9 +238,9 @@ pub async fn open_project_merge_recovery_terminal(
                 source_branch.as_str(),
             ],
             Some(&repo_dir),
-            &auth,
+            &source_auth,
         )?;
-        let source_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
+        let source_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &source_auth)
             .ok()
             .and_then(|output| first_output_line(&output))
             .ok_or_else(|| "Could not resolve the pull request branch.".to_string())?;
@@ -251,7 +255,7 @@ pub async fn open_project_merge_recovery_terminal(
         run_git(
             &["update-ref", recovery_ref.as_str(), expected_commit.as_str()],
             Some(&repo_dir),
-            &auth,
+            &target_auth,
         )?;
         launch_terminal_at(&repo_dir)?;
         Ok(ProjectMergeRecoveryTerminalResult {

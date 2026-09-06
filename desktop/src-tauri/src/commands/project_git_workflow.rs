@@ -3,9 +3,8 @@
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
-    build_git_auth_config_for_keys, build_git_clone_auth_config, clone_url_owner, run_git,
-    validate_local_clone_url, validate_local_clone_url_for_workspace, validate_workspace_clone_url,
-    GitAuthConfig,
+    build_git_auth_config_for_url, build_git_auth_config_for_url_with_keys, clone_url_owner,
+    run_git, validate_local_clone_url, validate_local_clone_url_for_workspace, GitAuthConfig,
 };
 use super::project_repo_paths::{
     canonical_repos_roots, canonicalize_repos_root, default_repos_root_candidates,
@@ -426,7 +425,7 @@ pub async fn clone_project_repository(
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoCloneResult, String> {
     validate_local_clone_url_for_workspace(&clone_url, &state)?;
-    let auth = build_git_clone_auth_config(&clone_url, &state)?;
+    let auth = build_git_auth_config_for_url(&clone_url, &state)?;
     tauri::async_runtime::spawn_blocking(move || {
         clone_project_repository_blocking(
             repos_dir.as_deref(),
@@ -507,8 +506,8 @@ pub async fn merge_project_pull_request(
         source_branch,
         expected_commit,
     } = input;
-    validate_workspace_clone_url(&target_clone_url, &state)?;
-    validate_workspace_clone_url(&source_clone_url, &state)?;
+    validate_local_clone_url_for_workspace(&target_clone_url, &state)?;
+    validate_local_clone_url_for_workspace(&source_clone_url, &state)?;
     let target_owner = target_owner.trim().to_ascii_lowercase();
     if target_owner.len() != 64 || !target_owner.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("Invalid target repository owner.".to_string().into());
@@ -537,7 +536,13 @@ pub async fn merge_project_pull_request(
         &pull_request_id,
         &pull_request_author,
     )?;
-    let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
+    // Target and source may be different hosts (e.g. merging in a pull
+    // request from an externally-mirrored fork into a Buzz-hosted target),
+    // so each clone URL gets auth scoped to itself.
+    let target_auth =
+        build_git_auth_config_for_url_with_keys(&target_clone_url, &owner_identity.keys)?;
+    let source_auth =
+        build_git_auth_config_for_url_with_keys(&source_clone_url, &owner_identity.keys)?;
 
     let git_result = tauri::async_runtime::spawn_blocking(
         move || -> Result<ProjectRepoMergeGitResult, ProjectPullRequestMergeError> {
@@ -560,7 +565,7 @@ pub async fn merge_project_pull_request(
                     repo_path,
                 ],
                 None,
-                &auth,
+                &target_auth,
             )?;
             run_git(
                 &[
@@ -571,9 +576,9 @@ pub async fn merge_project_pull_request(
                     source_branch.as_str(),
                 ],
                 Some(&repo_dir),
-                &auth,
+                &source_auth,
             )?;
-            let source_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
+            let source_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &source_auth)
                 .ok()
                 .and_then(|output| first_output_line(&output))
                 .ok_or_else(|| "Could not resolve the pull request branch.".to_string())?;
@@ -598,13 +603,13 @@ pub async fn merge_project_pull_request(
                     expected_commit.as_str(),
                 ],
                 Some(&repo_dir),
-                &auth,
+                &target_auth,
             );
             if let Err(error) = merge_result {
                 let has_conflicts = run_git(
                     &["diff", "--name-only", "--diff-filter=U"],
                     Some(&repo_dir),
-                    &auth,
+                    &target_auth,
                 )
                 .is_ok_and(|output| !output.trim().is_empty());
                 return Err(classify_merge_error(
@@ -614,7 +619,7 @@ pub async fn merge_project_pull_request(
                     &source_branch,
                 ));
             }
-            let merge_commit = run_git(&["rev-parse", "HEAD"], Some(&repo_dir), &auth)
+            let merge_commit = run_git(&["rev-parse", "HEAD"], Some(&repo_dir), &target_auth)
                 .ok()
                 .and_then(|output| first_output_line(&output))
                 .ok_or_else(|| "Could not resolve the merge commit.".to_string())?;
@@ -626,7 +631,7 @@ pub async fn merge_project_pull_request(
                     format!("HEAD:{target_branch}").as_str(),
                 ],
                 Some(&repo_dir),
-                &auth,
+                &target_auth,
             )?;
 
             Ok(ProjectRepoMergeGitResult {
