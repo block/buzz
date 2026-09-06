@@ -49,8 +49,10 @@ Use read-only SQLite handles for discovery. Before any direct write, or before
 a destructive MCP operation:
 
 1. Confirm the exact target IDs and expected ownership.
-2. For creation or moves, confirm the target project name/ID is absent and every
-   source task ID exists exactly once on its expected board.
+2. For project creation, confirm the target project name/ID is absent. For a
+   move or ID-preserving restore, confirm exactly one destination project exists
+   at the expected name/ID and every source task ID exists exactly once on its
+   expected board.
 3. Create an online SQLite backup in `/data/backups` and record its SHA-256.
 4. Run `PRAGMA integrity_check` against the backup before writing.
 5. Apply related direct writes in one transaction with fail-closed
