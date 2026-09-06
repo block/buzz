@@ -36,8 +36,44 @@ pub struct BlobDescriptor {
     pub duration: Option<f64>,
 }
 
+/// Sanitize a filename for imeta `filename` and markdown labels.
+///
+/// Matches Desktop `sanitize_filename` and the relay's imeta contract
+/// (`crates/buzz-relay/src/handlers/imeta.rs`): final path segment only
+/// (both `/` and `\`), no control characters, 1–255 **bytes**, fallback `"file"`.
+///
+/// Using this for both the imeta field and the markdown link text prevents the
+/// regression where Blossom upload succeeds but `messages send --file` fails
+/// at event ingest on a relay-invalid basename.
+pub fn sanitize_filename(name: &str) -> String {
+    // Keep only the final path segment — defend against `../` and absolute paths
+    // regardless of separator style (Unix `Path::file_name` does not split `\`).
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+    // Bound by UTF-8 bytes to match relay `value.len() > 255` (not char count).
+    let mut cleaned = String::new();
+    for c in base.chars().filter(|c| !c.is_control()) {
+        let mut buf = [0u8; 4];
+        let enc = c.encode_utf8(&mut buf);
+        if cleaned.len() + enc.len() > 255 {
+            break;
+        }
+        cleaned.push_str(enc);
+    }
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
-pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
+///
+/// When `filename` is set (local path or basename the user uploaded), it is
+/// sanitized and included as `filename <name>` so Desktop can render FileCards
+/// with a real label for generic attachments. Pass `None` for media that needs
+/// no label. Empty/invalid-after-sanitize names are omitted rather than
+/// publishing a relay-invalid value.
+pub fn build_imeta_tag_with_filename(d: &BlobDescriptor, filename: Option<&str>) -> Vec<String> {
     let mut tag = vec![
         "imeta".to_string(),
         format!("url {}", d.url),
@@ -45,6 +81,13 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
         format!("x {}", d.sha256),
         format!("size {}", d.size),
     ];
+    if let Some(raw) = filename.map(str::trim).filter(|s| !s.is_empty()) {
+        let base = sanitize_filename(raw);
+        // sanitize_filename always returns 1–255 valid bytes; still guard.
+        if !base.is_empty() && base.len() <= 255 {
+            tag.push(format!("filename {base}"));
+        }
+    }
     if let Some(ref dim) = d.dim {
         tag.push(format!("dim {dim}"));
     }
@@ -60,13 +103,64 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
+/// Format one uploaded attachment for message body markdown.
+///
+/// Matches Desktop `formatImetaMediaLine`:
+/// - `video/*` → `![video](url)`
+/// - `image/*` (except `*.agent.png` / `*.team.png` snapshots) → `![image](url)`
+/// - everything else (zip, pdf, txt, …) → plain `[filename](url)` so Desktop
+///   FileCard renders a download card instead of a broken image.
+///
+/// Label uses the same [`sanitize_filename`] contract as the imeta field.
+pub fn format_attachment_markdown(file_path: &str, desc: &BlobDescriptor) -> String {
+    let mime = desc.mime_type.as_str();
+    let basename = sanitize_filename(file_path);
+    let lower = basename.to_ascii_lowercase();
+    let is_snapshot_png = lower.ends_with(".agent.png") || lower.ends_with(".team.png");
+
+    if mime.starts_with("video/") {
+        return format!("\n![video]({})", desc.url);
+    }
+    if mime.starts_with("image/") && !is_snapshot_png {
+        return format!("\n![image]({})", desc.url);
+    }
+
+    // Generic / snapshot: escape `[` `]` `\` in the label so markdown stays valid.
+    // After sanitize, `\` is already gone; keep escapes for `[` `]` and any residual.
+    let escaped = basename
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
+    format!("\n[{escaped}]({})", desc.url)
+}
+
+/// Image MIME types accepted on the image/thumbnail upload path.
+const ALLOWED_IMAGE_MIMES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/// Video MIME types accepted on the video pipeline path.
+const ALLOWED_VIDEO_MIMES: &[&str] = &["video/mp4"];
+
+/// MIME types blocked on the generic file-upload path.
+///
+/// Mirrors `buzz-media` `BLOCKED_FILE_MIME_TYPES`: active web content (stored
+/// XSS) and native executables/installers. Everything else is allowed for
+/// agent co-lab (zip skill packs, pdf, text, office docs, …) and is enforced
+/// again server-side by `validate_file_content`.
+const BLOCKED_FILE_MIMES: &[&str] = &[
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -74,6 +168,39 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic (non-image/video) uploads (100 MB).
+/// Matches relay default `BUZZ_MAX_FILE_BYTES`.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Whether a sniffed MIME may be uploaded via CLI (`buzz upload` / `--file`).
+///
+/// - Images: jpeg/png/gif/webp only (image pipeline).
+/// - Video: mp4 only (video pipeline).
+/// - Other audio/video: rejected (no sanitizer yet — same as relay).
+/// - Everything else: allowed unless on the dangerous blocklist (zip, pdf, …).
+fn is_upload_mime_allowed(mime: &str) -> bool {
+    if mime.starts_with("image/") {
+        return ALLOWED_IMAGE_MIMES.contains(&mime);
+    }
+    if mime.starts_with("video/") {
+        return ALLOWED_VIDEO_MIMES.contains(&mime);
+    }
+    if mime.starts_with("audio/") {
+        return false;
+    }
+    !BLOCKED_FILE_MIMES.contains(&mime)
+}
+
+fn max_upload_bytes_for_mime(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1170,21 +1297,17 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
+        // 2. Detect MIME from magic bytes (no signature → opaque download).
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
+        if !is_upload_mime_allowed(&mime) {
             return Err(CliError::Usage(format!("unsupported file type: {mime}")));
         }
 
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        // 3. Size check (image / video / generic file tiers).
+        let max = max_upload_bytes_for_mime(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -1508,8 +1631,11 @@ mod retry_tests {
     use std::time::Duration;
 
     use super::{
-        env_duration_secs, is_moderation_kind, jitter_delay, parse_retry_hint_text,
-        parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS, RETRY_MAX_ATTEMPTS,
+        build_imeta_tag_with_filename, env_duration_secs, format_attachment_markdown,
+        is_moderation_kind, is_upload_mime_allowed, jitter_delay, max_upload_bytes_for_mime,
+        parse_retry_hint_text, parse_retry_in_secs, sanitize_filename, BlobDescriptor,
+        MAX_FILE_BYTES, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, RETRY_BASE_SECS, RETRY_IN_MAX_SECS,
+        RETRY_MAX_ATTEMPTS,
     };
 
     // ---- parse_retry_in_secs ----
@@ -1546,6 +1672,169 @@ mod retry_tests {
     #[test]
     fn parse_empty_body_returns_none() {
         assert_eq!(parse_retry_in_secs(""), None);
+    }
+
+    // ---- is_upload_mime_allowed (M1 media widen) ----
+
+    #[test]
+    fn upload_allows_images_video_and_zip() {
+        for mime in [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "video/mp4",
+            "application/zip",
+            "application/pdf",
+            "text/plain",
+            "application/json",
+            "application/octet-stream",
+        ] {
+            assert!(is_upload_mime_allowed(mime), "expected allowed: {mime}");
+        }
+    }
+
+    #[test]
+    fn upload_blocks_active_and_executable_types() {
+        for mime in [
+            "text/html",
+            "application/javascript",
+            "image/svg+xml",
+            "application/x-msdownload",
+            "application/x-executable",
+            "application/vnd.android.package-archive",
+            "audio/mpeg",
+            "video/webm",
+            "image/bmp",
+        ] {
+            assert!(!is_upload_mime_allowed(mime), "expected blocked: {mime}");
+        }
+    }
+
+    #[test]
+    fn upload_size_tiers() {
+        assert_eq!(max_upload_bytes_for_mime("image/png"), MAX_IMAGE_BYTES);
+        assert_eq!(max_upload_bytes_for_mime("video/mp4"), MAX_VIDEO_BYTES);
+        assert_eq!(max_upload_bytes_for_mime("application/zip"), MAX_FILE_BYTES);
+    }
+
+    fn test_desc(mime: &str, url: &str) -> BlobDescriptor {
+        BlobDescriptor {
+            url: url.to_string(),
+            sha256: "aa".repeat(32),
+            size: 1,
+            mime_type: mime.to_string(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn attachment_markdown_image_and_video_inline() {
+        let img = test_desc("image/png", "https://relay.example/media/a.png");
+        assert_eq!(
+            format_attachment_markdown("/tmp/shot.png", &img),
+            "\n![image](https://relay.example/media/a.png)"
+        );
+        let vid = test_desc("video/mp4", "https://relay.example/media/a.mp4");
+        assert_eq!(
+            format_attachment_markdown("/tmp/clip.mp4", &vid),
+            "\n![video](https://relay.example/media/a.mp4)"
+        );
+    }
+
+    #[test]
+    fn attachment_markdown_generic_file_is_plain_link() {
+        let zip = test_desc("application/zip", "https://relay.example/media/pack.zip");
+        assert_eq!(
+            format_attachment_markdown("/tmp/gcr-skill-pack.zip", &zip),
+            "\n[gcr-skill-pack.zip](https://relay.example/media/pack.zip)"
+        );
+        let pdf = test_desc("application/pdf", "https://relay.example/media/doc.pdf");
+        assert_eq!(
+            format_attachment_markdown("/home/u/notes.pdf", &pdf),
+            "\n[notes.pdf](https://relay.example/media/doc.pdf)"
+        );
+    }
+
+    #[test]
+    fn attachment_markdown_escapes_label_metacharacters() {
+        let d = test_desc("application/pdf", "https://relay.example/media/x.pdf");
+        assert_eq!(
+            format_attachment_markdown("/tmp/a].pdf", &d),
+            "\n[a\\].pdf](https://relay.example/media/x.pdf)"
+        );
+    }
+
+    #[test]
+    fn attachment_markdown_snapshot_png_uses_file_link() {
+        let d = test_desc("image/png", "https://relay.example/media/snap.png");
+        assert_eq!(
+            format_attachment_markdown("/tmp/bot.agent.png", &d),
+            "\n[bot.agent.png](https://relay.example/media/snap.png)"
+        );
+    }
+
+    #[test]
+    fn imeta_tag_includes_optional_filename() {
+        let d = test_desc("application/zip", "https://relay.example/media/p.zip");
+        let with = build_imeta_tag_with_filename(&d, Some("pack.zip"));
+        assert!(with.iter().any(|f| f == "filename pack.zip"), "{with:?}");
+        let without = build_imeta_tag_with_filename(&d, None);
+        assert!(
+            !without.iter().any(|f| f.starts_with("filename ")),
+            "{without:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_matches_relay_contract() {
+        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
+        // Strips directory components and traversal (both separator styles).
+        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_filename("/abs/path/notes.txt"), "notes.txt");
+        assert_eq!(sanitize_filename(r"C:\Users\me\doc.docx"), "doc.docx");
+        // Unix Path::file_name leaves embedded `\` — we must still strip.
+        assert_eq!(sanitize_filename(r"bad\name.zip"), "name.zip");
+        // Empty / separator-only falls back.
+        assert_eq!(sanitize_filename(""), "file");
+        assert_eq!(sanitize_filename("/"), "file");
+        assert_eq!(sanitize_filename(r"\\"), "file");
+        // Control chars removed (including newlines).
+        assert_eq!(sanitize_filename("a\nb\tc.txt"), "abc.txt");
+        // Bound to 255 bytes (relay), not unbounded.
+        let long = "a".repeat(300);
+        assert_eq!(sanitize_filename(&long).len(), 255);
+        // Multibyte: never exceed 255 bytes (CJK ideograph is 3 UTF-8 bytes).
+        let multi = "\u{4e16}".repeat(100);
+        let out = sanitize_filename(&multi);
+        assert!(out.len() <= 255, "len={}", out.len());
+        assert_eq!(out.len() % 3, 0);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn imeta_tag_sanitizes_path_and_controls_in_filename() {
+        let d = test_desc("application/zip", "https://relay.example/media/p.zip");
+        let with = build_imeta_tag_with_filename(&d, Some(r"../../pack\evil\name.zip"));
+        assert!(with.iter().any(|f| f == "filename name.zip"), "{with:?}");
+        let with_ctrl = build_imeta_tag_with_filename(&d, Some("pack\n.zip"));
+        assert!(
+            with_ctrl.iter().any(|f| f == "filename pack.zip"),
+            "{with_ctrl:?}"
+        );
+    }
+
+    #[test]
+    fn attachment_markdown_uses_sanitized_label() {
+        let d = test_desc("application/zip", "https://relay.example/media/p.zip");
+        assert_eq!(
+            format_attachment_markdown(r"/tmp/dir\weird\pack.zip", &d),
+            "\n[pack.zip](https://relay.example/media/p.zip)"
+        );
     }
 
     // ---- parse_retry_hint_text ----
