@@ -4,7 +4,8 @@ import { describe, it } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  AgentStatusMobileBar,
+  AgentStatusDetails,
+  AgentStatusIndicator,
   AgentStatusSidebarPanel,
 } from "./AgentStatusDisplay.tsx";
 import { deriveConfiguredAgentStatuses } from "./agentStatusModel.ts";
@@ -136,33 +137,51 @@ describe("agent status surfaces", () => {
     ],
   });
 
-  it("renders context, every provider window, reset time and data age", () => {
-    const markup = renderToStaticMarkup(
-      AgentStatusSidebarPanel({ statuses, nowSeconds: NOW_SECONDS }),
+  it("renders a compact percentage ring and full on-demand details", () => {
+    const indicator = renderToStaticMarkup(
+      AgentStatusIndicator({ status: statuses[0] }),
+    );
+    const details = renderToStaticMarkup(
+      AgentStatusDetails({ status: statuses[0], nowSeconds: NOW_SECONDS }),
     );
 
-    assert.match(markup, /Victra/);
-    assert.match(markup, /75%/);
-    assert.match(markup, /5 hour/);
-    assert.match(markup, /38%/);
-    assert.match(markup, /Weekly/);
-    assert.match(markup, /72%/);
-    assert.match(markup, /Resets in 1h/);
-    assert.match(markup, /Updated 2m ago/);
-    assert.equal((markup.match(/role="progressbar"/g) ?? []).length, 4);
+    assert.match(indicator, /aria-label="Victra usage: 75%"/);
+    assert.match(indicator, />75%</);
+    assert.doesNotMatch(indicator, /5 hour/);
+    assert.match(details, /75K \/ 100K tokens/);
+    assert.match(details, /5 hour/);
+    assert.match(details, /38%/);
+    assert.match(details, /Weekly/);
+    assert.match(details, /72%/);
+    assert.match(details, /Resets in 1h/);
+    assert.match(details, /Updated 2m ago/);
   });
 
-  it("uses permanent desktop and compact fixed mobile placement classes", () => {
+  it("shows the highest known usage in the compact ring", () => {
+    const [status] = deriveConfiguredAgentStatuses({
+      agents: [agents[0]],
+      nowSeconds: NOW_SECONDS,
+      snapshots: [
+        snapshot({
+          accountUsageWindows: [{ label: "Session", usedPercent: 87 }],
+        }),
+      ],
+    });
+    const indicator = renderToStaticMarkup(AgentStatusIndicator({ status }));
+
+    assert.match(indicator, /aria-label="Victra usage: 87%"/);
+  });
+
+  it("lists agent names compactly instead of rendering permanent metric cards", () => {
     const desktop = renderToStaticMarkup(
       AgentStatusSidebarPanel({ statuses, nowSeconds: NOW_SECONDS }),
     );
-    const mobile = renderToStaticMarkup(
-      AgentStatusMobileBar({ statuses, nowSeconds: NOW_SECONDS }),
-    );
 
-    assert.match(desktop, /class="[^"]*hidden[^"]*md:block/);
-    assert.match(mobile, /class="[^"]*fixed[^"]*md:hidden/);
-    assert.match(mobile, /aria-label="Agent status"/);
+    assert.match(desktop, /aria-label="Agent usage"/);
+    assert.match(desktop, /Victra/);
+    assert.match(desktop, /Claude/);
+    assert.doesNotMatch(desktop, /role="progressbar"/);
+    assert.doesNotMatch(desktop, /Context unavailable/);
   });
 
   it("renders honest unavailable states without invented metric values", () => {
@@ -172,13 +191,10 @@ describe("agent status surfaces", () => {
       snapshots: [],
     });
     const markup = renderToStaticMarkup(
-      AgentStatusMobileBar({
-        statuses: emptyStatuses,
-        nowSeconds: NOW_SECONDS,
-      }),
+      AgentStatusIndicator({ status: emptyStatuses[0] }),
     );
 
-    assert.match(markup, /Waiting for metrics/);
+    assert.match(markup, /aria-label="Victra usage unavailable"/);
     assert.doesNotMatch(markup, /0%/);
   });
 });

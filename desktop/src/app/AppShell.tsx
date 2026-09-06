@@ -53,7 +53,7 @@ import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
 import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
 import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
-import { PermanentAgentStatusMobileBar } from "@/features/agents/status/AgentStatusDisplay";
+
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -930,7 +930,7 @@ export function AppShell() {
                           onUnstarChannel={unstarChannel}
                         />
                       ) : null}
-                      {!isHuddleRoom ? <PermanentAgentStatusMobileBar /> : null}
+
                       <TerminalContextOverrideProvider
                         onChange={setTerminalContextOverride}
                       >

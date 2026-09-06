@@ -238,11 +238,29 @@ unlabeled total.
 
 ## Publisher Behavior
 
-- Publish exactly one event per completed turn, at turn completion, including
-  turns that end in cancellation or error when usage was observed.
-- Do NOT publish an event for a turn with no observed usage (all counters
-  unknown); an all-null metric carries no information.
+A publisher can be embedded in a local ACP harness or run next to a remote
+cloud agent. How it obtains provider quotas is implementation-specific; both
+producer paths use the same event kind, tags, encryption, validation, and
+payload fields. The event MUST be signed by the agent named by the `agent` tag.
+A separate quota collector therefore publishes through the agent identity; it
+MUST NOT substitute its own identity or expose provider credentials.
+
+- Publish one turn metric at turn completion, including turns that end in
+  cancellation or error when usage was observed.
+- A publisher MAY also emit a quota-only snapshot when
+  `accountUsageWindows` changes, or as a low-frequency heartbeat. Quota-only
+  snapshots omit unknown turn and context counters rather than inventing
+  values. They remain agent-account snapshots, not billing records.
+- Do NOT publish an event with no observed turn usage and no context or account
+  snapshot fields; such an event carries no information.
 - `created_at` SHOULD equal the payload `timestamp` truncated to seconds.
+
+Quota collection and turn instrumentation MAY run in separate processes, but
+partial events from both paths are expected to be merged by consumers per
+agent. The newest valid context pair (`contextUsedTokens` together with
+`contextLimitTokens`) remains available when a newer quota-only event omits it;
+the newest non-empty `accountUsageWindows` array replaces the older array.
+Consumers MUST NOT merge snapshots across different agent pubkeys.
 
 ## Relay Behavior
 

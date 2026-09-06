@@ -1,36 +1,15 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { resolveUserLabel } from "@/features/profile/lib/identity";
 import {
   getLatestAgentMetricSnapshots,
   onAgentMetricsChanged,
   type LatestAgentMetricSnapshot,
 } from "@/shared/api/tauriArchive";
 import { deriveConfiguredAgentStatuses } from "./agentStatusModel";
-import type {
-  AgentMetricSnapshot,
-  AgentStatusViewModel,
-  TrackedAgentStatusConfig,
-} from "./types";
-
-function configuredPubkey(value: string | undefined): string | undefined {
-  const candidate = value?.trim().toLowerCase();
-  return candidate && /^[0-9a-f]{64}$/.test(candidate) ? candidate : undefined;
-}
-
-/** Stable deployment configuration for the two permanent status slots. */
-export const PERMANENT_AGENT_STATUS_CONFIG = [
-  {
-    id: "victra",
-    label: "Victra",
-    agentPubkey: configuredPubkey(import.meta.env?.VITE_VICTRA_AGENT_PUBKEY),
-  },
-  {
-    id: "claude",
-    label: "Claude",
-    agentPubkey: configuredPubkey(import.meta.env?.VITE_CLAUDE_AGENT_PUBKEY),
-  },
-] satisfies readonly TrackedAgentStatusConfig[];
+import type { AgentMetricSnapshot, AgentStatusViewModel } from "./types";
 
 function parseTokenCount(value: string | null): bigint | null {
   if (value === null || !/^[0-9]+$/.test(value)) return null;
@@ -61,16 +40,14 @@ export function decodeLatestAgentMetricSnapshot(
     accountUsageWindows: snapshot.accountUsageWindows.map((window) => ({
       label: window.label,
       usedPercent: window.usedPercent,
-      resetAt: window.resetAt
-        ? parseRfc3339Seconds(window.resetAt)
-        : null,
+      resetAt: window.resetAt ? parseRfc3339Seconds(window.resetAt) : null,
     })),
     timestamp,
   };
 }
 
 export function useAgentStatusAdapter(
-  agents: readonly TrackedAgentStatusConfig[],
+  agents: readonly { agentPubkey: string; id: string; label: string }[],
   snapshots: readonly AgentMetricSnapshot[],
   isLoading = false,
   error: string | null = null,
@@ -87,22 +64,12 @@ export function useAgentStatusAdapter(
   );
 }
 
-/** Live native query shared by both permanent desktop/mobile surfaces. */
+/** Owner-scoped live query for every agent that has published metrics. */
 export function usePermanentAgentStatuses(): AgentStatusViewModel[] {
-  const pubkeys = React.useMemo(
-    () =>
-      PERMANENT_AGENT_STATUS_CONFIG.flatMap((agent) =>
-        agent.agentPubkey ? [agent.agentPubkey] : [],
-      ),
-    [],
-  );
   const query = useQuery({
-    enabled: pubkeys.length > 0,
-    queryKey: ["latest-agent-metric-snapshots", ...pubkeys],
+    queryKey: ["latest-agent-metric-snapshots"],
     queryFn: async () =>
-      (
-        await getLatestAgentMetricSnapshots({ agentPubkeys: pubkeys })
-      ).flatMap((snapshot) => {
+      (await getLatestAgentMetricSnapshots()).flatMap((snapshot) => {
         const decoded = decodeLatestAgentMetricSnapshot(snapshot);
         return decoded ? [decoded] : [];
       }),
@@ -119,10 +86,26 @@ export function usePermanentAgentStatuses(): AgentStatusViewModel[] {
       ? query.error.message
       : "Metrics unavailable"
     : null;
-  return useAgentStatusAdapter(
-    PERMANENT_AGENT_STATUS_CONFIG,
-    query.data ?? [],
-    query.isLoading,
-    error,
+  const snapshots = query.data ?? [];
+  const pubkeys = React.useMemo(
+    () => snapshots.map((snapshot) => snapshot.agentPubkey),
+    [snapshots],
   );
+  const profiles = useUsersBatchQuery(pubkeys, {
+    enabled: pubkeys.length > 0,
+  }).data?.profiles;
+  const agents = React.useMemo(
+    () =>
+      snapshots.map((snapshot) => ({
+        id: snapshot.agentPubkey,
+        label: resolveUserLabel({
+          pubkey: snapshot.agentPubkey,
+          profiles,
+        }),
+        agentPubkey: snapshot.agentPubkey,
+      })),
+    [profiles, snapshots],
+  );
+
+  return useAgentStatusAdapter(agents, snapshots, query.isLoading, error);
 }

@@ -16,13 +16,6 @@ export type AgentMetricSnapshot = {
   timestamp: number;
 };
 
-/** Exact identity configuration; missing pubkeys are shown as unconfigured. */
-export type TrackedAgentStatusConfig = {
-  id: string;
-  label: string;
-  agentPubkey?: string;
-};
-
 export type AgentMetricSnapshotState = {
   snapshots: readonly AgentMetricSnapshot[];
   isLoading?: boolean;

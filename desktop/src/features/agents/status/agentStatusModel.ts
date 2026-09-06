@@ -1,8 +1,4 @@
-import type {
-  AgentStatusViewModel,
-  TrackedAgentStatusConfig,
-  AgentMetricSnapshot,
-} from "./types";
+import type { AgentStatusViewModel, AgentMetricSnapshot } from "./types";
 
 const DEFAULT_STALE_AFTER_SECONDS = 45 * 60;
 
@@ -36,7 +32,7 @@ export function deriveConfiguredAgentStatuses({
   nowSeconds = Math.floor(Date.now() / 1_000),
   staleAfterSeconds = DEFAULT_STALE_AFTER_SECONDS,
 }: {
-  agents: readonly TrackedAgentStatusConfig[];
+  agents: readonly { agentPubkey: string; id: string; label: string }[];
   snapshots: readonly AgentMetricSnapshot[];
   isLoading?: boolean;
   error?: string | null;

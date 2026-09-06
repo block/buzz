@@ -15,6 +15,7 @@ import {
   scaleProfileAvatarStatusGeometry,
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { AgentStatusForPubkey } from "@/features/agents/status/AgentStatusDisplay";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
 import { Button } from "@/shared/ui/button";
@@ -211,11 +212,14 @@ export function ChannelScreenHeader({
       title={activeChannelTitle}
       titleAdornment={
         activeChannel?.channelType === "dm" && !isGroupDm ? (
-          <UserNameIndicators
-            className="ml-1"
-            pubkey={activeDmParticipant?.pubkey}
-            size="dm"
-          />
+          <>
+            <UserNameIndicators
+              className="ml-1"
+              pubkey={activeDmParticipant?.pubkey}
+              size="dm"
+            />
+            <AgentStatusForPubkey pubkey={activeDmParticipant?.pubkey} />
+          </>
         ) : null
       }
       transparentChrome={transparentChrome}

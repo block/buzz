@@ -1,6 +1,7 @@
 import { AlertCircle, Bot, Clock3 } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Progress } from "@/shared/ui/progress";
 import type { AgentStatusViewModel, AgentUsageWindowSnapshot } from "./types";
 import { usePermanentAgentStatuses } from "./useAgentStatusAdapter";
@@ -38,19 +39,25 @@ export function formatReset(
   return `Resets in ${Math.ceil(remaining / 86_400)}d`;
 }
 
+function primaryPercent(status: AgentStatusViewModel): number | null {
+  const knownPercents = status.usageWindows.map((window) => window.usedPercent);
+  if (status.contextPercent !== null) {
+    knownPercents.push(status.contextPercent);
+  }
+  return knownPercents.length > 0 ? Math.max(...knownPercents) : null;
+}
+
 function MetricBar({
   label,
   percent,
   detail,
-  className,
 }: {
   label: string;
   percent: number;
   detail?: string | null;
-  className?: string;
 }) {
   return (
-    <div className={cn("space-y-1", className)}>
+    <div className="space-y-1">
       <div className="flex min-w-0 items-baseline justify-between gap-2 text-xs">
         <span className="truncate text-muted-foreground">{label}</span>
         <span className="shrink-0 font-medium tabular-nums text-foreground">
@@ -116,13 +123,68 @@ function UsageWindow({
   );
 }
 
-function AgentStatusCard({
-  compact = false,
-  nowSeconds,
+export function AgentStatusIndicator({
+  className,
   status,
 }: {
-  compact?: boolean;
-  nowSeconds: number;
+  className?: string;
+  status: AgentStatusViewModel;
+}) {
+  const percent = primaryPercent(status);
+  const label =
+    percent === null
+      ? `${status.label} usage unavailable`
+      : `${status.label} usage: ${formatPercent(percent)}`;
+
+  return (
+    <span
+      aria-label={label}
+      className={cn(
+        "relative inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold leading-none tabular-nums",
+        status.state === "stale"
+          ? "text-amber-600 dark:text-amber-400"
+          : status.state === "error"
+            ? "text-destructive"
+            : "text-muted-foreground",
+        className,
+      )}
+      role="img"
+      title={label}
+    >
+      <svg aria-hidden="true" className="absolute inset-0 size-full -rotate-90">
+        <circle
+          className="stroke-current opacity-15"
+          cx="16"
+          cy="16"
+          fill="none"
+          r="13"
+          strokeWidth="2"
+        />
+        {percent !== null ? (
+          <circle
+            className="stroke-current"
+            cx="16"
+            cy="16"
+            fill="none"
+            pathLength="100"
+            r="13"
+            strokeDasharray="100"
+            strokeDashoffset={100 - percent}
+            strokeLinecap="round"
+            strokeWidth="2"
+          />
+        ) : null}
+      </svg>
+      <span>{percent === null ? "—" : formatPercent(percent)}</span>
+    </span>
+  );
+}
+
+export function AgentStatusDetails({
+  nowSeconds = Math.floor(Date.now() / 1_000),
+  status,
+}: {
+  nowSeconds?: number;
   status: AgentStatusViewModel;
 }) {
   const hasMetrics = status.state === "ready" || status.state === "stale";
@@ -130,39 +192,18 @@ function AgentStatusCard({
   const technicalLabel = [status.model, status.harness]
     .filter(Boolean)
     .join(" · ");
+  const usageWindowOccurrences = new Map<string, number>();
 
   return (
-    <article
-      aria-label={`${status.label} usage`}
-      className={cn(
-        "rounded-xl border border-border/60 bg-background/45",
-        compact ? "min-w-44 space-y-1.5 px-2.5 py-2" : "space-y-2.5 p-3",
-      )}
-    >
+    <div className="w-64 space-y-3" data-testid="agent-status-details">
       <header className="flex min-w-0 items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span
-            aria-hidden="true"
-            className={cn(
-              "size-2 shrink-0 rounded-full",
-              status.state === "ready"
-                ? "bg-emerald-500"
-                : status.state === "stale"
-                  ? "bg-amber-500"
-                  : status.state === "error"
-                    ? "bg-destructive"
-                    : "bg-muted-foreground/40",
-            )}
-          />
-          <span className="truncate text-sm font-semibold">{status.label}</span>
-        </div>
+        <span className="truncate text-sm font-semibold">{status.label}</span>
         {status.state === "stale" ? (
           <span className="text-xs font-medium text-amber-600 dark:text-amber-400">
             Stale
           </span>
         ) : null}
       </header>
-
       {hasMetrics ? (
         <>
           {status.contextPercent !== null ? (
@@ -176,13 +217,17 @@ function AgentStatusCard({
               Context unavailable
             </div>
           )}
-          {status.usageWindows.map((window, index) => (
-            <UsageWindow
-              key={`${window.label}-${index}`}
-              nowSeconds={nowSeconds}
-              window={window}
-            />
-          ))}
+          {status.usageWindows.map((window) => {
+            const occurrence = usageWindowOccurrences.get(window.label) ?? 0;
+            usageWindowOccurrences.set(window.label, occurrence + 1);
+            return (
+              <UsageWindow
+                key={`${window.label}-${occurrence}`}
+                nowSeconds={nowSeconds}
+                window={window}
+              />
+            );
+          })}
           <footer className="flex min-w-0 items-center justify-between gap-2 text-xs text-muted-foreground">
             <span className="truncate" title={technicalLabel || undefined}>
               {technicalLabel || "Unknown runtime"}
@@ -193,7 +238,36 @@ function AgentStatusCard({
       ) : (
         <StatusMessage status={status} />
       )}
-    </article>
+    </div>
+  );
+}
+
+export function AgentStatusPopover({
+  className,
+  nowSeconds,
+  status,
+}: {
+  className?: string;
+  nowSeconds?: number;
+  status: AgentStatusViewModel;
+}) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          className={cn(
+            "rounded-full outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+            className,
+          )}
+          type="button"
+        >
+          <AgentStatusIndicator status={status} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-auto p-3">
+        <AgentStatusDetails nowSeconds={nowSeconds} status={status} />
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -204,10 +278,11 @@ export function AgentStatusSidebarPanel({
   statuses: readonly AgentStatusViewModel[];
   nowSeconds?: number;
 }) {
+  if (statuses.length === 0) return null;
   return (
     <section
-      aria-label="Agent status"
-      className="hidden space-y-2 border-t border-border/50 px-2 pt-2 md:block"
+      aria-label="Agent usage"
+      className="space-y-1 border-t border-border/50 px-2 pt-2 group-data-[collapsible=icon]:hidden"
       data-testid="agent-status-sidebar"
     >
       <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -215,38 +290,15 @@ export function AgentStatusSidebarPanel({
         Agent usage
       </div>
       {statuses.map((status) => (
-        <AgentStatusCard
+        <div
+          className="flex min-w-0 items-center justify-between gap-2 rounded-lg px-1.5 py-0.5"
           key={status.id}
-          nowSeconds={nowSeconds}
-          status={status}
-        />
+        >
+          <span className="truncate text-xs font-medium">{status.label}</span>
+          <AgentStatusPopover nowSeconds={nowSeconds} status={status} />
+        </div>
       ))}
     </section>
-  );
-}
-
-export function AgentStatusMobileBar({
-  statuses,
-  nowSeconds = Math.floor(Date.now() / 1_000),
-}: {
-  statuses: readonly AgentStatusViewModel[];
-  nowSeconds?: number;
-}) {
-  return (
-    <aside
-      aria-label="Agent status"
-      className="fixed inset-x-2 bottom-[max(0.5rem,env(safe-area-inset-bottom))] z-30 flex gap-2 overflow-x-auto rounded-2xl border border-border/70 bg-background/90 p-1.5 shadow-lg backdrop-blur-xl md:hidden"
-      data-testid="agent-status-mobile"
-    >
-      {statuses.map((status) => (
-        <AgentStatusCard
-          compact
-          key={status.id}
-          nowSeconds={nowSeconds}
-          status={status}
-        />
-      ))}
-    </aside>
   );
 }
 
@@ -255,7 +307,14 @@ export function PermanentAgentStatusSidebarPanel() {
   return <AgentStatusSidebarPanel statuses={statuses} />;
 }
 
-export function PermanentAgentStatusMobileBar() {
+export function AgentStatusForPubkey({ pubkey }: { pubkey?: string }) {
   const statuses = usePermanentAgentStatuses();
-  return <AgentStatusMobileBar statuses={statuses} />;
+  const normalizedPubkey = pubkey?.trim().toLowerCase();
+  const status = normalizedPubkey
+    ? statuses.find(
+        (candidate) =>
+          candidate.agentPubkey?.toLowerCase() === normalizedPubkey,
+      )
+    : undefined;
+  return status ? <AgentStatusPopover status={status} /> : null;
 }
