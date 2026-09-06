@@ -177,6 +177,8 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
         "GIT_EXEC_PATH",
         "GIT_CONFIG_PARAMETERS",
         "GIT_CONFIG_COUNT",
+        "GIT_ALLOW_PROTOCOL",
+        "GIT_PROTOCOL_FROM_USER",
         "NOSTR_PRIVATE_KEY",
         TRUSTED_EXTERNAL_GIT_ORIGINS_ENV,
     ] {

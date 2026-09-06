@@ -47,6 +47,13 @@ export function projectCloneErrorPresentation(
         "You need access to the repository’s channel before you can clone it.",
     };
   }
+  if (message.includes("must be github.com or a host listed in")) {
+    return {
+      title: "Repository host not trusted",
+      description:
+        "Ask your Buzz operator to add this GitLab origin to `BUZZ_TRUSTED_EXTERNAL_GIT_ORIGINS` and restart Buzz.",
+    };
+  }
   if (message.includes("install the gh cli")) {
     return {
       title: "GitHub CLI required",

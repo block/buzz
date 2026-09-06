@@ -1,6 +1,6 @@
 use super::project_git_exec::{
     build_git_auth_config, build_git_auth_config_for_url, clean_branch, clean_target_ref, run_git,
-    validate_local_clone_url_for_workspace, GitAuthConfig,
+    validate_local_clone_url_for_workspace, validate_workspace_clone_url, GitAuthConfig,
 };
 use super::project_git_file_content::{checkout_project_repo, read_preview_content};
 use super::project_git_push::push_project_local_repository_blocking;
@@ -806,8 +806,8 @@ pub async fn push_project_local_repository(
     base_branch: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoPushResult, String> {
-    validate_local_clone_url_for_workspace(&clone_url, &state)?;
-    let auth = build_git_auth_config_for_url(&clone_url, &state)?;
+    validate_workspace_clone_url(&clone_url, &state)?;
+    let auth = build_git_auth_config(&state)?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let Some(repo_dir) =

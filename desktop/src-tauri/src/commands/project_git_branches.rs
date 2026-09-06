@@ -3,8 +3,7 @@
 use super::project_git::first_output_line;
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
-    build_git_auth_config_for_url, clean_branch, run_git, validate_local_clone_url_for_workspace,
-    GitAuthConfig,
+    build_git_auth_config, clean_branch, run_git, validate_workspace_clone_url, GitAuthConfig,
 };
 use crate::app_state::AppState;
 use serde::Serialize;
@@ -174,14 +173,14 @@ pub async fn create_project_remote_branch(
     new_branch: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoBranchResult, String> {
-    validate_local_clone_url_for_workspace(&clone_url, &state)?;
+    validate_workspace_clone_url(&clone_url, &state)?;
     let source_branch = normalize_branch(&source_branch, "source")?;
     let expected_commit = normalize_commit(&expected_commit, "source")?;
     let new_branch = normalize_branch(&new_branch, "new")?;
     if new_branch == source_branch {
         return Err("The new branch must have a different name.".to_string());
     }
-    let auth = build_git_auth_config_for_url(&clone_url, &state)?;
+    let auth = build_git_auth_config(&state)?;
 
     tauri::async_runtime::spawn_blocking(move || {
         create_remote_branch_blocking(
@@ -203,10 +202,10 @@ pub async fn delete_project_remote_branch(
     expected_commit: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoBranchResult, String> {
-    validate_local_clone_url_for_workspace(&clone_url, &state)?;
+    validate_workspace_clone_url(&clone_url, &state)?;
     let branch = normalize_branch(&branch, "branch")?;
     let expected_commit = normalize_commit(&expected_commit, "branch")?;
-    let auth = build_git_auth_config_for_url(&clone_url, &state)?;
+    let auth = build_git_auth_config(&state)?;
 
     tauri::async_runtime::spawn_blocking(move || {
         delete_remote_branch_blocking(&clone_url, &branch, &expected_commit, &auth)
