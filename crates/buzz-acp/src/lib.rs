@@ -35,7 +35,7 @@ use buzz_core::observer::{
 use clap::Parser;
 use config::{
     AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    MultipleEventHandling, RespondTo, SubscribeMode, MAX_MODELS_TIMEOUT_SECS,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -63,8 +63,24 @@ fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
 }
 
-/// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
-const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for auth-methods / authenticate initialize probes (not models).
+const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Resolve the `buzz-acp models` session-handshake timeout, clamped to a
+/// bounded range so misconfiguration cannot hang forever or use zero.
+fn models_handshake_timeout(secs: u64) -> Duration {
+    Duration::from_secs(secs.clamp(1, MAX_MODELS_TIMEOUT_SECS))
+}
+
+fn stop_reason_wire(reason: &acp::StopReason) -> &'static str {
+    match reason {
+        acp::StopReason::EndTurn => "end_turn",
+        acp::StopReason::Cancelled => "cancelled",
+        acp::StopReason::MaxTokens => "max_tokens",
+        acp::StopReason::MaxTurnRequests => "max_turn_requests",
+        acp::StopReason::Refusal => "refusal",
+    }
+}
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
@@ -5613,7 +5629,7 @@ async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
         }
     };
 
-    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+    let init_result = match tokio::time::timeout(AUTH_PROBE_TIMEOUT, client.initialize()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -5622,7 +5638,7 @@ async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent timed out ({AUTH_PROBE_TIMEOUT:?})");
             std::process::exit(1);
         }
     };
@@ -5661,7 +5677,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
         }
     };
 
-    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+    let init_result = match tokio::time::timeout(AUTH_PROBE_TIMEOUT, client.initialize()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -5670,7 +5686,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent initialize timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent initialize timed out ({AUTH_PROBE_TIMEOUT:?})");
             std::process::exit(1);
         }
     };
@@ -5708,11 +5724,12 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
     }
 }
 
-/// Flow: spawn → initialize → session/new → print models → shutdown.
-/// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
+/// Flow: spawn → initialize → session/new → print models → optional prompt → shutdown.
+/// No relay connection, no MCP servers, no subscriptions.
 async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
+    let handshake_timeout = models_handshake_timeout(args.timeout_secs);
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
     let cwd = current_working_directory()?;
 
@@ -5727,9 +5744,9 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
             }
         };
 
-    // Initialize + session/new under a timeout. Client is owned above,
-    // so shutdown() runs on all paths (success, error, timeout).
-    let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
+    // Initialize + session/new under a configurable timeout. Client is owned
+    // above, so shutdown() runs on all paths (success, error, timeout).
+    let protocol_result = tokio::time::timeout(handshake_timeout, async {
         let init = client.initialize().await?;
         let session = client.session_new_full(&cwd, vec![], None, None).await?;
         Ok::<_, acp::AcpError>((init, session))
@@ -5745,7 +5762,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent timed out ({handshake_timeout:?})");
             std::process::exit(1);
         }
     };
@@ -5768,9 +5785,30 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     let config_options = extract_model_config_options(&session_resp.raw);
     let model_state = extract_model_state(&session_resp.raw);
 
+    // Optional real prompt on the same session (diagnostic path).
+    let mut prompt_stop: Option<&'static str> = None;
+    if let Some(prompt_text) = args.prompt.as_deref() {
+        match client
+            .session_prompt_with_idle_timeout(
+                &session_resp.session_id,
+                prompt_text,
+                Duration::from_secs(120),
+                Duration::from_secs(300),
+            )
+            .await
+        {
+            Ok(reason) => prompt_stop = Some(stop_reason_wire(&reason)),
+            Err(e) => {
+                client.shutdown().await;
+                eprintln!("error: prompt failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if args.json {
         // Structured JSON output — consumed by Phase 3 `get_agent_models`.
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "agent": {
                 "name": agent_name,
                 "version": agent_version,
@@ -5782,7 +5820,11 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
                 "currentModelId": ms.get("currentModelId"),
                 "availableModels": ms.get("availableModels"),
             })),
+            "handshakeTimeoutSecs": handshake_timeout.as_secs(),
         });
+        if let Some(stop) = prompt_stop {
+            output["prompt"] = serde_json::json!({ "stopReason": stop });
+        }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         // Human-readable output.
@@ -5837,10 +5879,117 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         if !has_models {
             println!("No model information available from this agent.");
         }
+
+        if let Some(stop) = prompt_stop {
+            println!();
+            println!("Prompt stopReason: {stop}");
+        }
     }
 
     client.shutdown().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod models_handshake_timeout_tests {
+    use super::*;
+    use clap::Parser;
+    use config::DEFAULT_MODELS_TIMEOUT_SECS;
+
+    /// Scripted ACP agent: initialize replies immediately; session/new sleeps
+    /// 11s (> legacy 10s); later requests get empty models.
+    fn slow_session_new_script() -> String {
+        r#"count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  id=$((count - 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"serverInfo\":{\"name\":\"slow-models\",\"version\":\"0\"},\"agentCapabilities\":{}}}"
+  elif [ "$count" -eq 2 ]; then
+    sleep 11
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"sess-slow\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"models\":[]}}"
+  fi
+done"#
+            .to_string()
+    }
+
+    async fn handshake_with_timeout(
+        timeout: Duration,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let script = slow_session_new_script();
+        let mut client = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .map_err(|e| e.to_string())?;
+        let cwd = current_working_directory().map_err(|e| e.to_string())?;
+        let result = tokio::time::timeout(timeout, async {
+            let _init = client.initialize().await.map_err(|e| e.to_string())?;
+            let _sess = client
+                .session_new_full(&cwd, vec![], None, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })
+        .await;
+        client.shutdown().await;
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e.into()),
+            Err(_) => Err("timed out waiting for agent session".into()),
+        }
+    }
+
+    #[test]
+    fn models_default_timeout_exceeds_legacy_ten_seconds() {
+        assert!(
+            DEFAULT_MODELS_TIMEOUT_SECS > 10,
+            "default must clear the legacy 10s false-negative window"
+        );
+        assert_eq!(
+            models_handshake_timeout(DEFAULT_MODELS_TIMEOUT_SECS),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            models_handshake_timeout(0),
+            Duration::from_secs(1),
+            "zero clamps to 1s (bounded, non-hanging)"
+        );
+        assert_eq!(
+            models_handshake_timeout(u64::MAX),
+            Duration::from_secs(MAX_MODELS_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn models_args_document_timeout_flag_and_env() {
+        let args = ModelsArgs::parse_from(["buzz-acp models", "--timeout-secs", "45"]);
+        assert_eq!(args.timeout_secs, 45);
+        assert!(args.prompt.is_none());
+
+        let with_prompt = ModelsArgs::parse_from(["buzz-acp models", "--prompt", "ping", "--json"]);
+        assert_eq!(with_prompt.timeout_secs, DEFAULT_MODELS_TIMEOUT_SECS);
+        assert_eq!(with_prompt.prompt.as_deref(), Some("ping"));
+        assert!(with_prompt.json);
+    }
+
+    #[tokio::test]
+    async fn models_handshake_times_out_under_legacy_10s_when_session_new_is_slow() {
+        let err = handshake_with_timeout(Duration::from_secs(10))
+            .await
+            .expect_err("11s session/new must fail under a 10s handshake budget");
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_handshake_succeeds_when_timeout_allows_session_new_over_10s() {
+        handshake_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("11s session/new must succeed with a 30s handshake budget");
+    }
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
