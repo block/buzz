@@ -76,6 +76,7 @@ Export:
 ```bash
 export BUZZ_RELAY_URL="http://localhost:3000"
 export BUZZ_PRIVATE_KEY="nsec1..."   # from the mint output
+# Prefer file/stdin in shared shells: buzz --private-key-file /tmp/nsec …
 ```
 
 ### Scope reference
