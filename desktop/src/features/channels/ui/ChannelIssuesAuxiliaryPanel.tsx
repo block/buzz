@@ -1,7 +1,9 @@
-import { ArrowLeft, X } from "lucide-react";
+import { ArrowLeft, Plus, X } from "lucide-react";
 import * as React from "react";
 
+import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { useProjectsQuery } from "@/features/projects/hooks";
+import { CreateIssueDialog } from "@/features/projects/ui/CreateIssueDialog";
 import { ProjectIssuesPanel } from "@/features/projects/ui/ProjectIssuesPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import type { Channel } from "@/shared/api/types";
@@ -101,6 +103,17 @@ function ChannelIssuesAuxiliaryPanelForChannel({
   const [selectedIssueId, setSelectedIssueId] = React.useState<string | null>(
     null,
   );
+  const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
+  const createIssueMutation = useCreateProjectIssueMutation(repository);
+
+  const handleCreateIssue = React.useCallback(
+    async ({ body, title }: { body: string; title: string }) => {
+      await createIssueMutation.mutateAsync({ body, title });
+      await projectsQuery.refetch();
+      setCreateIssueOpen(false);
+    },
+    [createIssueMutation, projectsQuery],
+  );
 
   return (
     <RightAuxiliaryPane
@@ -121,12 +134,33 @@ function ChannelIssuesAuxiliaryPanelForChannel({
           {projectsQuery.isLoading ? (
             <p className="p-4 text-sm text-muted-foreground">Loading issues…</p>
           ) : repository ? (
-            <ProjectIssuesPanel
-              onSelectedIssueIdChange={setSelectedIssueId}
-              profiles={profiles}
-              project={repository}
-              selectedIssueId={selectedIssueId}
-            />
+            <>
+              {!selectedIssueId ? (
+                <div className="flex justify-end px-4 pt-3">
+                  <Button
+                    onClick={() => setCreateIssueOpen(true)}
+                    size="sm"
+                    type="button"
+                  >
+                    <Plus className="h-4 w-4" />
+                    Create issue
+                  </Button>
+                </div>
+              ) : null}
+              <ProjectIssuesPanel
+                onSelectedIssueIdChange={setSelectedIssueId}
+                profiles={profiles}
+                project={repository}
+                selectedIssueId={selectedIssueId}
+              />
+              <CreateIssueDialog
+                isCreating={createIssueMutation.isPending}
+                onCreate={handleCreateIssue}
+                onOpenChange={setCreateIssueOpen}
+                open={createIssueOpen}
+                projectName={repository.name}
+              />
+            </>
           ) : (
             <p className="p-4 text-sm text-muted-foreground">
               Link a repository to this channel to keep its issue work here.

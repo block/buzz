@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockBridge } from "../helpers/bridge";
+import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const ISSUE_COMMENTS = [
   "First issue comment",
@@ -110,6 +110,70 @@ test("channel issue detail has a back path to the scoped issue list", async ({
 
   await panel.getByRole("button", { name: "Back to issues" }).click();
   await expect(panel.getByTestId("project-issue-row").first()).toBeVisible();
+});
+
+test("channel issues preserve an open thread and create in the linked repository", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-general").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: "general",
+          }) ?? false,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(
+    ({ parentEventId, pubkey }) =>
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "Issue context reply",
+        parentEventId,
+        pubkey,
+      }),
+    {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await page.getByTestId("message-thread-summary").first().click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+
+  await page.getByTestId("channel-issues-trigger").click();
+  const issuesPanel = page.getByTestId("channel-issues-auxiliary-pane");
+  await expect(issuesPanel).toBeVisible();
+  await expect(threadPanel).toBeVisible();
+
+  await issuesPanel.getByRole("button", { name: "Create issue" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create an issue" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Title").fill("Create from channel issues");
+  await dialog.getByLabel("Description").fill("Created in the channel.");
+  await dialog.getByRole("button", { name: "Create issue" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  const createdIssue = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) =>
+        event.kind === 1621 && event.content === "Created in the channel.",
+    ),
+  );
+  expect(createdIssue?.tags).toContainEqual(["a", expect.any(String)]);
+
+  await issuesPanel.getByRole("button", { name: "Close issues" }).click();
+  await expect(issuesPanel).toHaveCount(0);
+  await expect(threadPanel).toBeVisible();
+
+  await threadPanel.getByRole("button", { name: "Close panel" }).click();
+  await expect(threadPanel).toHaveCount(0);
 });
 
 test("issue assignees can be assigned and unassigned", async ({ page }) => {

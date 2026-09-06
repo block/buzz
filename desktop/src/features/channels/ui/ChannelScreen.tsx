@@ -739,6 +739,9 @@ export function ChannelScreen({
     setProfilePanelPubkey,
     toggleIssues: issuesPanel.toggle,
   });
+  const handleToggleIssuesForLayout = React.useCallback(() => {
+    handleToggleIssues({ preserveThread: !isSinglePanelView });
+  }, [handleToggleIssues, isSinglePanelView]);
   const handleToggleMembers = React.useCallback(
     () => setIsMembersSidebarOpen((prev) => !prev),
     [],
@@ -761,7 +764,7 @@ export function ChannelScreen({
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
-        onToggleIssues={handleToggleIssues}
+        onToggleIssues={handleToggleIssuesForLayout}
         onToggleMembers={handleToggleMembers}
         showHeaderContent={!isSinglePanelView && !isHuddleTranscript}
         transparentChrome={activeChannel?.channelType !== "forum"}
@@ -782,7 +785,7 @@ export function ChannelScreen({
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
-      handleToggleIssues,
+      handleToggleIssuesForLayout,
       handleToggleMembers,
       isSinglePanelView,
       isHuddleTranscript,

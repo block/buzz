@@ -785,7 +785,82 @@ export const ChannelPane = React.memo(function ChannelPane({
        * frozen snapshot because the panel is fully prop-driven.
        */}
       <AnimatePresence onExitComplete={markExitComplete}>
-        {issuesPanelOpen && activeChannel ? (
+        {useSplitAuxiliaryPane &&
+        threadHeadMessage &&
+        issuesPanelOpen &&
+        activeChannel ? (
+          <>
+            {(() => {
+              const panel = (
+                <MessageThreadPanel
+                  channel={activeChannel}
+                  channelId={activeChannel?.id ?? null}
+                  channelName={activeChannel?.name ?? "channel"}
+                  currentPubkey={currentPubkey}
+                  disabled={isComposerDisabled}
+                  editTarget={threadEditTarget}
+                  firstUnreadReplyId={threadFirstUnreadReplyId}
+                  huddleMemberPubkeys={huddleMemberPubkeys}
+                  huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                  isHuddleTranscript={isHuddleTranscript}
+                  isFollowingThread={isFollowingThread}
+                  isMessageUnreadById={isMessageUnreadById}
+                  isSending={isSending}
+                  {...threadLayoutProps}
+                  autoSendDraftKey={autoSendDraftKey}
+                  onAutoSubmitComplete={handleAutoSubmitComplete}
+                  onCancelEdit={onCancelEdit}
+                  onCancelReply={onCancelThreadReply}
+                  onClose={onCloseThread}
+                  onDelete={onDelete}
+                  onEdit={onEdit}
+                  onEditLastOwnMessage={handleEditLastOwnThreadMessage}
+                  onEditSave={onEditSave}
+                  onFollowThread={onFollowThread}
+                  onMarkUnread={onMarkUnread}
+                  onMarkRead={onMarkRead}
+                  onExpandReplies={onExpandThreadReplies}
+                  onSelectReplyTarget={onSelectThreadReplyTarget}
+                  onSend={onSendThreadReply}
+                  onSendToChannel={
+                    isComposerDisabled ? undefined : onSendToChannel
+                  }
+                  onScrollTargetResolved={() => resolveScrollTarget()}
+                  onScrollTargetSettled={resolveScrollTarget}
+                  onToggleReaction={onToggleReaction}
+                  onUnfollowThread={onUnfollowThread}
+                  profiles={profiles}
+                  replyTargetMessage={threadReplyTargetMessage}
+                  scrollTargetHighlights={!layoutScrollTargetId}
+                  scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
+                  threadHead={threadHeadMessage}
+                  videoReviewPresentation={threadVideoReviewPresentation}
+                  widthPx={threadPanelWidthPx}
+                  threadReplies={threadMessages}
+                  threadRepliesPending={threadMessagesPending}
+                  threadUnreadCount={threadUnreadCounts?.get(
+                    threadHeadMessage.id,
+                  )}
+                  threadReplyUnreadCounts={threadReplyUnreadCounts}
+                  threadTypingPubkeys={threadTypingPubkeys}
+                  activityAccessoryVisible={hasThreadComposerBotActivity}
+                  composerToolbarExtraActions={threadContextRing}
+                />
+              );
+              return wrapThreadPanel(panel);
+            })()}
+            <ChannelIssuesAuxiliaryPanel
+              activeChannel={activeChannel}
+              canResetWidth={canResetThreadPanelWidth}
+              key="channel-issues-panel"
+              onClose={() => onCloseIssuesPanel?.()}
+              onResetWidth={onResetThreadPanelWidth}
+              onResizeStart={onThreadPanelResizeStart}
+              profiles={profiles}
+              widthPx={threadPanelWidthPx}
+            />
+          </>
+        ) : issuesPanelOpen && activeChannel ? (
           <ChannelIssuesAuxiliaryPanel
             activeChannel={activeChannel}
             canResetWidth={canResetThreadPanelWidth}

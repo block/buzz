@@ -21,17 +21,20 @@ export function useChannelIssuesPanelToggle({
   setProfilePanelPubkey: (pubkey: string | null) => void;
   toggleIssues: () => void;
 }) {
-  return React.useCallback(() => {
-    toggleIssues();
-    setOpenThreadHeadId(null);
-    setProfilePanelPubkey(null);
-    setChannelManagementOpen(false);
-    closeAgentSession();
-  }, [
-    closeAgentSession,
-    setChannelManagementOpen,
-    setOpenThreadHeadId,
-    setProfilePanelPubkey,
-    toggleIssues,
-  ]);
+  return React.useCallback(
+    (options?: { preserveThread?: boolean }) => {
+      toggleIssues();
+      if (!options?.preserveThread) setOpenThreadHeadId(null);
+      setProfilePanelPubkey(null);
+      setChannelManagementOpen(false);
+      closeAgentSession();
+    },
+    [
+      closeAgentSession,
+      setChannelManagementOpen,
+      setOpenThreadHeadId,
+      setProfilePanelPubkey,
+      toggleIssues,
+    ],
+  );
 }
