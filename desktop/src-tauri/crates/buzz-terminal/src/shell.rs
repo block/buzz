@@ -21,6 +21,7 @@
 //! on many systems. A directory or a non-executable file falls through to the
 //! next candidate instead of becoming an unspawnable child.
 
+#[cfg(unix)]
 use std::path::Path;
 
 /// Last-resort shell. POSIX guarantees `/bin/sh`; if this is not executable

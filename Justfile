@@ -170,13 +170,15 @@ _ensure-sidecar-stubs:
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    EXE=""
+    [[ "$TARGET" == *windows* ]] && EXE=".exe"
     mkdir -p desktop/src-tauri/binaries
     SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
     if [[ "$TARGET" != *windows* ]]; then
         SIDECARS+=(buzz-backend-kubernetes)
     fi
     for bin in "${SIDECARS[@]}"; do
-        touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        touch "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE}"
     done
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
@@ -276,15 +278,17 @@ desktop-release-build target="aarch64-apple-darwin":
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET={{target}}
+    EXE=""
+    [[ "$TARGET" == *windows* ]] && EXE=".exe"
     mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
+    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET$EXE"
+    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET$EXE"
     if [[ "$TARGET" != *windows* ]]; then
-        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
+        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET$EXE"
     fi
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET$EXE"
+    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET$EXE"
+    touch "desktop/src-tauri/binaries/buzz-$TARGET$EXE"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
@@ -663,10 +667,12 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    EXE=""
+    [[ "$TARGET" == *windows* ]] && EXE=".exe"
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
     for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
-        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
-        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        cp "${TARGET_DIR}/debug/${bin}${EXE}" "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE}"
     done
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
@@ -700,14 +706,16 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     # exe dir for executable buzz-backend-* files, so the non-executable stub that
     # tauri dev copies next to the exe would hide the provider from "Run on".
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    EXE=""
+    [[ "$TARGET" == *windows* ]] && EXE=".exe"
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
     STAGING_SIDECARS=(buzz)
     if [[ "$TARGET" != *windows* ]]; then
         STAGING_SIDECARS+=(buzz-backend-kubernetes)
     fi
     for bin in "${STAGING_SIDECARS[@]}"; do
-        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
-        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        cp "${TARGET_DIR}/release/${bin}${EXE}" "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE}"
     done
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
@@ -735,14 +743,16 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
     # exe dir for executable buzz-backend-* files, so the non-executable stub that
     # tauri dev copies next to the exe would hide the provider from "Run on".
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    EXE=""
+    [[ "$TARGET" == *windows* ]] && EXE=".exe"
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
     PRODUCTION_SIDECARS=(buzz)
     if [[ "$TARGET" != *windows* ]]; then
         PRODUCTION_SIDECARS+=(buzz-backend-kubernetes)
     fi
     for bin in "${PRODUCTION_SIDECARS[@]}"; do
-        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
-        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        cp "${TARGET_DIR}/release/${bin}${EXE}" "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE}"
     done
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://buzz.block.builderlab.xyz"
