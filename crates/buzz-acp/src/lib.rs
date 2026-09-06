@@ -110,6 +110,76 @@ async fn publish_presence(
     Ok(())
 }
 
+/// Publish this agent's kind:10100 entry in the relay agent directory.
+///
+/// The directory is how a client that does NOT manage this agent locally
+/// learns the agent can be invoked. Desktop resolves mention candidates
+/// through `getMentionableAgentPubkeys`, whose only source for a
+/// non-locally-managed agent is this event (`respond_to`,
+/// `respond_to_allowlist`, `channel_ids`); mobile mirrors the same rule in
+/// `agentIsSharedWithUser`. Both have consumed it since before this commit —
+/// nothing on any surface published it, so the whole path sat dead and an
+/// agent was mentionable only from the one machine holding it in
+/// `managed-agents.json`. Mobile's `role == "bot"` member fallback masked it
+/// there; desktop has no such fallback, so mentions silently went out with no
+/// `p` tag and the agent was never woken.
+///
+/// `display_name` is deliberately omitted: both clients prefer the kind:0
+/// profile for the rendered name, and the harness has no configured name of
+/// its own to contribute.
+///
+/// Kind 10100 is replaceable, so each publish supersedes this pubkey's
+/// previous entry.
+async fn publish_agent_directory_entry(
+    publisher: &relay::RelayEventPublisher,
+    keys: &nostr::Keys,
+    respond_to: &config::RespondTo,
+    respond_to_allowlist: &HashSet<String>,
+    channel_ids: &HashSet<Uuid>,
+) -> Result<(), relay::RelayError> {
+    use buzz_core::kind::KIND_AGENT_PROFILE;
+    use nostr::{EventBuilder, Kind};
+
+    let content = agent_directory_content(respond_to, respond_to_allowlist, channel_ids);
+
+    let event = EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE as u16), content)
+        .tags([])
+        .sign_with_keys(keys)
+        .map_err(|e| relay::RelayError::Http(format!("agent directory sign error: {e}")))?;
+    publisher.publish_event(event).await?;
+    Ok(())
+}
+
+/// Build the kind:10100 content body. Field names are the wire contract shared
+/// with desktop (`nostr_convert::agents_from_events`) and mobile
+/// (`AgentDirectoryEntry.fromEvent`) — renaming one silently drops the agent
+/// from that client's mention autocomplete rather than failing loudly.
+///
+/// Sets are serialized sorted: the event is replaceable and re-signed on every
+/// start, so a stable byte order keeps an unchanged agent from looking like a
+/// new entry on each restart.
+///
+/// `channel_add_policy` is deliberately NOT emitted. The relay treats it as the
+/// authoritative policy for the author, so including a guess here would
+/// overwrite whatever the operator set via `buzz channels set-add-policy`.
+fn agent_directory_content(
+    respond_to: &config::RespondTo,
+    respond_to_allowlist: &HashSet<String>,
+    channel_ids: &HashSet<Uuid>,
+) -> String {
+    let mut allowlist: Vec<String> = respond_to_allowlist.iter().cloned().collect();
+    allowlist.sort();
+    let mut channels: Vec<String> = channel_ids.iter().map(Uuid::to_string).collect();
+    channels.sort();
+
+    serde_json::json!({
+        "respond_to": respond_to.to_string(),
+        "respond_to_allowlist": allowlist,
+        "channel_ids": channels,
+    })
+    .to_string()
+}
+
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
     start_nonce: &str,
@@ -2788,6 +2858,36 @@ async fn tokio_main() -> Result<()> {
         match publish_presence(&presence_publisher, &presence_keys, "online").await {
             Ok(_) => tracing::info!("presence set to online"),
             Err(e) => tracing::warn!("failed to set initial presence: {e}"),
+        }
+    }
+
+    // Published from the same readiness boundary as presence, and for the same
+    // reason: the channel set is only truthful once subscriptions resolved.
+    // Desktop scopes eligibility per channel (`relayAgentCanRespondInChannel`),
+    // so an entry listing channels the agent never subscribed to would offer a
+    // mention that can never be answered.
+    //
+    // `Nobody` is skipped rather than advertised. It is a heartbeat-only mode
+    // with nothing to invoke, and the desktop's `RespondTo` has no `nobody`
+    // variant — publishing it would fail deserialization of the whole
+    // `Vec<RelayAgentInfo>` and blank the directory for *every* agent, not
+    // just this one.
+    if config.respond_to != config::RespondTo::Nobody {
+        match publish_agent_directory_entry(
+            &presence_publisher,
+            &presence_keys,
+            &config.respond_to,
+            &config.respond_to_allowlist,
+            &subscribed_channel_ids,
+        )
+        .await
+        {
+            Ok(_) => tracing::info!(
+                respond_to = %config.respond_to,
+                channels = subscribed_channel_ids.len(),
+                "published agent directory entry (kind:10100)"
+            ),
+            Err(e) => tracing::warn!("failed to publish agent directory entry: {e}"),
         }
     }
 
@@ -9204,6 +9304,55 @@ mod build_mcp_servers_tests {
                 .iter()
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "empty display name should not be forwarded"
+        );
+    }
+
+    #[test]
+    fn agent_directory_content_carries_the_fields_clients_gate_on() {
+        let channel = Uuid::parse_str("53d663bd-383d-4719-a3ff-ddc44d8d1917").unwrap();
+        let content = agent_directory_content(
+            &config::RespondTo::Anyone,
+            &HashSet::new(),
+            &HashSet::from([channel]),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // These three keys ARE the cross-device mention contract: desktop's
+        // `relayAgentCanRespondInChannel` and mobile's `agentIsSharedWithUser`
+        // read exactly these to decide the agent is invocable.
+        assert_eq!(parsed["respond_to"], "anyone");
+        assert_eq!(parsed["respond_to_allowlist"], serde_json::json!([]));
+        assert_eq!(
+            parsed["channel_ids"],
+            serde_json::json!(["53d663bd-383d-4719-a3ff-ddc44d8d1917"])
+        );
+        // Emitting a policy here would clobber the operator's stored value.
+        assert!(parsed.get("channel_add_policy").is_none());
+    }
+
+    #[test]
+    fn agent_directory_content_is_stable_across_restarts() {
+        let a = Uuid::parse_str("53d663bd-383d-4719-a3ff-ddc44d8d1917").unwrap();
+        let b = Uuid::parse_str("6ab8a700-fad7-41ac-966c-889e1965b652").unwrap();
+        let allowlist = HashSet::from(["b".repeat(64), "a".repeat(64)]);
+
+        // Same logical entry, different HashSet iteration order.
+        let first = agent_directory_content(
+            &config::RespondTo::Allowlist,
+            &allowlist,
+            &HashSet::from([a, b]),
+        );
+        let second = agent_directory_content(
+            &config::RespondTo::Allowlist,
+            &allowlist,
+            &HashSet::from([b, a]),
+        );
+        assert_eq!(first, second);
+
+        let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(
+            parsed["respond_to_allowlist"],
+            serde_json::json!(["a".repeat(64), "b".repeat(64)])
         );
     }
 
