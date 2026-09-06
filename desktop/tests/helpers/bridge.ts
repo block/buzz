@@ -148,6 +148,8 @@ type MockInstallRuntimeResult = {
 type MockBridgeOptions = {
   /** Tauri window label exposed to the app. Defaults to the main window. */
   windowLabel?: string;
+  /** Delay native backing updates to verify startup reveal ordering. */
+  windowBackingColorDelayMs?: number;
   ttsSettings?: {
     version: number;
     agentTextToSpeech: boolean;
