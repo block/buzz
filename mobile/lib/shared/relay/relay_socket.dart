@@ -98,7 +98,12 @@ class RelaySocket {
       if (identical(_connectingClient, client)) _connectingClient = null;
     }
 
-    if (!identical(_channel, channel)) return;
+    if (!identical(_channel, channel)) {
+      // Cancellation can race with a completed upgrade. That socket is no
+      // longer owned by the HTTP client, so close the retired channel too.
+      unawaited(channel.sink.close());
+      return;
+    }
 
     _state = SocketState.authenticating;
     _authCompleter = Completer<void>();
