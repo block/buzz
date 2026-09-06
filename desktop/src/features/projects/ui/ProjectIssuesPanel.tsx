@@ -396,7 +396,7 @@ function IssueStatusPicker({
   return (
     <div className="space-y-2">
       <select
-        aria-label="Change MyBuzz workflow status"
+        aria-label="Change issue status"
         className="h-8 w-full rounded-md border border-border/60 bg-transparent px-2 text-xs text-foreground"
         disabled={isPending}
         onChange={(event) =>
