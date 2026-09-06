@@ -1092,6 +1092,9 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         Some("completed") => ProviderStop::EndTurn,
         _ => ProviderStop::Other,
     };
+if text.is_empty() && !reasoning.is_empty() && tool_calls.is_empty() {
+        text = reasoning.clone();
+    }
     let input_tokens = sum_usage(&v, &["input_tokens"]).and_then(SumUsageResult::into_exact);
     let output_tokens = sum_usage(&v, &["output_tokens"]).and_then(SumUsageResult::into_exact);
     // The Responses API nests the cache split under `input_tokens_details`.
@@ -1464,7 +1467,7 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     let msg = choice
         .get("message")
         .ok_or_else(|| AgentError::Llm("missing message".into()))?;
-    let (text, block_reasoning) = openai_content_parts(msg.get("content"));
+    let (mut text, block_reasoning) = openai_content_parts(msg.get("content"));
     // DeepSeek and vLLM-style OpenAI-compat hosts expose reasoning tokens on the
     // message object. Prefer `reasoning_content` (DeepSeek's field name); fall
     // back to `reasoning` (some other providers), and last to reasoning blocks
@@ -1514,6 +1517,9 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         }
     }
     dedupe_provider_ids(&mut tool_calls);
+    if text.is_empty() && !reasoning.is_empty() && tool_calls.is_empty() {
+        text = reasoning.clone();
+    }
     let input_tokens = openai_chat_input_tokens(&v);
     let output_tokens = sum_usage(&v, &["completion_tokens"]).and_then(SumUsageResult::into_exact);
     let cached_input_tokens = openai_chat_cached_tokens(&v);
