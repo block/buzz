@@ -25,7 +25,7 @@ const overrides = new Set([
   // clientId (not a pubkey) sliced in a debug log next to the real thing.
   "src/features/channels/readState/readStateManager.ts:338",
   // Array windows (first N pubkeys), not string truncation.
-  "src/features/messages/lib/threadPanel.ts:395",
+  "src/features/messages/lib/threadPanel.ts:399",
   "src/features/projects/ui/ProjectsView.tsx:166",
   "src/features/projects/ui/ProjectsOverviewPanel.tsx:209",
 ]);

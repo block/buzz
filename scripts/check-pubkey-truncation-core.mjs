@@ -10,14 +10,37 @@ import path from "node:path";
  * which also offers full-key reveal + copy). Ad-hoc `pubkey.slice(0, N)`
  * display forms fragmented into five formats before this guard existed.
  *
- * It flags `.slice(` / `.substring(` / `.slice(0` template-truncations applied
- * to identifiers that look like a pubkey/npub, outside the canonical module.
+ * It flags `.slice(` / `.substring(` / `.substr(` truncations applied to
+ * identifiers that look like a pubkey/npub, outside the canonical module.
  * Non-display uses (array windows, color derivation from a key, avatar
  * initials) live in each app's `overrides` allowlist.
+ *
+ * The scan runs over whole file contents rather than a line at a time: the
+ * formatter wraps a long call as `authorPubkey\n  .slice(0, 8)`, which no
+ * single line matches.
  */
 
 const PUBKEY_SLICE_RE =
-  /\b[A-Za-z_$][\w$]*(?:[Pp]ubkey|[Pp]ub_key|[Nn]pub)[\w$]*\??\.(?:slice|substring)\(|\b(?:pubkey|npub)\??\.(?:slice|substring)\(/g;
+  /\b[A-Za-z_$][\w$]*(?:[Pp]ubkey|[Pp]ub_key|[Nn]pub)[\w$]*\??\s*(?:\r?\n\s*)?\.(?:slice|substring|substr)\(|\b(?:pubkey|npub)\??\s*(?:\r?\n\s*)?\.(?:slice|substring|substr)\(/g;
+
+/**
+ * Every hand-rolled truncation in `content`, as `{ line, text }` with a
+ * 1-based line number and the trimmed source line the match starts on.
+ */
+export function findPubkeyTruncations(content) {
+  const found = [];
+  PUBKEY_SLICE_RE.lastIndex = 0;
+  let match = PUBKEY_SLICE_RE.exec(content);
+  while (match !== null) {
+    const line = content.slice(0, match.index).split("\n").length;
+    found.push({
+      line,
+      text: content.split("\n")[line - 1].trim(),
+    });
+    match = PUBKEY_SLICE_RE.exec(content);
+  }
+  return found;
+}
 
 async function walkFiles(directory) {
   const entries = await fs.readdir(directory, { withFileTypes: true });
@@ -80,18 +103,13 @@ export async function runPubkeyTruncationCheck({
     }
 
     const content = await fs.readFile(filePath, "utf8");
-    const lines = content.split("\n");
-    lines.forEach((line, index) => {
-      PUBKEY_SLICE_RE.lastIndex = 0;
-      if (!PUBKEY_SLICE_RE.test(line)) {
-        return;
-      }
-      const key = `${relativePath.split(path.sep).join("/")}:${index + 1}`;
+    for (const found of findPubkeyTruncations(content)) {
+      const key = `${relativePath.split(path.sep).join("/")}:${found.line}`;
       if (overrides.has(key)) {
-        return;
+        continue;
       }
-      violations.push({ key, line: line.trim() });
-    });
+      violations.push({ key, line: found.text });
+    }
   }
 
   if (violations.length > 0) {
