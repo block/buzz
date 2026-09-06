@@ -1,13 +1,29 @@
+mod connection_observability;
 pub mod migration;
 pub(crate) mod observability;
 pub mod replica_fence;
+
+pub use connection_observability::{
+    DbConnectionEdge, DbConnectionLifecycleEvent, DbConnectionObserver, DbConnectionOutcome,
+    DbConnectionReason, DbConnectionStep, DbPoolRole,
+};
+pub(crate) use connection_observability::{
+    CONNECTION_DURATION_STEPS, CONNECTION_RAW_SERIES_PER_POD, CONNECTION_STARTED_STEPS,
+    CONNECTION_TERMINALS,
+};
 
 use crate::{deletion, event, DbError, EventQuery, Result};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, QueryBuilder};
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
@@ -555,7 +571,23 @@ impl Db {
     /// `buzz.created_at_floor` GUC — this is what makes the replica fence
     /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
-        let pool = Self::connect_writer_pool(config).await?;
+        Self::new_with_connection_observer(
+            config,
+            Arc::new(connection_observability::NoopDbConnectionObserver),
+        )
+        .await
+    }
+
+    /// Create a `Db` while publishing writer connection lifecycle events.
+    ///
+    /// The observer receives only fixed enums, durations, and process-local
+    /// ordinals. Database URLs, hosts, usernames, SQL, and raw errors never
+    /// cross this boundary.
+    pub async fn new_with_connection_observer(
+        config: &DbConfig,
+        observer: Arc<dyn DbConnectionObserver>,
+    ) -> Result<Self> {
+        let pool = Self::connect_writer_pool_with_observer(config, observer).await?;
         let read_max_connections = config
             .read_max_connections
             .unwrap_or(config.max_connections);
@@ -584,9 +616,28 @@ impl Db {
     /// constructor so they inherit the timeout, floor-guard, and isolation
     /// policy installed by [`Db::new`].
     pub async fn connect_writer_pool(config: &DbConfig) -> Result<PgPool> {
+        Self::connect_writer_pool_with_observer(
+            config,
+            Arc::new(connection_observability::NoopDbConnectionObserver),
+        )
+        .await
+    }
+
+    /// Connect the writer pool and publish fixed-schema connection events.
+    pub async fn connect_writer_pool_with_observer(
+        config: &DbConfig,
+        observer: Arc<dyn DbConnectionObserver>,
+    ) -> Result<PgPool> {
+        use connection_observability::{
+            classify_pool_error, record_milestone, DbConnectionReason, DbConnectionStep,
+            DbConnectionStepAttempt, DbPoolRole,
+        };
+
         let lock_timeout_ms = config.lock_timeout_ms;
         let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
         let statement_timeout_ms = config.statement_timeout_ms;
+        let next_connection_ordinal = Arc::new(AtomicU64::new(1));
+        let hook_observer = Arc::clone(&observer);
         let options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
@@ -594,12 +645,37 @@ impl Db {
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
             .after_connect(move |conn, _meta| {
+                let observer = Arc::clone(&hook_observer);
+                let connection_ordinal = next_connection_ordinal.fetch_add(1, Ordering::Relaxed);
                 Box::pin(async move {
+                    // SQLx 0.9 exposes no callback immediately before each raw
+                    // physical dial. Entering `after_connect` is the truthful
+                    // point at which DNS/network/TLS/authentication succeeded.
+                    record_milestone(
+                        &observer,
+                        DbPoolRole::Writer,
+                        connection_ordinal,
+                        DbConnectionStep::PhysicalConnect,
+                    );
+
                     // `SET` cannot take bind parameters; `set_config` can.
-                    sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
+                    let floor = DbConnectionStepAttempt::start(
+                        Arc::clone(&observer),
+                        DbPoolRole::Writer,
+                        Some(connection_ordinal),
+                        DbConnectionStep::CreatedAtFloor,
+                    );
+                    if let Err(error) =
+                        sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
                         .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
                         .execute(&mut *conn)
-                        .await?;
+                        .await
+                    {
+                        floor.fail(DbConnectionReason::SessionSetup);
+                        return Err(error);
+                    }
+                    floor.succeed();
+
                     // `lock_timeout` fails the waiting statement; it does not
                     // cancel the holder. `idle_in_transaction_session_timeout`
                     // reaps only holders idling inside an open transaction,
@@ -608,7 +684,13 @@ impl Db {
                     // milliseconds. Migration/schema-destruction connections
                     // reset lock and statement timeouts before their intentional
                     // long wait (see `with_exclusive_schema_destruction_lock`).
-                    sqlx::query(
+                    let timeouts = DbConnectionStepAttempt::start(
+                        Arc::clone(&observer),
+                        DbPoolRole::Writer,
+                        Some(connection_ordinal),
+                        DbConnectionStep::SessionTimeouts,
+                    );
+                    if let Err(error) = sqlx::query(
                         "SELECT set_config('lock_timeout', $1, false), \
                                 set_config('idle_in_transaction_session_timeout', $2, false), \
                                 set_config('statement_timeout', $3, false)",
@@ -617,11 +699,31 @@ impl Db {
                     .bind(idle_txn_timeout_ms.to_string())
                     .bind(statement_timeout_ms.to_string())
                     .execute(&mut *conn)
-                    .await?;
-                    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+                    .await
+                    {
+                        timeouts.fail(DbConnectionReason::SessionSetup);
+                        return Err(error);
+                    }
+                    timeouts.succeed();
+
+                    let isolation_step = DbConnectionStepAttempt::start(
+                        Arc::clone(&observer),
+                        DbPoolRole::Writer,
+                        Some(connection_ordinal),
+                        DbConnectionStep::Isolation,
+                    );
+                    let isolation: String = match sqlx::query_scalar("SHOW transaction_isolation")
                         .fetch_one(&mut *conn)
-                        .await?;
+                        .await
+                    {
+                        Ok(isolation) => isolation,
+                        Err(error) => {
+                            isolation_step.fail(DbConnectionReason::SessionSetup);
+                            return Err(error);
+                        }
+                    };
                     if isolation != "read committed" {
+                        isolation_step.fail(DbConnectionReason::IsolationMismatch);
                         return Err(sqlx::Error::Configuration(
                             format!(
                                 "writer pool requires READ COMMITTED transaction isolation, got {isolation}"
@@ -629,10 +731,38 @@ impl Db {
                             .into(),
                         ));
                     }
+                    isolation_step.succeed();
+                    record_milestone(
+                        &observer,
+                        DbPoolRole::Writer,
+                        connection_ordinal,
+                        DbConnectionStep::Ready,
+                    );
                     Ok(())
                 })
             });
-        Ok(options.connect(&config.database_url).await?)
+
+        let pool_attempt = DbConnectionStepAttempt::start(
+            Arc::clone(&observer),
+            DbPoolRole::Writer,
+            None,
+            DbConnectionStep::WriterPool,
+        );
+        match options.connect(&config.database_url).await {
+            Ok(pool) => {
+                pool_attempt.succeed();
+                Ok(pool)
+            }
+            Err(error) => {
+                let (outcome, reason) = classify_pool_error(&error);
+                if outcome == connection_observability::DbConnectionOutcome::TimedOut {
+                    pool_attempt.time_out();
+                } else {
+                    pool_attempt.fail(reason);
+                }
+                Err(error.into())
+            }
+        }
     }
 
     /// Reader acquire timeout — deliberately far below the writer's

@@ -43,6 +43,12 @@ const DB_POOL_ACQUIRE_DURATION_BUCKETS_S: [f64; 9] =
     [0.001, 0.005, 0.01, 0.025, 0.05, 0.15, 0.5, 1.0, 3.0];
 const DB_POOL_ACQUIRE_DURATION_UNIT: metrics::Unit = metrics::Unit::Seconds;
 
+/// Writer pool/session buckets preserve sub-millisecond setup while retaining
+/// seconds-scale failures in the final bucket.
+const DB_CONNECTION_STEP_DURATION_BUCKETS_S: [f64; 10] = [
+    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.15, 0.5, 1.0, 3.0,
+];
+
 /// Seconds-scale buckets for Git hydration and pack streams.
 const GIT_DURATION_BUCKETS_S: [f64; 13] = [
     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
@@ -115,6 +121,11 @@ fn configured_prometheus_builder(gauge_idle_timeout_secs: u64) -> PrometheusBuil
             &DB_POOL_ACQUIRE_DURATION_BUCKETS_S,
         )
         .expect("valid DB pool acquisition duration bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_db_connection_step_duration_seconds".to_owned()),
+            &DB_CONNECTION_STEP_DURATION_BUCKETS_S,
+        )
+        .expect("valid DB connection-step duration bucket boundaries")
         .set_buckets_for_metric(
             Matcher::Full("buzz_git_hydrate_bytes".to_owned()),
             &GIT_BYTES_BUCKETS,
@@ -242,6 +253,10 @@ pub(crate) fn describe_readiness_metrics() {
 
 /// Register the frozen operation-aware pool-acquisition contract.
 pub(crate) fn describe_db_pool_metrics() {
+    metrics::describe_counter!(
+        "buzz_db_pool_acquire_started_total",
+        "Database pool checkout starts by valid pool role and operation"
+    );
     metrics::describe_histogram!(
         "buzz_db_pool_acquire_duration_seconds",
         DB_POOL_ACQUIRE_DURATION_UNIT,
@@ -254,6 +269,19 @@ pub(crate) fn describe_db_pool_metrics() {
     metrics::describe_gauge!(
         "buzz_db_pool_waiters",
         "Current tracked-operation database pool checkout attempts in progress by valid pool role and operation"
+    );
+    metrics::describe_counter!(
+        "buzz_db_connection_step_started_total",
+        "Writer connection setup phase starts by fixed pool role and step"
+    );
+    metrics::describe_counter!(
+        "buzz_db_connection_step_attempts_total",
+        "Writer connection setup terminals by fixed pool role, step, and outcome"
+    );
+    metrics::describe_histogram!(
+        "buzz_db_connection_step_duration_seconds",
+        metrics::Unit::Seconds,
+        "Writer connection setup phase duration by fixed pool role and step"
     );
 }
 
@@ -345,11 +373,17 @@ mod contract_tests {
     }
 
     #[test]
-    fn production_builder_exports_frozen_db_pool_contract_and_187_series_budget() {
+    fn production_builder_exports_frozen_db_pool_and_connection_contracts() {
         let (recorder, handle) = super::readiness_test_recorder();
         metrics::with_local_recorder(&recorder, || {
             super::describe_db_pool_metrics();
             for (pool_role, operation) in buzz_db::DB_POOL_ACQUIRE_VALID_PAIRS {
+                metrics::counter!(
+                    "buzz_db_pool_acquire_started_total",
+                    "pool_role" => pool_role,
+                    "operation" => operation,
+                )
+                .increment(1);
                 metrics::histogram!(
                     "buzz_db_pool_acquire_duration_seconds",
                     "pool_role" => pool_role,
@@ -372,15 +406,44 @@ mod contract_tests {
                     .increment(1);
                 }
             }
+            for (pool_role, step) in buzz_db::DB_CONNECTION_STARTED_STEPS {
+                metrics::counter!(
+                    "buzz_db_connection_step_started_total",
+                    "pool_role" => pool_role.as_str(),
+                    "step" => step.as_str(),
+                )
+                .increment(1);
+            }
+            for (pool_role, step) in buzz_db::DB_CONNECTION_DURATION_STEPS {
+                metrics::histogram!(
+                    "buzz_db_connection_step_duration_seconds",
+                    "pool_role" => pool_role.as_str(),
+                    "step" => step.as_str(),
+                )
+                .record(0.02);
+            }
+            for (pool_role, step, outcome) in buzz_db::DB_CONNECTION_TERMINALS {
+                metrics::counter!(
+                    "buzz_db_connection_step_attempts_total",
+                    "pool_role" => pool_role.as_str(),
+                    "step" => step.as_str(),
+                    "outcome" => outcome.as_str(),
+                )
+                .increment(1);
+            }
         });
 
         let scrape = handle.render();
+        assert!(scrape.contains("# TYPE buzz_db_pool_acquire_started_total counter"));
         assert!(scrape.contains("# TYPE buzz_db_pool_acquire_duration_seconds histogram"));
         assert!(scrape.contains("# TYPE buzz_db_pool_acquire_attempts_total counter"));
         assert!(scrape.contains("# TYPE buzz_db_pool_waiters gauge"));
         assert!(scrape.contains("# HELP buzz_db_pool_acquire_duration_seconds Database pool checkout duration by valid pool role and operation"));
         assert!(scrape.contains("# HELP buzz_db_pool_acquire_attempts_total Database pool checkout terminals by valid pool role, operation, and outcome"));
         assert!(scrape.contains("# HELP buzz_db_pool_waiters Current tracked-operation database pool checkout attempts in progress by valid pool role and operation"));
+        assert!(scrape.contains("# TYPE buzz_db_connection_step_started_total counter"));
+        assert!(scrape.contains("# TYPE buzz_db_connection_step_attempts_total counter"));
+        assert!(scrape.contains("# TYPE buzz_db_connection_step_duration_seconds histogram"));
         assert_eq!(super::DB_POOL_ACQUIRE_DURATION_UNIT, metrics::Unit::Seconds);
         let readiness_buckets = scrape
             .lines()
@@ -405,7 +468,8 @@ mod contract_tests {
         let raw_series = scrape
             .lines()
             .filter(|line| {
-                line.starts_with("buzz_db_pool_acquire_duration_seconds")
+                line.starts_with("buzz_db_pool_acquire_started_total")
+                    || line.starts_with("buzz_db_pool_acquire_duration_seconds")
                     || line.starts_with("buzz_db_pool_acquire_attempts_total")
                     || line.starts_with("buzz_db_pool_waiters{")
             })
@@ -420,7 +484,9 @@ mod contract_tests {
             let keys = label_keys(line);
             if line.starts_with("buzz_db_pool_acquire_duration_seconds_bucket") {
                 assert_eq!(keys, BTreeSet::from(["le", "operation", "pool_role"]));
-            } else if line.starts_with("buzz_db_pool_acquire_duration_seconds") {
+            } else if line.starts_with("buzz_db_pool_acquire_duration_seconds")
+                || line.starts_with("buzz_db_pool_acquire_started_total")
+            {
                 assert_eq!(keys, BTreeSet::from(["operation", "pool_role"]));
             } else if line.starts_with("buzz_db_pool_acquire_attempts_total") {
                 assert_eq!(keys, BTreeSet::from(["operation", "outcome", "pool_role"]));
@@ -429,6 +495,32 @@ mod contract_tests {
             }
             assert!(!line.contains("operation=\"other\""));
             assert!(!line.contains("result="));
+        }
+
+        let connection_series = scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_db_connection_step_started_total")
+                    || line.starts_with("buzz_db_connection_step_attempts_total")
+                    || line.starts_with("buzz_db_connection_step_duration_seconds")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            connection_series.len(),
+            buzz_db::DB_CONNECTION_RAW_SERIES_PER_POD,
+            "unexpected DB connection scrape:\n{scrape}"
+        );
+        for line in connection_series {
+            let keys = label_keys(line);
+            if line.starts_with("buzz_db_connection_step_duration_seconds_bucket") {
+                assert_eq!(keys, BTreeSet::from(["le", "pool_role", "step"]));
+            } else if line.starts_with("buzz_db_connection_step_attempts_total") {
+                assert_eq!(keys, BTreeSet::from(["outcome", "pool_role", "step"]));
+            } else {
+                assert_eq!(keys, BTreeSet::from(["pool_role", "step"]));
+            }
+            assert!(!line.contains("reason="));
+            assert!(!line.contains("connection_ordinal="));
         }
     }
 }

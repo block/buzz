@@ -1,4 +1,4 @@
-//! Fixed-schema evidence for the relay's earliest startup steps.
+//! Fixed-schema evidence for relay startup and database connection setup.
 //!
 //! These events are written directly to stderr because crypto, tracing,
 //! configuration, and metrics setup can fail before the normal telemetry
@@ -16,6 +16,11 @@ use std::{
 
 use serde::Serialize;
 use uuid::Uuid;
+
+use buzz_db::{
+    DbConnectionEdge, DbConnectionLifecycleEvent, DbConnectionObserver, DbConnectionOutcome,
+    DbConnectionReason, DbConnectionStep, DbPoolRole,
+};
 
 const EVENT_NAME: &str = "buzz_process_lifecycle";
 const SCHEMA_VERSION: u8 = 1;
@@ -168,6 +173,10 @@ struct LifecycleEvent {
     process_elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     phase_elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pool_role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection_ordinal: Option<u64>,
 }
 
 trait EventWriter: Send + Sync {
@@ -214,7 +223,7 @@ impl ProcessLifecycle {
         } else {
             Instant::now()
         };
-        self.emit(phase, "started", None, None, None);
+        self.emit_startup(phase, "started", None, None, None);
         PhaseGuard {
             lifecycle: Arc::clone(self),
             phase,
@@ -223,7 +232,7 @@ impl ProcessLifecycle {
         }
     }
 
-    fn emit(
+    fn emit_startup(
         &self,
         phase: StartupPhase,
         edge: &'static str,
@@ -231,20 +240,46 @@ impl ProcessLifecycle {
         reason: Option<LifecycleReason>,
         elapsed: Option<Duration>,
     ) {
+        self.emit(
+            "startup",
+            phase.as_str(),
+            edge,
+            status.map(LifecycleStatus::as_str),
+            reason.map(LifecycleReason::as_str),
+            elapsed,
+            None,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit(
+        &self,
+        track: &'static str,
+        phase: &'static str,
+        edge: &'static str,
+        status: Option<&'static str>,
+        reason: Option<&'static str>,
+        elapsed: Option<Duration>,
+        pool_role: Option<&'static str>,
+        connection_ordinal: Option<u64>,
+    ) {
         self.writer.emit(&LifecycleEvent {
             event_name: EVENT_NAME,
             schema_version: SCHEMA_VERSION,
             process_boot_id: self.boot_id,
             sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
-            track: "startup",
-            phase: phase.as_str(),
+            track,
+            phase,
             edge,
-            status: status.map(LifecycleStatus::as_str),
-            reason: reason.map(LifecycleReason::as_str),
+            status,
+            reason,
             process_started_at_unix_ms: millis_since_epoch(self.wall_origin),
             observed_at_unix_ms: millis_since_epoch(SystemTime::now()),
             process_elapsed_ms: saturating_millis(self.monotonic_origin.elapsed()),
             phase_elapsed_ms: elapsed.map(saturating_millis),
+            pool_role,
+            connection_ordinal,
         });
     }
 }
@@ -276,7 +311,7 @@ impl PhaseGuard {
     fn finish(mut self, status: LifecycleStatus, reason: Option<LifecycleReason>) {
         let elapsed = self.started_at.elapsed();
         self.lifecycle
-            .emit(self.phase, "terminal", Some(status), reason, Some(elapsed));
+            .emit_startup(self.phase, "terminal", Some(status), reason, Some(elapsed));
         self.finished = true;
     }
 }
@@ -291,7 +326,7 @@ impl Drop for PhaseGuard {
         } else {
             (LifecycleStatus::Abandoned, LifecycleReason::OwnerDropped)
         };
-        self.lifecycle.emit(
+        self.lifecycle.emit_startup(
             self.phase,
             "terminal",
             Some(status),
@@ -371,17 +406,64 @@ impl BootTracker {
     }
 
     /// Finish early startup with a structured lifecycle terminal.
-    pub fn finish(self) {
+    pub fn finish(self) -> LifecycleRecorder {
         let status = if self.degraded.is_some() {
             LifecycleStatus::Degraded
         } else {
             LifecycleStatus::Succeeded
         };
+        let lifecycle = Arc::clone(&self.lifecycle);
         self.headline.finish(status, self.degraded);
+        LifecycleRecorder { lifecycle }
     }
 
     fn fail(self, reason: LifecycleReason) {
         self.headline.fail(reason);
+    }
+}
+
+/// Cloneable bridge from dependency lifecycle events into the process schema.
+#[derive(Clone)]
+pub struct LifecycleRecorder {
+    lifecycle: Arc<ProcessLifecycle>,
+}
+
+impl LifecycleRecorder {
+    #[allow(clippy::too_many_arguments)]
+    fn record_database_fields(
+        &self,
+        pool_role: DbPoolRole,
+        connection_ordinal: Option<u64>,
+        step: DbConnectionStep,
+        edge: DbConnectionEdge,
+        outcome: Option<DbConnectionOutcome>,
+        reason: Option<DbConnectionReason>,
+        elapsed: Option<Duration>,
+    ) {
+        self.lifecycle.emit(
+            "database",
+            step.lifecycle_phase(),
+            edge.as_str(),
+            outcome.map(|outcome| outcome.as_str()),
+            reason.map(|reason| reason.as_str()),
+            elapsed,
+            Some(pool_role.as_str()),
+            connection_ordinal,
+        );
+    }
+}
+
+impl DbConnectionObserver for LifecycleRecorder {
+    fn record(&self, event: DbConnectionLifecycleEvent) {
+        self.record_database_fields(
+            event.pool_role(),
+            event.connection_ordinal(),
+            event.step(),
+            event.edge(),
+            event.outcome(),
+            event.reason(),
+            event.elapsed(),
+        );
     }
 }
 
@@ -587,5 +669,40 @@ mod tests {
                 "panic",
             ]
         );
+    }
+
+    #[test]
+    fn database_events_share_boot_sequence_without_sensitive_fields() {
+        let (lifecycle, writer) = recorder();
+        let recorder = LifecycleRecorder { lifecycle };
+        recorder.record_database_fields(
+            DbPoolRole::Writer,
+            Some(2),
+            DbConnectionStep::Isolation,
+            DbConnectionEdge::Terminal,
+            Some(DbConnectionOutcome::Failed),
+            Some(DbConnectionReason::IsolationMismatch),
+            Some(Duration::from_millis(4)),
+        );
+
+        let values = events(&writer);
+        assert_eq!(values.len(), 1);
+        let value = serde_json::to_value(&values[0]).expect("serialize database lifecycle event");
+        assert_eq!(value["sequence"], 1);
+        assert_eq!(value["track"], "database");
+        assert_eq!(value["phase"], "db_isolation");
+        assert_eq!(value["edge"], "terminal");
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["reason"], "isolation_mismatch");
+        assert_eq!(value["pool_role"], "writer");
+        assert_eq!(value["connection_ordinal"], 2);
+        assert_eq!(value["phase_elapsed_ms"], 4);
+        let rendered = serde_json::to_string(&value).expect("render database lifecycle event");
+        for forbidden in ["postgres://", "password", "database_url", "hostname", "sql"] {
+            assert!(
+                !rendered.contains(forbidden),
+                "leaked forbidden field {forbidden}"
+            );
+        }
     }
 }
