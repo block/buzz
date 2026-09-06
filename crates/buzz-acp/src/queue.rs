@@ -83,6 +83,17 @@ const MAX_BATCH_EVENTS: usize = 50;
 /// Maximum retry attempts before a batch is dead-lettered.
 pub(crate) const MAX_RETRIES: u32 = 10;
 
+/// Maximum consecutive usage-limit holds per scope before the batch is
+/// dead-lettered anyway.
+///
+/// A hold ([`EventQueue::requeue_held`]) lasts until the provider's parsed
+/// reset time (or [`crate::usage_limit::FALLBACK_HOLD_SECS`] without one) and
+/// does not consume the [`MAX_RETRIES`] budget. This cap bounds a scope that
+/// keeps hitting the limit at every reset — a misparsed time or a permanently
+/// exhausted account — so it cannot be held forever. Holds reset on the
+/// scope's next successful turn, like `retry_counts`.
+pub(crate) const MAX_USAGE_LIMIT_HOLDS: u32 = 24;
+
 /// Base retry delay in seconds (doubled each attempt).
 const BASE_RETRY_DELAY_SECS: u64 = 5;
 
@@ -162,6 +173,7 @@ pub struct FlushBatch {
 ///   in_flight_deadlines:  Map<channel_id, Instant>                (auto-expire after in_flight_deadline)
 ///   retry_after:          Map<channel_id, Instant>
 ///   retry_counts:         Map<channel_id, u32>                    (dead-letter after MAX_RETRIES)
+///   usage_limit_holds:    Map<channel_id, u32>                    (dead-letter after MAX_USAGE_LIMIT_HOLDS)
 ///   dedup_mode:           DedupMode
 ///
 /// Transitions:
@@ -189,12 +201,18 @@ pub struct FlushBatch {
 ///     in_flight_channels.remove(channel_id)
 ///     in_flight_deadlines.remove(channel_id)
 ///     retry_counts.remove(channel_id)
+///     usage_limit_holds.remove(channel_id)
 ///     clean up expired retry_after entry if present
 ///
 ///   requeue(batch):
 ///     increment retry_counts[channel]
 ///     if retry_counts[channel] > MAX_RETRIES: dead-letter (log ERROR, return batch to caller)
 ///     else: push_front with original received_at, set exponential backoff retry_after with jitter
+///
+///   requeue_held(batch, delay):            (provider usage limit — see crate::usage_limit)
+///     increment usage_limit_holds[channel]  (retry_counts untouched)
+///     if usage_limit_holds[channel] > MAX_USAGE_LIMIT_HOLDS: dead-letter (log ERROR, return batch to caller)
+///     else: push_front with original received_at, set retry_after = now + delay (the limit's reset)
 /// ```
 pub struct EventQueue {
     queues: HashMap<SessionScope, VecDeque<QueuedEvent>>,
@@ -206,6 +224,11 @@ pub struct EventQueue {
     retry_after: HashMap<SessionScope, Instant>,
     /// Per-scope retry attempt counter for exponential backoff / dead-lettering.
     retry_counts: HashMap<SessionScope, u32>,
+    /// Per-scope count of consecutive usage-limit holds (see
+    /// [`requeue_held`](Self::requeue_held)); dead-letter after
+    /// [`MAX_USAGE_LIMIT_HOLDS`]. Kept apart from `retry_counts` so a hold
+    /// never eats into the transient-failure budget.
+    usage_limit_holds: HashMap<SessionScope, u32>,
     dedup_mode: DedupMode,
     /// Events from cancelled batches, keyed by channel. Merged into the next
     /// `FlushBatch` for that channel as `cancelled_events` so `format_prompt()`
@@ -246,6 +269,7 @@ impl EventQueue {
             in_flight_batch_sizes: HashMap::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
+            usage_limit_holds: HashMap::new(),
             dedup_mode,
             cancelled_batches: HashMap::new(),
             cancel_reasons: HashMap::new(),
@@ -518,9 +542,11 @@ impl EventQueue {
             Some(_) => {
                 self.retry_after.remove(&scope);
                 self.retry_counts.remove(&scope);
+                self.usage_limit_holds.remove(&scope);
             }
             None => {
                 self.retry_counts.remove(&scope);
+                self.usage_limit_holds.remove(&scope);
             }
         }
     }
@@ -561,6 +587,7 @@ impl EventQueue {
                 batch.events.len(),
             );
             self.retry_counts.remove(&scope);
+            self.usage_limit_holds.remove(&scope);
             // Also clear retry_after so fresh traffic on this scope isn't
             // throttled by stale backoff from the discarded poison batch.
             self.retry_after.remove(&scope);
@@ -615,6 +642,73 @@ impl EventQueue {
         self.retry_after.insert(scope, Instant::now() + delay);
         self.enforce_channel_cap(channel_id);
         None
+    }
+
+    /// Re-queue a batch whose prompt failed on a provider usage limit, holding
+    /// the scope for `delay` — until the limit's parsed reset, see
+    /// [`crate::usage_limit`].
+    ///
+    /// Unlike [`requeue`](Self::requeue) this does **not** consume the retry
+    /// budget: the failure is deterministic until the window resets, so
+    /// counting it dead-letters every batch that outlives ten backoff steps
+    /// (≈ 20 minutes) and discards the event exactly when it could finally
+    /// run. Consecutive holds are counted separately and capped at
+    /// [`MAX_USAGE_LIMIT_HOLDS`]; past the cap the batch is dead-lettered and
+    /// returned to the caller, like an exhausted retry budget. Returns `None`
+    /// when the batch was held.
+    ///
+    /// The whole batch is restored via
+    /// [`requeue_preserve_timestamps`](Self::requeue_preserve_timestamps), so
+    /// an interrupted turn's cancelled carryover survives the hold too.
+    ///
+    /// Note: does NOT remove from `in_flight_scopes` — caller must call
+    /// `mark_complete` separately (which keeps both counters while the hold
+    /// is active, exactly as for a backoff requeue).
+    pub fn requeue_held(&mut self, batch: FlushBatch, delay: Duration) -> Option<FlushBatch> {
+        let channel_id = batch.channel_id;
+        let scope = batch.scope.clone();
+        let hold = {
+            let count = self.usage_limit_holds.entry(scope.clone()).or_insert(0);
+            *count += 1;
+            *count
+        };
+
+        if hold > MAX_USAGE_LIMIT_HOLDS {
+            tracing::error!(
+                channel_id = %channel_id,
+                hold,
+                events = batch.events.len(),
+                "dead-lettering batch after {} usage-limit holds — discarding {} events",
+                MAX_USAGE_LIMIT_HOLDS,
+                batch.events.len(),
+            );
+            self.usage_limit_holds.remove(&scope);
+            self.retry_counts.remove(&scope);
+            self.retry_after.remove(&scope);
+            return Some(batch);
+        }
+
+        tracing::warn!(
+            channel_id = %channel_id,
+            scope = %scope.telemetry_label(),
+            hold,
+            max = MAX_USAGE_LIMIT_HOLDS,
+            delay_secs = delay.as_secs(),
+            events = batch.events.len(),
+            "holding batch until the usage limit resets"
+        );
+        self.requeue_preserve_timestamps(batch);
+        self.retry_after.insert(scope, Instant::now() + delay);
+        None
+    }
+
+    /// Number of consecutive usage-limit holds recorded for `scope` since its
+    /// last successful turn (0 when none).
+    pub fn usage_limit_holds<K: IntoScope>(&self, scope: K) -> u32 {
+        self.usage_limit_holds
+            .get(&scope.into_scope())
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Re-queue a **complete** flushed batch preserving original `received_at`
@@ -799,6 +893,40 @@ impl EventQueue {
         self.retry_counts.insert(scope.into_scope(), count);
     }
 
+    /// Current retry-attempt counter for a scope (0 when absent). Test-only.
+    #[cfg(test)]
+    pub fn retry_count_for_test<K: IntoScope>(&self, scope: K) -> u32 {
+        self.retry_counts
+            .get(&scope.into_scope())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Force a scope's usage-limit hold counter, simulating `count` prior
+    /// holds so a test can hit [`MAX_USAGE_LIMIT_HOLDS`] directly. Test-only.
+    #[cfg(test)]
+    pub fn set_usage_limit_holds_for_test<K: IntoScope>(&mut self, scope: K, count: u32) {
+        self.usage_limit_holds.insert(scope.into_scope(), count);
+    }
+
+    /// Remaining `retry_after` throttle for a scope, if one is set. Test-only.
+    #[cfg(test)]
+    pub fn retry_after_remaining_for_test<K: IntoScope>(&self, scope: K) -> Option<Duration> {
+        self.retry_after
+            .get(&scope.into_scope())
+            .map(|t| t.saturating_duration_since(Instant::now()))
+    }
+
+    /// Ids of the queued (not in-flight) events for a scope, head first.
+    /// Test-only.
+    #[cfg(test)]
+    pub fn queued_event_ids_for_test<K: IntoScope>(&self, scope: K) -> Vec<nostr::EventId> {
+        self.queues
+            .get(&scope.into_scope())
+            .map(|q| q.iter().map(|e| e.event.id).collect())
+            .unwrap_or_default()
+    }
+
     /// Drop all queued (non-in-flight) events for a channel.
     ///
     /// Used when the agent is removed from a channel — any pending events
@@ -828,6 +956,8 @@ impl EventQueue {
         // Also purge side-tables for every scope of this channel.
         self.retry_after.retain(|s, _| s.channel_id() != channel_id);
         self.retry_counts
+            .retain(|s, _| s.channel_id() != channel_id);
+        self.usage_limit_holds
             .retain(|s, _| s.channel_id() != channel_id);
         self.cancelled_batches
             .retain(|s, _| s.channel_id() != channel_id);
@@ -1029,6 +1159,12 @@ impl EventQueue {
         // queued events, AND no in-flight prompt — they completed their
         // retry cycle and are truly idle.
         self.retry_counts.retain(|scope, _| {
+            self.retry_after.contains_key(scope)
+                || self.queues.get(scope).is_some_and(|q| !q.is_empty())
+                || self.in_flight_scopes.contains(scope)
+        });
+        // Same idleness rule for usage-limit hold counters.
+        self.usage_limit_holds.retain(|scope, _| {
             self.retry_after.contains_key(scope)
                 || self.queues.get(scope).is_some_and(|q| !q.is_empty())
                 || self.in_flight_scopes.contains(scope)
@@ -6583,5 +6719,123 @@ mod tests {
             !prompt.contains("Description:"),
             "unresolved metadata must not render a Description field; got: {prompt}"
         );
+    }
+
+    // ── usage-limit hold ──────────────────────────────────────────────────
+
+    /// A hold keeps the batch queued, throttles the scope for the given delay
+    /// and leaves `retry_counts` untouched — the transient-failure budget must
+    /// not be spent on a deterministic limit.
+    #[test]
+    fn test_requeue_held_keeps_events_without_consuming_retry_budget() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        queue.set_retry_count_for_test(channel_id, 3);
+        queue.push(make_queued(channel_id, "held"));
+        let batch = queue.flush_next().expect("batch");
+        let original_id = batch.events[0].event.id;
+
+        assert!(queue
+            .requeue_held(batch, Duration::from_secs(3600))
+            .is_none());
+        queue.mark_complete(channel_id);
+
+        assert_eq!(
+            queue.retry_count_for_test(channel_id),
+            3,
+            "a hold must not touch retry_counts"
+        );
+        assert_eq!(queue.usage_limit_holds(channel_id), 1);
+        assert_eq!(queue.queued_event_count(channel_id), 1);
+        let remaining = queue
+            .retry_after_remaining_for_test(channel_id)
+            .expect("scope throttled");
+        assert!(remaining > Duration::from_secs(3500), "{remaining:?}");
+        assert!(
+            queue.flush_next().is_none(),
+            "held scope must not flush before the delay elapses"
+        );
+        // Still the same event, at the head.
+        assert_eq!(
+            queue.queued_event_ids_for_test(channel_id),
+            vec![original_id]
+        );
+    }
+
+    /// Once the delay elapses the very same events flush again, in order, and
+    /// the subsequent successful completion clears the hold counter.
+    #[test]
+    fn test_requeue_held_releases_the_same_events_after_the_delay() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        queue.push(make_queued(channel_id, "first"));
+        queue.push(make_queued(channel_id, "second"));
+        let batch = queue.flush_next().expect("batch");
+        let ids: Vec<_> = batch.events.iter().map(|e| e.event.id).collect();
+        assert_eq!(ids.len(), 2);
+
+        assert!(queue
+            .requeue_held(batch, Duration::from_millis(60))
+            .is_none());
+        queue.mark_complete(channel_id);
+        assert!(queue.flush_next().is_none(), "held");
+
+        std::thread::sleep(Duration::from_millis(80));
+        let again = queue.flush_next().expect("released after the hold");
+        let again_ids: Vec<_> = again.events.iter().map(|e| e.event.id).collect();
+        assert_eq!(again_ids, ids, "same events, same order");
+        queue.mark_complete(channel_id);
+        assert_eq!(
+            queue.usage_limit_holds(channel_id),
+            0,
+            "a successful turn clears the hold counter"
+        );
+        assert_eq!(queue.retry_count_for_test(channel_id), 0);
+    }
+
+    /// Consecutive holds keep counting while retry_counts stays put; past the
+    /// cap the batch is dead-lettered and all throttle state is cleared.
+    #[test]
+    fn test_requeue_held_dead_letters_past_the_hold_cap() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        queue.set_usage_limit_holds_for_test(channel_id, MAX_USAGE_LIMIT_HOLDS - 1);
+        queue.push(make_queued(channel_id, "doomed"));
+
+        // Hold number MAX is still a hold …
+        let batch = queue.flush_next().expect("batch");
+        assert!(queue
+            .requeue_held(batch, Duration::from_millis(1))
+            .is_none());
+        queue.mark_complete(channel_id);
+        assert_eq!(queue.usage_limit_holds(channel_id), MAX_USAGE_LIMIT_HOLDS);
+        assert_eq!(queue.retry_count_for_test(channel_id), 0);
+        std::thread::sleep(Duration::from_millis(5));
+
+        // … and the next one dead-letters.
+        let batch = queue.flush_next().expect("batch after hold");
+        let dead = queue
+            .requeue_held(batch, Duration::from_secs(60))
+            .expect("dead-lettered past the cap");
+        assert_eq!(dead.events.len(), 1);
+        queue.mark_complete(channel_id);
+        assert_eq!(queue.queued_event_count(channel_id), 0);
+        assert_eq!(queue.usage_limit_holds(channel_id), 0);
+        assert!(queue.retry_after_remaining_for_test(channel_id).is_none());
+    }
+
+    /// `drain_channel` (agent removed from the channel) forgets hold state
+    /// along with the other per-scope side tables.
+    #[test]
+    fn test_drain_channel_clears_usage_limit_holds() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        queue.push(make_queued(channel_id, "x"));
+        let batch = queue.flush_next().expect("batch");
+        assert!(queue.requeue_held(batch, Duration::from_secs(60)).is_none());
+        queue.mark_complete(channel_id);
+        assert_eq!(queue.usage_limit_holds(channel_id), 1);
+        queue.drain_channel(channel_id);
+        assert_eq!(queue.usage_limit_holds(channel_id), 0);
     }
 }

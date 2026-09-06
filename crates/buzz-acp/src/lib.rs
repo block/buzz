@@ -15,6 +15,7 @@ mod relay;
 mod scope;
 mod setup_mode;
 mod usage;
+mod usage_limit;
 
 pub use usage::TurnUsage;
 
@@ -4610,7 +4611,112 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
-/// Spawn a task that posts a user-visible failure notice to the relay.
+/// Extract the provider usage-limit error behind a failed prompt, if that is
+/// what failed it. See [`usage_limit`] for the classification and why such
+/// errors are held rather than retried with backoff.
+fn usage_limit_from_outcome(outcome: &PromptOutcome) -> Option<usage_limit::UsageLimit> {
+    match outcome {
+        PromptOutcome::Error(acp::AcpError::AgentError { message, .. }) => {
+            usage_limit::detect(message)
+        }
+        _ => None,
+    }
+}
+
+/// Maximum characters of an event's content quoted in a failure notice.
+const NOTICE_EXCERPT_CHARS: usize = 80;
+
+/// Describe the events of a failed batch for a channel notice: which agent
+/// and turn they belonged to, and one `buzz://message` deep link per event
+/// with its author, time and an excerpt of what was asked.
+///
+/// A bare "please re-send" leaves the reader guessing *what* was lost —
+/// during a fleet-wide usage-limit outage a dozen agents each drop a different
+/// request into the same channel. The deep link resolves the original event
+/// in Buzz Desktop even when the notice cannot be threaded under it.
+fn describe_batch_events(batch: &FlushBatch, turn_id: &str, config: &Config) -> String {
+    let mut out = format!(
+        "Affected: {} event(s) for {}, turn `{turn_id}`",
+        batch.events.len(),
+        agent_label(config)
+    );
+    for be in &batch.events {
+        let event = &be.event;
+        let mut link = format!(
+            "buzz://message?channel={}&id={}",
+            batch.channel_id,
+            event.id.to_hex()
+        );
+        if let Some(root) = queue::parse_thread_tags(event).root_event_id {
+            link.push_str("&thread=");
+            link.push_str(&root);
+        }
+        let author: String = nostr::ToBech32::to_bech32(&event.pubkey)
+            .unwrap_or_else(|_| event.pubkey.to_hex())
+            .chars()
+            .take(12)
+            .collect();
+        let when =
+            chrono::TimeZone::timestamp_opt(&chrono::Utc, event.created_at.as_secs() as i64, 0)
+                .single()
+                .map(|t| {
+                    t.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M (%:z)")
+                        .to_string()
+                })
+                .unwrap_or_else(|| event.created_at.as_secs().to_string());
+        let excerpt = notice_excerpt(&event.content);
+        out.push_str(&format!("\n• {link} — {author}… at {when}: “{excerpt}”"));
+    }
+    out
+}
+
+/// The agent's display name from `BUZZ_ACP_DISPLAY_NAME` (the same contract
+/// forwarded to dev-mcp for git authorship), falling back to its npub.
+fn agent_label(config: &Config) -> String {
+    match std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+        Ok(name) if !name.trim().is_empty() => name.trim().to_string(),
+        _ => nostr::ToBech32::to_bech32(&config.keys.public_key())
+            .unwrap_or_else(|_| config.keys.public_key().to_hex()),
+    }
+}
+
+/// First non-empty line of `content`, whitespace-collapsed, capped at
+/// [`NOTICE_EXCERPT_CHARS`] characters with an ellipsis.
+fn notice_excerpt(content: &str) -> String {
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = collapsed.chars();
+    let head: String = chars.by_ref().take(NOTICE_EXCERPT_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// Spawn a task that posts a user-visible notice to the relay, threaded per
+/// `thread_tags` (empty tags → top-level channel post).
+fn spawn_notice(
+    rest_client: Option<&relay::RestClient>,
+    channel_id: Uuid,
+    thread_tags: queue::ThreadTags,
+    content: String,
+) {
+    if let Some(rest) = rest_client {
+        let rest = rest.clone();
+        tokio::spawn(async move {
+            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+        });
+    }
+}
+
+/// Spawn a task that posts a user-visible failure notice to the relay, in the
+/// thread of the batch's last event.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
 /// dead-letter path so neither duplicates the tokio::spawn block.
@@ -4619,18 +4725,12 @@ fn spawn_failure_notice(
     batch: &FlushBatch,
     content: String,
 ) {
-    if let Some(rest) = rest_client {
-        let thread_tags = batch
-            .events
-            .last()
-            .map(|be| queue::parse_thread_tags(&be.event))
-            .unwrap_or_default();
-        let rest = rest.clone();
-        let channel_id = batch.channel_id;
-        tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
-        });
-    }
+    let thread_tags = batch
+        .events
+        .last()
+        .map(|be| queue::parse_thread_tags(&be.event))
+        .unwrap_or_default();
+    spawn_notice(rest_client, batch.channel_id, thread_tags, content);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4693,6 +4793,9 @@ fn handle_prompt_result(
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
         if !removed_channels.contains(&batch.channel_id) {
+            // Computed up front: every notice below quotes the batch, and the
+            // requeue/hold branches consume it.
+            let details = describe_batch_events(&batch, &result.turn_id, config);
             if matches!(
                 result.outcome,
                 PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
@@ -4726,7 +4829,7 @@ fn handle_prompt_result(
                     batch.events.len(),
                 );
                 let content = format!(
-                    "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
+                    "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.\n\n{details}",
                     config.max_turn_duration_secs
                 );
                 spawn_failure_notice(rest_client, &batch, content);
@@ -4744,13 +4847,54 @@ fn handle_prompt_result(
                 );
                 if let Some(dead) = queue.requeue(batch) {
                     let content = format!(
-                        "⚠️ I couldn't process the last request after multiple retries (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
+                        "⚠️ I couldn't process the last request after multiple retries (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.\n\n{details}",
                         config.max_turn_duration_secs
                     );
                     spawn_failure_notice(rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
+                }
+            } else if let Some(limit) = usage_limit_from_outcome(&result.outcome) {
+                // Provider usage limit: deterministic until the window resets,
+                // so hold the batch until then rather than burning the retry
+                // budget and discarding the event. Observed 2026-09-03: a
+                // five-hour account limit failed 183 turns across 15 agents;
+                // every pending batch was dead-lettered within ~20 minutes and
+                // nothing resumed once the limit lifted.
+                let delay = limit.hold_delay(chrono::Local::now());
+                let resets = limit.reset_label();
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    hold_secs = delay.as_secs(),
+                    resets_at = resets.as_deref().unwrap_or("unknown"),
+                    "usage limit hit — holding batch until it resets"
+                );
+                let channel_id = batch.channel_id;
+                let thread_tags = batch
+                    .events
+                    .last()
+                    .map(|be| queue::parse_thread_tags(&be.event))
+                    .unwrap_or_default();
+                let first_hold = queue.usage_limit_holds(&batch.scope) == 0;
+                if let Some(dead) = queue.requeue_held(batch, delay) {
+                    let content = format!(
+                        "⚠️ I couldn't process the last request: the provider usage limit was still in force after {} waits for it to reset. Please re-send if it's still needed.\n\n{details}",
+                        queue::MAX_USAGE_LIMIT_HOLDS
+                    );
+                    spawn_failure_notice(rest_client, &dead, content);
+                } else if first_hold {
+                    // Tell the channel once per hold series why the agent has
+                    // gone quiet and that nothing needs re-sending.
+                    let when = match &resets {
+                        Some(at) => format!("once it resets at {at}"),
+                        None => format!("in about {} minutes", delay.as_secs().div_ceil(60)),
+                    };
+                    let content = format!(
+                        "⏳ The provider usage limit was hit, so I couldn't process the last request yet. I'll retry it automatically {when} — no need to re-send.\n\n{details}"
+                    );
+                    spawn_notice(rest_client, channel_id, thread_tags, content);
                 }
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
@@ -4762,10 +4906,11 @@ fn handle_prompt_result(
                     events = batch.events.len(),
                     "dead-lettering batch immediately — non-retryable auth error"
                 );
-                let content = "⚠️ I couldn't process the last request: authentication failed. \
+                let content = format!(
+                    "⚠️ I couldn't process the last request: authentication failed. \
                     Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
-                    and then re-send."
-                    .to_string();
+                    and then re-send.\n\n{details}"
+                );
                 spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
@@ -4779,7 +4924,7 @@ fn handle_prompt_result(
                     _ => "repeated failures".to_string(),
                 };
                 let content = format!(
-                    "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
+                    "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed.\n\n{details}"
                 );
                 spawn_failure_notice(rest_client, &dead, content);
             }
@@ -10909,6 +11054,208 @@ mod error_outcome_emission_tests {
             0,
             "auth error must dead-letter immediately — no events should be pending"
         );
+    }
+
+    // ── usage-limit hold behavior ─────────────────────────────────────────
+
+    /// The exact message observed in the 2026-09-03 fleet incident.
+    const LIMIT_MSG: &str =
+        "Internal error: You've hit your session limit · resets 3:10am (Asia/Seoul)";
+
+    fn limit_error() -> AcpError {
+        AcpError::AgentError {
+            code: -32603,
+            message: LIMIT_MSG.to_string(),
+        }
+    }
+
+    fn one_event_batch(channel_id: uuid::Uuid, content: &str) -> FlushBatch {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
+            .sign_with_keys(&keys)
+            .unwrap();
+        FlushBatch {
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    /// Drive `handle_prompt_result` with an error outcome for `batch` against
+    /// `queue`, no observer and no relay — the queue state afterwards is the
+    /// observable.
+    async fn run_error_outcome(
+        queue: &mut EventQueue,
+        channel_id: uuid::Uuid,
+        batch: FlushBatch,
+        error: AcpError,
+    ) {
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+    }
+
+    /// A usage-limit `PromptOutcome::Error` (Claude Code "hit your session
+    /// limit · resets …") must hold the batch until the reset instead of
+    /// entering the backoff/dead-letter path: the event stays queued, the
+    /// scope is throttled for the time until reset, and the retry budget is
+    /// untouched.
+    #[tokio::test]
+    async fn usage_limit_error_holds_batch_without_consuming_retry_budget() {
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = one_event_batch(channel_id, "please deploy the release");
+        let event_id = batch.events[0].event.id;
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+
+        run_error_outcome(&mut queue, channel_id, batch, limit_error()).await;
+
+        assert_eq!(
+            queue.queued_event_count(channel_id),
+            1,
+            "held batch must stay queued, not be dead-lettered"
+        );
+        assert_eq!(
+            queue.retry_count_for_test(channel_id),
+            0,
+            "a usage-limit hold must not consume the retry budget"
+        );
+        assert_eq!(queue.usage_limit_holds(channel_id), 1);
+        let remaining = queue
+            .retry_after_remaining_for_test(channel_id)
+            .expect("scope throttled until the reset");
+        let buffer = std::time::Duration::from_secs(usage_limit::RESET_BUFFER_SECS);
+        // "resets 3:10am" is at most a day away, and always a real wait
+        // (buffer included) rather than a backoff-sized delay.
+        assert!(
+            remaining > buffer && remaining <= std::time::Duration::from_secs(24 * 3600) + buffer,
+            "unexpected hold {remaining:?}"
+        );
+        assert!(
+            queue.flush_next().is_none(),
+            "held scope must not flush before the reset"
+        );
+        assert_eq!(queue.queued_event_ids_for_test(channel_id), vec![event_id]);
+    }
+
+    /// Past [`queue::MAX_USAGE_LIMIT_HOLDS`] consecutive holds the batch is
+    /// dead-lettered like an exhausted retry budget, so a permanently
+    /// exhausted account cannot pin a scope forever.
+    #[tokio::test]
+    async fn usage_limit_holds_past_the_cap_dead_letter() {
+        let channel_id = uuid::Uuid::new_v4();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.set_usage_limit_holds_for_test(channel_id, queue::MAX_USAGE_LIMIT_HOLDS);
+
+        run_error_outcome(
+            &mut queue,
+            channel_id,
+            one_event_batch(channel_id, "x"),
+            limit_error(),
+        )
+        .await;
+
+        assert_eq!(queue.queued_event_count(channel_id), 0);
+        assert_eq!(queue.pending_channels(), 0);
+        assert_eq!(queue.usage_limit_holds(channel_id), 0);
+    }
+
+    /// Only `AgentError`s that read as a usage limit take the hold path; auth
+    /// and other application errors keep their existing classification.
+    #[test]
+    fn usage_limit_is_recognised_only_for_limit_errors() {
+        assert!(usage_limit_from_outcome(&PromptOutcome::Error(limit_error())).is_some());
+        for message in [
+            "API Error: 401 OAuth access token has expired. Re-authenticate to continue.",
+            "Usage credits required for 1M context",
+        ] {
+            let outcome = PromptOutcome::Error(AcpError::AgentError {
+                code: -32000,
+                message: message.to_string(),
+            });
+            assert!(usage_limit_from_outcome(&outcome).is_none(), "{message}");
+        }
+        assert!(usage_limit_from_outcome(&PromptOutcome::AgentExited).is_none());
+    }
+
+    /// The failure/hold notice names the turn and deep-links every affected
+    /// event with an excerpt, so a reader can find what was dropped.
+    #[test]
+    fn notice_details_link_the_original_event_with_an_excerpt() {
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = one_event_batch(
+            channel_id,
+            "@agent please deploy the release to staging\nand ignore this second line",
+        );
+        let event = &batch.events[0].event;
+        let details = describe_batch_events(&batch, "turn-42", &test_config());
+
+        let link = format!(
+            "buzz://message?channel={channel_id}&id={}",
+            event.id.to_hex()
+        );
+        assert!(details.contains(&link), "{details}");
+        assert!(details.contains("turn `turn-42`"), "{details}");
+        assert!(details.contains("1 event(s)"), "{details}");
+        assert!(
+            details.contains("“@agent please deploy the release to staging”"),
+            "{details}"
+        );
+        assert!(!details.contains("second line"), "{details}");
+
+        let long = "x".repeat(NOTICE_EXCERPT_CHARS + 20);
+        let excerpt = notice_excerpt(&format!("  {long}  "));
+        assert_eq!(excerpt.chars().count(), NOTICE_EXCERPT_CHARS + 1);
+        assert!(excerpt.ends_with('…'));
+        assert_eq!(notice_excerpt("\n\n  spaced   out  \n"), "spaced out");
     }
 
     /// A non-auth application error (e.g. usage credits) must still follow the
