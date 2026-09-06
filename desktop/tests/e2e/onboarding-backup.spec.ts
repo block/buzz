@@ -7,8 +7,11 @@ import {
   startWindowFileDrag,
 } from "../helpers/fileDrag";
 
-async function enterMachineBackup(page: import("@playwright/test").Page) {
-  await installMockBridge(page, undefined, {
+async function enterMachineBackup(
+  page: import("@playwright/test").Page,
+  mock?: Parameters<typeof installMockBridge>[1],
+) {
+  await installMockBridge(page, mock, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
@@ -35,6 +38,14 @@ async function invokedCommands(page: import("@playwright/test").Page) {
     () =>
       (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
         .__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+}
+
+async function encryptionPasswords(page: import("@playwright/test").Page) {
+  return page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+      .filter(({ command }) => command === "create_ncryptsec_backup")
+      .map(({ payload }) => (payload as { password?: string }).password),
   );
 }
 
@@ -266,6 +277,30 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+});
+
+test("editing a password during encryption saves only the latest value", async ({
+  page,
+}) => {
+  await enterMachineBackup(page, {
+    backupEncryptionDelayMs: 750,
+  });
+  await openPasswordBackup(page);
+
+  const input = page.getByTestId("backup-passphrase-input");
+  const firstPassword = "first-password";
+  const latestPassword = "first-password-finished";
+  await input.fill(firstPassword);
+  await expect.poll(() => encryptionPasswords(page)).toEqual([firstPassword]);
+
+  await input.fill(latestPassword);
+  await page.getByTestId("encrypted-backup-create").click();
+  await expect
+    .poll(() => encryptionPasswords(page))
+    .toEqual([firstPassword, latestPassword]);
+  await expect(
+    page.getByRole("heading", { name: "Optionally, test your backup" }),
+  ).toBeVisible();
 });
 
 test("security view returns to the yellow onboarding view", async ({
