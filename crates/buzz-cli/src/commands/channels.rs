@@ -13,6 +13,7 @@ use crate::client::{
 };
 use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
+use crate::commands::parse_write_response;
 use crate::commands::users::presence_subject;
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
@@ -1408,6 +1409,166 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
+/// The kind:10100 profile the relay currently stores for us.
+#[derive(Debug)]
+struct StoredAgentProfile {
+    /// Parsed event body, or empty when no profile is stored.
+    body: serde_json::Map<String, serde_json::Value>,
+    /// `created_at` of the stored event, or 0 when none is stored. A replaceable
+    /// write must out-bid this to land.
+    created_at: u64,
+}
+
+/// Fetch this identity's current kind:10100 profile body as a JSON object.
+///
+/// Returns an empty object only when the identity genuinely has no profile
+/// yet. Every other outcome is an error: the caller writes a replaceable event
+/// built from this map, so treating a failed lookup as "no profile" would
+/// republish a single-field profile and erase `name`, `display_name`,
+/// `agent_type`, `capabilities` and `status` — every field clients parse from
+/// the profile body (`agents_from_events`), the exact wipe this merge exists to
+/// prevent. Failing loudly leaves the stored profile intact.
+async fn fetch_own_agent_profile(client: &BuzzClient) -> Result<StoredAgentProfile, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+        "authors": [client.keys().public_key().to_hex()],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await.map_err(profile_read_error)?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(|e| {
+        CliError::Other(format!(
+            "relay returned an unreadable profile query result: {e}"
+        ))
+    })?;
+    parse_stored_profile(&events)
+}
+
+/// Explain a failed profile read without flattening its category.
+///
+/// `exit_code` and `is_retryable_error` classify by variant, and those codes are
+/// the CLI's agent-facing contract (2 = network/relay, 3 = auth, 4 = other), so
+/// mapping a 503 or a connect timeout to `Other` would tell a caller to abandon
+/// a transient outage as permanent, and an expired `BUZZ_AUTH_TAG` to treat
+/// re-authenticating as pointless. Context is added where the variant has room
+/// for it.
+fn profile_read_error(e: CliError) -> CliError {
+    const CONTEXT: &str = "could not read the current agent profile, so the policy change \
+                           was not published (publishing without it would erase the profile)";
+    match e {
+        // `reqwest::Error` has nowhere to put added context, and the variant —
+        // exit 2, retryable — is what a caller acts on.
+        CliError::Network(_) => e,
+        CliError::Relay { status, body } => CliError::Relay {
+            status,
+            body: format!("{CONTEXT}: {body}"),
+        },
+        CliError::Auth(message) => CliError::Auth(format!("{CONTEXT}: {message}")),
+        CliError::Key(message) => CliError::Key(format!("{CONTEXT}: {message}")),
+        other => CliError::Other(format!("{CONTEXT}: {other}")),
+    }
+}
+
+/// The stored profile a query result describes, or an error rather than a guess.
+///
+/// Separate from the query so the decision that matters — when it is safe to
+/// treat a result as "no profile" — is testable without a relay. Getting it
+/// wrong republishes a single-field profile and erases the rest.
+fn parse_stored_profile(events: &[serde_json::Value]) -> Result<StoredAgentProfile, CliError> {
+    let Some(event) = events.first() else {
+        return Ok(StoredAgentProfile {
+            body: serde_json::Map::new(),
+            created_at: 0,
+        });
+    };
+    // A result row we cannot fully read is not an absent profile, and both
+    // fields are checked together because both defaults were unsafe:
+    // defaulting `content` to `""` takes the empty-body path below and
+    // republishes a single-field profile — the wipe this merge exists to
+    // prevent — and defaulting `created_at` to 0 stamps the write at a plain
+    // `now`, restoring the same-second event-id coin flip
+    // `profile_publish_timestamp` exists to avoid. Only a genuinely absent
+    // event yields an empty body.
+    let (Some(created_at), Some(content)) = (
+        event.get("created_at").and_then(serde_json::Value::as_u64),
+        event.get("content").and_then(serde_json::Value::as_str),
+    ) else {
+        return Err(CliError::Other(
+            "the relay returned an agent profile event without a readable \
+             `created_at` and `content`; refusing to replace the stored profile \
+             from a result this command cannot interpret."
+                .to_string(),
+        ));
+    };
+    if content.trim().is_empty() {
+        // A profile event with no body carries nothing to preserve, so this is
+        // the "no profile" case rather than a lookup we failed to read.
+        return Ok(StoredAgentProfile {
+            body: serde_json::Map::new(),
+            created_at,
+        });
+    }
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Object(body)) => Ok(StoredAgentProfile { body, created_at }),
+        _ => Err(CliError::Other(
+            "the stored agent profile is not a JSON object; refusing to replace it \
+             with a single-field profile. This command only merges into an object \
+             body and is the only in-repo publisher of kind:10100, so recover by \
+             signing a corrected kind:10100 event and submitting it to the relay's \
+             `POST /events`, then re-run."
+                .to_string(),
+        )),
+    }
+}
+
+/// How far ahead of this host's clock a merge may stamp its `created_at`.
+///
+/// The relay accepts a ±900s window measured against *its own* clock
+/// (`MAX_TIMESTAMP_DRIFT_SECS`, `crates/buzz-relay/src/handlers/ingest.rs`);
+/// this budget is measured against ours, so the two are not directly
+/// comparable. A stored copy accepted at `S` when relay time was `R` proves
+/// only `S - R <= 900`, so out-bidding it at `S + 1` can sit up to 901s from
+/// relay time. The headroom below 900 absorbs that overshoot, so a refusal here
+/// means the stored profile's timestamp is genuinely broken rather than merely
+/// written by a host whose clock leads ours.
+const MAX_PROFILE_PUBLISH_LEAD_SECS: u64 = 600;
+
+fn unix_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The `created_at` a merge must publish to replace `stored_created_at`.
+///
+/// Out-bids the stored copy by timestamp rather than leaving it to the event-id
+/// tiebreak. `Db::replace_addressable_event` resolves a same-second write by
+/// lowest id, so a plain `now` write is a coin flip against a peer republishing
+/// the profile in the same second — and a deterministic *loss* against a stored
+/// copy stamped later by a skewed peer. Retrying at `now` cannot win either, so
+/// retries alone do not fix it.
+///
+/// Bounded against the *relay's* tolerance, not against a tight local-clock
+/// assumption. Stamping `stored_created_at + 1` is only ever one second ahead of
+/// whichever writer produced the stored copy, so the lead measured against our
+/// own clock is just this host's skew from that writer's — and refusing on a few
+/// seconds of it made the command unusable on any deployment where the harness
+/// host's clock runs ahead of the operator's. What needs guarding is a stored
+/// copy so far in the future that out-bidding it would fall outside the relay's
+/// ±900s window.
+fn profile_publish_timestamp(now: u64, stored_created_at: u64) -> Result<u64, CliError> {
+    let created_at = now.max(stored_created_at + 1);
+    let lead = created_at.saturating_sub(now);
+    if lead > MAX_PROFILE_PUBLISH_LEAD_SECS {
+        return Err(CliError::Other(format!(
+            "the stored agent profile is timestamped {lead}s ahead of this host's clock; \
+             out-bidding it would fall outside the relay's timestamp tolerance. \
+             Check for clock skew, or republish a correctly stamped kind:10100 profile."
+        )));
+    }
+    Ok(created_at)
+}
+
 /// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
@@ -1439,18 +1600,271 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
-    let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
+    // kind:10100 is replaceable, and the relay projects only
+    // `channel_add_policy` into a column — `name`, `display_name`,
+    // `agent_type`, `capabilities` and `status` live solely in the event body
+    // clients read (`agents_from_events`). Publishing this one field alone
+    // therefore erased the rest of the profile, blanking the agent's name and
+    // capabilities in the directory until it was republished by hand.
+    // (Channel membership is not among them: clients source it from
+    // relay-signed kind:39002, not this body.)
+    //
+    // This is a read-modify-write on a replaceable event with no
+    // compare-and-set, so it races any other client publishing kind:10100 for
+    // this identity under the same key. No in-repo writer other than this
+    // command publishes that kind, so the peer is an out-of-repo one — an agent
+    // harness that republishes the profile as its channel membership changes.
+    // Re-read after publishing and redo the merge if someone else's copy is now
+    // stored: without that, an operator running this command while an agent is
+    // being invited to a channel silently drops the invite from `channel_ids`.
+    //
+    // The window is narrowed, not closed. A peer that publishes between our
+    // read and our write still loses its change, because a replaceable write
+    // carries the whole body and nothing records what we replaced.
+    const MAX_MERGE_ATTEMPTS: usize = 3;
+    const CONFLICT_MSG: &str = "another writer replaced the agent profile while this policy \
+                                change was being published; the change did not stick. Retry.";
     use nostr::{EventBuilder, Kind};
-    let builder = EventBuilder::new(
-        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
-        &content,
-    )
-    .tags([]);
-    let event = client.sign_event(builder)?;
+    // No sleep between attempts: unlike a harness that republishes repeatedly
+    // and would ratchet its own stamps upward, this runs at most three times
+    // per invocation. Sleeping here only delayed the command.
+    for _ in 1..=MAX_MERGE_ATTEMPTS {
+        let stored = fetch_own_agent_profile(client).await?;
+        let mut profile = stored.body;
+        profile.insert(
+            "channel_add_policy".to_string(),
+            serde_json::Value::String(policy.to_string()),
+        );
+        let content = serde_json::Value::Object(profile).to_string();
 
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
+        // Out-bid the stored copy by timestamp rather than leaving it to the
+        // event-id tiebreak. `Db::replace_addressable_event` resolves a
+        // same-second write by lowest id, so a default `created_at = now` write
+        // is a coin flip against a peer republishing the profile in the same
+        // second — and a deterministic *loss* against a stored copy stamped
+        // later by a skewed peer. Retrying at `now` cannot win either, so retries alone do
+        // not fix it.
+        let created_at = profile_publish_timestamp(unix_secs_now(), stored.created_at)?;
+
+        let builder = EventBuilder::new(
+            Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
+            &content,
+        )
+        .tags([])
+        .custom_created_at(nostr::Timestamp::from_secs(created_at));
+        let event = client.sign_event(builder)?;
+        let event_id = event.id.to_hex();
+
+        let resp = client.submit_event(event).await?;
+
+        // `duplicate:` means the relay took the write and rolled it back — the
+        // loser of a replaceable compare. It arrives as `accepted: true`, so
+        // reading only `accepted` would report success for a discarded write.
+        // A bare accept is still not landed either: a peer may have published
+        // straight after us and replaced our copy, so confirm before trusting
+        // it. Reporting a conflict for an accepted-but-unconfirmed write told a
+        // caller to retry a change that had already landed — and the retry
+        // rebuilt the same body at the same stamp, so it came back `duplicate:`
+        // and looked like a conflict again, all the way to exit 5.
+        let attempt = match parse_write_response(&resp, CONFLICT_MSG) {
+            Ok(rendered) => WriteAttempt::Accepted {
+                rendered,
+                confirmation: confirm_stored_profile(client, &event_id, created_at).await,
+            },
+            Err(CliError::Conflict(_)) => WriteAttempt::Conflicted,
+            // A non-conflict error (network, auth, malformed) is terminal for
+            // this invocation: the mutation's fate is that error's, not a retry.
+            Err(other) => return Err(other),
+        };
+        match merge_attempt_outcome(attempt) {
+            AttemptOutcome::Done(rendered) => {
+                println!("{rendered}");
+                return Ok(());
+            }
+            AttemptOutcome::Retry => {}
+        }
+    }
+    // Never report success for a write we could not confirm landed. Exit 5 is
+    // the CLI's write-conflict code, so a caller can distinguish "retry me"
+    // from a usage or network error.
+    Err(CliError::Conflict(CONFLICT_MSG.to_string()))
+}
+
+/// What a post-publish read proves about the event we just published.
+#[derive(Debug, PartialEq, Eq)]
+enum Confirmation {
+    /// Our event is the stored copy.
+    Landed,
+    /// A copy that beats ours is stored, so ours was replaced: merge onto the
+    /// new one and publish again.
+    Replaced,
+    /// The read proves nothing — it cannot see our write yet, or it failed.
+    Unconfirmed(String),
+}
+
+/// Read the stored kind:10100 head back and classify our write against it.
+///
+/// A failed read is `Unconfirmed`, never an error: the mutation has already
+/// happened by the time this runs, so borrowing the read's error would report a
+/// successful policy change as a network or relay failure and send exit 2 to a
+/// caller whose write landed.
+async fn confirm_stored_profile(
+    client: &BuzzClient,
+    published_id: &str,
+    published_created_at: u64,
+) -> Confirmation {
+    match stored_profile_head(client).await {
+        Ok(stored) => classify_confirmation(
+            published_id,
+            published_created_at,
+            stored
+                .as_ref()
+                .map(|(id, created_at)| (id.as_str(), *created_at)),
+        ),
+        Err(e) => Confirmation::Unconfirmed(format!(
+            "the relay accepted the event, but reading the profile back to confirm \
+             it did not succeed: {e}"
+        )),
+    }
+}
+
+/// Classify a read-back head against the event we published.
+///
+/// The read cannot be pinned to the primary: kind:10100 is global, so the
+/// filter carries neither a channel pin nor an `until`, which makes it
+/// `RoutePredicate::Bounded` and lets the relay serve it from a read replica
+/// whenever `BUZZ_REPLICA_READ_MAX_AGE_MS` is set. That budget bounds how
+/// recently the replica proved its replay position, not whether a write from a
+/// moment ago is visible, so a read issued straight after the publish can
+/// legitimately return the pre-write event.
+///
+/// The relay's own replace rule separates that lag from a real loss:
+/// `Db::replace_addressable_event` keeps the higher `created_at` and breaks a
+/// tie by lowest event id. A stored copy that loses that comparison to the
+/// event we just published therefore cannot have replaced it — the read is
+/// simply behind. Treating it as a conflict republished a byte-identical event,
+/// drew `duplicate:`, and returned exit 5 for a policy change that was stored.
+fn classify_confirmation(
+    published_id: &str,
+    published_created_at: u64,
+    stored: Option<(&str, u64)>,
+) -> Confirmation {
+    let Some((stored_id, stored_created_at)) = stored else {
+        // The relay accepted our event, so an empty read is one that cannot see
+        // it yet: a replaceable write is never removed by a peer's.
+        return Confirmation::Unconfirmed(
+            "the relay accepted the event, but the profile read back empty".to_string(),
+        );
+    };
+    if stored_id == published_id {
+        return Confirmation::Landed;
+    }
+    let stored_beats_ours = match stored_created_at.cmp(&published_created_at) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => stored_id < published_id,
+        std::cmp::Ordering::Less => false,
+    };
+    if stored_beats_ours {
+        Confirmation::Replaced
+    } else {
+        Confirmation::Unconfirmed(format!(
+            "the relay accepted the event, but the profile read back a copy \
+             ({stored_id} at {stored_created_at}) that cannot have replaced it"
+        ))
+    }
+}
+
+/// Event id and `created_at` of the kind:10100 profile the relay currently
+/// stores for us.
+async fn stored_profile_head(client: &BuzzClient) -> Result<Option<(String, u64)>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+        "authors": [client.keys().public_key().to_hex()],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("unreadable profile query result: {e}")))?;
+    let Some(event) = events.first() else {
+        return Ok(None);
+    };
+    let (Some(id), Some(created_at)) = (
+        event.get("id").and_then(serde_json::Value::as_str),
+        event.get("created_at").and_then(serde_json::Value::as_u64),
+    ) else {
+        return Err(CliError::Other(
+            "the relay returned a profile event without a readable id and `created_at`".to_string(),
+        ));
+    };
+    Ok(Some((id.to_string(), created_at)))
+}
+
+/// Attach a confirmation caveat to an accepted write response.
+///
+/// The relay accepted the event, so this is a success: stdout keeps the
+/// documented `{event_id, accepted, message}` shape, and the extra `warning`
+/// key is additive the same way the create commands inject the new entity id.
+fn unconfirmed_write_response(rendered: &str, reason: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(rendered) {
+        Ok(serde_json::Value::Object(mut response)) => {
+            response.insert(
+                "warning".to_string(),
+                serde_json::Value::String(reason.to_string()),
+            );
+            serde_json::Value::Object(response).to_string()
+        }
+        _ => rendered.to_string(),
+    }
+}
+
+/// One publish attempt's relay-observed result, decoupled from the retry loop
+/// so the loop's branching is a pure, testable mapping rather than logic buried
+/// in an async `for`.
+#[derive(Debug, PartialEq)]
+enum WriteAttempt {
+    /// The relay accepted the event; `confirmation` is the post-publish
+    /// read-back that says whether it actually became the stored head.
+    Accepted {
+        rendered: String,
+        confirmation: Confirmation,
+    },
+    /// The relay reported the write a duplicate it rolled back (`duplicate:`),
+    /// which arrives as `accepted: true` but is a lost replaceable compare.
+    Conflicted,
+}
+
+/// What the retry loop does with one attempt.
+#[derive(Debug, PartialEq)]
+enum AttemptOutcome {
+    /// Stop: print this response and return success. Carries either the plain
+    /// accepted response or one with an additive unconfirmed `warning`.
+    Done(String),
+    /// The stored copy changed under us; re-read, re-merge, and publish again.
+    Retry,
+}
+
+/// Map a publish attempt to its loop outcome.
+///
+/// A landed write and an accepted-but-unconfirmable write are both successes —
+/// the latter keeps the documented response shape with an additive warning,
+/// because the relay accepted the event and nothing that could have replaced it
+/// is stored. A `Replaced` confirmation and a rolled-back `duplicate:` are both
+/// retries onto whatever is now stored. Non-conflict errors never reach here:
+/// the loop returns them directly, since the mutation's fate is the error's.
+fn merge_attempt_outcome(attempt: WriteAttempt) -> AttemptOutcome {
+    match attempt {
+        WriteAttempt::Accepted {
+            rendered,
+            confirmation,
+        } => match confirmation {
+            Confirmation::Landed => AttemptOutcome::Done(rendered),
+            Confirmation::Unconfirmed(reason) => {
+                AttemptOutcome::Done(unconfirmed_write_response(&rendered, &reason))
+            }
+            Confirmation::Replaced => AttemptOutcome::Retry,
+        },
+        WriteAttempt::Conflicted => AttemptOutcome::Retry,
+    }
 }
 
 pub async fn cmd_set_canvas(
@@ -1587,10 +2001,13 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
-        cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
-        hints_from_results, join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
-        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
+        classify_confirmation, cmd_set_add_policy, fetch_candidate_hints,
+        finalize_roster_resolution, format_candidate, hints_from_results, join_bounded_queries,
+        merge_attempt_outcome, name_matches, parse_stored_profile, profile_publish_timestamp,
+        profile_read_error, resolve_roster_with_archive_filter, unconfirmed_write_response,
+        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, AttemptOutcome,
+        CandidateHint, ChannelSummary, Confirmation, ResolvedAgent, RosterResolution, SkippedSlug,
+        WriteAttempt, MAX_PROFILE_PUBLISH_LEAD_SECS,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -2600,6 +3017,87 @@ mod tests {
         );
     }
 
+    // ---- kind:10100 profile merge -----------------------------------------
+
+    fn profile_event(created_at: u64, content: &str) -> serde_json::Value {
+        json!({ "created_at": created_at, "content": content })
+    }
+
+    #[test]
+    fn a_stored_profile_keeps_every_field_the_policy_does_not_own() {
+        // The defect: publishing `{"channel_add_policy": ...}` alone replaced
+        // the whole event body, blanking the agent's name and capabilities in
+        // the directory.
+        let stored = parse_stored_profile(&[profile_event(
+            100,
+            r#"{"name":"probe","display_name":"Probe","capabilities":["chat"],"status":"online"}"#,
+        )])
+        .expect("a JSON object body parses");
+        let mut merged = stored.body;
+        merged.insert("channel_add_policy".into(), json!("open"));
+
+        assert_eq!(merged.get("name"), Some(&json!("probe")));
+        assert_eq!(merged.get("display_name"), Some(&json!("Probe")));
+        assert_eq!(merged.get("capabilities"), Some(&json!(["chat"])));
+        assert_eq!(merged.get("status"), Some(&json!("online")));
+        assert_eq!(merged.get("channel_add_policy"), Some(&json!("open")));
+    }
+
+    #[test]
+    fn no_stored_profile_is_the_only_case_that_yields_an_empty_body() {
+        let none = parse_stored_profile(&[]).expect("no events is not an error");
+        assert!(none.body.is_empty());
+        assert_eq!(none.created_at, 0);
+
+        let blank = parse_stored_profile(&[profile_event(42, "  ")])
+            .expect("an empty body carries nothing to preserve");
+        assert!(blank.body.is_empty());
+        // Still out-bid the stored copy: the event exists, only its body is empty.
+        assert_eq!(blank.created_at, 42);
+    }
+
+    #[test]
+    fn an_unreadable_profile_is_refused_rather_than_replaced() {
+        // Treating this as "no profile" would republish a single-field profile
+        // and erase the rest, which is the wipe this merge exists to prevent.
+        for content in [r#"["not","an","object"]"#, "not json at all", r#""string""#] {
+            let err = parse_stored_profile(&[profile_event(1, content)])
+                .expect_err("a non-object body must not be treated as absent");
+            assert!(
+                matches!(err, CliError::Other(ref m) if m.contains("refusing to replace")),
+                "unexpected error for {content:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_merge_out_bids_the_stored_copy_instead_of_tying_it() {
+        // A same-second write is resolved by lowest event id, so publishing at
+        // `now` is a coin flip against the harness republishing concurrently.
+        assert_eq!(profile_publish_timestamp(1_000, 999).unwrap(), 1_000);
+        assert_eq!(profile_publish_timestamp(1_000, 1_000).unwrap(), 1_001);
+        assert_eq!(profile_publish_timestamp(1_000, 1_050).unwrap(), 1_051);
+    }
+
+    #[test]
+    fn ordinary_clock_skew_does_not_block_a_policy_change() {
+        // Refusing on a few seconds of skew made the command unusable wherever
+        // the harness host's clock led the operator's.
+        let stored = 1_000 + MAX_PROFILE_PUBLISH_LEAD_SECS - 1;
+        assert!(profile_publish_timestamp(1_000, stored).is_ok());
+    }
+
+    #[test]
+    fn a_stored_stamp_past_the_relay_window_is_refused_not_out_bid() {
+        let stored = 1_000 + MAX_PROFILE_PUBLISH_LEAD_SECS + 1;
+        let err = profile_publish_timestamp(1_000, stored)
+            .expect_err("out-bidding this would fall outside the relay's tolerance");
+        assert!(
+            matches!(err, CliError::Other(ref m) if m.contains("clock skew")),
+            "unexpected error: {err:?}"
+        );
+    }
+
     #[test]
     fn hints_from_results_successful_empty_snapshot_seeds_all_offline() {
         let pk_a = "c".repeat(64);
@@ -2691,6 +3189,26 @@ mod tests {
     }
 
     #[test]
+    fn a_result_row_we_cannot_read_is_refused_rather_than_treated_as_absent() {
+        // Defaulting `content` to "" republished a single-field profile — the
+        // wipe this merge exists to prevent — and defaulting `created_at` to 0
+        // dropped the write back to a plain `now` stamp, restoring the
+        // same-second event-id coin flip.
+        for event in [
+            json!({ "created_at": 100 }),
+            json!({ "created_at": 100, "content": 42 }),
+            json!({ "content": "{}" }),
+        ] {
+            let err = parse_stored_profile(std::slice::from_ref(&event))
+                .expect_err("an unreadable row must not look like an absent profile");
+            assert!(
+                matches!(err, CliError::Other(ref m) if m.contains("cannot interpret")),
+                "unexpected error for {event}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn hints_from_results_relay_error_response_seeds_nothing() {
         // The relay surfaces a Redis-outage presence lookup as a non-2xx error,
         // which the CLI query returns as `Err`. That must seed nothing — a
@@ -2707,6 +3225,40 @@ mod tests {
         assert!(
             map.get(&pk).is_none_or(|h| h.presence.is_none()),
             "a relay-side presence failure must never be inferred as offline: {map:?}"
+        );
+    }
+
+    #[test]
+    fn a_transient_profile_read_failure_keeps_its_exit_code() {
+        // Flattening these to `Other` reports exit 4 and `retryable: false` for
+        // a relay outage or an expired auth tag, against the exit-code contract
+        // agents drive the CLI by.
+        let relay = profile_read_error(CliError::Relay {
+            status: 503,
+            body: "unavailable".into(),
+        });
+        assert!(
+            matches!(relay, CliError::Relay { status: 503, .. }),
+            "{relay:?}"
+        );
+        assert!(crate::error::is_retryable_error(&relay));
+        assert_eq!(crate::error::exit_code(&relay), 2);
+
+        let auth = profile_read_error(CliError::Auth("token expired".into()));
+        assert_eq!(crate::error::exit_code(&auth), 3);
+
+        let other = profile_read_error(CliError::Other("unreadable body".into()));
+        assert!(matches!(other, CliError::Other(_)), "{other:?}");
+        assert_eq!(crate::error::exit_code(&other), 4);
+    }
+
+    // ---- post-publish confirmation ----------------------------------------
+
+    #[test]
+    fn our_own_event_reading_back_is_the_only_landed_case() {
+        assert_eq!(
+            classify_confirmation("aa", 1_000, Some(("aa", 1_000))),
+            Confirmation::Landed
         );
     }
 
@@ -2927,6 +3479,407 @@ mod tests {
         assert!(
             map.values().all(|h| h.profile_updated_at.is_none()),
             "the hung profile query must contribute nothing: {map:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_that_cannot_see_our_write_is_not_a_conflict() {
+        // The confirmation filter is neither channel-pinned nor `until`-bounded,
+        // so the relay may serve it from a lagging read replica and return the
+        // pre-write event. A stored copy that loses the relay's replace
+        // comparison cannot have replaced ours, so the read is behind — and
+        // calling that a conflict republished a byte-identical event, drew
+        // `duplicate:`, and exited 5 on a policy change that was stored.
+        let older = classify_confirmation("bb", 1_001, Some(("aa", 1_000)));
+        assert!(matches!(older, Confirmation::Unconfirmed(_)), "{older:?}");
+
+        // Same second, higher stored id: the lowest-id tiebreak went to us, so
+        // this copy cannot be the stored head either.
+        let tie = classify_confirmation("aa", 1_000, Some(("bb", 1_000)));
+        assert!(matches!(tie, Confirmation::Unconfirmed(_)), "{tie:?}");
+
+        // Our write was accepted, so nothing can have removed it.
+        let empty = classify_confirmation("aa", 1_000, None);
+        assert!(matches!(empty, Confirmation::Unconfirmed(_)), "{empty:?}");
+    }
+
+    #[test]
+    fn a_copy_that_beats_ours_is_a_replacement_to_merge_onto() {
+        assert_eq!(
+            classify_confirmation("aa", 1_000, Some(("bb", 1_001))),
+            Confirmation::Replaced
+        );
+        // Same second, lower stored id: the lowest-id tiebreak went to the peer.
+        assert_eq!(
+            classify_confirmation("bb", 1_000, Some(("aa", 1_000))),
+            Confirmation::Replaced
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_write_reports_success_with_a_warning() {
+        let rendered = r#"{"event_id":"aa","accepted":true,"message":"ok"}"#;
+        let out = unconfirmed_write_response(rendered, "could not confirm the write");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("json response");
+        // The documented write-response shape survives; the caveat is additive.
+        assert_eq!(parsed.get("event_id"), Some(&json!("aa")));
+        assert_eq!(parsed.get("accepted"), Some(&json!(true)));
+        assert_eq!(parsed.get("message"), Some(&json!("ok")));
+        assert_eq!(
+            parsed.get("warning"),
+            Some(&json!("could not confirm the write"))
+        );
+    }
+
+    // ---- per-attempt loop mapping -----------------------------------------
+
+    #[test]
+    fn a_landed_write_is_done_with_the_relay_response() {
+        let outcome = merge_attempt_outcome(WriteAttempt::Accepted {
+            rendered: r#"{"event_id":"aa","accepted":true,"message":""}"#.into(),
+            confirmation: Confirmation::Landed,
+        });
+        assert_eq!(
+            outcome,
+            AttemptOutcome::Done(r#"{"event_id":"aa","accepted":true,"message":""}"#.into())
+        );
+    }
+
+    #[test]
+    fn an_accepted_but_unconfirmed_write_is_done_with_an_added_warning() {
+        let outcome = merge_attempt_outcome(WriteAttempt::Accepted {
+            rendered: r#"{"event_id":"aa","accepted":true,"message":"ok"}"#.into(),
+            confirmation: Confirmation::Unconfirmed("read replica was behind".into()),
+        });
+        let AttemptOutcome::Done(rendered) = outcome else {
+            panic!("an accepted write is a success, not a retry: {outcome:?}");
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("json response");
+        assert_eq!(parsed.get("accepted"), Some(&json!(true)));
+        assert_eq!(
+            parsed.get("warning"),
+            Some(&json!("read replica was behind"))
+        );
+    }
+
+    #[test]
+    fn a_replaced_or_conflicted_write_retries() {
+        // Both a peer copy that beat ours and a rolled-back `duplicate:` mean
+        // the stored head is not ours — re-read, re-merge, publish again.
+        assert_eq!(
+            merge_attempt_outcome(WriteAttempt::Accepted {
+                rendered: "{}".into(),
+                confirmation: Confirmation::Replaced,
+            }),
+            AttemptOutcome::Retry
+        );
+        assert_eq!(
+            merge_attempt_outcome(WriteAttempt::Conflicted),
+            AttemptOutcome::Retry
+        );
+    }
+}
+
+/// End-to-end coverage of the read-merge-confirm retry loop in
+/// `cmd_set_add_policy`, driven against a scripted in-process relay so the
+/// loop's re-merge-on-`Replaced` and bounded-attempt exhaustion run as real
+/// HTTP round-trips, not just the pure per-attempt mapping above.
+#[cfg(test)]
+mod set_add_policy_loop_tests {
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use nostr::Keys;
+    use serde_json::{json, Value};
+    use tokio::net::TcpListener;
+
+    use super::cmd_set_add_policy;
+    use crate::client::BuzzClient;
+    use crate::error::{exit_code, CliError};
+
+    /// The single kind:10100 profile the scripted relay currently stores.
+    #[derive(Clone, Default)]
+    struct Stored {
+        present: bool,
+        id: String,
+        created_at: u64,
+        content: String,
+    }
+
+    /// How the scripted relay reacts to each accepted write.
+    #[derive(Clone)]
+    enum Mode {
+        /// Store exactly what we submitted — our write always lands.
+        AcceptOurs,
+        /// For the first `beat_until` writes, replace ours with a distinct peer
+        /// copy (`peer_body`) that out-bids by one second; store ours afterwards
+        /// so the re-merge can land. The peer body deliberately differs from what
+        /// we submitted, so a landing write proves the command re-read the *new*
+        /// stored copy rather than reusing its stale one.
+        PeerBeatsThenAccepts { beat_until: u32, peer_body: String },
+        /// Every write is immediately replaced by an out-bidding peer copy.
+        PeerAlwaysBeats { peer_body: String },
+        /// For the first `dup_until` writes, answer `accepted:true` but with a
+        /// `duplicate:` message — the relay's signal that it took the write and
+        /// rolled it back — while leaving our own copy as the stored head. The
+        /// command must treat that as a conflict and retry from the message
+        /// alone, even though a confirmation read would show our event landed.
+        DuplicateThenAccepts { dup_until: u32 },
+    }
+
+    struct RelayState {
+        stored: Mutex<Stored>,
+        /// The parsed body of every event the command submitted, in order — the
+        /// evidence that the merge actually preserved the stored fields.
+        submissions: Mutex<Vec<serde_json::Map<String, Value>>>,
+        writes: AtomicU32,
+        mode: Mode,
+    }
+
+    /// `POST /query` — return the stored profile as a one-element array, or empty.
+    /// Serves both the pre-write fetch and the post-write confirmation read.
+    async fn query(State(state): State<Arc<RelayState>>) -> Json<Value> {
+        let stored = state.stored.lock().unwrap();
+        if stored.present {
+            Json(json!([{
+                "id": stored.id,
+                "created_at": stored.created_at,
+                "content": stored.content,
+            }]))
+        } else {
+            Json(json!([]))
+        }
+    }
+
+    /// `POST /events` — record the submitted body, then update stored state per
+    /// `Mode`. Recording the body is what lets a test assert the merge preserved
+    /// the fields the policy does not own, instead of only counting writes.
+    async fn events(State(state): State<Arc<RelayState>>, body: String) -> Json<Value> {
+        let submitted: Value = serde_json::from_str(&body).expect("submitted event is json");
+        let sub_id = submitted["id"].as_str().expect("event id").to_string();
+        let sub_created = submitted["created_at"].as_u64().expect("event created_at");
+        let sub_content = submitted["content"]
+            .as_str()
+            .expect("event content")
+            .to_string();
+        let parsed: Value = serde_json::from_str(&sub_content).expect("submitted content is json");
+        state
+            .submissions
+            .lock()
+            .unwrap()
+            .push(parsed.as_object().expect("content is an object").clone());
+        let n = state.writes.fetch_add(1, Ordering::SeqCst) + 1;
+
+        let ours = Stored {
+            present: true,
+            id: sub_id.clone(),
+            created_at: sub_created,
+            content: sub_content.clone(),
+        };
+        // A peer copy that out-bids ours by one second. Tracking our own stamp
+        // (rather than a fixed-large value) keeps the next attempt's re-merge
+        // inside the publish-lead window instead of tripping the skew guard.
+        let peer = |peer_body: &str| Stored {
+            present: true,
+            id: format!("peer-{n}"),
+            created_at: sub_created + 1,
+            content: peer_body.to_string(),
+        };
+
+        // Each arm yields the new stored head and the write-response message.
+        // Only `DuplicateThenAccepts` returns a non-empty message; every other
+        // mode signals loss through the confirmation read, not the message.
+        let (next, message) = match &state.mode {
+            Mode::AcceptOurs => (ours, ""),
+            Mode::PeerBeatsThenAccepts {
+                beat_until,
+                peer_body,
+            } if n <= *beat_until => (peer(peer_body), ""),
+            Mode::PeerBeatsThenAccepts { .. } => (ours, ""),
+            Mode::PeerAlwaysBeats { peer_body } => (peer(peer_body), ""),
+            Mode::DuplicateThenAccepts { dup_until } if n <= *dup_until => {
+                (ours, "duplicate: dominated")
+            }
+            Mode::DuplicateThenAccepts { .. } => (ours, ""),
+        };
+        *state.stored.lock().unwrap() = next;
+
+        Json(json!({ "event_id": sub_id, "accepted": true, "message": message }))
+    }
+
+    async fn scripted_relay(mode: Mode) -> (String, Arc<RelayState>) {
+        let state = Arc::new(RelayState {
+            stored: Mutex::new(Stored::default()),
+            submissions: Mutex::new(Vec::new()),
+            writes: AtomicU32::new(0),
+            mode,
+        });
+        let app = Router::new()
+            .route("/query", post(query))
+            .route("/events", post(events))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), state)
+    }
+
+    /// Seed the relay's stored profile with a populated body before the command
+    /// runs, so the merge has real sibling fields to preserve.
+    fn seed(state: &RelayState, content: &str) {
+        *state.stored.lock().unwrap() = Stored {
+            present: true,
+            id: "seeded".to_string(),
+            created_at: 100,
+            content: content.to_string(),
+        };
+    }
+
+    fn client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+    }
+
+    /// The Nth (0-based) body the command submitted to the relay.
+    fn submission(state: &RelayState, i: usize) -> serde_json::Map<String, Value> {
+        state.submissions.lock().unwrap()[i].clone()
+    }
+
+    #[tokio::test]
+    async fn a_clean_write_preserves_the_existing_body_and_adds_the_policy() {
+        // The core guarantee: a policy change carries the stored profile forward
+        // rather than replacing it. Publishing a single-field body here is the
+        // exact wipe the PR fixes — this assertion is what catches it.
+        let (url, state) = scripted_relay(Mode::AcceptOurs).await;
+        seed(&state, r#"{"name":"orig","capabilities":["chat"]}"#);
+        cmd_set_add_policy(&client(&url), "owner_only")
+            .await
+            .expect("a write that lands is a success");
+        assert_eq!(state.writes.load(Ordering::SeqCst), 1, "no spurious retry");
+
+        let body = submission(&state, 0);
+        assert_eq!(body.get("name"), Some(&json!("orig")), "name must survive");
+        assert_eq!(
+            body.get("capabilities"),
+            Some(&json!(["chat"])),
+            "capabilities must survive"
+        );
+        assert_eq!(
+            body.get("channel_add_policy"),
+            Some(&json!("owner_only")),
+            "the policy must be written"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replaced_write_re_merges_onto_the_new_copy_and_lands() {
+        // Attempt 1 is replaced by a peer whose body differs from ours; attempt 2
+        // must re-read *that* copy and merge onto it. Asserting the final body
+        // carries the peer's fields (not our first attempt's) is what proves the
+        // re-merge used fresh state instead of blindly republishing.
+        let (url, state) = scripted_relay(Mode::PeerBeatsThenAccepts {
+            beat_until: 1,
+            peer_body: r#"{"name":"peer","display_name":"Peer"}"#.to_string(),
+        })
+        .await;
+        seed(&state, r#"{"name":"orig"}"#);
+        cmd_set_add_policy(&client(&url), "owner_only")
+            .await
+            .expect("re-merge onto the replacement then land");
+        assert_eq!(
+            state.writes.load(Ordering::SeqCst),
+            2,
+            "one replacement should cost exactly one retry"
+        );
+
+        let first = submission(&state, 0);
+        assert_eq!(
+            first.get("name"),
+            Some(&json!("orig")),
+            "attempt 1 merged onto the seeded copy"
+        );
+        let last = submission(&state, 1);
+        assert_eq!(
+            last.get("name"),
+            Some(&json!("peer")),
+            "attempt 2 merged onto the peer's copy, not our stale one"
+        );
+        assert_eq!(
+            last.get("display_name"),
+            Some(&json!("Peer")),
+            "the peer's other fields are preserved through the re-merge"
+        );
+        assert_eq!(
+            last.get("channel_add_policy"),
+            Some(&json!("owner_only")),
+            "the policy is applied to the re-merged body"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_replaced_every_time_exhausts_to_exit_5() {
+        let (url, state) = scripted_relay(Mode::PeerAlwaysBeats {
+            peer_body: r#"{"name":"peer"}"#.to_string(),
+        })
+        .await;
+        seed(&state, r#"{"name":"orig"}"#);
+        let err = cmd_set_add_policy(&client(&url), "owner_only")
+            .await
+            .expect_err("a perpetually replaced write must not report success");
+        assert!(
+            matches!(err, CliError::Conflict(_)),
+            "exhaustion is a write conflict: {err:?}"
+        );
+        assert_eq!(exit_code(&err), 5, "write conflict is the CLI's exit 5");
+        assert_eq!(
+            state.writes.load(Ordering::SeqCst),
+            3,
+            "exactly MAX_MERGE_ATTEMPTS writes before giving up"
+        );
+        // Every attempt carried the policy on a real merged body — the loop kept
+        // trying to land the change, it did not degrade to a single-field wipe.
+        for i in 0..3 {
+            assert_eq!(
+                submission(&state, i).get("channel_add_policy"),
+                Some(&json!("owner_only")),
+                "attempt {i} must still carry the policy"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_response_is_a_conflict_and_is_retried_not_reported_as_success() {
+        // A `duplicate:` write arrives as `accepted: true` — the relay took it
+        // and rolled it back. The command must retry from that message alone,
+        // even though the stored head here is our own event, so a read would say
+        // the write landed. Attempt 2 re-merges under a fresh out-bid stamp
+        // (a new event id, no longer a duplicate) and lands.
+        //
+        // The write count is the discriminator: a build that read only
+        // `accepted` — the bug this branch guards — would stop after one write.
+        let (url, state) = scripted_relay(Mode::DuplicateThenAccepts { dup_until: 1 }).await;
+        seed(&state, r#"{"name":"orig"}"#);
+        cmd_set_add_policy(&client(&url), "owner_only")
+            .await
+            .expect("a duplicate is retried, then the re-merge lands");
+        assert_eq!(
+            state.writes.load(Ordering::SeqCst),
+            2,
+            "a duplicate must be retried, not accepted as landed"
+        );
+        let last = submission(&state, 1);
+        assert_eq!(
+            last.get("name"),
+            Some(&json!("orig")),
+            "the retry still carried the stored profile forward"
+        );
+        assert_eq!(
+            last.get("channel_add_policy"),
+            Some(&json!("owner_only")),
+            "the policy landed on the retry"
         );
     }
 }
