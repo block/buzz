@@ -8,6 +8,36 @@ import { sortEvents } from "../../shared/api/relayClientShared.ts";
 export const ISSUE_ASSIGNMENT_LABEL = "assignment";
 export const ISSUE_UNASSIGNMENT_LABEL = "unassignment";
 export const ISSUE_ACTION_REQUIRED_LABEL = "action-required";
+export const MYBUZZ_WORKFLOW_STATUS_LABEL = "mybuzz-workflow-status";
+export const MYBUZZ_WORKFLOW_STATUS_WORKFLOW = "mybuzz-status-v1";
+export const MYBUZZ_WORKFLOW_STATUS_OWNER =
+  "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b";
+
+export const MYBUZZ_WORKFLOW_STATUS_STATES = [
+  "triage",
+  "backlog",
+  "in-development",
+  "implemented",
+  "code-qs",
+  "to-be-published",
+  "ready-for-test",
+];
+
+export const MYBUZZ_WORKFLOW_STATUS_LABELS = {
+  triage: "Triage",
+  backlog: "Backlog",
+  "in-development": "In Development",
+  implemented: "Implemented",
+  "code-qs": "Code-QS",
+  "to-be-published": "To Be Published",
+  "ready-for-test": "Ready for Test",
+};
+
+const MYBUZZ_WORKFLOW_STATUS_REASON_REQUIRED = new Set([
+  "triage",
+  "backlog",
+  "ready-for-test",
+]);
 
 export function isHumanDirectedIssueComment(body) {
   return /^(?:test|expected|reply)\s*:/i.test(body.trimStart());
@@ -58,51 +88,6 @@ export function allowedActorsForRoot(rootEvent) {
   const owner = repoOwnerFromAddress(getTag(rootEvent, "a"));
   if (owner) allowed.add(owner);
   return allowed;
-}
-
-function latestStatusForIssue(
-  issue,
-  statusEvents,
-  assignees,
-  additionalStatusActors = [],
-) {
-  const allowedActors = allowedActorsForRoot(issue);
-  // Assignees and a verified NIP-OA owner are status-specific actors. Do not
-  // add them to allowedActorsForRoot: that helper also gates assignments and
-  // pull-request lifecycle events.
-  for (const actor of [...assignees, ...additionalStatusActors]) {
-    allowedActors.add(actor.toLowerCase());
-  }
-  return statusEvents
-    .filter(
-      (event) =>
-        allowedActors.has(event.pubkey.toLowerCase()) &&
-        !getAllTags(event, "t").includes("human-verdict") &&
-        event.tags.some((tag) => tag[0] === "e" && tag[1] === issue.id),
-    )
-    .sort((left, right) => right.created_at - left.created_at)[0];
-}
-
-function statusFromEvent(issue, statusEvent) {
-  if (statusEvent?.kind === 1631) return PROJECT_ISSUE_STATUS.DONE;
-  if (statusEvent?.kind === 1632) return PROJECT_ISSUE_STATUS.CLOSED;
-  // NIP-34 calls 1633 "Draft"; we surface it as Triage for issues. The
-  // label-based fallbacks below are client-side heuristics, not protocol.
-  if (statusEvent?.kind === 1633) return PROJECT_ISSUE_STATUS.TRIAGE;
-
-  const labels = [
-    ...getAllTags(issue, "t"),
-    ...(statusEvent ? getAllTags(statusEvent, "t") : []),
-  ].map((label) => label.toLowerCase());
-  if (labels.includes("approved")) return PROJECT_ISSUE_STATUS.APPROVED;
-  if (labels.includes("in-review") || labels.includes("review")) {
-    return PROJECT_ISSUE_STATUS.IN_REVIEW;
-  }
-  if (labels.includes("in-progress") || labels.includes("active")) {
-    return PROJECT_ISSUE_STATUS.IN_PROGRESS;
-  }
-  if (labels.includes("triage")) return PROJECT_ISSUE_STATUS.TRIAGE;
-  return PROJECT_ISSUE_STATUS.BACKLOG;
 }
 
 /**
@@ -191,13 +176,7 @@ function assignmentStateForIssue(issue, issueCommentEvents) {
 
 function commentsForIssue(issueCommentEvents) {
   return sortEvents(issueCommentEvents)
-    .filter((event) => {
-      const labels = getAllTags(event, "t");
-      return (
-        !labels.includes("review-ready") &&
-        !labels.includes("issue-verdict-confirmed")
-      );
-    })
+    .filter((event) => !isWorkflowActivityEvent(event))
     .map((event) => ({
       id: event.id,
       content: event.content,
@@ -209,6 +188,164 @@ function commentsForIssue(issueCommentEvents) {
         ISSUE_ACTION_REQUIRED_LABEL,
       ),
     }));
+}
+
+function isWorkflowActivityEvent(event) {
+  const labels = getAllTags(event, "t");
+  return (
+    isMyBuzzWorkflowStatusEvent(event) ||
+    labels.includes(ISSUE_ASSIGNMENT_LABEL) ||
+    labels.includes(ISSUE_UNASSIGNMENT_LABEL) ||
+    labels.includes("test-ready") ||
+    labels.includes("review-ready") ||
+    labels.includes("technical-review") ||
+    labels.includes("release-published") ||
+    labels.includes("human-verdict") ||
+    labels.includes("issue-verdict-confirmed")
+  );
+}
+
+function isLowercaseHex64(value) {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isPrintableReason(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.trim() === value &&
+    !hasControlCharacters(value)
+  );
+}
+
+function exactWorkflowStatusTags(event, issueId, repoAddress) {
+  const knownTags = new Set(["e", "a", "t", "workflow", "state", "reason"]);
+  if (
+    !Array.isArray(event.tags) ||
+    event.tags.some((tag) => !Array.isArray(tag) || !knownTags.has(tag[0]))
+  ) {
+    return null;
+  }
+  const exactOne = (name, value) =>
+    event.tags.filter((tag) => tag[0] === name).length === 1 &&
+    exactTag(event, name, value);
+  if (
+    !exactOne("e", [issueId, "", "root"]) ||
+    !exactOne("a", [repoAddress]) ||
+    !exactOne("t", [MYBUZZ_WORKFLOW_STATUS_LABEL]) ||
+    !exactOne("workflow", [MYBUZZ_WORKFLOW_STATUS_WORKFLOW])
+  ) {
+    return null;
+  }
+  const state = singleTagValue(event, "state");
+  if (!state || !MYBUZZ_WORKFLOW_STATUS_STATES.includes(state)) return null;
+  const reasons = event.tags.filter((tag) => tag[0] === "reason");
+  if (reasons.length > 1) return null;
+  const reason = reasons.length === 1 ? singleTagValue(event, "reason") : null;
+  if (reasons.length === 1 && !reason) return null;
+  if (
+    (MYBUZZ_WORKFLOW_STATUS_REASON_REQUIRED.has(state) &&
+      !isPrintableReason(reason)) ||
+    (reason !== null && !isPrintableReason(reason))
+  ) {
+    return null;
+  }
+  return { reason, state };
+}
+
+function isMyBuzzWorkflowStatusEvent(event) {
+  const issueId = getTag(event, "e");
+  const repoAddress = getTag(event, "a");
+  return (
+    Boolean(issueId) &&
+    Boolean(repoAddress) &&
+    exactWorkflowStatusTags(event, issueId, repoAddress) !== null
+  );
+}
+
+function workflowStatusesForIssue(issue, issueCommentEvents) {
+  const repoAddress = getTag(issue, "a");
+  if (!repoAddress) return [];
+  const byId = new Map();
+  for (const event of issueCommentEvents) {
+    if (
+      event.kind !== 1 ||
+      event.pubkey.toLowerCase() !== MYBUZZ_WORKFLOW_STATUS_OWNER ||
+      !isLowercaseHex64(event.id) ||
+      !isLowercaseHex64(event.pubkey) ||
+      !Number.isInteger(event.created_at)
+    ) {
+      continue;
+    }
+    const parsed = exactWorkflowStatusTags(event, issue.id, repoAddress);
+    if (!parsed || byId.has(event.id)) continue;
+    byId.set(event.id, { event, ...parsed });
+  }
+  return [...byId.values()].sort(
+    (left, right) =>
+      right.event.created_at - left.event.created_at ||
+      right.event.id.localeCompare(left.event.id),
+  );
+}
+
+function activityForIssue(issue, issueCommentEvents, workflowStatuses) {
+  const repoAddress = getTag(issue, "a");
+  const trustedActors = allowedActorsForRoot(issue);
+  const activity = workflowStatuses.map(({ event, reason, state }) => ({
+    id: event.id,
+    createdAt: event.created_at,
+    text: `Workflow status: ${MYBUZZ_WORKFLOW_STATUS_LABELS[state]}${reason ? ` - ${reason}` : ""}`,
+  }));
+  if (workflowStatuses.length === 0) {
+    activity.push({
+      id: "not-yet-classified",
+      createdAt: issue.created_at,
+      text: "Not yet classified",
+    });
+  }
+  for (const event of issueCommentEvents) {
+    const labels = getAllTags(event, "t");
+    if (
+      event.kind !== 1 ||
+      !repoAddress ||
+      !exactlyOneTag(event, "e", [issue.id, "", "root"]) ||
+      !exactlyOneTag(event, "a", [repoAddress])
+    ) {
+      continue;
+    }
+    if (
+      (labels.includes(ISSUE_ASSIGNMENT_LABEL) ||
+        labels.includes(ISSUE_UNASSIGNMENT_LABEL)) &&
+      trustedActors.has(event.pubkey.toLowerCase())
+    ) {
+      for (const pubkey of getAllTags(event, "p")) {
+        activity.push({
+          id: `${event.id}:${pubkey}`,
+          createdAt: event.created_at,
+          text: `${labels.includes(ISSUE_ASSIGNMENT_LABEL) ? "Assigned" : "Unassigned"}: ${pubkey.slice(0, 12)}...`,
+        });
+      }
+      continue;
+    }
+    const milestone = [
+      "test-ready",
+      "review-ready",
+      "technical-review",
+      "release-published",
+      "human-verdict",
+    ].find((label) => labels.includes(label));
+    if (milestone && trustedActors.has(event.pubkey.toLowerCase())) {
+      activity.push({
+        id: event.id,
+        createdAt: event.created_at,
+        text: `Technical milestone: ${milestone}`,
+      });
+    }
+  }
+  return activity.sort(
+    (left, right) =>
+      right.createdAt - left.createdAt || right.id.localeCompare(left.id),
+  );
 }
 
 function exactTag(event, name, value) {
@@ -506,7 +643,7 @@ export function eventToProjectIssue(
   issue,
   statusEvents = [],
   commentEvents = [],
-  additionalStatusActors = [],
+  _additionalStatusActors = [],
   reviewAuthority,
 ) {
   const issueCommentEvents = commentEvents.filter((event) =>
@@ -514,16 +651,7 @@ export function eventToProjectIssue(
       (tag) => (tag[0] === "e" || tag[0] === "E") && tag[1] === issue.id,
     ),
   );
-  // Assignment state comes before status resolution: assignees are trusted
-  // status actors, so their set must be known before a status event is
-  // honored.
   const assignmentState = assignmentStateForIssue(issue, issueCommentEvents);
-  const latestStatus = latestStatusForIssue(
-    issue,
-    statusEvents,
-    assignmentState.assignees,
-    additionalStatusActors,
-  );
   const currentReviewBinding = currentReviewForIssue(
     issue,
     issueCommentEvents,
@@ -556,28 +684,15 @@ export function eventToProjectIssue(
       }
     : null;
   const directVerdict = currentReview?.verdict?.kind ?? null;
-  const latestLifecycleAfterMarker =
-    latestStatus &&
-    currentReviewBinding &&
-    latestStatus.created_at > currentReviewBinding.marker.created_at
-      ? latestStatus
-      : null;
+  const workflowStatuses = workflowStatusesForIssue(issue, issueCommentEvents);
+  const workflowStatus = workflowStatuses[0] ?? null;
   const status =
     directVerdict === "accepted"
       ? PROJECT_ISSUE_STATUS.DONE
-      : directVerdict === "rejected"
-        ? PROJECT_ISSUE_STATUS.BACKLOG
-        : currentReview
-          ? latestLifecycleAfterMarker?.kind === 1631 ||
-            !latestLifecycleAfterMarker
-            ? PROJECT_ISSUE_STATUS.IN_REVIEW
-            : statusFromEvent(issue, latestLifecycleAfterMarker)
-          : statusFromEvent(issue, latestStatus);
-  const effectiveStatus =
-    rawVerdict ??
-    (currentReviewBinding
-      ? (latestStatus ?? currentReviewBinding.marker)
-      : latestStatus);
+      : workflowStatus
+        ? MYBUZZ_WORKFLOW_STATUS_LABELS[workflowStatus.state]
+        : PROJECT_ISSUE_STATUS.TRIAGE;
+  const effectiveStatus = rawVerdict ?? workflowStatus?.event ?? null;
   const comments = commentsForIssue(issueCommentEvents);
   const title =
     getTag(issue, "subject") ||
@@ -599,6 +714,15 @@ export function eventToProjectIssue(
     assignees: assignmentState.assignees,
     assigneeOperationHeads: assignmentState.heads,
     status,
+    workflowStatus: workflowStatus
+      ? {
+          eventId: workflowStatus.event.id,
+          state: workflowStatus.state,
+          reason: workflowStatus.reason,
+          createdAt: workflowStatus.event.created_at,
+        }
+      : null,
+    activity: activityForIssue(issue, issueCommentEvents, workflowStatuses),
     statusEventId: effectiveStatus?.id ?? null,
     statusCreatedAt: effectiveStatus?.created_at ?? null,
     updatedAt:
@@ -632,9 +756,7 @@ export function projectIssueEventsToIssues(
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
-/** Keep consecutive status changes ordered across whole-second Nostr
- * timestamps — `latestStatusForIssue` picks the highest `created_at`, so a
- * second change inside the same second would otherwise be a coin flip. */
+/** Keep consecutive status changes ordered across whole-second Nostr timestamps. */
 export function nextProjectIssueStatusCreatedAt(issue, now) {
   return Math.max(now, (issue.statusCreatedAt ?? 0) + 1);
 }

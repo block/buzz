@@ -6,7 +6,6 @@ import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
-import { resolveOaOwner } from "@/shared/api/tauriIdentityArchive";
 import {
   getProjectLocalRepoDiff,
   getProjectRepoDiff,
@@ -236,7 +235,7 @@ async function fetchProjectIssues(
     "#a": [project.repoAddress],
     limit: 200,
   });
-  const [issueEvents, statusEvents, commentEvents, assignmentEvents, oaOwner] =
+  const [issueEvents, statusEvents, commentEvents, assignmentEvents] =
     await Promise.all([
       issuePromise,
       relayClient.fetchEvents({
@@ -261,17 +260,13 @@ async function fetchProjectIssues(
       issuePromise.then((events) =>
         fetchAssignmentOperationEvents(events.map((event) => event.id)),
       ),
-      // NIP-OA ownership is cryptographically verified by the existing Tauri
-      // command. A failed lookup must keep the extra status gate closed without
-      // making the issue list itself unavailable.
-      resolveOaOwner(project.owner).catch(() => null),
     ]);
 
   return projectIssueEventsToIssues(
     issueEvents,
     statusEvents,
     mergeEventsById(commentEvents, assignmentEvents),
-    oaOwner ? [oaOwner.owner] : [],
+    [],
     project.reviewAuthority,
   );
 }

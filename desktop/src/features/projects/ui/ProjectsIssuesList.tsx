@@ -53,8 +53,7 @@ type ProjectsIssuesListProps = {
 };
 
 function nextStepLabel(status: ProjectIssue["status"]) {
-  if (status === "Done" || status === "Closed") return "View issue";
-  if (status === "In Review") return "Review issue";
+  if (status === "Done") return "View issue";
   if (status === "Triage") return "Triage issue";
   return "Open issue";
 }
@@ -264,12 +263,13 @@ function IssueListRow({
 
 const ISSUE_STATUS_SECTIONS = [
   { status: "Triage", label: "Triage", terminal: false },
-  { status: "In Review", label: "Review", terminal: false },
-  { status: "Approved", label: "Approved", terminal: false },
-  { status: "In Progress", label: "In Progress", terminal: false },
   { status: "Backlog", label: "Backlog", terminal: false },
+  { status: "In Development", label: "In Development", terminal: false },
+  { status: "Implemented", label: "Implemented", terminal: false },
+  { status: "Code-QS", label: "Code-QS", terminal: false },
+  { status: "To Be Published", label: "To Be Published", terminal: false },
+  { status: "Ready for Test", label: "Ready for Test", terminal: false },
   { status: "Done", label: "Done", terminal: true },
-  { status: "Closed", label: "Closed", terminal: true },
 ] as const;
 
 function IssueStatusSection({

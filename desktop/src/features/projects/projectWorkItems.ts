@@ -8,8 +8,6 @@ import {
   KIND_GIT_ISSUE,
   KIND_GIT_PR_UPDATE,
   KIND_GIT_PULL_REQUEST,
-  KIND_GIT_STATUS_CLOSED,
-  KIND_GIT_STATUS_DRAFT,
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_OPEN,
   KIND_TEXT_NOTE,
@@ -111,12 +109,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
         limit: 2_000,
       }),
       fetchEvents({
-        kinds: [
-          KIND_GIT_STATUS_OPEN,
-          KIND_GIT_STATUS_MERGED,
-          KIND_GIT_STATUS_CLOSED,
-          KIND_GIT_STATUS_DRAFT,
-        ],
+        kinds: [KIND_GIT_STATUS_OPEN, KIND_GIT_STATUS_MERGED],
         "#a": repoAddresses,
         limit: 2_000,
       }),

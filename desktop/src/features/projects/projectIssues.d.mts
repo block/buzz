@@ -3,11 +3,32 @@ import type { RelayEvent } from "@/shared/api/types";
 export type ProjectIssueStatus =
   | "Triage"
   | "Backlog"
-  | "In Progress"
-  | "Approved"
-  | "In Review"
-  | "Done"
-  | "Closed";
+  | "In Development"
+  | "Implemented"
+  | "Code-QS"
+  | "To Be Published"
+  | "Ready for Test"
+  | "Done";
+
+export type MyBuzzWorkflowStatus = {
+  eventId: string;
+  state:
+    | "triage"
+    | "backlog"
+    | "in-development"
+    | "implemented"
+    | "code-qs"
+    | "to-be-published"
+    | "ready-for-test";
+  reason: string | null;
+  createdAt: number;
+};
+
+export type ProjectIssueActivity = {
+  id: string;
+  createdAt: number;
+  text: string;
+};
 
 export type ProjectIssueComment = {
   id: string;
@@ -64,6 +85,8 @@ export type ProjectIssue = {
   assignees: string[];
   assigneeOperationHeads: Record<string, string>;
   status: ProjectIssueStatus;
+  workflowStatus: MyBuzzWorkflowStatus | null;
+  activity: ProjectIssueActivity[];
   statusEventId: string | null;
   statusCreatedAt: number | null;
   updatedAt: number;
@@ -74,6 +97,11 @@ export type ProjectIssue = {
 export const ISSUE_ASSIGNMENT_LABEL: "assignment";
 export const ISSUE_UNASSIGNMENT_LABEL: "unassignment";
 export const ISSUE_ACTION_REQUIRED_LABEL: "action-required";
+export const MYBUZZ_WORKFLOW_STATUS_LABEL: "mybuzz-workflow-status";
+export const MYBUZZ_WORKFLOW_STATUS_WORKFLOW: "mybuzz-status-v1";
+export const MYBUZZ_WORKFLOW_STATUS_OWNER: string;
+export const MYBUZZ_WORKFLOW_STATUS_STATES: string[];
+export const MYBUZZ_WORKFLOW_STATUS_LABELS: Record<string, ProjectIssueStatus>;
 export function isHumanDirectedIssueComment(body: string): boolean;
 
 export const PROJECT_ISSUE_STATUS: {

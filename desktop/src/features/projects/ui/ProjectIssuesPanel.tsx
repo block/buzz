@@ -1,17 +1,14 @@
 import {
-  Check,
   ChevronDown,
   ChevronRight,
   CircleCheck,
   CircleDot,
-  CircleX,
   MessageSquare,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
-import { useOaOwnerQuery } from "@/features/identity-archive/hooks";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
   type ProjectIssue,
@@ -24,12 +21,10 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import {
-  availableProjectIssueLifecycleStatuses,
-  canChangeProjectIssueStatus,
   canSubmitProjectIssueVerdict,
-  ISSUE_LIFECYCLE_STATUS_LABEL,
   MAX_REJECTION_REASON_LENGTH,
-  type ProjectIssueLifecycleStatus,
+  canWriteMyBuzzWorkflowStatus,
+  type MyBuzzWorkflowStatusState,
   useSubmitProjectIssueVerdictMutation,
   useUpdateProjectIssueStatusMutation,
 } from "@/features/projects/issueStatus";
@@ -40,12 +35,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { IssueAssigneeFacepile, IssueAssigneesRow } from "./IssueAssigneesRow";
 import {
   ProjectFeedRow,
@@ -62,7 +52,6 @@ import { ShareLinkButton } from "./ShareLinkButton";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
-  if (status === "Closed") return "text-destructive";
   return "text-green-500";
 }
 
@@ -95,12 +84,13 @@ export function reviewSectionState(
 
 const ISSUE_STATUS_SECTIONS = [
   { status: "Triage", label: "Triage", terminal: false },
-  { status: "In Review", label: "Review", terminal: false },
-  { status: "Approved", label: "Approved", terminal: false },
-  { status: "In Progress", label: "In Progress", terminal: false },
   { status: "Backlog", label: "Backlog", terminal: false },
+  { status: "In Development", label: "In Development", terminal: false },
+  { status: "Implemented", label: "Implemented", terminal: false },
+  { status: "Code-QS", label: "Code-QS", terminal: false },
+  { status: "To Be Published", label: "To Be Published", terminal: false },
+  { status: "Ready for Test", label: "Ready for Test", terminal: false },
   { status: "Done", label: "Done", terminal: true },
-  { status: "Closed", label: "Closed", terminal: true },
 ] as const;
 
 const ISSUE_ROWS_PER_GROUP_STORAGE_KEY = "buzz.projects.issueRows";
@@ -115,9 +105,6 @@ function readIssueRowsPerGroup(): number {
 function issueStatusVisual(status: ProjectIssue["status"]) {
   if (status === "Done") {
     return { className: "text-purple-400", icon: CircleCheck };
-  }
-  if (status === "Closed") {
-    return { className: "text-destructive", icon: CircleX };
   }
   return { className: "text-green-500", icon: CircleDot };
 }
@@ -233,6 +220,26 @@ function IssueRow({
   );
 }
 
+function IssueActivity({ issue }: { issue: ProjectIssue }) {
+  return (
+    <section className="space-y-3 p-4" data-testid="project-issue-activity">
+      <p className="text-sm text-muted-foreground">
+        Workflow history is read-only and does not grant lifecycle authority.
+      </p>
+      <ol className="space-y-2 border-l border-border/60 pl-3 text-sm">
+        {issue.activity.map((entry) => (
+          <li key={entry.id}>
+            <p className="text-foreground">{entry.text}</p>
+            <p className="text-xs text-muted-foreground">
+              {relativeTime(entry.createdAt)}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 /** Full issue conversation and comment composer. */
 export function ProjectIssueDetail({
   issue,
@@ -311,29 +318,40 @@ export function ProjectIssueDetail({
           ) : null}
         </header>
 
-        <section className="space-y-3 p-4">
-          <DiscussedInChannels
-            entityLabel="this issue"
-            query={entityDiscussionQuery(issue.id)}
-            testId="issue-discussed-in"
-          />
-          <ProjectIssueCommentTimeline
-            comments={issue.comments}
-            key={issue.id}
-            profiles={profiles}
-          />
-          <div data-testid="project-issue-comment-composer">
-            <ForumComposer
-              className="border border-border/60 bg-background/45"
-              disabled={commentMutation.isPending}
-              isSending={commentMutation.isPending}
-              members={members}
-              onSubmit={handleCommentSubmit}
-              placeholder="Add a comment…"
-              profiles={profiles}
-            />
-          </div>
-        </section>
+        <Tabs className="px-4 pb-4" defaultValue="discussion">
+          <TabsList>
+            <TabsTrigger value="discussion">Discussion</TabsTrigger>
+            <TabsTrigger value="activity">Activity</TabsTrigger>
+          </TabsList>
+          <TabsContent value="discussion">
+            <section className="space-y-3 py-4">
+              <DiscussedInChannels
+                entityLabel="this issue"
+                query={entityDiscussionQuery(issue.id)}
+                testId="issue-discussed-in"
+              />
+              <ProjectIssueCommentTimeline
+                comments={issue.comments}
+                key={issue.id}
+                profiles={profiles}
+              />
+              <div data-testid="project-issue-comment-composer">
+                <ForumComposer
+                  className="border border-border/60 bg-background/45"
+                  disabled={commentMutation.isPending}
+                  isSending={commentMutation.isPending}
+                  members={members}
+                  onSubmit={handleCommentSubmit}
+                  placeholder="Add a comment…"
+                  profiles={profiles}
+                />
+              </div>
+            </section>
+          </TabsContent>
+          <TabsContent value="activity">
+            <IssueActivity issue={issue} />
+          </TabsContent>
+        </Tabs>
       </div>
 
       <IssueMetaRail
@@ -346,78 +364,71 @@ export function ProjectIssueDetail({
   );
 }
 
-/** Status control for the issue meta rail: publishes a NIP-34 status event
- * (kind 1630/1631/1632/1633) instead of leaving the desktop read-only.
- *
- * Only the four protocol states are offered. "In Progress" and "In Review"
- * are label heuristics with no status event behind them, so they can be shown
- * as the current state but never selected here. */
 function IssueStatusPicker({
   issue,
   project,
-  signAsManagedOwner,
 }: {
   issue: ProjectIssue;
   project: Project;
-  signAsManagedOwner: boolean;
 }) {
   const { isPending, mutateAsync: updateIssueStatus } =
     useUpdateProjectIssueStatusMutation(project);
-  const visual = issueStatusVisual(issue.status);
-
-  const handleSelect = React.useCallback(
-    async (status: ProjectIssueLifecycleStatus) => {
-      if (ISSUE_LIFECYCLE_STATUS_LABEL[status] === issue.status) return;
-      try {
-        await updateIssueStatus({ issue, signAsManagedOwner, status });
-        toast.success(`Status set to ${ISSUE_LIFECYCLE_STATUS_LABEL[status]}.`);
-      } catch (error) {
-        toast.error(
-          error instanceof Error
-            ? error.message
-            : "Failed to update issue status.",
-        );
-      }
-    },
-    [issue, signAsManagedOwner, updateIssueStatus],
+  const [state, setState] = React.useState<MyBuzzWorkflowStatusState>("triage");
+  const [reason, setReason] = React.useState("");
+  const requiresReason = ["triage", "backlog", "ready-for-test"].includes(
+    state,
   );
 
+  const handleSelect = React.useCallback(async () => {
+    try {
+      await updateIssueStatus({ issue, reason, state });
+      toast.success("Workflow status updated.");
+      setReason("");
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to update workflow status.",
+      );
+    }
+  }, [issue, reason, state, updateIssueStatus]);
+
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        aria-label="Change issue status"
-        className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium hover:bg-accent/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 ${visual.className}`}
-        data-testid="project-issue-status-trigger"
+    <div className="space-y-2">
+      <select
+        aria-label="Change MyBuzz workflow status"
+        className="h-8 w-full rounded-md border border-border/60 bg-transparent px-2 text-xs text-foreground"
         disabled={isPending}
+        onChange={(event) =>
+          setState(event.target.value as MyBuzzWorkflowStatusState)
+        }
+        value={state}
       >
-        <visual.icon className="h-3.5 w-3.5" />
-        {issue.status}
-        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
-        {availableProjectIssueLifecycleStatuses(
-          issue.currentReview !== null,
-        ).map((status) => {
-          const label = ISSUE_LIFECYCLE_STATUS_LABEL[status];
-          const option = issueStatusVisual(label);
-          return (
-            <DropdownMenuItem
-              data-testid={`project-issue-status-option-${status}`}
-              key={status}
-              onSelect={() => {
-                void handleSelect(status);
-              }}
-            >
-              <option.icon className={`h-3.5 w-3.5 ${option.className}`} />
-              {label}
-              {label === issue.status ? (
-                <Check className="ml-auto h-3.5 w-3.5 text-muted-foreground" />
-              ) : null}
-            </DropdownMenuItem>
-          );
-        })}
-      </DropdownMenuContent>
-    </DropdownMenu>
+        <option value="triage">Triage</option>
+        <option value="backlog">Backlog</option>
+        <option value="in-development">In Development</option>
+        <option value="implemented">Implemented</option>
+        <option value="code-qs">Code-QS</option>
+        <option value="to-be-published">To Be Published</option>
+        <option value="ready-for-test">Ready for Test</option>
+      </select>
+      <textarea
+        aria-label="Workflow status reason"
+        className="min-h-16 w-full rounded-md border border-border/60 bg-background p-2 text-xs text-foreground"
+        disabled={isPending}
+        onChange={(event) => setReason(event.target.value)}
+        placeholder={requiresReason ? "Reason required" : "Reason (optional)"}
+        value={reason}
+      />
+      <button
+        className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
+        disabled={isPending || (requiresReason && !reason.trim())}
+        onClick={() => void handleSelect()}
+        type="button"
+      >
+        Set workflow status
+      </button>
+    </div>
   );
 }
 
@@ -561,24 +572,12 @@ function IssueMetaRail({
   const isAuthor = viewer === normalizePubkey(issue.author);
   const isOwner = viewer === normalizePubkey(project.owner);
   const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
-  const oaOwnerQuery = useOaOwnerQuery(
-    project.owner,
-    Boolean(viewer) && !isOwner && !isManagedAgentOwner,
-  );
-  const isOaOwner = oaOwnerQuery.data?.isMe === true;
   // Same trust rule as parsing (assigneesForIssue): the issue author or
   // repo owner (directly or via a managed agent) can assign anyone;
   // everyone else who is signed in may still self-assign.
   const canAssignOthers =
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
-  const canChangeStatus = canChangeProjectIssueStatus({
-    isManagedAgentOwner,
-    isOaOwner,
-    issueAssignees: issue.assignees,
-    issueAuthor: issue.author,
-    projectOwner: project.owner,
-    viewer,
-  });
+  const canChangeStatus = canWriteMyBuzzWorkflowStatus(viewer);
 
   return (
     <aside
@@ -589,11 +588,7 @@ function IssueMetaRail({
     >
       <OverviewRailSection title="Status">
         {canChangeStatus ? (
-          <IssueStatusPicker
-            issue={issue}
-            project={project}
-            signAsManagedOwner={isManagedAgentOwner && !isOwner}
-          />
+          <IssueStatusPicker issue={issue} project={project} />
         ) : (
           <span
             className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium ${status.className}`}
@@ -646,7 +641,7 @@ function IssueMetaRail({
           </div>
         </OverviewRailSection>
       ) : null}
-      <OverviewRailSection title="Activity">
+      <OverviewRailSection title="Metadata">
         <dl className="space-y-1.5 text-xs text-muted-foreground">
           <div className="flex items-center justify-between gap-3">
             <dt>Created</dt>
