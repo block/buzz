@@ -4,6 +4,7 @@ import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
 import { FeatureGate } from "@/shared/features";
 import type { Channel, SearchHit } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import {
   SidebarHeader,
   SidebarMenu,
@@ -25,6 +26,7 @@ type SidebarSelectedView =
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
+  className?: string;
   currentChannelId?: string | null;
   currentPubkey?: string;
   onBrowseChannels?: () => void;
@@ -52,6 +54,7 @@ type AppSidebarPrimaryMenuProps = {
 
 export function AppSidebarPinnedHeader({
   channelLabels,
+  className,
   currentChannelId,
   currentPubkey,
   onBrowseChannels,
@@ -67,7 +70,7 @@ export function AppSidebarPinnedHeader({
 }: AppSidebarPinnedHeaderProps) {
   return (
     <div
-      className="mx-[3px] shrink-0 px-2 pb-2 pt-3"
+      className={cn("mx-[3px] shrink-0 px-2 pb-2 pt-3", className)}
       data-testid="sidebar-pinned-header"
     >
       <TopbarSearch

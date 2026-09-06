@@ -96,6 +96,7 @@ export default defineConfig({
         "**/relay-connectivity.spec.ts",
         "**/unread-pill.spec.ts",
         "**/sidebar-more-unread-overlap.spec.ts",
+        "**/sidebar-community-rail-insets.spec.ts",
         "**/sidebar-snapshot.spec.ts",
         "**/home-collapsed-top-chrome.spec.ts",
         "**/top-chrome-zoom-clearance.spec.ts",
