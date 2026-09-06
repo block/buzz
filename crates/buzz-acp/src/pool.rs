@@ -3994,7 +3994,7 @@ async fn fetch_thread_context(
     agent_pubkey: nostr::PublicKey,
     rest: &RestClient,
 ) -> Option<ConversationContext> {
-    fetch_thread_context_with(
+    let mut context = fetch_thread_context_with(
         channel_id,
         root_event_id,
         limit,
@@ -4002,7 +4002,9 @@ async fn fetch_thread_context(
         |filters| async move { rest.query(&filters).await },
         |filters| async move { rest.count(&filters).await },
     )
-    .await
+    .await?;
+    overlay_context_edits(channel_id, &mut context, rest).await;
+    Some(context)
 }
 
 async fn fetch_thread_context_with<Query, QueryFut, Count, CountFut>(
@@ -4171,7 +4173,7 @@ async fn fetch_dm_context(
         .custom_tags(h_tag, [ch_str.as_str()])
         .limit(limit as usize);
 
-    fetch_with_retry(|| async {
+    let mut context = fetch_with_retry(|| async {
         match timeout(
             CONTEXT_FETCH_TIMEOUT,
             rest.query(std::slice::from_ref(&filter)),
@@ -4195,7 +4197,9 @@ async fn fetch_dm_context(
             }
         }
     })
-    .await
+    .await?;
+    overlay_context_edits(channel_id, &mut context, rest).await;
+    Some(context)
 }
 
 /// Parse the legacy REST thread response (used in tests only).
@@ -4270,6 +4274,124 @@ fn parse_dm_response(json: serde_json::Value, limit: u32) -> Option<Conversation
         total,
         truncated,
     })
+}
+
+fn context_messages_mut(context: &mut ConversationContext) -> &mut Vec<ContextMessage> {
+    match context {
+        ConversationContext::Thread { messages, .. } | ConversationContext::Dm { messages, .. } => {
+            messages
+        }
+    }
+}
+
+/// Apply the newest kind:40003 edit for each visible message.
+///
+/// Desktop already overlays edits onto the original kind:9 row. ACP thread/DM
+/// context previously kept the original content, so follow-up turns could miss
+/// text added after send. The edit event id replaces the original id so
+/// delivery-delta treats the new body as unseen.
+fn apply_latest_message_edits(messages: &mut [ContextMessage], edit_events: &[serde_json::Value]) {
+    if messages.is_empty() || edit_events.is_empty() {
+        return;
+    }
+
+    let mut latest: HashMap<String, (u64, String, String)> = HashMap::new();
+    for ev in edit_events {
+        let kind = ev.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
+        if kind != u64::from(buzz_core::kind::KIND_STREAM_MESSAGE_EDIT) {
+            continue;
+        }
+        let Some(content) = ev.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(edit_id) = ev.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let ts = ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(tags) = ev.get("tags").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for tag in tags {
+            let Some(arr) = tag.as_array() else {
+                continue;
+            };
+            if arr.first().and_then(|v| v.as_str()) != Some("e") {
+                continue;
+            }
+            let Some(target) = arr.get(1).and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let key = target.to_ascii_lowercase();
+            match latest.get(&key) {
+                Some((prev_ts, _, _)) if ts < *prev_ts => {}
+                _ => {
+                    latest.insert(key, (ts, edit_id.to_string(), content.to_string()));
+                }
+            }
+        }
+    }
+
+    for message in messages {
+        let key = message.event_id.to_ascii_lowercase();
+        if let Some((_, edit_id, content)) = latest.get(&key) {
+            message.content = content.clone();
+            message.event_id = edit_id.clone();
+        }
+    }
+}
+
+async fn overlay_context_edits(
+    channel_id: Uuid,
+    context: &mut ConversationContext,
+    rest: &RestClient,
+) {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let messages = context_messages_mut(context);
+    let ids: Vec<String> = messages
+        .iter()
+        .map(|message| message.event_id.clone())
+        .filter(|id| id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()))
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+
+    let e_tag = SingleLetterTag::lowercase(Alphabet::E);
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let ch = channel_id.to_string();
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16,
+        ))
+        .custom_tags(e_tag, id_refs)
+        .custom_tags(h_tag, [ch.as_str()]);
+
+    match timeout(
+        CONTEXT_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(json)) => {
+            if let Some(events) = json.as_array() {
+                apply_latest_message_edits(context_messages_mut(context), events);
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(
+                channel_id = %channel_id,
+                "message edit overlay fetch failed — using original content: {e}"
+            );
+        }
+        Err(_) => {
+            tracing::debug!(
+                channel_id = %channel_id,
+                "message edit overlay fetch timed out — using original content"
+            );
+        }
+    }
 }
 
 /// Extract a `ContextMessage` from a JSON message object.
@@ -7189,6 +7311,58 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert!(
             conversation_context_delta(Some(context), &HashSet::new(), &HashSet::new()).is_some()
         );
+    }
+
+    #[test]
+    fn apply_latest_message_edits_uses_newest_edit_and_edit_event_id() {
+        let original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let older_edit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let newer_edit = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let mut messages = vec![context_message(original, "1. one\n2. two")];
+        apply_latest_message_edits(
+            &mut messages,
+            &[
+                json!({
+                    "id": older_edit,
+                    "kind": 40003,
+                    "created_at": 10,
+                    "content": "1. one\n2. two\n3. three",
+                    "tags": [["e", original], ["h", "channel"]]
+                }),
+                json!({
+                    "id": newer_edit,
+                    "kind": 40003,
+                    "created_at": 20,
+                    "content": "1. one\n2. two\n3. three\n7. seven",
+                    "tags": [["e", original], ["h", "channel"]]
+                }),
+            ],
+        );
+        assert_eq!(messages[0].content, "1. one\n2. two\n3. three\n7. seven");
+        assert_eq!(messages[0].event_id, newer_edit);
+    }
+
+    #[test]
+    fn conversation_context_delta_reincludes_edited_message() {
+        let original = "old-kind9".to_string();
+        let edit = "new-kind40003".to_string();
+        let delivered = HashSet::from([original]);
+        let context = ConversationContext::Thread {
+            messages: vec![context_message(&edit, "(edited) 7. rename Home")],
+            total: 1,
+            root_present: true,
+            truncated: false,
+        };
+
+        let delta = conversation_context_delta(Some(context), &delivered, &HashSet::new())
+            .expect("edited body should be new context");
+        match delta {
+            ConversationContext::Thread { messages, .. } => {
+                assert_eq!(messages[0].event_id, edit);
+                assert!(messages[0].content.contains("7. rename Home"));
+            }
+            _ => panic!("expected thread context"),
+        }
     }
 
     #[test]
