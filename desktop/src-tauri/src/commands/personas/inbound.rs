@@ -267,11 +267,31 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
             let outcome = commit_inbound_with_store(&conn, &inbound_retained_event, || {
                 let mut personas = load_personas(&app)?;
                 // `inbound_persona` is `Some` for KIND_PERSONA (set above).
-                apply_inbound_persona(
+                let rename = apply_inbound_persona(
                     &mut personas,
                     inbound_persona.expect("persona parsed above"),
                 );
-                save_personas(&app, &personas)
+                save_personas(&app, &personas)?;
+                // A rename that arrives over the relay has to reach linked
+                // instances too, exactly as `update_persona_with` does for a local
+                // edit. Without this the definition and the instance's `name`
+                // diverge on this device through sync alone -- and `record.name` is
+                // what the agent republishes as its kind:0 display_name on every
+                // start, so the relay identity keeps the old name while the UI
+                // shows the new one and @mention resolution stops matching.
+                if let Some(rename) = rename {
+                    let mut agents = load_managed_agents(&app)?;
+                    let renamed = super::update::propagate_persona_name_rename(
+                        &mut agents,
+                        &rename.persona_id,
+                        &rename.old_display_name,
+                        &rename.new_display_name,
+                    );
+                    if !renamed.is_empty() {
+                        save_managed_agents(&app, &agents)?;
+                    }
+                }
+                Ok(())
             })?;
             if outcome == InboundOutcome::Skipped {
                 return Ok(None);
@@ -670,6 +690,16 @@ fn event_d_tag(event: &nostr::Event) -> Result<String, String> {
         .ok_or_else(|| "inbound event missing d-tag".to_string())
 }
 
+/// A `display_name` change observed while merging an inbound persona, carried
+/// back to the caller so linked agent instances can be renamed in the same
+/// reconcile pass. `apply_inbound_persona` only owns the persona vector, so it
+/// cannot reach the managed-agent store itself.
+struct InboundPersonaRename {
+    persona_id: String,
+    old_display_name: String,
+    new_display_name: String,
+}
+
 /// Merge a parsed inbound persona into the local set: patch the matching record
 /// in place, or push it when none matches.
 ///
@@ -679,13 +709,25 @@ fn event_d_tag(event: &nostr::Event) -> Result<String, String> {
 /// `created_at` survive. On no match, the parsed record is inserted as-is; since
 /// `persona_from_event` sets `id = d_tag`, an in-app persona reuses its d-tag as
 /// the id and a re-received event stays idempotent (no duplicate row).
-fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefinition) {
+fn apply_inbound_persona(
+    personas: &mut Vec<AgentDefinition>,
+    inbound: AgentDefinition,
+) -> Option<InboundPersonaRename> {
     let d_tag = persona_d_tag(&inbound);
     match personas
         .iter_mut()
         .find(|record| persona_d_tag(record) == d_tag)
     {
         Some(local) => {
+            // Captured before the overwrite: the caller needs both halves to
+            // rename linked instances, and `propagate_persona_name_rename`
+            // matches on the OLD name.
+            let rename =
+                (local.display_name != inbound.display_name).then(|| InboundPersonaRename {
+                    persona_id: local.id.clone(),
+                    old_display_name: local.display_name.clone(),
+                    new_display_name: inbound.display_name.clone(),
+                });
             local.display_name = inbound.display_name;
             local.avatar_url = inbound.avatar_url;
             local.description = inbound.description;
@@ -699,8 +741,14 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
             local.parallelism = inbound.parallelism;
             local.shared = inbound.shared;
             local.updated_at = inbound.updated_at;
+            rename
         }
-        None => personas.push(inbound),
+        None => {
+            // A persona this device has never seen has no linked instances to
+            // rename.
+            personas.push(inbound);
+            None
+        }
     }
 }
 

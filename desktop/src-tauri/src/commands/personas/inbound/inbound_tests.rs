@@ -918,3 +918,97 @@ fn inbound_definition_less_agent_accepts_visible_multiline_prompt() {
 
     assert!(validate_inbound_managed_agent_definition(&inbound).is_ok());
 }
+
+// ── Inbound persona rename -> linked instances ───────────────────────────
+//
+// `update_persona_with` propagates a local rename to linked instances.
+// `apply_inbound_persona` did not, so a rename made on device A and synced to
+// device B updated B's definition while B's instance kept its old `name`.
+// `record.name` is what the agent republishes as its kind:0 display_name on
+// every start, so the relay identity silently kept the old name while the UI
+// showed the new one.
+
+use crate::commands::personas::update::propagate_persona_name_rename;
+
+/// An instance linked to `persona_id` whose `name` still tracks the definition.
+fn linked_instance(pubkey: &str, persona_id: &str, name: &str) -> ManagedAgentRecord {
+    let mut record = local_agent();
+    record.pubkey = pubkey.to_string();
+    record.persona_id = Some(persona_id.to_string());
+    record.name = name.to_string();
+    record.display_name = Some(name.to_string());
+    record
+}
+
+#[test]
+fn inbound_rename_reports_the_old_and_new_names() {
+    let mut personas = vec![local_in_app()];
+    let rename = apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"))
+        .expect("display_name changed");
+
+    assert_eq!(rename.persona_id, UUID);
+    assert_eq!(rename.old_display_name, "Local");
+    assert_eq!(rename.new_display_name, "Remote");
+}
+
+#[test]
+fn inbound_without_a_name_change_reports_no_rename() {
+    let mut personas = vec![local_in_app()];
+    // Same display_name, other projected fields still differ and still patch.
+    let rename = apply_inbound_persona(&mut personas, inbound_for(UUID, "Local"));
+
+    assert!(rename.is_none(), "no rename to propagate");
+    assert_eq!(personas[0].system_prompt, "remote prompt", "still patched");
+}
+
+#[test]
+fn inserting_an_unseen_persona_reports_no_rename() {
+    let mut personas = vec![local_in_app()];
+    let other = "99999999-8888-7777-6666-555555555555";
+    // A persona this device has never seen cannot have linked instances.
+    assert!(apply_inbound_persona(&mut personas, inbound_for(other, "New")).is_none());
+}
+
+#[test]
+fn a_slug_matched_rename_reports_the_local_id_not_the_d_tag() {
+    let mut local = local_in_app();
+    local.id = "local-uuid".to_string();
+    local.source_team_persona_slug = Some("team-slug".to_string());
+    let mut personas = vec![local];
+
+    let rename = apply_inbound_persona(&mut personas, inbound_for("team-slug", "Renamed"))
+        .expect("display_name changed");
+
+    // Instances link through `persona_id` == the LOCAL id. Reporting the d-tag
+    // here would match no records and silently propagate nothing.
+    assert_eq!(rename.persona_id, "local-uuid");
+    assert_eq!(rename.old_display_name, "Local");
+}
+
+#[test]
+fn the_reported_rename_drives_propagation_to_linked_instances() {
+    let mut personas = vec![local_in_app()];
+    let rename = apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"))
+        .expect("display_name changed");
+
+    let mut records = vec![
+        linked_instance("pk-tracking", UUID, "Local"),
+        // Pool-named: deliberately individualised, must keep its name.
+        linked_instance("pk-pool", UUID, "Birch"),
+        // Linked to a different persona entirely.
+        linked_instance("pk-other", "other-persona", "Local"),
+    ];
+
+    let renamed = propagate_persona_name_rename(
+        &mut records,
+        &rename.persona_id,
+        &rename.old_display_name,
+        &rename.new_display_name,
+    );
+
+    assert_eq!(renamed, vec!["pk-tracking".to_string()]);
+    assert_eq!(records[0].name, "Remote");
+    assert_eq!(records[0].display_name, Some("Remote".to_string()));
+    assert_eq!(records[1].name, "Birch", "pool-named instance untouched");
+    assert_eq!(records[2].name, "Local", "other persona untouched");
+}
