@@ -375,8 +375,7 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return with_grok_managed_stdio(command, default_args);
     }
 
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return with_grok_managed_stdio(command, default_args);
     }
 

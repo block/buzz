@@ -927,11 +927,11 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return with_grok_managed_stdio(command, default_args);
     }
 
-    // Older callers relied on the Goose-specific default even for runtimes like
-    // Codex and Claude. Treat that legacy fallback as "no args" for zero-arg
-    // providers so desktop- and env-based launches behave the same way.
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    // Clap's `BUZZ_ACP_AGENT_ARGS` default is the Goose sentinel `acp`. Treat
+    // that as "no args" whenever this command has a table default so Grok gets
+    // headless stdio instead of `grok acp`. Goose's own default is `["acp"]`,
+    // so this is a no-op there; Codex/Claude still collapse it to empty.
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return with_grok_managed_stdio(command, default_args);
     }
 
@@ -1829,6 +1829,11 @@ mod tests {
         ];
         assert_eq!(normalize_agent_args("grok", Vec::new()), expected);
         assert_eq!(
+            normalize_agent_args("grok", vec!["acp".into()]),
+            expected,
+            "Clap's default BUZZ_ACP_AGENT_ARGS=acp must not launch grok acp"
+        );
+        assert_eq!(
             normalize_agent_args("/usr/local/bin/grok", vec!["".into()]),
             expected
         );
@@ -1851,6 +1856,27 @@ mod tests {
             ),
             vec!["agent", "--leader", "stdio"],
             "explicit --leader must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn grok_cli_without_agent_args_uses_headless_stdio() {
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+        ]);
+        assert_eq!(
+            args.agent_args,
+            vec!["acp"],
+            "clap still defaults BUZZ_ACP_AGENT_ARGS to acp"
+        );
+        let cfg = Config::from_args(args).expect("from_args");
+        assert_eq!(
+            cfg.agent_args,
+            vec!["agent", "--always-approve", "--no-leader", "stdio"]
         );
     }
 
