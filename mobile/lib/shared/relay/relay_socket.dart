@@ -37,6 +37,16 @@ class RelaySocket {
   @visibleForTesting
   static Duration debugPingInterval = pingInterval;
 
+  /// Bound on the websocket handshake. Without one, a half-open TCP path —
+  /// typical after the app resumes from background across a network change —
+  /// hangs `WebSocket.connect` indefinitely: the session sits in
+  /// `reconnecting`, no error ever surfaces, and no retry is scheduled. A
+  /// bounded connect fails fast into the normal reconnect backoff instead.
+  static const connectTimeout = Duration(seconds: 10);
+
+  @visibleForTesting
+  static Duration debugConnectTimeout = connectTimeout;
+
   final String _wsUrl;
   final String? _nsec;
   final void Function(List<dynamic> message) _onMessage;
@@ -73,6 +83,7 @@ class RelaySocket {
       _channel = IOWebSocketChannel.connect(
         Uri.parse(_wsUrl),
         pingInterval: debugPingInterval,
+        connectTimeout: debugConnectTimeout,
       );
       await _channel!.ready;
     } catch (e) {
