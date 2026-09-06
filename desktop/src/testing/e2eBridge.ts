@@ -43,6 +43,7 @@ import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStor
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
 import {
   injectObserverEventsForE2E,
+  injectLiveObserverEventsForE2E,
   syncAgentObserverEvents,
 } from "@/features/agents/observerRelayStore";
 import {
@@ -392,7 +393,10 @@ type E2eConfig = {
     sendMessageErrors?: string[];
     /** Test-only observer control requests captured after mock publish. */
     observerControlResults?: Array<{
-      type: "cancel_turn" | "switch_model";
+      type: "cancel_turn" | "switch_model" | "switch_effort";
+      sessionId?: string;
+      sessionToken?: string;
+      effort?: string;
       status: string;
       channelId?: string | null;
       requestId?: string;
@@ -1487,6 +1491,7 @@ declare global {
       turnId: string;
       kind?: "turn_started" | "turn_completed";
     }) => void;
+    __BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__?: Window["__BUZZ_E2E_SEED_OBSERVER_EVENTS__"];
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
       events: Array<{
@@ -4960,13 +4965,19 @@ let mockObserverControlSeq = 0;
 function emitMockObserverControlResult(
   agentPubkey: string,
   request: {
-    type: "cancel_turn" | "switch_model";
+    type: "cancel_turn" | "switch_model" | "switch_effort";
+    sessionId?: string;
+    sessionToken?: string;
+    effort?: string;
     channelId?: string | null;
     requestId?: string;
     modelId?: string;
   },
   result: {
-    type: "cancel_turn" | "switch_model";
+    type: "cancel_turn" | "switch_model" | "switch_effort";
+    sessionId?: string;
+    sessionToken?: string;
+    effort?: string;
     status: string;
     channelId?: string | null;
     requestId?: string;
@@ -4977,6 +4988,9 @@ function emitMockObserverControlResult(
   const payload = {
     type: result.type,
     status: result.status,
+    sessionId: result.sessionId ?? request.sessionId,
+    sessionToken: result.sessionToken ?? request.sessionToken,
+    effort: result.effort ?? request.effort,
     ...(result.requestId !== undefined
       ? { requestId: result.requestId }
       : request.requestId !== undefined
@@ -11063,7 +11077,10 @@ function sendToMockSocket(args: {
       const frame = event.tags.find((tag) => tag[0] === "frame")?.[1];
       if (frame === "control") {
         let payload: {
-          type: "cancel_turn" | "switch_model";
+          type: "cancel_turn" | "switch_model" | "switch_effort";
+          sessionId?: string;
+          sessionToken?: string;
+          effort?: string;
           channelId?: string | null;
           requestId?: string;
           modelId?: string;
@@ -11854,6 +11871,9 @@ export function maybeInstallE2eTauriMocks() {
     };
     syncAgentTurnsFromEvents(agentPubkey, [event]);
     syncAgentObserverEvents(agentPubkey, [event]);
+  };
+  window.__BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
+    injectLiveObserverEventsForE2E(agentPubkey, events);
   };
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);

@@ -1,4 +1,7 @@
+import { compareObserverEvents } from "./observerEventOrdering";
+export { compareObserverEvents } from "./observerEventOrdering";
 import * as React from "react";
+import { retainSessionConfigs } from "./lib/conversationEffort";
 
 import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
@@ -66,6 +69,12 @@ type AgentObserverStoreListener = (update?: AgentObserverStoreUpdate) => void;
 
 const listeners = new Set<AgentObserverStoreListener>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
+const sessionConfigsByAgent = new Map<string, readonly ObserverEvent[]>();
+export function getAgentSessionConfigs(
+  pubkey: string,
+): readonly ObserverEvent[] {
+  return sessionConfigsByAgent.get(normalizePubkey(pubkey)) ?? EMPTY_EVENTS;
+}
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
 
@@ -280,6 +289,10 @@ function appendAgentEvents(
   if (added.length === 0) return null;
 
   const sortedAdded = [...added].sort(compareObserverEvents);
+  sessionConfigsByAgent.set(
+    key,
+    retainSessionConfigs(getAgentSessionConfigs(key), sortedAdded),
+  );
   const sorted = allAtEnd
     ? [...current, ...sortedAdded]
     : [...current, ...sortedAdded].sort(compareObserverEvents);
@@ -405,22 +418,6 @@ export function getArchivedChannelEvents(
     archiveEventsByChannel.get(archiveChannelKey(agentPubkey, channelId)) ??
     EMPTY_EVENTS
   );
-}
-
-export function compareObserverEvents(
-  left: ObserverEvent,
-  right: ObserverEvent,
-) {
-  const leftTime = Date.parse(left.timestamp);
-  const rightTime = Date.parse(right.timestamp);
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-    const timeDiff = leftTime - rightTime;
-    if (timeDiff !== 0) {
-      return timeDiff;
-    }
-  }
-
-  return left.seq - right.seq;
 }
 
 /**
@@ -911,6 +908,14 @@ export function injectObserverEventsForE2E(
   }
 }
 
+/** E2E-only: use the live ingestion path, including correlated control results. */
+export function injectLiveObserverEventsForE2E(
+  agentPubkey: string,
+  events: ObserverEvent[],
+) {
+  processLiveObserverEvents(agentPubkey, events);
+}
+
 /**
  * Synchronize the observer store with a sorted buffer of events for one agent.
  * Used by test harnesses and replay bridges that already hold decoded frames.
@@ -932,6 +937,7 @@ export function resetAgentObserverStore() {
   startPromise = null;
   eventProcessingQueue = Promise.resolve();
   eventsByAgent.clear();
+  sessionConfigsByAgent.clear();
   transcriptByAgent.clear();
   evictionFloorByAgent.clear();
   snapshotByAgent.clear();

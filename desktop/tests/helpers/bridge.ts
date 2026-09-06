@@ -307,7 +307,10 @@ type MockBridgeOptions = {
   sendMessageErrors?: string[];
   /** Test-only observer control results emitted after mock control publishes. */
   observerControlResults?: Array<{
-    type: "cancel_turn" | "switch_model";
+    type: "cancel_turn" | "switch_model" | "switch_effort";
+    sessionId?: string;
+    sessionToken?: string;
+    effort?: string;
     status: string;
     channelId?: string | null;
     requestId?: string;
