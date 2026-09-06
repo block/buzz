@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp::{AcpClient, EnvVar, McpServer};
+use acp::{AcpClient, EnvVar, McpServer, SystemPromptTransport};
 use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
@@ -35,7 +35,7 @@ use buzz_core::observer::{
 use clap::Parser;
 use config::{
     AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    MultipleEventHandling, PromptArgs, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -2466,6 +2466,16 @@ async fn tokio_main() -> Result<()> {
             .collect();
         let args = ModelsArgs::parse_from(&filtered);
         return run_models(args).await;
+    }
+
+    if is_subcommand("prompt") {
+        let filtered: Vec<String> = std::env::args()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a)
+            .collect();
+        let args = PromptArgs::parse_from(&filtered);
+        return run_one_shot_prompt(args).await;
     }
 
     if is_subcommand("auth-methods") {
@@ -5840,6 +5850,90 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     }
 
     client.shutdown().await;
+    Ok(())
+}
+
+/// `buzz-acp prompt` — run one provider-agnostic ACP turn locally.
+///
+/// This intentionally shares `AcpClient` with the relay harness, so every
+/// supported adapter follows the same initialize/session/prompt protocol.
+async fn run_one_shot_prompt(args: PromptArgs) -> Result<()> {
+    use std::io::Read;
+
+    let mut prompt = String::new();
+    std::io::stdin()
+        .read_to_string(&mut prompt)
+        .context("failed to read prompt from stdin")?;
+    ensure!(!prompt.trim().is_empty(), "prompt must not be empty");
+
+    let agent_command = args.agent.agent_command;
+    let agent_args = config::normalize_agent_args(&agent_command, args.agent.agent_args);
+    let cwd = current_working_directory()?;
+    let mut client = AcpClient::spawn(&agent_command, &agent_args, &[], false)
+        .await
+        .context("failed to start the configured agent")?;
+
+    let result = async {
+        let initialized = client.initialize().await?;
+        let protocol_version = initialized["protocolVersion"].as_u64().unwrap_or(1);
+        let agent_name = initialized
+            .pointer("/agentInfo/name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let normalized_agent = config::normalize_agent_command_identity(&agent_command);
+        let is_goose = agent_name == "goose" || normalized_agent == "goose";
+        let system_prompt = args
+            .system_prompt
+            .as_deref()
+            .filter(|prompt| !prompt.trim().is_empty());
+        let is_claude_agent = agent_name == "@agentclientprotocol/claude-agent-acp";
+        let system_prompt_transport = if is_goose || (protocol_version < 2 && !is_claude_agent) {
+            None
+        } else if is_claude_agent {
+            system_prompt.map(SystemPromptTransport::ClaudeMeta)
+        } else {
+            system_prompt.map(SystemPromptTransport::Field)
+        };
+        let session = client
+            .session_new_full(&cwd, vec![], system_prompt_transport, None)
+            .await?;
+        let stop_reason = client
+            .session_prompt_with_idle_timeout(
+                &session.session_id,
+                prompt.trim(),
+                Duration::from_secs(30),
+                Duration::from_secs(120),
+            )
+            .await?;
+        Ok::<_, acp::AcpError>((client.take_agent_message(), stop_reason))
+    }
+    .await;
+
+    client.shutdown().await;
+    let (message, stop_reason) = result.context("agent prompt did not complete")?;
+    ensure!(
+        !message.trim().is_empty(),
+        "agent returned an empty message"
+    );
+
+    let stop_reason = match stop_reason {
+        acp::StopReason::EndTurn => "end_turn",
+        acp::StopReason::Cancelled => "cancelled",
+        acp::StopReason::MaxTokens => "max_tokens",
+        acp::StopReason::MaxTurnRequests => "max_turn_requests",
+        acp::StopReason::Refusal => "refusal",
+    };
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "message": message,
+                "stopReason": stop_reason,
+            }))?
+        );
+    } else {
+        print!("{message}");
+    }
     Ok(())
 }
 

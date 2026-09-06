@@ -40,6 +40,7 @@ import { emojiDisplayName } from "@/shared/lib/emojiName";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 import { Button } from "@/shared/ui/button";
+import { ACTION_TRAY_SURFACE_CLASS } from "@/shared/ui/actionTray";
 import { HashArrowIn } from "@/shared/ui/icons";
 import { DeleteMessageConfirmDialog } from "./DeleteMessageConfirmDialog";
 import {
@@ -515,7 +516,12 @@ export const MessageActionBar = React.memo(function MessageActionBar({
       )}
       data-testid={`message-action-bar-${message.id}`}
     >
-      <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
+      <div
+        className={cn(
+          "overflow-hidden rounded-full",
+          ACTION_TRAY_SURFACE_CLASS,
+        )}
+      >
         <div className="flex items-center gap-0.5 p-1">
           {hasReactionAction && quickReactionItems.length > 0 ? (
             <div className="hidden items-center gap-0.5 sm:flex">

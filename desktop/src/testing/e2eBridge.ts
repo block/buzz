@@ -14016,6 +14016,33 @@ export function maybeInstallE2eTauriMocks() {
           selectedModel: null,
           supportsSwitching: false,
         };
+      case "generate_welcome_message":
+        // Keep the mock asynchronous so the button's in-progress treatment is
+        // covered by the same workflow test as the generated draft.
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+        return {
+          text: "Welcome, {{member}}! We’re glad you’re here.\n\nStart by saying hello in {{insert:introductions}}, then read {{insert:community-guide}}. Here’s a look at the community: {{insert:community-photo}}.",
+          inserts: [
+            {
+              id: "introductions",
+              type: "channel",
+              title: "introductions",
+              url: "buzz://channel/introductions",
+            },
+            {
+              id: "community-guide",
+              type: "link",
+              title: "Community guide",
+              url: "https://example.com/community-guide",
+            },
+            {
+              id: "community-photo",
+              type: "image",
+              title: "Community photo",
+              url: "https://example.com/community-photo.png",
+            },
+          ],
+        };
       case "discover_agent_models": {
         const discoverError = activeConfig?.mock?.discoverAgentModelsError;
         if (discoverError) {

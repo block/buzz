@@ -712,6 +712,7 @@ pub fn run() {
             delete_managed_agent,
             get_managed_agent_log,
             get_agent_models,
+            generate_welcome_message,
             discover_agent_models,
             agent_access_owner_only,
             get_agent_config_surface,
