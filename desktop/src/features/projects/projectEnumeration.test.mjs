@@ -245,3 +245,21 @@ test("buildProjectsFromFetcher still suppresses deleted heads via the scoped fet
   const projects = await buildProjectsFromFetcher(fetchExhaustively);
   assert.deepEqual(projects, [], "deleted repo must not surface as a project");
 });
+
+test("enumerates issue-root-scoped project events", async () => {
+  const filters = [];
+
+  await enumerateProjectEvents(
+    async (filter) => {
+      filters.push(filter);
+      return [];
+    },
+    [1],
+    500,
+    { "#e": ["a".repeat(64)] },
+  );
+
+  assert.deepEqual(filters, [
+    { "#e": ["a".repeat(64)], kinds: [1], limit: 500 },
+  ]);
+});

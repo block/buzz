@@ -10,5 +10,9 @@ test("retains the accessible custom issue-status control contract", async () => 
 
   assert.match(source, /aria-label="Change issue status"/);
   assert.match(source, /aria-label="Workflow status reason"/);
+  assert.match(source, /border-input bg-background/);
+  assert.match(source, /A reason is required for this workflow status\./);
+  assert.match(source, /void handleSelect\(event\.target\.value/);
+  assert.doesNotMatch(source, />\s*Set workflow status\s*</);
   assert.doesNotMatch(source, /signProjectIssueStatus/);
 });

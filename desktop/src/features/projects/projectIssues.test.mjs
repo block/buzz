@@ -210,6 +210,30 @@ test("frozen mybuzz-status-v1 write, reload, and read fixture is stable", () => 
   assert.equal(reloaded.workflowStatus?.eventId, latest.id);
 });
 
+test("write to list overview to reopened issue retains the latest owner status", () => {
+  const initial = workflowStatusEvent({
+    id: "a".repeat(64),
+    reason: "Initial classification.",
+  });
+  const written = workflowStatusEvent({
+    id: "b".repeat(64),
+    state: "ready-for-test",
+    reason: "Ready for human testing.",
+    createdAt: 201,
+  });
+
+  const listOverview = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [initial, written],
+  );
+  const reopened = eventToProjectIssue(issueEvent(), [], [written, initial]);
+
+  assert.equal(listOverview.status, "Ready for Test");
+  assert.equal(reopened.status, "Ready for Test");
+  assert.equal(reopened.workflowStatus?.eventId, written.id);
+});
+
 test("native and malformed status events have no header or activity effect", () => {
   const valid = workflowStatusEvent({ reason: "Initial classification." });
   const malformed = [

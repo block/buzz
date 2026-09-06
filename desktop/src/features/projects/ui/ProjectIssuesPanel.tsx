@@ -95,6 +95,10 @@ const ISSUE_STATUS_SECTIONS = [
 
 const ISSUE_ROWS_PER_GROUP_STORAGE_KEY = "buzz.projects.issueRows";
 
+function requiresWorkflowStatusReason(state: MyBuzzWorkflowStatusState) {
+  return ["triage", "backlog", "ready-for-test"].includes(state);
+}
+
 function readIssueRowsPerGroup(): number {
   const stored = Number(
     globalThis.localStorage?.getItem(ISSUE_ROWS_PER_GROUP_STORAGE_KEY),
@@ -373,34 +377,49 @@ function IssueStatusPicker({
 }) {
   const { isPending, mutateAsync: updateIssueStatus } =
     useUpdateProjectIssueStatusMutation(project);
-  const [state, setState] = React.useState<MyBuzzWorkflowStatusState>("triage");
+  const persistedState = issue.workflowStatus?.state ?? "triage";
+  const [state, setState] =
+    React.useState<MyBuzzWorkflowStatusState>(persistedState);
   const [reason, setReason] = React.useState("");
-  const requiresReason = ["triage", "backlog", "ready-for-test"].includes(
-    state,
-  );
+  const [statusHint, setStatusHint] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    setState(persistedState);
+    setStatusHint(null);
+  }, [persistedState]);
 
-  const handleSelect = React.useCallback(async () => {
-    try {
-      await updateIssueStatus({ issue, reason, state });
-      toast.success("Workflow status updated.");
-      setReason("");
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to update workflow status.",
-      );
-    }
-  }, [issue, reason, state, updateIssueStatus]);
+  const handleSelect = React.useCallback(
+    async (next: MyBuzzWorkflowStatusState) => {
+      if (requiresWorkflowStatusReason(next) && !reason.trim()) {
+        setState(persistedState);
+        setStatusHint("A reason is required for this workflow status.");
+        return;
+      }
+      try {
+        setState(next);
+        setStatusHint(null);
+        await updateIssueStatus({ issue, reason, state: next });
+        toast.success("Workflow status updated.");
+        setReason("");
+      } catch (error) {
+        setState(persistedState);
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Failed to update workflow status.",
+        );
+      }
+    },
+    [issue, persistedState, reason, updateIssueStatus],
+  );
 
   return (
     <div className="space-y-2">
       <select
         aria-label="Change issue status"
-        className="h-8 w-full rounded-md border border-border/60 bg-transparent px-2 text-xs text-foreground"
+        className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
         disabled={isPending}
         onChange={(event) =>
-          setState(event.target.value as MyBuzzWorkflowStatusState)
+          void handleSelect(event.target.value as MyBuzzWorkflowStatusState)
         }
         value={state}
       >
@@ -417,17 +436,18 @@ function IssueStatusPicker({
         className="min-h-16 w-full rounded-md border border-border/60 bg-background p-2 text-xs text-foreground"
         disabled={isPending}
         onChange={(event) => setReason(event.target.value)}
-        placeholder={requiresReason ? "Reason required" : "Reason (optional)"}
+        placeholder={
+          requiresWorkflowStatusReason(state)
+            ? "Reason required"
+            : "Reason (optional)"
+        }
         value={reason}
       />
-      <button
-        className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
-        disabled={isPending || (requiresReason && !reason.trim())}
-        onClick={() => void handleSelect()}
-        type="button"
-      >
-        Set workflow status
-      </button>
+      {statusHint ? (
+        <p className="text-xs text-destructive" role="status">
+          {statusHint}
+        </p>
+      ) : null}
     </div>
   );
 }

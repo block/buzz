@@ -248,11 +248,14 @@ async function fetchProjectIssues(
         "#a": [project.repoAddress],
         limit: 500,
       }),
-      relayClient.fetchEvents({
-        kinds: [KIND_TEXT_NOTE],
-        "#a": [project.repoAddress],
-        limit: 500,
-      }),
+      // Custom MyBuzz workflow status events are kind:1 comments. Fetch by
+      // issue root so an active repository comment stream cannot evict the
+      // most recent status from the bounded repository-wide query.
+      issuePromise.then((events) =>
+        fetchProjectEventsExhaustively([KIND_TEXT_NOTE], {
+          "#e": events.map((event) => event.id),
+        }),
+      ),
       // Assignment state must reduce over the complete operation history, not
       // whatever survives the bounded comment window above. Keyed by issue id
       // (`#e`) because that is the only tag constraint the relay applies
