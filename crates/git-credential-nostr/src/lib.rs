@@ -56,8 +56,15 @@ fn load_key() -> Result<String, String> {
     let path = git_config("nostr.keyfile").ok_or_else(|| {
         "no nostr key configured. Set $NOSTR_PRIVATE_KEY or git config nostr.keyfile".to_string()
     })?;
+
+    // Refuse symlinks so a swapped link cannot redirect a permission-checked
+    // path to a world-readable secret (TOCTOU / confused-deputy).
+    let meta = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("cannot stat keyfile {path}: {e}"))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("keyfile {path} must not be a symlink"));
+    }
     check_keyfile_permissions(&path)?;
-    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot stat keyfile {path}: {e}"))?;
     if !meta.is_file() {
         return Err(format!("keyfile {path} is not a regular file"));
     }
@@ -223,7 +230,13 @@ pub fn run() -> i32 {
     };
     raw_key.zeroize();
 
-    let parsed_url = Url::parse(&url).unwrap_or_else(|e| panic!("invalid URL {url:?}: {e}"));
+    let parsed_url = match Url::parse(&url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("error: invalid URL {url:?}: {e}");
+            return 1;
+        }
+    };
     let http_data = HttpData::new(parsed_url, method);
     let auth_tag = match load_auth_tag() {
         Ok(tag) => tag,
