@@ -50,3 +50,22 @@
 @utility elevate-sm {
   box-shadow: var(--shadow-sm);
 }
+
+/* Composition-input spike only. Remove with the spike route. */
+.spike-editor {
+  outline: none;
+  min-height: 3lh;
+}
+
+.spike-editor p {
+  margin: 0;
+}
+
+.spike-tile {
+  display: inline-block;
+  padding-inline: 0.375rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-inset);
+  color: var(--color-text-primary);
+  user-select: none;
+}

@@ -328,6 +328,18 @@ importers:
       '@tauri-apps/api':
         specifier: ~2.11.1
         version: 2.11.1
+      '@tiptap/core':
+        specifier: ^3.22.3
+        version: 3.22.5(@tiptap/pm@3.22.5)
+      '@tiptap/pm':
+        specifier: ^3.22.3
+        version: 3.22.5
+      '@tiptap/react':
+        specifier: ^3.22.3
+        version: 3.22.5(@floating-ui/dom@1.8.0)(@tiptap/core@3.22.5(@tiptap/pm@3.22.5))(@tiptap/pm@3.22.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@tiptap/starter-kit':
+        specifier: ^3.22.3
+        version: 3.22.5
       dockview-react:
         specifier: 8.2.0
         version: 8.2.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

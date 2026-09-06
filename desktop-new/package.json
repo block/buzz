@@ -24,6 +24,10 @@
     "@tabler/icons-react": "^3.46.0",
     "@tanstack/react-router": "^1.168.10",
     "@tauri-apps/api": "~2.11.1",
+    "@tiptap/core": "^3.22.3",
+    "@tiptap/pm": "^3.22.3",
+    "@tiptap/react": "^3.22.3",
+    "@tiptap/starter-kit": "^3.22.3",
     "dockview-react": "8.2.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
