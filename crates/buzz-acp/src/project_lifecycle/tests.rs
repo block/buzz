@@ -286,4 +286,5 @@ fn production_prompt_formatter_is_bound_to_validated_prompt_tag() {
     assert!(lifecycle.contains("pull request merged successfully"));
     assert!(lifecycle.contains(&pr.id.to_hex()));
     assert!(lifecycle.contains("Do not post a generic acknowledgement"));
+    assert!(lifecycle.contains("cannot be a channel-message reply parent"));
 }

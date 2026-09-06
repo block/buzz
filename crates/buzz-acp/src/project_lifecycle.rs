@@ -944,7 +944,7 @@ pub fn prompt_guidance(event: &Event, prompt_tag: &str) -> Option<String> {
          Pull request: {pull_request_id}\n\
          Repository: {repository}\n\
          Merge commit: {merge_commit}\n\
-         Instruction: This is a verified lifecycle wakeup for a pull request you authored, not a new human request. Resume ownership of the work now that it has merged: inspect the pull request context and perform any useful post-merge follow-up. Do not post a generic acknowledgement; send a channel/thread update only when there is concrete follow-up or information worth sharing."
+         Instruction: This is a verified lifecycle wakeup for a pull request you authored, not a new human request. Resume ownership of the work now that it has merged: inspect the pull request context and perform any useful post-merge follow-up. Do not post a generic acknowledgement. The merged-status event is global and cannot be a channel-message reply parent; post at channel level, or reply to an original channel message only if you can identify one. Send an update only when there is concrete follow-up or information worth sharing."
     ))
 }
 
