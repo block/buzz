@@ -1186,6 +1186,7 @@ dependencies = [
  "futures-util",
  "hex",
  "nostr 0.44.7",
+ "rustls",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

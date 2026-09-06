@@ -23,3 +23,7 @@ hex = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+# Both ring and aws-lc-rs are present in the workspace tree, so
+# rustls cannot select a process-level CryptoProvider on its own and every
+# wss:// relay PANICS at connect. Pin one explicitly, install it in main().
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
