@@ -2,6 +2,7 @@ import * as React from "react";
 import { UserRound } from "lucide-react";
 
 import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
+import { squareEmojiAvatarDataUrl } from "./ProfileAvatarEditor.utils";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
@@ -57,16 +58,20 @@ export function ProfileAvatar({
   const initials = getInitials(label);
   const presentation = useAvatarPresentation(avatarUrl);
   const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
+  const shapedAvatarUrl =
+    shape === "squircle" && presentedAvatarUrl
+      ? squareEmojiAvatarDataUrl(presentedAvatarUrl)
+      : presentedAvatarUrl;
 
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
-  const animated = parseAnimatedAvatarUrl(presentedAvatarUrl);
+  const animated = parseAnimatedAvatarUrl(shapedAvatarUrl);
   const [isHovered, setIsHovered] = React.useState(false);
   const baseUrl = animated
     ? isHovered
       ? animated.animationUrl
       : animated.posterUrl
-    : presentedAvatarUrl;
+    : shapedAvatarUrl;
 
   // Compute the live (proxied) source. Failures are tracked per resolved URL so
   // the poster and hover animation can recover independently. Under `untrusted`
@@ -96,7 +101,7 @@ export function ProfileAvatar({
     <Avatar
       className={cn(
         "shrink-0 text-primary shadow-xs",
-        shape === "squircle" && "rounded-[30%]",
+        shape === "squircle" && "agent-avatar-squircle",
         // Animated avatars carry their own backdrop disc and transparent
         // surroundings — any container fill would flatten the pop-out.
         plain || animated ? "bg-transparent shadow-none" : "bg-primary/20",

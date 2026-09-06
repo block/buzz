@@ -192,29 +192,51 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                 duration: MediaQuery.disableAnimationsOf(context)
                     ? Duration.zero
                     : const Duration(milliseconds: 180),
-                padding: EdgeInsets.all(active ? Grid.xxs : Grid.half),
+                padding: isAgent
+                    ? EdgeInsets.zero
+                    : EdgeInsets.all(active ? Grid.xxs : Grid.half),
                 decoration: BoxDecoration(
-                  shape: isAgent ? BoxShape.rectangle : BoxShape.circle,
-                  borderRadius: isAgent
-                      ? BorderRadius.circular(
-                          (_huddleParticipantSpotlightRadius + Grid.half) * 0.6,
-                        )
-                      : null,
-                  color: context.colors.primary.withValues(
-                    alpha: active ? 0.18 : 0.08,
-                  ),
+                  shape: BoxShape.circle,
+                  color: isAgent
+                      ? Colors.transparent
+                      : context.colors.primary.withValues(
+                          alpha: active ? 0.18 : 0.08,
+                        ),
                 ),
-                child: AvatarImage(
-                  imageUrl: profile?.avatarUrl,
-                  radius: _huddleParticipantSpotlightRadius,
-                  backgroundColor: context.colors.primaryContainer,
-                  fallback: Icon(
-                    LucideIcons.userRound,
-                    size: 56,
-                    color: context.colors.onPrimaryContainer,
-                  ),
-                  isAgent: isAgent,
-                ),
+                child: isAgent
+                    ? AgentAvatarSquircle(
+                        child: ColoredBox(
+                          color: context.colors.primary.withValues(
+                            alpha: active ? 0.18 : 0.08,
+                          ),
+                          child: Padding(
+                            padding: EdgeInsets.all(
+                              active ? Grid.xxs : Grid.half,
+                            ),
+                            child: AvatarImage(
+                              imageUrl: profile?.avatarUrl,
+                              radius: _huddleParticipantSpotlightRadius,
+                              backgroundColor: context.colors.primaryContainer,
+                              fallback: Icon(
+                                LucideIcons.userRound,
+                                size: 56,
+                                color: context.colors.onPrimaryContainer,
+                              ),
+                              isAgent: true,
+                            ),
+                          ),
+                        ),
+                      )
+                    : AvatarImage(
+                        imageUrl: profile?.avatarUrl,
+                        radius: _huddleParticipantSpotlightRadius,
+                        backgroundColor: context.colors.primaryContainer,
+                        fallback: Icon(
+                          LucideIcons.userRound,
+                          size: 56,
+                          color: context.colors.onPrimaryContainer,
+                        ),
+                      ),
               ),
               const SizedBox(height: Grid.twelve),
               Material(

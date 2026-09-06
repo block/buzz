@@ -28,6 +28,7 @@ import { AvatarCustomColorPanel } from "@/features/profile/ui/AvatarCustomColorP
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { AGENT_AVATAR_SQUIRCLE_PATH } from "@/shared/ui/AvatarClipPaths";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import {
   Popover,
@@ -107,7 +108,6 @@ export function AgentCreationPreview({
     assetLabel.charAt(0).toUpperCase() + assetLabel.slice(1);
   const isRoundedSquare = shape === "rounded-square";
   const isCompact = variant === "compact";
-  const emojiShape = isRoundedSquare ? "rounded-square" : "circle";
   const {
     inputRef: avatarUploadInputRef,
     isUploading,
@@ -197,11 +197,7 @@ export function AgentCreationPreview({
     if (!isCustomColorPickerOpen || !selectedEmoji) {
       return;
     }
-    const nextAvatarUrl = emojiAvatarDataUrl(
-      selectedEmoji,
-      customColorDraft,
-      emojiShape,
-    );
+    const nextAvatarUrl = emojiAvatarDataUrl(selectedEmoji, customColorDraft);
     if (avatarUrl === nextAvatarUrl) {
       return;
     }
@@ -212,7 +208,6 @@ export function AgentCreationPreview({
     isCustomColorPickerOpen,
     onSelectAvatar,
     selectedEmoji,
-    emojiShape,
   ]);
 
   function applyAvatarUrl() {
@@ -227,7 +222,7 @@ export function AgentCreationPreview({
   }
 
   function applyEmojiAvatar(emoji: string, color = selectedColor) {
-    const nextAvatarUrl = emojiAvatarDataUrl(emoji, color, emojiShape);
+    const nextAvatarUrl = emojiAvatarDataUrl(emoji, color);
     onSelectAvatar(nextAvatarUrl);
     onCommitAvatar?.(nextAvatarUrl);
     setSquishKey((key) => key + 1);
@@ -724,7 +719,7 @@ export function AgentCreationPreview({
                     ? isCompact
                       ? "rounded-2xl"
                       : "rounded-[2rem]"
-                    : "rounded-[30%]",
+                    : "agent-avatar-squircle",
                 )}
                 role="img"
                 style={{ backgroundColor: emojiAvatarPreview.color }}
@@ -924,19 +919,19 @@ export function AgentCreationPreview({
                   }
                   className={isCompact ? "h-16 w-16" : "h-36 w-36"}
                   clipTestId={`${testIdPrefix}-mask`}
-                  cornerRadius={(isCompact ? 64 : 144) * 0.3}
                   cutout={
                     isCompact
                       ? { cx: 58, cy: 58, r: 16.5 }
                       : { cx: 123, cy: 123, r: 24 }
                   }
                   maskMode={isCompact ? "radial" : "clip-path"}
+                  shape="squircle"
                   size={isCompact ? 64 : 144}
                 >
                   {emojiAvatarPreview ? (
                     <div
                       aria-label={`${label} ${assetLabel}`}
-                      className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-[30%] shadow-xs transition-[background-color] duration-200 ease-out"
+                      className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden agent-avatar-squircle shadow-xs transition-[background-color] duration-200 ease-out"
                       role="img"
                       style={{
                         backgroundColor: emojiAvatarPreview.color,
@@ -979,21 +974,42 @@ export function AgentCreationPreview({
                   <button
                     aria-label={`Add ${assetLabel}`}
                     className={cn(
-                      "flex items-center justify-center border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow,scale] duration-150 ease-out hover:scale-[1.02] hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100",
+                      "relative flex items-center justify-center bg-background text-primary shadow-xs transition-[background-color,border-color,color,filter,scale] duration-150 ease-out hover:scale-[1.02] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100",
                       isCompact ? "h-16 w-16" : "h-36 w-36",
                       isRoundedSquare
-                        ? isCompact
-                          ? "rounded-2xl"
-                          : "rounded-[2rem]"
-                        : "rounded-[30%]",
+                        ? cn(
+                            "border-2 border-dashed border-border hover:border-primary/60 hover:bg-primary/5",
+                            isCompact ? "rounded-2xl" : "rounded-[2rem]",
+                          )
+                        : "agent-avatar-squircle border-0",
                       isDragOverAvatar &&
                         !isAvatarMenuOpen &&
-                        "border-primary/70 bg-primary/5 ring-2 ring-primary/15",
+                        (isRoundedSquare
+                          ? "border-primary/70 bg-primary/5 ring-2 ring-primary/15"
+                          : "bg-primary/5 ring-2 ring-primary/30"),
                     )}
                     disabled={disabled || isUploading}
                     title={`Add ${assetLabel}`}
                     type="button"
                   >
+                    {isRoundedSquare ? null : (
+                      <svg
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-0 h-full w-full text-border transition-colors duration-150 ease-out group-hover/avatar-preview:text-primary/60"
+                        data-testid={`${testIdPrefix}-empty-outline`}
+                        preserveAspectRatio="none"
+                        viewBox="0 0 1 1"
+                      >
+                        <path
+                          d={AGENT_AVATAR_SQUIRCLE_PATH}
+                          fill="none"
+                          pathLength="1"
+                          stroke="currentColor"
+                          strokeDasharray="0.035 0.035"
+                          strokeWidth="0.018"
+                        />
+                      </svg>
+                    )}
                     {isUploading ? (
                       <Spinner
                         aria-label={`Uploading ${assetLabel}`}
