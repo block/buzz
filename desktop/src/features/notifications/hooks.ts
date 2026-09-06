@@ -1,15 +1,18 @@
 import * as React from "react";
 
+import { isTauri } from "@tauri-apps/api/core";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import { scheduleAfterForegroundReady } from "@/shared/lib/foregroundReady";
+import { isWindowsPlatform } from "@/shared/lib/platform";
 import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
   type DesktopNotificationPermissionState,
 } from "./lib/desktop";
+import { ensureDesktopNotificationPermission } from "./lib/permission";
 import {
   COMING_SOON_SLOTS,
   DEFAULT_SLOT_ALERTS_ENABLED,
@@ -200,7 +203,16 @@ export function useNotificationSettings(pubkey?: string) {
   }, [normalizedPubkey, settings]);
 
   const refreshPermission = React.useEffectEvent(async () => {
-    const nextPermission = await getDesktopNotificationPermissionState();
+    let nextPermission = await getDesktopNotificationPermissionState();
+    // Windows Tauri boots with a false "denied" from the init shim before the
+    // app is registered as a notification sender. Apply the same one-shot
+    // recovery the toggle uses so the mount-time read does not write off a
+    // persisted desktopEnabled=true before the user touches anything.
+    nextPermission = await ensureDesktopNotificationPermission({
+      currentPermission: nextPermission,
+      isWindowsTauri: isWindowsPlatform() && isTauri(),
+      requestAccess: requestDesktopNotificationAccess,
+    });
     setPermission(nextPermission);
     return nextPermission;
   });
@@ -258,10 +270,12 @@ export function useNotificationSettings(pubkey?: string) {
 
     try {
       let nextPermission = await refreshPermission();
-      if (nextPermission === "default") {
-        nextPermission = await requestDesktopNotificationAccess();
-        setPermission(nextPermission);
-      }
+      nextPermission = await ensureDesktopNotificationPermission({
+        currentPermission: nextPermission,
+        isWindowsTauri: isWindowsPlatform() && isTauri(),
+        requestAccess: requestDesktopNotificationAccess,
+      });
+      setPermission(nextPermission);
 
       if (nextPermission !== "granted") {
         setSettings((current) => ({
