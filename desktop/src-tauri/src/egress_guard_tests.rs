@@ -250,47 +250,47 @@ fn src_rust_files() -> Vec<std::path::PathBuf> {
 }
 
 /// Site-granular `/events` inventory: `(file suffix, expected non-comment
-/// `/events` occurrences, expected guard call sites — full-path calls into
-/// the egress-guard module)`.
+/// `/events` occurrences, expected guard call sites, expected calls into the
+/// bounded, idempotent HTTP event-submit funnel)`.
 ///
-/// Every entry pairs the URL-construction count with the guard-call count for
-/// that file, so BOTH of these fail the scan (not just a brand-new file):
+/// Every production entry pairs the URL-construction count with both safety
+/// boundaries for that file, so all of these fail the scan (not just a
+/// brand-new file):
 ///   - adding an unguarded ninth `/events` site inside an already-listed file
-///     (count goes up without a matching table update), and
-///   - removing/refactoring away a guard call while its egress site remains.
+///     (count goes up without a matching table update),
+///   - removing/refactoring away a guard call while its egress site remains,
+///   - bypassing the retrying event-submit funnel and its per-request deadline.
 ///
-/// Updating a row here is the deliberate act that must accompany wiring the
-/// guard + adding an injection test for the new site.
-const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
+/// Updating a row here is the deliberate act that must accompany wiring both
+/// boundaries and adding an injection test for a new production site.
+const EVENTS_INVENTORY: &[(&str, usize, usize, usize)] = &[
     // Production egress boundaries (see egress_guard.rs table):
-    ("src/relay.rs", 2, 2),                             // boundaries 2, 4
-    ("src/relay/submit.rs", 1, 1),                      // boundaries 1 + 3 (shared funnel)
-    ("src/huddle/pipeline.rs", 1, 1),                   // boundary 5
-    ("src/commands/team_snapshot.rs", 1, 1),            // boundary 6
-    ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
-    ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
-    // Test-only fixtures — no production egress, no guard:
-    ("src/relay_admission.rs", 1, 0),
-    ("src/archive/mod_tests.rs", 1, 0),
-    ("src/managed_agents/persona_events/tests.rs", 1, 0),
-    ("src/commands/team_snapshot/tests.rs", 1, 0),
+    ("src/relay.rs", 2, 2, 2),                  // boundaries 2, 4
+    ("src/relay/submit.rs", 1, 1, 1),           // boundaries 1 + 3 (shared funnel)
+    ("src/huddle/pipeline.rs", 1, 1, 1),        // boundary 5
+    ("src/commands/team_snapshot.rs", 1, 1, 1), // boundary 6
+    ("src/commands/personas/snapshot/import.rs", 2, 1, 1), // boundary 7 + its in-file injection-test fixture URL
+    ("src/native_websocket.rs", 0, 2, 0),                  // boundary 8 (WS frames; no events URL)
+    // Test-only fixtures — no production egress, no guard or production submit call:
+    ("src/relay/tests.rs", 5, 0, 0),
+    ("src/commands/engram_submit_response.rs", 2, 0, 0),
+    ("src/relay_admission.rs", 1, 0, 0),
+    ("src/archive/mod_tests.rs", 1, 0, 0),
+    ("src/managed_agents/persona_events/tests.rs", 1, 0, 0),
+    ("src/commands/team_snapshot/tests.rs", 1, 0, 0),
     // Mock-relay route in its in-file tests; production publish goes through
     // the guarded boundary-1 funnel (`submit_signed_event_at_with_keys`).
-    ("src/commands/personas/sharing.rs", 1, 0),
+    ("src/commands/personas/sharing.rs", 1, 0, 0),
     // Loopback submit relay in `identity_archive.rs`'s in-file regen tests;
     // production archive/unarchive publish through the guarded boundary-1
     // funnel via `submit_event`.
-    ("src/commands/identity_archive.rs", 1, 0),
-    // Mock-relay routes in team-sharing tests (accept/reject stub +
-    // recording stub for the delete-then-share gate + gated recording stub for
-    // the two-flush serialization gate + stalling stub for the per-scope
-    // isolation and bounded-stall gates); same pattern as persona sharing
-    // above — production publish goes through the guarded boundary-1 funnel via
-    // the flush loop.
-    ("src/commands/teams/sharing/tests.rs", 4, 0),
+    ("src/commands/identity_archive.rs", 1, 0, 0),
+    // Mock-relay routes in team-sharing tests; production publish goes through
+    // the guarded boundary-1 funnel via the flush loop.
+    ("src/commands/teams/sharing/tests.rs", 4, 0, 0),
     // Stub-relay route in the tombstone-flush gate tests; production flush
     // publishes through the guarded boundary-1 funnel.
-    ("src/commands/teams/pending/tests/gate.rs", 1, 0),
+    ("src/commands/teams/pending/tests/gate.rs", 1, 0, 0),
 ];
 
 // Needles are assembled at runtime so this scan file itself contains no
@@ -301,11 +301,27 @@ fn events_needle() -> String {
 fn guard_needle() -> String {
     ["egress_guard::", "assert_no_key_backup"].concat()
 }
+fn event_submit_call_count(content: &str) -> usize {
+    let needles = [
+        ["send_event_", "http_request_with_keys("].concat(),
+        ["submit_event_", "json_with_keys("].concat(),
+        ["submit_event_", "text_with_keys("].concat(),
+    ];
+    content
+        .lines()
+        .filter(|line| {
+            needles.iter().any(|needle| line.contains(needle))
+                && !line.trim_start().starts_with("//")
+                && !line.contains("fn send_event_")
+                && !line.contains("fn submit_event_")
+        })
+        .count()
+}
 
 /// Pure scan core over `(relative path, content)` pairs. Returns violations;
 /// empty means every file matches its inventory row exactly (files absent
-/// from the table are expected to have zero `/events` sites and zero guard
-/// calls).
+/// from the table are expected to have zero `/events` sites, guard calls, and
+/// bounded HTTP event-submit calls).
 fn events_inventory_violations(files: &[(String, String)]) -> Vec<String> {
     let events = events_needle();
     let guard = guard_needle();
@@ -314,9 +330,9 @@ fn events_inventory_violations(files: &[(String, String)]) -> Vec<String> {
     for (rel, content) in files {
         let expected = EVENTS_INVENTORY
             .iter()
-            .find(|(suffix, _, _)| rel.ends_with(suffix))
-            .map(|&(_, e, g)| (e, g))
-            .unwrap_or((0, 0));
+            .find(|(suffix, _, _, _)| rel.ends_with(suffix))
+            .map(|&(_, e, g, s)| (e, g, s))
+            .unwrap_or((0, 0, 0));
 
         let mut event_sites = Vec::new();
         for (i, line) in content.lines().enumerate() {
@@ -328,15 +344,18 @@ fn events_inventory_violations(files: &[(String, String)]) -> Vec<String> {
             }
         }
         let guard_count = content.matches(&guard).count();
+        let event_submit_count = event_submit_call_count(content);
 
-        if (event_sites.len(), guard_count) != expected {
+        if (event_sites.len(), guard_count, event_submit_count) != expected {
             violations.push(format!(
-                "{rel}: found {} events-URL site(s) + {} guard call(s), inventory \
-                 expects {} + {}. Sites found:\n{}",
+                "{rel}: found {} events-URL site(s) + {} guard call(s) + {} bounded-submit \
+                 call(s), inventory expects {} + {} + {}. Sites found:\n{}",
                 event_sites.len(),
                 guard_count,
+                event_submit_count,
                 expected.0,
                 expected.1,
+                expected.2,
                 if event_sites.is_empty() {
                     "  (none)".to_string()
                 } else {
@@ -366,9 +385,9 @@ fn read_src_files() -> Vec<(String, String)> {
 
 /// Inventory completeness: every `/events` URL-construction site in
 /// `desktop/src-tauri/src` must match the site-granular inventory above. A
-/// future ninth submission path — in a NEW file or an ALREADY-LISTED one —
-/// fails this test until its guard is wired, its injection test exists, and
-/// its inventory row is updated.
+/// future ninth production submission path — in a NEW file or an
+/// ALREADY-LISTED one — fails this test until its guard and bounded HTTP funnel
+/// are wired, its injection test exists, and its inventory row is updated.
 #[test]
 fn events_url_inventory_is_fully_guarded() {
     let violations = events_inventory_violations(&read_src_files());
@@ -414,6 +433,30 @@ fn inventory_scan_catches_removed_guard_call() {
     assert!(
         violations.iter().any(|v| v.contains("src/relay.rs")),
         "a removed guard call in relay.rs must trip the scan: {violations:?}"
+    );
+}
+
+/// The timeout/retry boundary also fires in reverse: a production event path
+/// that bypasses the bounded idempotent funnel while retaining its `/events`
+/// URL and egress guard is caught.
+#[test]
+fn inventory_scan_catches_removed_bounded_submit_call() {
+    let mut files = read_src_files();
+    let huddle = files
+        .iter_mut()
+        .find(|(rel, _)| rel.ends_with("src/huddle/pipeline.rs"))
+        .expect("huddle pipeline must be in the scan set");
+    huddle.1 = huddle.1.replacen(
+        &["send_event_", "http_request_with_keys("].concat(),
+        "unbounded_event_submit(",
+        1,
+    );
+    let violations = events_inventory_violations(&files);
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("src/huddle/pipeline.rs")),
+        "a removed bounded event-submit call must trip the scan: {violations:?}"
     );
 }
 
