@@ -43,6 +43,10 @@ keypair.
   `<bucket>.minio`. It is not configurable for an external S3 provider through
   `.env`; use the Helm chart or a custom Compose configuration for providers
   such as new Railway Storage Buckets that require `virtual` addressing.
+- `git-data-init` chowns the `buzz-git-data` volume to uid/gid `1000` before
+  the relay starts. Fresh Docker named volumes are root-owned; without this
+  step the non-root relay cannot create `/data/git/.pack-cache` and
+  restart-loops.
 
 Run `./run.sh backup-hint` for the backup checklist.
 
