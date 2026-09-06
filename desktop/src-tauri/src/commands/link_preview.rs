@@ -10,6 +10,8 @@ use reqwest::{
 use serde::Serialize;
 use url::Url;
 
+#[path = "link_preview_cancellation.rs"]
+mod cancellation;
 #[path = "link_preview_image_retry.rs"]
 mod image_retry;
 #[path = "link_preview_rate_limit.rs"]
@@ -17,15 +19,19 @@ mod rate_limit;
 #[path = "link_preview_youtube.rs"]
 mod youtube;
 
-use rate_limit::{image_host_cooldown_remaining, retry_after_duration, set_image_host_cooldown};
+use rate_limit::{
+    image_host_cooldown_remaining, image_host_gate, retry_after_duration, set_image_host_cooldown,
+};
 
 const MAX_PREVIEW_FETCH_BYTES: usize = 256 * 1024;
 const MAX_IMAGE_FETCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 const MAX_SANITIZED_DIMENSION: u32 = 1200;
-const PREVIEW_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
-const PREVIEW_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+const TRANSPORT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DNS_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_INLINE_IMAGE_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 const MAX_METADATA_CHARS: usize = 180;
 const MAX_METADATA_DESCRIPTION_CHARS: usize = 280;
@@ -55,27 +61,46 @@ pub struct LinkPreviewMetadata {
 #[tauri::command]
 pub async fn fetch_link_preview_metadata(
     href: String,
+    request_id: Option<String>,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
-    tokio::time::timeout(
-        PREVIEW_TOTAL_TIMEOUT,
-        fetch_link_preview_metadata_inner(href),
-    )
-    .await
-    .map_err(|_| "link preview request timed out".to_string())?
+    let cancellation = cancellation::begin(request_id.as_deref());
+    let result = match cancellation {
+        Some(cancellation) => {
+            tokio::select! {
+                result = fetch_link_preview_metadata_for_url(href) => result,
+                () = cancellation.cancelled() => Err("link preview request cancelled".to_string()),
+            }
+        }
+        None => fetch_link_preview_metadata_for_url(href).await,
+    };
+    cancellation::finish(request_id.as_deref());
+    result
 }
 
-async fn fetch_link_preview_metadata_inner(
+/// Cancel renderer-owned metadata work, including an in-flight response body.
+#[tauri::command]
+pub fn cancel_link_preview_metadata(request_id: String) {
+    cancellation::cancel(&request_id);
+}
+
+/// Release a renderer's cancellation record after its invocation settles.
+#[tauri::command]
+pub fn release_link_preview_metadata(request_id: String) {
+    cancellation::finish(Some(&request_id));
+}
+
+async fn fetch_link_preview_metadata_for_url(
     href: String,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
     let mut url = Url::parse(href.trim()).map_err(|error| format!("invalid URL: {error}"))?;
-    validate_public_https_url(&url).await?;
+    validate_metadata_url(&url).await?;
 
     if youtube::is_video_url(&url) {
         return youtube::fetch_oembed_metadata(&url).await;
     }
 
     for redirect_count in 0..=MAX_REDIRECTS {
-        let response = send_pinned_request(&url, "text/html,application/xhtml+xml;q=0.9").await?;
+        let response = send_metadata_request(&url, "text/html,application/xhtml+xml;q=0.9").await?;
 
         if response.status().is_redirection() {
             if redirect_count == MAX_REDIRECTS {
@@ -90,7 +115,7 @@ async fn fetch_link_preview_metadata_inner(
             url = url
                 .join(location)
                 .map_err(|error| format!("invalid link preview redirect: {error}"))?;
-            validate_public_https_url(&url).await?;
+            validate_metadata_url(&url).await?;
             continue;
         }
 
@@ -107,28 +132,15 @@ async fn fetch_link_preview_metadata_inner(
         let (image_result, favicon_result) = tokio::join!(
             async {
                 match image_url {
-                    Some(image_url) => Some(
-                        tokio::time::timeout(
-                            PREVIEW_FETCH_TIMEOUT,
-                            fetch_sanitized_image_with_retry(image_url, false),
-                        )
-                        .await
-                        .unwrap_or(Err(ImageFetchError::Transient {
-                            retry_after: None,
-                            retry_inline: false,
-                        })),
-                    ),
+                    Some(image_url) => {
+                        Some(fetch_sanitized_image_with_retry(image_url, false).await)
+                    }
                     None => None,
                 }
             },
             async {
                 match favicon_url {
-                    Some(favicon_url) => tokio::time::timeout(
-                        PREVIEW_FETCH_TIMEOUT,
-                        fetch_sanitized_image(favicon_url, true),
-                    )
-                    .await
-                    .ok(),
+                    Some(favicon_url) => Some(fetch_sanitized_image(favicon_url, true).await),
                     None => None,
                 }
             }
@@ -166,6 +178,15 @@ fn apply_image_result(
     }
 }
 
+async fn validate_metadata_url(url: &Url) -> Result<(), String> {
+    #[cfg(test)]
+    if METADATA_TEST_SERVER.try_with(|_| ()).is_ok() {
+        return Ok(());
+    }
+
+    validate_public_https_url(url).await
+}
+
 async fn validate_public_https_url(url: &Url) -> Result<(), String> {
     if url.scheme() != "https" || url.username() != "" || url.password().is_some() {
         return Err("link previews require an HTTPS URL without credentials".to_string());
@@ -182,11 +203,15 @@ async fn validate_public_https_url(url: &Url) -> Result<(), String> {
 
 async fn resolve_public_addresses(host: &str) -> Result<Vec<IpAddr>, String> {
     let host = host.to_string();
-    let addresses = tokio::net::lookup_host((host.as_str(), 443))
-        .await
-        .map_err(|error| format!("link preview DNS resolution failed: {error}"))?
-        .map(|address| address.ip())
-        .collect::<Vec<_>>();
+    let addresses = tokio::time::timeout(
+        DNS_RESOLUTION_TIMEOUT,
+        tokio::net::lookup_host((host.as_str(), 443)),
+    )
+    .await
+    .map_err(|_| "link preview DNS resolution timed out".to_string())?
+    .map_err(|error| format!("link preview DNS resolution failed: {error}"))?
+    .map(|address| address.ip())
+    .collect::<Vec<_>>();
 
     if addresses.is_empty() {
         return Err("link preview DNS resolution returned no addresses".to_string());
@@ -196,6 +221,25 @@ async fn resolve_public_addresses(host: &str) -> Result<Vec<IpAddr>, String> {
     }
 
     Ok(addresses)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static METADATA_TEST_SERVER: std::net::SocketAddr;
+}
+
+async fn send_metadata_request(url: &Url, accept: &str) -> Result<reqwest::Response, String> {
+    #[cfg(test)]
+    if let Ok(address) = METADATA_TEST_SERVER.try_with(|address| *address) {
+        return reqwest::Client::new()
+            .get(format!("http://{address}{}", url.path()))
+            .header(ACCEPT, accept)
+            .send()
+            .await
+            .map_err(|error| format!("link preview test request failed: {error}"));
+    }
+
+    send_pinned_request(url, accept).await
 }
 
 async fn send_pinned_request(url: &Url, accept: &str) -> Result<reqwest::Response, String> {
@@ -211,6 +255,8 @@ async fn send_pinned_request(url: &Url, accept: &str) -> Result<reqwest::Respons
         .no_proxy()
         .redirect(Policy::none())
         .pool_max_idle_per_host(0)
+        .connect_timeout(TRANSPORT_CONNECT_TIMEOUT)
+        .read_timeout(TRANSPORT_IDLE_TIMEOUT)
         .resolve_to_addrs(host, &socket_addresses)
         .build()
         .map_err(|error| format!("link preview client failed: {error}"))?;
@@ -219,9 +265,9 @@ async fn send_pinned_request(url: &Url, accept: &str) -> Result<reqwest::Respons
         .header(ACCEPT, accept)
         .header(USER_AGENT, "Buzz Desktop link preview");
 
-    tokio::time::timeout(PREVIEW_FETCH_TIMEOUT, request.send())
+    request
+        .send()
         .await
-        .map_err(|_| "link preview request timed out".to_string())?
         .map_err(|error| format!("link preview request failed: {error}"))
 }
 
@@ -340,21 +386,84 @@ async fn fetch_sanitized_image_with_retry(
     .await
 }
 
+async fn wait_for_image_host_cooldown(
+    waited_for_cooldown: &mut bool,
+    retry_after: Duration,
+) -> bool {
+    if *waited_for_cooldown {
+        return false;
+    }
+    *waited_for_cooldown = true;
+    tokio::time::sleep(retry_after).await;
+    true
+}
+
+fn retryable_image_cooldown(
+    url: &Url,
+    retry_after: Option<Duration>,
+    waited_for_cooldown: &mut bool,
+) -> Option<Duration> {
+    let retry_after = retry_after?;
+    if *waited_for_cooldown {
+        return None;
+    }
+    set_image_host_cooldown(url, retry_after);
+    if retry_after > MAX_INLINE_IMAGE_COOLDOWN {
+        return None;
+    }
+    *waited_for_cooldown = true;
+    Some(retry_after)
+}
+
 async fn fetch_sanitized_image(
-    mut url: Url,
+    url: Url,
     preserve_transparency: bool,
 ) -> Result<(String, String), ImageFetchError> {
-    validate_public_https_url(&url)
+    fetch_sanitized_image_using(
+        url,
+        preserve_transparency,
+        |url| async move { validate_public_https_url(&url).await },
+        |url, accept| async move { send_pinned_request(&url, accept).await },
+    )
+    .await
+}
+
+async fn fetch_sanitized_image_using<V, VFut, F, Fut>(
+    mut url: Url,
+    preserve_transparency: bool,
+    mut validate_url: V,
+    mut send_request: F,
+) -> Result<(String, String), ImageFetchError>
+where
+    V: FnMut(Url) -> VFut,
+    VFut: std::future::Future<Output = Result<(), String>>,
+    F: FnMut(Url, &'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, String>>,
+{
+    validate_url(url.clone())
         .await
         .map_err(|_| ImageFetchError::Rejected)?;
-    for redirect_count in 0..=MAX_REDIRECTS {
+    let mut redirect_count = 0;
+    let mut waited_for_cooldown = false;
+    while redirect_count <= MAX_REDIRECTS {
         if let Some(retry_after) = image_host_cooldown_remaining(&url) {
-            return Err(ImageFetchError::Transient {
-                retry_after: Some(retry_after),
-                retry_inline: false,
-            });
+            if retry_after > MAX_INLINE_IMAGE_COOLDOWN
+                || !wait_for_image_host_cooldown(&mut waited_for_cooldown, retry_after).await
+            {
+                return Err(ImageFetchError::Transient {
+                    retry_after: Some(retry_after),
+                    retry_inline: false,
+                });
+            }
+            continue;
         }
-        let response = send_pinned_request(&url, "image/jpeg,image/png,image/webp")
+
+        let host_gate = image_host_gate(&url);
+        let host_guard = host_gate.lock().await;
+        if image_host_cooldown_remaining(&url).is_some() {
+            continue;
+        }
+        let response = send_request(url.clone(), "image/jpeg,image/png,image/webp")
             .await
             .map_err(|_| ImageFetchError::Transient {
                 retry_after: None,
@@ -370,9 +479,10 @@ async fn fetch_sanitized_image(
                 .and_then(|value| value.to_str().ok())
                 .ok_or(ImageFetchError::Rejected)?;
             url = url.join(location).map_err(|_| ImageFetchError::Rejected)?;
-            validate_public_https_url(&url)
+            validate_url(url.clone())
                 .await
                 .map_err(|_| ImageFetchError::Rejected)?;
+            redirect_count += 1;
             continue;
         }
         if !response.status().is_success() {
@@ -383,12 +493,18 @@ async fn fetch_sanitized_image(
                 || status.is_server_error()
             {
                 let retry_after = retry_after_duration(&response);
-                if let Some(retry_after) = retry_after {
-                    set_image_host_cooldown(&url, retry_after);
+                if let Some(retry_after) =
+                    retryable_image_cooldown(&url, retry_after, &mut waited_for_cooldown)
+                {
+                    drop(host_guard);
+                    tokio::time::sleep(retry_after).await;
+                    continue;
                 }
                 return Err(ImageFetchError::Transient {
                     retry_after,
-                    retry_inline: status != reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    retry_inline: retry_after.is_none()
+                        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+                        && !waited_for_cooldown,
                 });
             }
             return Err(ImageFetchError::Rejected);
@@ -677,315 +793,5 @@ fn decode_html_entities(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::rate_limit::MAX_IMAGE_RETRY_AFTER;
-    use super::{
-        apply_image_result, declares_animation, extract_favicon_url, extract_image_url,
-        extract_link_preview_metadata, is_html_response, read_bytes_prefix, retry_after_duration,
-        sanitize_image, ImageFetchError, LinkPreviewImageFetchState, LinkPreviewMetadata,
-        MAX_METADATA_DESCRIPTION_CHARS,
-    };
-    use axum::{body::Body, http::Response, routing::get, Router};
-    use base64::Engine as _;
-    use bytes::Bytes;
-    use futures_util::stream;
-    use image::{DynamicImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
-    use std::{convert::Infallible, io::Cursor};
-    use url::Url;
-
-    async fn test_response(router: Router, path: &str) -> reqwest::Response {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        reqwest::get(format!("http://{address}{path}"))
-            .await
-            .unwrap()
-    }
-
-    #[test]
-    fn metadata_prefers_open_graph_and_reads_site_name() {
-        let html = r#"<meta content="Buzz" property="og:site_name">
-          <meta content="Rich previews &amp; cards" property="og:title">
-          <meta content="Safe &amp; useful previews" property="og:description">
-          <meta name="twitter:title" content="Twitter fallback"><title>Fallback</title>"#;
-        assert_eq!(
-            extract_link_preview_metadata(html),
-            Some(LinkPreviewMetadata {
-                title: "Rich previews & cards".to_string(),
-                site_name: Some("Buzz".to_string()),
-                description: Some("Safe & useful previews".to_string()),
-                image_data_url: None,
-                image_domain: None,
-                image_fetch_state: LinkPreviewImageFetchState::None,
-                image_retry_after_ms: None,
-                favicon_data_url: None,
-            })
-        );
-    }
-
-    #[test]
-    fn image_results_preserve_absence_and_classify_recovery() {
-        let mut metadata = extract_link_preview_metadata("<title>Preview result</title>").unwrap();
-        apply_image_result(&mut metadata, None);
-        assert_eq!(metadata.image_fetch_state, LinkPreviewImageFetchState::None);
-
-        apply_image_result(
-            &mut metadata,
-            Some(Err(ImageFetchError::Transient {
-                retry_after: Some(std::time::Duration::from_secs(15)),
-                retry_inline: false,
-            })),
-        );
-        assert_eq!(
-            metadata.image_fetch_state,
-            LinkPreviewImageFetchState::TransientFailure
-        );
-        assert_eq!(metadata.image_retry_after_ms, Some(15_000));
-
-        apply_image_result(
-            &mut metadata,
-            Some(Ok((
-                "data:image/jpeg;base64,abc".to_string(),
-                "images.example.com".to_string(),
-            ))),
-        );
-        assert_eq!(
-            metadata.image_fetch_state,
-            LinkPreviewImageFetchState::Image
-        );
-        assert_eq!(metadata.image_domain.as_deref(), Some("images.example.com"));
-    }
-
-    #[test]
-    fn metadata_falls_back_to_twitter_then_title() {
-        assert_eq!(
-            extract_link_preview_metadata("<meta content='Tweet title' name='twitter:title'>")
-                .map(|metadata| metadata.title),
-            Some("Tweet title".to_string())
-        );
-        assert_eq!(
-            extract_link_preview_metadata("<title> Plain   title </title>")
-                .map(|metadata| metadata.title),
-            Some("Plain title".to_string())
-        );
-    }
-
-    #[test]
-    fn metadata_preserves_description_line_breaks() {
-        let html = r#"<meta property="og:title" content="Tweet title">
-          <meta property="og:description" content="First paragraph.&#10;&#10;Agents:&#10;- One&#10;- Two">"#;
-        assert_eq!(
-            extract_link_preview_metadata(html).and_then(|metadata| metadata.description),
-            Some("First paragraph.\n\nAgents:\n- One\n- Two".to_string())
-        );
-    }
-
-    #[test]
-    fn metadata_description_supports_standard_x_posts() {
-        let description = "x".repeat(MAX_METADATA_DESCRIPTION_CHARS + 1);
-        let html = format!(
-            r#"<meta property="og:title" content="Long post"><meta property="og:description" content="{description}">"#
-        );
-        let extracted = extract_link_preview_metadata(&html)
-            .and_then(|metadata| metadata.description)
-            .unwrap();
-        assert_eq!(extracted.chars().count(), MAX_METADATA_DESCRIPTION_CHARS);
-    }
-
-    #[test]
-    fn favicon_metadata_resolves_relative_icon_links() {
-        let page = Url::parse("https://example.com/articles/one").unwrap();
-        let html = r#"<link rel="stylesheet" href="styles.css">
-          <link href="../favicon.png" rel="shortcut icon">"#;
-        assert_eq!(
-            extract_favicon_url(html, &page).unwrap().as_str(),
-            "https://example.com/favicon.png"
-        );
-    }
-
-    #[test]
-    fn favicon_metadata_prefers_a_supported_raster_candidate() {
-        let page = Url::parse("https://github.com/block/buzz").unwrap();
-        let html = r#"<link rel="mask-icon" href="https://assets.example/favicon.svg">
-          <link rel="alternate icon" type="image/png" href="https://assets.example/favicon.png">
-          <link rel="icon" type="image/svg+xml" href="https://assets.example/favicon.svg">"#;
-        assert_eq!(
-            extract_favicon_url(html, &page).unwrap().as_str(),
-            "https://assets.example/favicon.png"
-        );
-    }
-
-    #[test]
-    fn favicon_metadata_uses_touch_icon_before_unsupported_ico() {
-        let page = Url::parse("https://twitter.com/tellaho").unwrap();
-        let html = r#"<link rel="icon" href="/favicon.ico">
-          <link rel="apple-touch-icon" sizes="192x192" href="/apple-touch-icon.png">"#;
-        assert_eq!(
-            extract_favicon_url(html, &page).unwrap().as_str(),
-            "https://twitter.com/apple-touch-icon.png"
-        );
-    }
-
-    #[test]
-    fn image_metadata_resolves_relative_urls_and_prefers_open_graph() {
-        let page = Url::parse("https://example.com/articles/one").unwrap();
-        let html = r#"<meta name="twitter:image" content="https://cdn.example/twitter.jpg">
-          <meta property="og:image" content="../preview.png">"#;
-        assert_eq!(
-            extract_image_url(html, &page).unwrap().as_str(),
-            "https://example.com/preview.png"
-        );
-    }
-
-    #[tokio::test]
-    async fn oversized_html_uses_metadata_within_the_bounded_prefix() {
-        const LIMIT: usize = 256;
-        let metadata = r#"<meta property="og:title" content="Prefix title"><meta property="og:image" content="https://example.com/preview.png">"#;
-        let body = format!("{metadata}{}", "x".repeat(LIMIT));
-        let response = test_response(
-            Router::new().route(
-                "/declared",
-                get(move || {
-                    let body = body.clone();
-                    async move {
-                        Response::builder()
-                            .header("content-type", "text/html")
-                            .body(Body::from(body))
-                            .unwrap()
-                    }
-                }),
-            ),
-            "/declared",
-        )
-        .await;
-        assert!(response
-            .content_length()
-            .is_some_and(|size| size > LIMIT as u64));
-        assert!(is_html_response(&response));
-
-        let prefix = read_bytes_prefix(response, LIMIT).await.unwrap();
-        assert_eq!(prefix.len(), LIMIT);
-        let html = String::from_utf8_lossy(&prefix);
-        assert_eq!(
-            extract_link_preview_metadata(&html).map(|metadata| metadata.title),
-            Some("Prefix title".to_string())
-        );
-        assert!(extract_image_url(&html, &Url::parse("https://example.com").unwrap()).is_some());
-    }
-
-    #[tokio::test]
-    async fn image_retry_after_uses_bounded_delta_seconds() {
-        let response = test_response(
-            Router::new().route(
-                "/rate-limited",
-                get(|| async {
-                    Response::builder()
-                        .status(429)
-                        .header("retry-after", "900")
-                        .body(Body::empty())
-                        .unwrap()
-                }),
-            ),
-            "/rate-limited",
-        )
-        .await;
-        assert_eq!(
-            retry_after_duration(&response),
-            Some(std::time::Duration::from_secs(900))
-        );
-
-        let response = test_response(
-            Router::new().route(
-                "/excessive",
-                get(|| async {
-                    Response::builder()
-                        .status(429)
-                        .header("retry-after", "7200")
-                        .body(Body::empty())
-                        .unwrap()
-                }),
-            ),
-            "/excessive",
-        )
-        .await;
-        assert_eq!(retry_after_duration(&response), Some(MAX_IMAGE_RETRY_AFTER));
-    }
-
-    #[tokio::test]
-    async fn oversized_chunked_html_ignores_metadata_beyond_the_bounded_prefix() {
-        const LIMIT: usize = 256;
-        let response = test_response(
-            Router::new().route(
-                "/chunked",
-                get(|| async {
-                    let chunks = stream::iter([
-                        Ok::<_, Infallible>(Bytes::from(vec![b'x'; LIMIT])),
-                        Ok(Bytes::from_static(
-                            br#"<meta property="og:title" content="Too late"><meta property="og:image" content="https://example.com/late.png">"#,
-                        )),
-                    ]);
-                    Response::builder()
-                        .header("content-type", "text/html")
-                        .body(Body::from_stream(chunks))
-                        .unwrap()
-                }),
-            ),
-            "/chunked",
-        )
-        .await;
-        assert_eq!(response.content_length(), None);
-
-        let prefix = read_bytes_prefix(response, LIMIT).await.unwrap();
-        assert_eq!(prefix.len(), LIMIT);
-        let html = String::from_utf8_lossy(&prefix);
-        assert_eq!(extract_link_preview_metadata(&html), None);
-        assert_eq!(
-            extract_image_url(&html, &Url::parse("https://example.com").unwrap()),
-            None
-        );
-    }
-
-    #[test]
-    fn sanitizer_rejects_mime_mismatch_and_outputs_static_jpeg() {
-        let source = DynamicImage::ImageRgb8(RgbImage::from_pixel(2, 2, Rgb([10, 20, 30])));
-        let mut png = Cursor::new(Vec::new());
-        source.write_to(&mut png, ImageFormat::Png).unwrap();
-        assert!(sanitize_image(png.get_ref(), "image/jpeg", false).is_err());
-        let sanitized = sanitize_image(png.get_ref(), "image/png", false).unwrap();
-        assert!(sanitized.starts_with("data:image/jpeg;base64,"));
-    }
-
-    #[test]
-    fn favicon_sanitizer_preserves_png_transparency() {
-        let source = DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 2, Rgba([36, 41, 47, 0])));
-        let mut png = Cursor::new(Vec::new());
-        source.write_to(&mut png, ImageFormat::Png).unwrap();
-
-        let sanitized = sanitize_image(png.get_ref(), "image/png", true).unwrap();
-        assert!(sanitized.starts_with("data:image/png;base64,"));
-        let encoded = sanitized.split_once(',').unwrap().1;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .unwrap();
-        assert!(image::load_from_memory(&bytes).unwrap().color().has_alpha());
-    }
-
-    #[test]
-    fn animation_markers_are_rejected_before_decode() {
-        let mut apng = b"\x89PNG\r\n\x1a\n".to_vec();
-        apng.extend_from_slice(b"junkacTLjunk");
-        assert!(declares_animation(&apng, ImageFormat::Png));
-
-        let mut webp = b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00".to_vec();
-        webp.push(0x02);
-        assert!(declares_animation(&webp, ImageFormat::WebP));
-    }
-
-    #[test]
-    fn metadata_requires_a_non_empty_title() {
-        assert_eq!(extract_link_preview_metadata("<title>   </title>"), None);
-        assert_eq!(extract_link_preview_metadata("<html></html>"), None);
-    }
-}
+#[path = "link_preview_tests.rs"]
+mod tests;
