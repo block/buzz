@@ -684,6 +684,41 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
     pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
+# Launch a development-only onboarding workshop. The frontend uses React-only
+# state and fixed mock data; native setup stops before migrations, identity
+# persistence, keychain access, relay sync, or agent restore.
+onboarding-preview *ARGS: _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    cd {{desktop_dir}}
+    [[ -d node_modules ]] || pnpm install
+    unset BUZZ_AUTH_TAG BUZZ_RESET_WEBVIEW_STATE BUZZ_SHARE_IDENTITY
+    export BUZZ_ONBOARDING_PREVIEW=1
+    export BUZZ_RELAY_URL="ws://127.0.0.1:9"
+    # Fixed public test fixture: build_app_state never generates an identity,
+    # while the preview UI never receives or exposes this value.
+    export BUZZ_PRIVATE_KEY="3dbaebadb5dfd777ff25149ee230d907a15a9e1294b40b830661e65bb42f6c03"
+    source ../scripts/instance-env.sh
+    export BUZZ_PREVIEW_VITE_PORT=$((20001 + (BUZZ_VITE_PORT % 40000)))
+    BUZZ_TAURI_CONFIG=$(node -e '
+      const config = JSON.parse(process.env.BUZZ_TAURI_CONFIG);
+      const url = new URL(config.build.devUrl);
+      url.port = process.env.BUZZ_PREVIEW_VITE_PORT;
+      url.searchParams.set("onboardingPreview", "1");
+      config.build.devUrl = url.toString();
+      config.build.beforeDevCommand = `exec ./node_modules/.bin/vite --port ${process.env.BUZZ_PREVIEW_VITE_PORT} --strictPort`;
+      config.identifier = `xyz.block.buzz.onboarding-preview.p${process.env.BUZZ_PREVIEW_VITE_PORT}`;
+      config.productName = "Buzz Onboarding Preview";
+      process.stdout.write(JSON.stringify(config));
+    ')
+    export BUZZ_TAURI_CONFIG
+    export BUZZ_DEV_KEYRING_SERVICE="buzz-desktop-onboarding-preview.${BUZZ_PREVIEW_VITE_PORT}"
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
+    echo "Starting non-persistent onboarding preview on Vite port ${BUZZ_PREVIEW_VITE_PORT}; external relay access is disabled"
+    pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs
     #!/usr/bin/env bash

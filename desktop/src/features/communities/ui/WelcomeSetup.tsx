@@ -43,6 +43,7 @@ export function WelcomeSetup({
   // behind the modal never changes out from under the user.
   const [isHostedSignInOpen, setIsHostedSignInOpen] = React.useState(false);
   const [copiedNpub, setCopiedNpub] = React.useState(false);
+  const [membershipRequired, setMembershipRequired] = React.useState(false);
   const communityOnboarding = useCommunityOnboarding();
   const identityQuery = useIdentityQuery();
   const systemColorScheme = useSystemColorScheme();
@@ -57,6 +58,7 @@ export function WelcomeSetup({
 
   const showPage = React.useCallback(
     (nextPage: WelcomeSetupPage, direction?: OnboardingTransitionDirection) => {
+      setMembershipRequired(false);
       setTransitionMode(
         direction ?? (nextPage === "welcome" ? "backward" : "forward"),
       );
@@ -262,19 +264,24 @@ export function WelcomeSetup({
                     showPage(page === "member" ? "existing" : "welcome")
                   }
                   onConnect={startConnection}
+                  onMembershipRequirementChange={
+                    page === "join" ? setMembershipRequired : undefined
+                  }
                   onRedeem={redeemInvite}
                   placeholder="Invite link or community URL"
                   variant="onboarding-spotlight"
                 />
-                {page === "join" ? (
-                  <div className="w-full max-w-[560px] text-left">
+                {page === "join" && membershipRequired ? (
+                  <div
+                    aria-live="polite"
+                    className="w-full max-w-[560px] text-left"
+                  >
                     <p className="text-sm font-medium text-foreground">
-                      Joining a private community?
+                      You’ll need to request access to this community
                     </p>
                     <p className="mt-2 text-sm leading-6 text-foreground/75">
-                      Some communities need the owner to add you before you can
-                      join. Copy your public ID and send it to the community
-                      owner.
+                      This community requires an admin to add you before you can
+                      join. Copy your public ID and send it to them.
                     </p>
                     <div className="mt-4 flex items-center gap-3 rounded-xl border border-foreground/10 bg-background/35 px-4 py-3">
                       <code

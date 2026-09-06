@@ -23,11 +23,15 @@ import {
 } from "@/features/communities/hostedCommunityApi";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { cn } from "@/shared/lib/cn";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
 import { OnboardingFooter } from "@/features/onboarding/ui/OnboardingFooter";
+import { OnboardingPreviewInput } from "@/features/onboarding/ui/OnboardingPreviewInput";
+import { useOnboardingPreviewCardLayout } from "@/features/onboarding/ui/OnboardingPreviewShell";
+import { ONBOARDING_PREVIEW_CARD_INPUT_CLASS } from "@/features/onboarding/ui/onboardingPreviewCardStyles";
 import {
   ONBOARDING_INK_ICON_CLASS,
   ONBOARDING_PRIMARY_CTA_CLASS,
@@ -64,6 +68,9 @@ type HostedCommunityOnboardingProps = {
    * finished driving the flow.
    */
   onReady?: () => void;
+  /** Use the production stage with local-only workshop behavior. */
+  previewMode?: boolean;
+  onPreviewContinue?: (communityName: string) => void;
   /**
    * While true, render only the sign-in modal and keep the page scaffolding
    * hidden, so whatever screen launched the flow stays visible behind it.
@@ -74,8 +81,216 @@ type HostedCommunityOnboardingProps = {
 export function HostedCommunityOnboarding({
   onBack,
   onReady,
+  onPreviewContinue,
+  previewMode = false,
   stageHidden = false,
 }: HostedCommunityOnboardingProps) {
+  if (previewMode) {
+    return (
+      <HostedCommunityOnboardingPreview
+        onBack={onBack}
+        onContinue={onPreviewContinue ?? (() => undefined)}
+      />
+    );
+  }
+
+  return (
+    <HostedCommunityOnboardingLive
+      onBack={onBack}
+      onReady={onReady}
+      stageHidden={stageHidden}
+    />
+  );
+}
+
+function HostedCommunityOnboardingPreview({
+  onBack,
+  onContinue,
+}: {
+  onBack: () => void;
+  onContinue: (communityName: string) => void;
+}) {
+  const cardLayout = useOnboardingPreviewCardLayout();
+  const [name, setName] = React.useState("");
+  const normalizedName = name.trim();
+  const nameIsAvailable =
+    normalizedName.length > 0 &&
+    VALID_HOSTED_COMMUNITY_NAME.test(normalizedName);
+  const displayName = name || "your-community";
+  const composedAddressLength =
+    displayName.length + HOSTED_COMMUNITY_SUFFIX.length + 1;
+  const addressFontSize = `min(2.25rem, calc(90cqw / ${(
+    composedAddressLength * 0.62
+  ).toFixed(2)}))`;
+
+  const continueToCommunity = (event: React.FormEvent) => {
+    event.preventDefault();
+    onContinue(name.trim() || "Your community");
+  };
+
+  return (
+    <div
+      className={cn(
+        "flex w-full max-w-[920px] flex-col",
+        cardLayout
+          ? "min-h-0 items-stretch text-left"
+          : "min-h-[calc(100dvh-15.625rem)] items-center text-center",
+      )}
+      data-testid="hosted-community-preview"
+    >
+      <h1 className="max-w-[620px] text-title font-normal leading-[1.18] tracking-[-0.025em]">
+        Create a community
+      </h1>
+      <p
+        className={cn(
+          "mt-2 max-w-[560px] text-sm leading-6 text-foreground",
+          !cardLayout && "mx-auto",
+        )}
+      >
+        Choose a name for your community.
+      </p>
+
+      <div
+        className={cn(
+          "flex w-full flex-1 flex-col text-left",
+          cardLayout ? "items-stretch justify-start pt-8" : "justify-center",
+        )}
+      >
+        {cardLayout ? (
+          <form
+            className="text-left"
+            data-testid="hosted-community-create-surface"
+            id="hosted-community-preview-create-form"
+            onSubmit={continueToCommunity}
+          >
+            <label
+              className="mb-2 block text-sm font-medium text-foreground"
+              htmlFor="hosted-community-preview-address"
+            >
+              Community name
+            </label>
+            <div
+              className="relative"
+              data-testid="hosted-community-address-line"
+            >
+              <OnboardingPreviewInput
+                autoComplete="off"
+                className={cn(
+                  ONBOARDING_PREVIEW_CARD_INPUT_CLASS,
+                  "pr-[12.5rem] font-mono",
+                )}
+                data-testid="hosted-community-address-input"
+                id="hosted-community-preview-address"
+                maxLength={63}
+                onChange={(event) => setName(event.target.value.toLowerCase())}
+                placeholder="your-community"
+                spellCheck={false}
+                value={name}
+              />
+              <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center whitespace-nowrap font-mono text-xs text-muted-foreground">
+                .{HOSTED_COMMUNITY_SUFFIX}
+              </span>
+            </div>
+            <p
+              aria-live="polite"
+              className={cn(
+                "mt-2 min-h-5 text-xs",
+                nameIsAvailable
+                  ? "text-foreground/70"
+                  : "text-muted-foreground",
+              )}
+              data-testid="hosted-community-address-status"
+            >
+              {normalizedName.length === 0
+                ? ""
+                : nameIsAvailable
+                  ? "This name is available."
+                  : "Use lowercase letters, numbers, and hyphens."}
+            </p>
+          </form>
+        ) : (
+          <Card
+            asChild
+            className={`${FUZZY_SURFACE_CLASS} !py-10 [--buzz-card-textured-min-height:176px]`}
+            data-testid="hosted-community-create-surface"
+            variant="textured"
+          >
+            <form
+              id="hosted-community-preview-create-form"
+              onSubmit={continueToCommunity}
+            >
+              <div
+                className="mx-auto flex w-full max-w-[900px] items-center justify-center whitespace-nowrap"
+                data-testid="hosted-community-address-line"
+                style={{ containerType: "inline-size" }}
+              >
+                <Input
+                  aria-label="Community name"
+                  autoComplete="off"
+                  className="h-auto min-w-0 flex-none rounded-none border-0 bg-transparent p-0 text-right font-mono !text-[rgb(var(--buzz-hosted-community-surface-fg))] shadow-none placeholder:!text-[rgb(var(--buzz-hosted-community-surface-fg))] placeholder:opacity-20 focus-visible:ring-0"
+                  data-testid="hosted-community-address-input"
+                  id="hosted-community-preview-address"
+                  maxLength={63}
+                  onChange={(event) =>
+                    setName(event.target.value.toLowerCase())
+                  }
+                  placeholder="your-community"
+                  spellCheck={false}
+                  style={{
+                    width: `${displayName.length}ch`,
+                    fontSize: addressFontSize,
+                  }}
+                  value={name}
+                />
+                <span
+                  className="shrink-0 font-mono !text-[rgb(var(--buzz-hosted-community-surface-fg))]"
+                  style={{ fontSize: addressFontSize }}
+                >
+                  .{HOSTED_COMMUNITY_SUFFIX}
+                </span>
+              </div>
+            </form>
+          </Card>
+        )}
+        {!cardLayout ? (
+          <p
+            aria-hidden
+            className="relative z-10 mt-3 min-h-5 text-center text-sm invisible"
+          >
+            Community address status
+          </p>
+        ) : null}
+      </div>
+
+      <OnboardingFooter>
+        <Button
+          className={cardLayout ? ONBOARDING_PRIMARY_CTA_CLASS : PAGE_CTA_CLASS}
+          data-testid="onboarding-preview-community-continue"
+          form="hosted-community-preview-create-form"
+          type="submit"
+        >
+          Next
+        </Button>
+        {!cardLayout ? (
+          <Button
+            className={PAGE_BACK_CLASS}
+            onClick={onBack}
+            type="button"
+            variant="ghost"
+          >
+            Back
+          </Button>
+        ) : null}
+      </OnboardingFooter>
+    </div>
+  );
+}
+
+function HostedCommunityOnboardingLive({
+  onBack,
+  onReady,
+  stageHidden = false,
+}: Pick<HostedCommunityOnboardingProps, "onBack" | "onReady" | "stageHidden">) {
   const onboarding = useCommunityOnboarding();
   const shouldReduceMotion = useReducedMotion();
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;

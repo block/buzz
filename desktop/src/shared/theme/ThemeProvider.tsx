@@ -89,6 +89,41 @@ type ThemeProviderProps = {
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
+const NON_PERSISTENT_THEME_VALUE: ThemeContextValue = {
+  accentColor: DEFAULT_ACCENT,
+  applyAppearance: () => undefined,
+  followSystem: false,
+  glassBackground: false,
+  glassBackgroundSupported: false,
+  glassOpacity: 65,
+  hasPair: false,
+  isDark: false,
+  isLoading: false,
+  prominentActiveTab: false,
+  selectedThemeName: "buzz",
+  setAccentColor: () => undefined,
+  setFollowSystem: () => undefined,
+  setGlassBackground: () => undefined,
+  setGlassOpacity: () => undefined,
+  setProminentActiveTab: () => undefined,
+  setTheme: () => undefined,
+  terminalPalette: null,
+  themeName: "buzz",
+};
+
+/** Supplies theme context without reading, writing, or applying preferences. */
+export function NonPersistentThemeProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  return (
+    <ThemeContext.Provider value={NON_PERSISTENT_THEME_VALUE}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
 function isValidThemeName(name: string): name is SyntaxThemeName {
   return (SYNTAX_THEMES as readonly string[]).includes(name);
 }

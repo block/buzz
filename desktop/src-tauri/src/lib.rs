@@ -34,6 +34,7 @@ mod native_websocket_batch;
 mod nostr_bind;
 pub mod nostr_convert;
 mod observed_unread;
+mod onboarding_preview;
 mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
@@ -159,6 +160,10 @@ pub fn run() {
                     // commit the startup surface before revealing it.
                     let window = webview.window();
 
+                    if onboarding_preview::reveal_window(&window) {
+                        return;
+                    }
+
                     #[cfg(target_os = "macos")]
                     {
                         set_initial_window_backing(&window);
@@ -236,6 +241,9 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            if onboarding_preview::skip_native_setup() {
+                return Ok(());
+            }
             #[cfg(target_os = "macos")]
             {
                 tray_menu::init(&app_handle)?;
