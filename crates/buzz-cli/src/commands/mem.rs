@@ -478,6 +478,24 @@ fn verify_hunks_at_declared_position(
     Ok(())
 }
 
+/// Reject patches that parse to zero hunks. diffy's parser is lenient: input
+/// that isn't unified-diff format (short-form `3a4` / `3c3` hunks, bare
+/// `---`/`+++` headers, arbitrary non-diff text) parses successfully into a
+/// patch with no hunks, and `diffy::apply` then returns the input unchanged —
+/// so `mem patch` would report success and publish a redundant event without
+/// modifying the value.
+fn ensure_patch_has_hunks(patch: &diffy::Patch<'_, str>) -> Result<(), CliError> {
+    if patch.hunks().is_empty() {
+        return Err(CliError::Usage(
+            "patch contains no hunks — input may not be a unified diff. \
+             Short-form diff output (`3a4`, `3c3,4`) is not supported; \
+             regenerate with `diff -u` so hunks carry `@@` headers."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Extract the current slug value as a `String` (or return `NotFound`).
 /// Used by `mem hash` and `mem patch` — they both need "the value or fail".
 /// Returns `(head_event, value)` so the caller can preserve monotonic ordering.
@@ -625,6 +643,7 @@ pub async fn cmd_patch(
 
     let patch = diffy::Patch::from_str(&diff_text)
         .map_err(|e| CliError::Usage(format!("malformed unified diff: {e}")))?;
+    ensure_patch_has_hunks(&patch)?;
 
     // Strict positional check — diffy's `apply` allows the hunk to slide
     // forward/backward in the file if it finds the preimage elsewhere. For
@@ -1041,5 +1060,57 @@ mod tests {
         let multi = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\
                      --- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
         assert_eq!(multi.lines().filter(|l| l.starts_with("--- ")).count(), 2);
+    }
+
+    // diffy's parser is lenient: text that isn't a unified diff — short-form
+    // `diff` output (`4a5`, `3c3`), bare `---`/`+++` headers, arbitrary prose —
+    // parses successfully into a patch with ZERO hunks. `diffy::apply` then
+    // returns the input unchanged, so `mem patch` would report success and
+    // publish a redundant event without touching the value. These tests pin
+    // the parser behavior and the guard against it (`ensure_patch_has_hunks`).
+    #[test]
+    fn short_form_diff_parses_to_zero_hunks() {
+        for short_form in ["4a5\n> epsilon\n", "3c3\n> GAMMA-1\n> GAMMA-2\n"] {
+            let patch = diffy::Patch::from_str(short_form).unwrap();
+            assert!(
+                patch.hunks().is_empty(),
+                "expected short-form {short_form:?} to parse as zero hunks"
+            );
+        }
+    }
+
+    #[test]
+    fn non_diff_text_and_bare_headers_parse_to_zero_hunks() {
+        let patch = diffy::Patch::from_str("hello world\n").unwrap();
+        assert!(patch.hunks().is_empty());
+
+        // Bare headers with no hunks (the empty-diff case) parse too.
+        let headers_only = diffy::Patch::from_str("--- a/x\n+++ b/x\n").unwrap();
+        assert!(headers_only.hunks().is_empty());
+    }
+
+    #[test]
+    fn ensure_patch_has_hunks_rejects_non_diff_accepts_real_hunks() {
+        // Short-form append (`4a5`) — the input that used to silently no-op.
+        let zero_hunk = diffy::Patch::from_str("4a5\n> epsilon\n").unwrap();
+        let err = ensure_patch_has_hunks(&zero_hunk).unwrap_err();
+        assert!(err.to_string().contains("no hunks"), "got: {err}");
+        assert!(err.to_string().contains("diff -u"), "got: {err}");
+
+        // A real unified hunk passes the guard and still applies.
+        let unified = "\
+--- a/x
++++ b/x
+@@ -4,1 +4,2 @@
+ delta
++epsilon
+";
+        let current = "alpha\nbeta\ngamma\ndelta\n";
+        let patch = diffy::Patch::from_str(unified).unwrap();
+        ensure_patch_has_hunks(&patch).unwrap();
+        assert_eq!(
+            diffy::apply(current, &patch).unwrap(),
+            "alpha\nbeta\ngamma\ndelta\nepsilon\n"
+        );
     }
 }
