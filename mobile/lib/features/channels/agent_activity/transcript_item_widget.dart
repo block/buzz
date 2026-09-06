@@ -72,6 +72,10 @@ class _MessageItemWidget extends StatelessWidget {
               style: context.textTheme.bodyMedium?.copyWith(
                 color: context.colors.onSurface,
               ),
+              // No link handler here, so an autolinked URL would draw as a
+              // link and do nothing when tapped. Transcript URLs stay text,
+              // as they were before gpt_markdown started autolinking.
+              autolink: false,
             ),
         ],
       ),
@@ -143,6 +147,8 @@ class _ThoughtItemWidget extends HookWidget {
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.colors.onSurfaceVariant,
                   ),
+                  // As above: no link handler on this surface either.
+                  autolink: false,
                 ),
               ],
             ],
