@@ -25,12 +25,33 @@ pub(super) const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// Download request timeout.
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+fn is_safe_media_ext(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 8
+        && value.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9'))
+}
+
+/// Blossom-style media path segment: `{sha256}`, `{sha256}.{ext}`, or `{sha256}.thumb.jpg`.
+fn is_safe_media_path_segment(sha256_ext: &str) -> bool {
+    let segments: Vec<&str> = sha256_ext.split('.').collect();
+    match segments.as_slice() {
+        [hash] => is_lower_hex_sha256(hash),
+        [hash, ext] => is_lower_hex_sha256(hash) && is_safe_media_ext(ext),
+        [hash, "thumb", "jpg"] => is_lower_hex_sha256(hash),
+        _ => false,
+    }
+}
+
 /// Validate that a URL is a legitimate relay media URL.
 ///
 /// Ensures:
 /// - URL scheme is `https` (or `http` for localhost dev)
 /// - URL origin matches the relay base URL
-/// - URL path matches `/media/{hash}.{ext}`
+/// - URL path matches `/media/{hash}.{ext}` with a Blossom-style hash segment
 pub(super) fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| "invalid URL".to_string())?;
     let base = url::Url::parse(relay_base).map_err(|_| "invalid relay base URL".to_string())?;
@@ -52,10 +73,13 @@ pub(super) fn validate_download_url(url: &str, relay_base: &str) -> Result<(), S
         return Err("download URL must match the relay origin".to_string());
     }
 
-    // Path must be /media/{filename}.
+    // Path must be /media/{blossom-hash-segment} with no extra path components.
     let path = parsed.path();
-    if !path.starts_with("/media/") {
+    let Some(segment) = path.strip_prefix("/media/") else {
         return Err("download URL must be a /media/ path".to_string());
+    };
+    if segment.is_empty() || segment.contains('/') || !is_safe_media_path_segment(segment) {
+        return Err("download URL must be a /media/{sha256}[.ext] path".to_string());
     }
 
     Ok(())
@@ -72,7 +96,8 @@ pub async fn download_image(
     let relay_base = relay_api_base_url_with_override(&state);
     validate_download_url(&url, &relay_base)?;
 
-    // Infer filename from the URL path (e.g. "abcdef123.jpg" from a Blossom URL).
+    // Infer filename from the URL path (e.g. Blossom sha256.ext) and sanitize
+    // before the save dialog — same posture as download_file.
     let filename = url::Url::parse(&url)
         .ok()
         .and_then(|u| {
@@ -82,6 +107,7 @@ pub async fn download_image(
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| "image.png".to_string());
+    let filename = sanitize_filename(&filename);
 
     // Derive extension for the save dialog filter.
     let ext = std::path::Path::new(&filename)
@@ -777,7 +803,7 @@ mod tests {
     #[test]
     fn test_validate_download_url_valid_relay_url() {
         assert!(validate_download_url(
-            "https://relay.example.com/media/abcdef1234567890.jpg",
+            "https://relay.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg",
             RELAY_BASE,
         )
         .is_ok());
@@ -786,14 +812,14 @@ mod tests {
     #[test]
     fn test_validate_download_url_valid_relay_url_png() {
         assert!(
-            validate_download_url("https://relay.example.com/media/abc123.png", RELAY_BASE,)
+            validate_download_url("https://relay.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png", RELAY_BASE,)
                 .is_ok()
         );
     }
 
     #[test]
     fn test_validate_download_url_non_relay_origin_rejected() {
-        let result = validate_download_url("https://evil.example.com/media/abc123.jpg", RELAY_BASE);
+        let result = validate_download_url("https://evil.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg", RELAY_BASE);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("relay origin"));
     }
@@ -806,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_validate_download_url_loopback_rejected() {
-        let result = validate_download_url("http://127.0.0.1/media/abc.jpg", RELAY_BASE);
+        let result = validate_download_url("http://127.0.0.1/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg", RELAY_BASE);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("relay origin"));
     }
@@ -814,7 +840,7 @@ mod tests {
     #[test]
     fn test_validate_download_url_localhost_allowed_for_localhost_relay() {
         assert!(validate_download_url(
-            "http://localhost:3000/media/abc.jpg",
+            "http://localhost:3000/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg",
             "http://localhost:3000",
         )
         .is_ok());
@@ -829,16 +855,44 @@ mod tests {
 
     #[test]
     fn test_validate_download_url_non_https_scheme_rejected() {
-        let result = validate_download_url("ftp://relay.example.com/media/abc.jpg", RELAY_BASE);
+        let result = validate_download_url("ftp://relay.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg", RELAY_BASE);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("HTTPS"));
     }
 
     #[test]
     fn test_validate_download_url_http_non_localhost_rejected() {
-        let result = validate_download_url("http://relay.example.com/media/abc.jpg", RELAY_BASE);
+        let result = validate_download_url("http://relay.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg", RELAY_BASE);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_download_url_short_hash_rejected() {
+        let result = validate_download_url(
+            "https://relay.example.com/media/abc123.jpg",
+            RELAY_BASE,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("sha256"));
+    }
+
+    #[test]
+    fn test_validate_download_url_path_traversal_rejected() {
+        let result = validate_download_url(
+            "https://relay.example.com/media/../secrets",
+            RELAY_BASE,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_download_url_nested_path_rejected() {
+        let result = validate_download_url(
+            "https://relay.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/extra.jpg",
+            RELAY_BASE,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -858,7 +912,7 @@ mod tests {
     #[test]
     fn test_validate_download_url_valid_relay_video_mp4() {
         assert!(validate_download_url(
-            "https://relay.example.com/media/abcdef1234567890.mp4",
+            "https://relay.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4",
             RELAY_BASE,
         )
         .is_ok());
@@ -867,14 +921,14 @@ mod tests {
     #[test]
     fn test_validate_download_url_valid_relay_video_webm() {
         assert!(
-            validate_download_url("https://relay.example.com/media/abc123.webm", RELAY_BASE)
+            validate_download_url("https://relay.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webm", RELAY_BASE)
                 .is_ok()
         );
     }
 
     #[test]
     fn test_validate_download_url_non_relay_video_rejected() {
-        let result = validate_download_url("https://evil.example.com/media/clip.mp4", RELAY_BASE);
+        let result = validate_download_url("https://evil.example.com/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4", RELAY_BASE);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("relay origin"));
     }
@@ -883,7 +937,7 @@ mod tests {
     fn test_validate_download_url_private_host_video_rejected() {
         // Off-relay private host serving a video must be rejected before any
         // fetch — same SSRF gate as image download.
-        let result = validate_download_url("http://127.0.0.1/media/clip.mp4", RELAY_BASE);
+        let result = validate_download_url("http://127.0.0.1/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4", RELAY_BASE);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("relay origin"));
     }
@@ -937,7 +991,7 @@ mod tests {
         let client = crate::app_state::build_media_fetch_client()
             .expect("media fetch client must build with no-redirect policy");
         let resp = client
-            .get(format!("http://{addr}/media/clip.mp4"))
+            .get(format!("http://{addr}/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4"))
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
