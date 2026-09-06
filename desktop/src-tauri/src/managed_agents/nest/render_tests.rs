@@ -36,10 +36,25 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
     }
 }
 
+/// A well-formed 64-character hex identity, deterministic per seed.
+///
+/// The renderer only accepts a real-shaped pubkey, so fixtures have to carry
+/// one; a placeholder like "Kit-pubkey" would be filtered out.
+fn fake_pubkey(seed: &str) -> String {
+    let mut hex: String = seed.bytes().map(|b| format!("{b:02x}")).collect();
+    while hex.len() < 64 {
+        hex.push_str("ab");
+    }
+    hex.truncate(64);
+    hex
+}
+
 fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
         description: None,
-        pubkey: String::new(),
+        // A provisioned agent always has a pubkey — that is what makes it
+        // addressable.
+        pubkey: fake_pubkey(name),
         name: name.to_string(),
         persona_id: persona_id.map(|s| s.to_string()),
         private_key_nsec: String::new(),
@@ -120,6 +135,118 @@ fn test_render_dynamic_section_agent_no_persona() {
     let agents = vec![make_agent("Scout", Some("nonexistent"))];
     let output = render_dynamic_section(&personas, &agents, &HashSet::new(), TEST_RELAY);
     assert!(output.contains("| Scout | — | @Scout |"));
+}
+
+/// A row whose identity is missing or malformed. `load_managed_agents` already
+/// drops empty-pubkey rows before regeneration (an empty pubkey is what marks a
+/// key-less agent *definition*), so these exercise the renderer's own guard
+/// against a caller that hands over raw store rows.
+fn make_unaddressable_agent(name: &str, pubkey: &str) -> ManagedAgentRecord {
+    ManagedAgentRecord {
+        pubkey: pubkey.to_string(),
+        relay_url: String::new(),
+        agent_command: String::new(),
+        ..make_agent(name, None)
+    }
+}
+
+#[test]
+fn test_render_dynamic_section_skips_malformed_identities() {
+    let personas = vec![make_persona("p1", "Builder")];
+    for bad in ["", "   ", "not-hex", &"a".repeat(63), &"z".repeat(64)] {
+        let agents = vec![
+            make_agent("Kit", Some("p1")),
+            make_unaddressable_agent("Ghost", bad),
+        ];
+        let output = render_dynamic_section(&personas, &agents, &HashSet::new(), TEST_RELAY);
+        assert!(output.contains("| Kit | Builder | @Kit |"), "{output}");
+        assert!(
+            !output.contains("Ghost"),
+            "{bad:?} is not an addressable identity: {output}"
+        );
+    }
+}
+
+#[test]
+fn test_render_dynamic_section_all_unaddressable_reads_as_empty() {
+    let agents = vec![
+        make_unaddressable_agent("Ghost", ""),
+        make_unaddressable_agent("Wraith", "nope"),
+    ];
+    let output = render_dynamic_section(&[], &agents, &HashSet::new(), TEST_RELAY);
+    assert!(
+        output.contains("No agents deployed yet"),
+        "a table of unaddressable rows is worse than saying there are none: {output}"
+    );
+}
+
+#[test]
+fn test_render_dynamic_section_skips_blank_named_agents() {
+    let agents = vec![ManagedAgentRecord {
+        name: "   ".to_string(),
+        ..make_agent("Kit", None)
+    }];
+    let output = render_dynamic_section(&[], &agents, &HashSet::new(), TEST_RELAY);
+    assert!(output.contains("No agents deployed yet"), "{output}");
+}
+
+#[test]
+fn test_duplicate_names_are_marked_ambiguous_not_merged() {
+    // Four creates of "Coder" mint four keypairs (#5786 defect B). Rendered
+    // plainly this is four identical `@Coder` cells.
+    let personas = vec![make_persona("p1", "Builder")];
+    let agents: Vec<ManagedAgentRecord> = (0..4)
+        .map(|i| ManagedAgentRecord {
+            pubkey: fake_pubkey(&format!("coder-{i}")),
+            ..make_agent("Coder", Some("p1"))
+        })
+        .collect();
+    let output = render_dynamic_section(&personas, &agents, &HashSet::new(), TEST_RELAY);
+
+    // No identity is dropped — all four are really deployed.
+    assert_eq!(output.matches("| Coder | Builder |").count(), 4, "{output}");
+    // And none of them claims to be reachable as a plain `@Coder`.
+    assert!(
+        !output.contains("| @Coder |"),
+        "a bare @Coder address is ambiguous here: {output}"
+    );
+    assert_eq!(output.matches("4 agents share this name").count(), 4);
+    // The pubkey prefix is what tells the rows apart.
+    for i in 0..4 {
+        let short = &fake_pubkey(&format!("coder-{i}"))[..8];
+        assert!(output.contains(short), "missing {short} in {output}");
+    }
+}
+
+#[test]
+fn test_duplicate_detection_ignores_case_and_surrounding_space() {
+    let agents = vec![
+        ManagedAgentRecord {
+            pubkey: fake_pubkey("one"),
+            ..make_agent("Coder", None)
+        },
+        ManagedAgentRecord {
+            pubkey: fake_pubkey("two"),
+            name: " coder ".to_string(),
+            ..make_agent("Coder", None)
+        },
+    ];
+    let output = render_dynamic_section(&[], &agents, &HashSet::new(), TEST_RELAY);
+    assert_eq!(
+        output.matches("2 agents share this name").count(),
+        2,
+        "{output}"
+    );
+}
+
+#[test]
+fn test_a_unique_name_keeps_the_plain_address() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let agents = vec![make_agent("Kit", Some("p1")), make_agent("Scout", None)];
+    let output = render_dynamic_section(&personas, &agents, &HashSet::new(), TEST_RELAY);
+    assert!(output.contains("| Kit | Builder | @Kit |"), "{output}");
+    assert!(output.contains("| Scout | — | @Scout |"), "{output}");
+    assert!(!output.contains("ambiguous"), "{output}");
 }
 
 #[test]
