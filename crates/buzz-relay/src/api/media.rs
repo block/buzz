@@ -47,6 +47,15 @@ enum UploadRouteMode {
     LegacyMedia,
 }
 
+/// Whether an upload should take the streaming video path.
+///
+/// Every ISO-BMFF container does, including one whose major brand says audio.
+/// A brand is a compatibility declaration, not an inventory: MP4RA registers
+/// `M4A `/`M4B ` as iTunes audio brands that may still carry video, chapter
+/// and text tracks. Routing on the brand would send a genuine video down the
+/// generic path to be rejected as audio. The validator classifies from parsed
+/// track types instead, and answers `415 audio/mp4` for a container that turns
+/// out to hold no video.
 fn should_stream_as_video(sniff: &[u8]) -> bool {
     infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
         || buzz_media::looks_like_iso_bmff(sniff)
@@ -1121,6 +1130,36 @@ mod tests {
             upload_route_mode("/media"),
             Err(MediaError::NotFound)
         ));
+    }
+
+    /// `ftyp` box: size, "ftyp", major brand, minor version, compatible brands.
+    fn ftyp(major: &[u8; 4], compatible: &[&[u8; 4]]) -> Vec<u8> {
+        let size = 16 + 4 * compatible.len();
+        let mut bytes = (size as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(major);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        for brand in compatible {
+            bytes.extend_from_slice(*brand);
+        }
+        bytes
+    }
+
+    #[test]
+    fn an_audio_branded_container_stays_on_the_bounded_video_path() {
+        // An Apple Voice Memo is major brand `M4A `. It must still reach the
+        // validator: the brand does not rule out a video track, and only the
+        // parsed tracks can say. Routing it away here would reject a
+        // video-bearing `M4A ` file on its compatibility declaration alone.
+        let memo = ftyp(b"M4A ", &[b"M4A ", b"mp42", b"isom"]);
+        assert!(buzz_media::looks_like_iso_bmff(&memo));
+        assert!(should_stream_as_video(&memo));
+    }
+
+    #[test]
+    fn mp4_video_still_uses_video_pipeline() {
+        let video = ftyp(b"isom", &[b"isom", b"mp42", b"avc1"]);
+        assert!(should_stream_as_video(&video));
     }
 
     #[test]
