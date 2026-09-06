@@ -30,6 +30,8 @@ type NostrKeyImportFormProps = {
   backLabel?: string;
   disabled?: boolean;
   errorMessage?: string | null;
+  /** Prefill when remounting after navigating away (e.g. back from harness setup). */
+  initialNsec?: string;
   onBack: () => void;
   onImport: (nsec: string, password?: string) => Promise<void>;
   /** Reports whether an import is in flight so host-owned navigation can be disabled. */
@@ -58,6 +60,7 @@ export function NostrKeyImportForm({
   backLabel = "Back",
   disabled = false,
   errorMessage: externalErrorMessage = null,
+  initialNsec = "",
   onBack,
   onImport,
   onImportingChange,
@@ -68,7 +71,7 @@ export function NostrKeyImportForm({
   footerMode = "onboarding",
   variant = "default",
 }: NostrKeyImportFormProps) {
-  const [nsecInput, setNsecInput] = React.useState("");
+  const [nsecInput, setNsecInput] = React.useState(initialNsec);
   const [passphrase, setPassphrase] = React.useState("");
   const [isImporting, setIsImporting] = React.useState(false);
   const importInFlightRef = React.useRef(false);
