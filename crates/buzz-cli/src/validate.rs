@@ -65,9 +65,21 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     if content.len() > MAX_CONTENT_BYTES {
         return Err(CliError::Usage(format!(
             "content exceeds maximum size ({} > {} bytes)",
-            content.len(),
-            MAX_CONTENT_BYTES
+            content.len(), MAX_CONTENT_BYTES
         )));
+    }
+    Ok(())
+}
+
+/// Reject empty or whitespace-only content.
+///
+/// Piped empty stdin or `printf '\n' | buzz messages send --content -`
+/// should fail before signing or relay submission (see #5744).
+pub fn validate_content_not_empty(content: &str) -> Result<(), CliError> {
+    if content.trim().is_empty() {
+        return Err(CliError::Usage(
+            "message content must not be empty or whitespace-only".into(),
+        ));
     }
     Ok(())
 }
@@ -274,6 +286,27 @@ mod tests {
     #[test]
     fn validate_content_size_empty() {
         assert!(validate_content_size("").is_ok());
+    }
+
+    // --- validate_content_not_empty ---
+
+    #[test]
+    fn validate_content_not_empty_rejects_empty() {
+        assert!(validate_content_not_empty("").is_err());
+    }
+
+    #[test]
+    fn validate_content_not_empty_rejects_whitespace_only() {
+        assert!(validate_content_not_empty("   ").is_err());
+        assert!(validate_content_not_empty("\n").is_err());
+        assert!(validate_content_not_empty("\t\n\r").is_err());
+    }
+
+    #[test]
+    fn validate_content_not_empty_accepts_content() {
+        assert!(validate_content_not_empty("hello").is_ok());
+        assert!(validate_content_not_empty(" hello ").is_ok());
+        assert!(validate_content_not_empty("\nhello\n").is_ok());
     }
 
     // --- percent_encode ---
