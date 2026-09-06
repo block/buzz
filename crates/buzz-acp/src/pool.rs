@@ -607,6 +607,72 @@ pub enum PromptOutcome {
     CancelDrainTimeout(Duration),
 }
 
+/// Provenance known centrally at the ACP turn boundary and retained until the
+/// durable completion metric is published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnProvenance {
+    channel_id: Option<Uuid>,
+    triggering_event_ids: Vec<String>,
+    root_event_id: Option<String>,
+    parent_event_id: Option<String>,
+    turn_id: String,
+    started_at: String,
+    adapter_session_id: Option<String>,
+}
+
+impl TurnProvenance {
+    fn capture(batch: Option<&FlushBatch>, turn_id: String, started_at: String) -> Self {
+        let triggering_event_ids = batch
+            .map(|batch| {
+                batch
+                    .cancelled_events
+                    .iter()
+                    .chain(batch.events.iter())
+                    .map(|event| event.event.id.to_hex())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let thread_tags = batch
+            .and_then(|batch| batch.events.last())
+            .map(|event| crate::queue::parse_thread_tags(&event.event))
+            .unwrap_or_default();
+        Self {
+            channel_id: batch.map(|batch| batch.channel_id),
+            triggering_event_ids,
+            root_event_id: thread_tags.root_event_id,
+            parent_event_id: thread_tags.parent_event_id,
+            turn_id,
+            started_at,
+            adapter_session_id: None,
+        }
+    }
+}
+
+/// Terminal facts supplied together so publication call sites cannot update a
+/// stop reason while accidentally omitting its normalized outcome/evidence.
+struct TurnMetricCompletion {
+    stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
+    outcome: buzz_core::agent_turn_metric::TurnOutcome,
+    terminal_evidence: buzz_core::agent_turn_metric::TerminalEvidence,
+    native_stop_reason: Option<String>,
+}
+
+impl TurnMetricCompletion {
+    fn new(
+        stop_reason: buzz_core::agent_turn_metric::StopReason,
+        outcome: buzz_core::agent_turn_metric::TurnOutcome,
+        terminal_evidence: buzz_core::agent_turn_metric::TerminalEvidence,
+        native_stop_reason: Option<String>,
+    ) -> Self {
+        Self {
+            stop_reason: Some(stop_reason),
+            outcome,
+            terminal_evidence,
+            native_stop_reason,
+        }
+    }
+}
+
 /// Immutable config subset shared (via `Arc`) by all spawned prompt tasks.
 ///
 /// Built once from `Config` at startup. Avoids cloning the full config
@@ -2133,16 +2199,14 @@ pub async fn run_prompt_task(
     };
     let observer_channel_id = source.channel_id();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
+    let mut provenance =
+        TurnProvenance::capture(batch.as_ref(), turn_id.clone(), turn_started_at.clone());
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         None,
         turn_id.clone(),
         turn_started_at.clone(),
     ));
-    let triggering_event_ids: Vec<String> = batch
-        .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
-        .unwrap_or_default();
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
@@ -2150,7 +2214,7 @@ pub async fn run_prompt_task(
                 PromptSource::Channel(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
             },
-            "triggeringEventIds": triggering_event_ids,
+            "triggeringEventIds": provenance.triggering_event_ids.clone(),
         }),
     );
 
@@ -2485,6 +2549,7 @@ pub async fn run_prompt_task(
             }
         }
     };
+    provenance.adapter_session_id = Some(session_id.clone());
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         Some(session_id.clone()),
@@ -2572,17 +2637,33 @@ pub async fn run_prompt_task(
                             .mark_scope_delivery_success(scope.clone(), true, []);
                     }
                     let usage = agent.acp.take_turn_usage();
-                    publish_agent_turn_metric(
+                    publish_initial_turn_metric(
                         &ctx,
                         usage,
-                        Some(*cid),
-                        &session_id,
-                        &format!("{turn_id}:initial"),
-                        Some(acp_stop_to_core(&stop_reason)),
+                        &provenance,
+                        TurnMetricCompletion::new(
+                            acp_stop_to_core(&stop_reason),
+                            buzz_core::agent_turn_metric::TurnOutcome::Success,
+                            buzz_core::agent_turn_metric::TerminalEvidence::PromptResponse,
+                            Some(format!("{stop_reason:?}")),
+                        ),
                     )
                     .await;
                 }
                 Err(AcpError::AgentExited) => {
+                    let usage = agent.acp.take_turn_usage();
+                    publish_initial_turn_metric(
+                        &ctx,
+                        usage,
+                        &provenance,
+                        TurnMetricCompletion::new(
+                            buzz_core::agent_turn_metric::StopReason::Error,
+                            buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                            buzz_core::agent_turn_metric::TerminalEvidence::AgentExit,
+                            None,
+                        ),
+                    )
+                    .await;
                     agent.state.invalidate_all();
                     send_prompt_result(
                         &result_tx,
@@ -2607,18 +2688,34 @@ pub async fn run_prompt_task(
                     {
                         Ok(stop_reason) => {
                             let usage = agent.acp.take_turn_usage();
-                            publish_agent_turn_metric(
+                            publish_initial_turn_metric(
                                 &ctx,
                                 usage,
-                                Some(*cid),
-                                &session_id,
-                                &format!("{turn_id}:initial"),
-                                Some(acp_stop_to_core(&stop_reason)),
+                                &provenance,
+                                TurnMetricCompletion::new(
+                                    acp_stop_to_core(&stop_reason),
+                                    buzz_core::agent_turn_metric::TurnOutcome::Cancelled,
+                                    buzz_core::agent_turn_metric::TerminalEvidence::CancelResponse,
+                                    Some(format!("{stop_reason:?}")),
+                                ),
                             )
                             .await;
                             agent.state.invalidate(&source);
                         }
                         Err(AcpError::AgentExited) => {
+                            let usage = agent.acp.take_turn_usage();
+                            publish_initial_turn_metric(
+                                &ctx,
+                                usage,
+                                &provenance,
+                                TurnMetricCompletion::new(
+                                    buzz_core::agent_turn_metric::StopReason::Error,
+                                    buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                                    buzz_core::agent_turn_metric::TerminalEvidence::AgentExit,
+                                    None,
+                                ),
+                            )
+                            .await;
                             agent.state.invalidate_all();
                             send_prompt_result(
                                 &result_tx,
@@ -2635,6 +2732,19 @@ pub async fn run_prompt_task(
                                 target: "pool::session",
                                 "cancel_with_cleanup failed during initial_message timeout: {e}"
                             );
+                            let usage = agent.acp.take_turn_usage();
+                            publish_initial_turn_metric(
+                                &ctx,
+                                usage,
+                                &provenance,
+                                TurnMetricCompletion::new(
+                                    buzz_core::agent_turn_metric::StopReason::Error,
+                                    buzz_core::agent_turn_metric::TurnOutcome::Unknown,
+                                    buzz_core::agent_turn_metric::TerminalEvidence::Error,
+                                    None,
+                                ),
+                            )
+                            .await;
                             agent.state.invalidate(&source);
                         }
                     }
@@ -2655,6 +2765,19 @@ pub async fn run_prompt_task(
                         "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
+                    let usage = agent.acp.take_turn_usage();
+                    publish_initial_turn_metric(
+                        &ctx,
+                        usage,
+                        &provenance,
+                        TurnMetricCompletion::new(
+                            buzz_core::agent_turn_metric::StopReason::Error,
+                            buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                            buzz_core::agent_turn_metric::TerminalEvidence::Timeout,
+                            None,
+                        ),
+                    )
+                    .await;
                     agent.state.invalidate_all();
                     send_prompt_result(
                         &result_tx,
@@ -2671,6 +2794,19 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
+                    let usage = agent.acp.take_turn_usage();
+                    publish_initial_turn_metric(
+                        &ctx,
+                        usage,
+                        &provenance,
+                        TurnMetricCompletion::new(
+                            buzz_core::agent_turn_metric::StopReason::Error,
+                            buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                            buzz_core::agent_turn_metric::TerminalEvidence::Error,
+                            None,
+                        ),
+                    )
+                    .await;
                     agent.state.invalidate(&source);
                     send_prompt_result(
                         &result_tx,
@@ -2923,10 +3059,13 @@ pub async fn run_prompt_task(
                                 publish_agent_turn_metric(
                                     &ctx,
                                     usage,
-                                    observer_channel_id,
-                                    &session_id,
-                                    &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                                    &provenance,
+                                    TurnMetricCompletion::new(
+                                        buzz_core::agent_turn_metric::StopReason::Cancelled,
+                                        buzz_core::agent_turn_metric::TurnOutcome::Cancelled,
+                                        buzz_core::agent_turn_metric::TerminalEvidence::CancelResponse,
+                                        Some(format!("{stop_reason:?}")),
+                                    ),
                                 )
                                 .await;
                                 send_prompt_result(
@@ -2959,10 +3098,13 @@ pub async fn run_prompt_task(
                                 publish_agent_turn_metric(
                                     &ctx,
                                     usage,
-                                    observer_channel_id,
-                                    &session_id,
-                                    &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                    &provenance,
+                                    TurnMetricCompletion::new(
+                                        buzz_core::agent_turn_metric::StopReason::Error,
+                                        buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                                        buzz_core::agent_turn_metric::TerminalEvidence::Error,
+                                        None,
+                                    ),
                                 )
                                 .await;
                                 send_prompt_result(
@@ -3024,10 +3166,13 @@ pub async fn run_prompt_task(
                         publish_agent_turn_metric(
                             &ctx,
                             usage,
-                            observer_channel_id,
-                            &session_id,
-                            &turn_id,
-                            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                            &provenance,
+                            TurnMetricCompletion::new(
+                                buzz_core::agent_turn_metric::StopReason::EndTurn,
+                                buzz_core::agent_turn_metric::TurnOutcome::Success,
+                                buzz_core::agent_turn_metric::TerminalEvidence::PromptResponse,
+                                Some("EndTurn".to_string()),
+                            ),
                         )
                         .await;
                         send_prompt_result(
@@ -3098,10 +3243,13 @@ pub async fn run_prompt_task(
             publish_agent_turn_metric(
                 &ctx,
                 usage,
-                observer_channel_id,
-                &session_id,
-                &turn_id,
-                Some(core_stop),
+                &provenance,
+                TurnMetricCompletion::new(
+                    core_stop,
+                    buzz_core::agent_turn_metric::TurnOutcome::Success,
+                    buzz_core::agent_turn_metric::TerminalEvidence::PromptResponse,
+                    Some(format!("{stop_reason:?}")),
+                ),
             )
             .await;
 
@@ -3121,10 +3269,13 @@ pub async fn run_prompt_task(
             publish_agent_turn_metric(
                 &ctx,
                 usage,
-                observer_channel_id,
-                &session_id,
-                &turn_id,
-                Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &provenance,
+                TurnMetricCompletion::new(
+                    buzz_core::agent_turn_metric::StopReason::Error,
+                    buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                    buzz_core::agent_turn_metric::TerminalEvidence::AgentExit,
+                    None,
+                ),
             )
             .await;
             send_prompt_result(
@@ -3153,10 +3304,13 @@ pub async fn run_prompt_task(
                     publish_agent_turn_metric(
                         &ctx,
                         usage,
-                        observer_channel_id,
-                        &session_id,
-                        &turn_id,
-                        Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                        &provenance,
+                        TurnMetricCompletion::new(
+                            buzz_core::agent_turn_metric::StopReason::Cancelled,
+                            buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                            buzz_core::agent_turn_metric::TerminalEvidence::Timeout,
+                            Some(format!("{stop_reason:?}")),
+                        ),
                     )
                     .await;
                     // Timeout triggers respawn in handle_prompt_result —
@@ -3181,10 +3335,13 @@ pub async fn run_prompt_task(
                     publish_agent_turn_metric(
                         &ctx,
                         usage,
-                        observer_channel_id,
-                        &session_id,
-                        &turn_id,
-                        Some(buzz_core::agent_turn_metric::StopReason::Error),
+                        &provenance,
+                        TurnMetricCompletion::new(
+                            buzz_core::agent_turn_metric::StopReason::Error,
+                            buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                            buzz_core::agent_turn_metric::TerminalEvidence::AgentExit,
+                            None,
+                        ),
                     )
                     .await;
                     send_prompt_result(
@@ -3206,10 +3363,13 @@ pub async fn run_prompt_task(
                     publish_agent_turn_metric(
                         &ctx,
                         usage,
-                        observer_channel_id,
-                        &session_id,
-                        &turn_id,
-                        Some(buzz_core::agent_turn_metric::StopReason::Error),
+                        &provenance,
+                        TurnMetricCompletion::new(
+                            buzz_core::agent_turn_metric::StopReason::Error,
+                            buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                            buzz_core::agent_turn_metric::TerminalEvidence::Error,
+                            None,
+                        ),
                     )
                     .await;
                     send_prompt_result(
@@ -3235,10 +3395,13 @@ pub async fn run_prompt_task(
             publish_agent_turn_metric(
                 &ctx,
                 usage,
-                observer_channel_id,
-                &session_id,
-                &turn_id,
-                Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &provenance,
+                TurnMetricCompletion::new(
+                    buzz_core::agent_turn_metric::StopReason::Error,
+                    buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                    buzz_core::agent_turn_metric::TerminalEvidence::Timeout,
+                    None,
+                ),
             )
             .await;
             send_prompt_result(
@@ -3262,10 +3425,13 @@ pub async fn run_prompt_task(
             publish_agent_turn_metric(
                 &ctx,
                 usage,
-                observer_channel_id,
-                &session_id,
-                &turn_id,
-                Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &provenance,
+                TurnMetricCompletion::new(
+                    buzz_core::agent_turn_metric::StopReason::Error,
+                    buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                    buzz_core::agent_turn_metric::TerminalEvidence::Error,
+                    None,
+                ),
             )
             .await;
             send_prompt_result(
@@ -4901,79 +5067,44 @@ pub(crate) fn build_turn_metric_counts(
     (turn_counts, cumulative_counts)
 }
 
+/// Publish one terminal metric for the internal initial-message turn while
+/// preserving its intentionally non-causal identity.
+async fn publish_initial_turn_metric(
+    ctx: &PromptContext,
+    usage: Option<crate::usage::TurnUsage>,
+    provenance: &TurnProvenance,
+    completion: TurnMetricCompletion,
+) {
+    let mut initial = provenance.clone();
+    initial.turn_id = format!("{}:initial", provenance.turn_id);
+    initial.triggering_event_ids.clear();
+    initial.root_event_id = None;
+    initial.parent_event_id = None;
+    publish_agent_turn_metric(ctx, usage, &initial, completion).await;
+}
+
 /// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
 ///
-/// Does nothing when `usage` is `None` (goose emitted no usage notification
-/// for this turn) or when `owner_pubkey` is unconfigured (no NIP-AO identity).
+/// Usage is optional: terminal turn existence remains durable when an adapter
+/// reports no counters. The owner pubkey remains required for NIP-44 delivery.
 /// Errors are logged at WARN and never surface to the caller — metric
 /// publishing must never fail a turn.
 async fn publish_agent_turn_metric(
     ctx: &PromptContext,
     usage: Option<crate::usage::TurnUsage>,
-    channel_id: Option<uuid::Uuid>,
-    session_id: &str,
-    turn_id: &str,
-    stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
+    provenance: &TurnProvenance,
+    completion: TurnMetricCompletion,
 ) {
-    use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
-    use nostr::{EventBuilder, Kind, Tag};
-
-    let (usage, owner_pk) = match (usage, ctx.agent_owner_pubkey.as_ref()) {
-        (Some(u), Some(pk)) => (u, pk),
-        _ => return,
-    };
-
-    let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
-    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let payload = AgentTurnMetricPayload {
-        harness: ctx.harness_name.clone(),
-        model: usage.model.clone(),
-        channel_id: channel_id.map(|id| id.to_string()),
-        session_id: Some(usage.session_id.clone()),
-        turn_id: Some(turn_id.to_string()),
-        turn_seq: Some(usage.turn_seq),
-        timestamp,
-        turn: turn_counts,
-        cumulative: cumulative_counts,
-        delta_reliable: usage.delta_reliable,
-        stop_reason,
-        pricing_identity: usage.pricing_identity.clone(),
-    };
-    let ciphertext = match buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
-        &ctx.agent_keys,
-        owner_pk,
-        &payload,
-    ) {
-        Ok(c) => c,
+    let session_id = provenance.adapter_session_id.as_deref().unwrap_or_default();
+    let event = match build_agent_turn_metric_event(ctx, usage.as_ref(), provenance, completion) {
+        Ok(Some(event)) => event,
+        Ok(None) => return,
         Err(e) => {
             tracing::warn!(
                 target: "pool::metrics",
                 session_id,
-                turn_id,
-                "NIP-AM: encrypt failed: {e}"
-            );
-            return;
-        }
-    };
-    let agent_hex = ctx.agent_keys.public_key().to_hex();
-    let owner_hex = owner_pk.to_hex();
-    let event = match EventBuilder::new(
-        Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16),
-        ciphertext,
-    )
-    .tags([
-        Tag::parse(["p", &owner_hex]).expect("p tag"),
-        Tag::parse(["agent", &agent_hex]).expect("agent tag"),
-    ])
-    .sign_with_keys(&ctx.agent_keys)
-    {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(
-                target: "pool::metrics",
-                session_id,
-                turn_id,
-                "NIP-AM: sign failed: {e}"
+                turn_id = provenance.turn_id,
+                "NIP-AM: build failed: {e}"
             );
             return;
         }
@@ -4984,16 +5115,78 @@ async fn publish_agent_turn_metric(
         Ok(Err(e)) => tracing::warn!(
             target: "pool::metrics",
             session_id,
-            turn_id,
+            turn_id = provenance.turn_id,
             "NIP-AM: publish failed: {e}"
         ),
         Err(_) => tracing::warn!(
             target: "pool::metrics",
             session_id,
-            turn_id,
+            turn_id = provenance.turn_id,
             "NIP-AM: publish timed out"
         ),
     }
+}
+
+fn build_agent_turn_metric_event(
+    ctx: &PromptContext,
+    usage: Option<&crate::usage::TurnUsage>,
+    provenance: &TurnProvenance,
+    completion: TurnMetricCompletion,
+) -> Result<Option<nostr::Event>, String> {
+    use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let Some(owner_pk) = ctx.agent_owner_pubkey.as_ref() else {
+        return Ok(None);
+    };
+    let (turn_counts, cumulative_counts) =
+        usage.map(build_turn_metric_counts).unwrap_or((None, None));
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let payload = AgentTurnMetricPayload {
+        harness: ctx.harness_name.clone(),
+        model: usage.and_then(|usage| usage.model.clone()),
+        channel_id: provenance.channel_id.map(|id| id.to_string()),
+        session_id: usage
+            .map(|usage| usage.session_id.clone())
+            .or_else(|| provenance.adapter_session_id.clone()),
+        turn_id: Some(provenance.turn_id.clone()),
+        triggering_event_ids: provenance.triggering_event_ids.clone(),
+        root_event_id: provenance.root_event_id.clone(),
+        parent_event_id: provenance.parent_event_id.clone(),
+        started_at: Some(provenance.started_at.clone()),
+        outcome: Some(completion.outcome),
+        terminal_evidence: Some(completion.terminal_evidence),
+        adapter_session_id: provenance.adapter_session_id.clone(),
+        runtime_session_id: None,
+        runtime_request_id: None,
+        native_stop_reason: completion.native_stop_reason,
+        turn_seq: usage.map(|usage| usage.turn_seq),
+        timestamp,
+        turn: turn_counts,
+        cumulative: cumulative_counts,
+        delta_reliable: usage.is_some_and(|usage| usage.delta_reliable),
+        stop_reason: completion.stop_reason,
+        pricing_identity: usage.and_then(|usage| usage.pricing_identity.clone()),
+    };
+    let ciphertext = buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
+        &ctx.agent_keys,
+        owner_pk,
+        &payload,
+    )
+    .map_err(|e| format!("encrypt failed: {e}"))?;
+    let agent_hex = ctx.agent_keys.public_key().to_hex();
+    let owner_hex = owner_pk.to_hex();
+    let event = EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16),
+        ciphertext,
+    )
+    .tags([
+        Tag::parse(["p", &owner_hex]).expect("p tag"),
+        Tag::parse(["agent", &agent_hex]).expect("agent tag"),
+    ])
+    .sign_with_keys(&ctx.agent_keys)
+    .map_err(|e| format!("sign failed: {e}"))?;
+    Ok(Some(event))
 }
 
 const REACTION_SEEN: &str = "👀";
@@ -8521,6 +8714,154 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
     // ── NIP-AM emit-hook unit tests ────────────────────────────────────────
 
+    fn provenance_batch(channel_id: Uuid, tags: Vec<Tag>, count: usize) -> FlushBatch {
+        let keys = Keys::generate();
+        let events = (0..count)
+            .map(|index| crate::queue::BatchEvent {
+                event: EventBuilder::new(Kind::Custom(9), format!("request-{index}"))
+                    .tags(tags.clone())
+                    .sign_with_keys(&keys)
+                    .unwrap(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            })
+            .collect();
+        FlushBatch {
+            channel_id,
+            events,
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn turn_provenance_preserves_single_and_multiple_triggers() {
+        let channel_id = Uuid::new_v4();
+        let single = provenance_batch(channel_id, vec![], 1);
+        let captured = TurnProvenance::capture(
+            Some(&single),
+            "turn-single".to_string(),
+            "2026-08-17T00:00:00Z".to_string(),
+        );
+        assert_eq!(captured.triggering_event_ids.len(), 1);
+        assert_eq!(
+            captured.triggering_event_ids[0],
+            single.events[0].event.id.to_hex()
+        );
+        assert_eq!(captured.channel_id, Some(channel_id));
+        assert!(captured.root_event_id.is_none());
+        assert!(captured.parent_event_id.is_none());
+
+        let multiple = provenance_batch(channel_id, vec![], 3);
+        let captured = TurnProvenance::capture(
+            Some(&multiple),
+            "turn-multiple".to_string(),
+            "2026-08-17T00:00:00Z".to_string(),
+        );
+        let expected: Vec<String> = multiple
+            .events
+            .iter()
+            .map(|event| event.event.id.to_hex())
+            .collect();
+        assert_eq!(captured.triggering_event_ids, expected);
+    }
+
+    #[test]
+    fn turn_provenance_preserves_merged_prompt_render_order() {
+        let channel_id = Uuid::new_v4();
+        let mut merged = provenance_batch(channel_id, vec![], 2);
+        let cancelled = provenance_batch(channel_id, vec![], 2);
+        merged.cancelled_events = cancelled.events;
+        merged.cancel_reason = Some(crate::queue::CancelReason::Steer);
+
+        let captured = TurnProvenance::capture(
+            Some(&merged),
+            "turn-merged".to_string(),
+            "2026-08-17T00:00:00Z".to_string(),
+        );
+        let expected: Vec<String> = merged
+            .cancelled_events
+            .iter()
+            .chain(merged.events.iter())
+            .map(|event| event.event.id.to_hex())
+            .collect();
+
+        assert_eq!(captured.triggering_event_ids, expected);
+    }
+
+    #[test]
+    fn turn_provenance_uses_existing_nip10_root_parent_semantics() {
+        let channel_id = Uuid::new_v4();
+        let root = "11".repeat(32);
+        let parent = "22".repeat(32);
+        let nested = provenance_batch(
+            channel_id,
+            vec![
+                Tag::parse(["e", &root, "", "root"]).unwrap(),
+                Tag::parse(["e", &parent, "", "reply"]).unwrap(),
+            ],
+            1,
+        );
+        let captured = TurnProvenance::capture(
+            Some(&nested),
+            "turn-nested".to_string(),
+            "2026-08-17T00:00:00Z".to_string(),
+        );
+        assert_eq!(captured.root_event_id.as_deref(), Some(root.as_str()));
+        assert_eq!(captured.parent_event_id.as_deref(), Some(parent.as_str()));
+
+        let direct = provenance_batch(
+            channel_id,
+            vec![Tag::parse(["e", &root, "", "reply"]).unwrap()],
+            1,
+        );
+        let captured = TurnProvenance::capture(
+            Some(&direct),
+            "turn-direct".to_string(),
+            "2026-08-17T00:00:00Z".to_string(),
+        );
+        assert_eq!(captured.root_event_id.as_deref(), Some(root.as_str()));
+        assert_eq!(captured.parent_event_id.as_deref(), Some(root.as_str()));
+    }
+
+    #[test]
+    fn turn_provenance_internal_turn_has_empty_triggers() {
+        let captured = TurnProvenance::capture(
+            None,
+            "turn-internal".to_string(),
+            "2026-08-17T00:00:00Z".to_string(),
+        );
+        assert!(captured.triggering_event_ids.is_empty());
+        assert!(captured.channel_id.is_none());
+        assert!(captured.root_event_id.is_none());
+        assert!(captured.parent_event_id.is_none());
+    }
+
+    fn metric_test_provenance(
+        session_id: &str,
+        turn_id: &str,
+        channel_id: Option<Uuid>,
+    ) -> TurnProvenance {
+        TurnProvenance {
+            channel_id,
+            triggering_event_ids: Vec::new(),
+            root_event_id: None,
+            parent_event_id: None,
+            turn_id: turn_id.to_string(),
+            started_at: "2026-08-17T00:00:00Z".to_string(),
+            adapter_session_id: Some(session_id.to_string()),
+        }
+    }
+
+    fn successful_metric_completion() -> TurnMetricCompletion {
+        TurnMetricCompletion::new(
+            buzz_core::agent_turn_metric::StopReason::EndTurn,
+            buzz_core::agent_turn_metric::TurnOutcome::Success,
+            buzz_core::agent_turn_metric::TerminalEvidence::PromptResponse,
+            Some("EndTurn".to_string()),
+        )
+    }
+
     /// `acp_stop_to_core` maps all ACP stop reasons to the correct NIP-AM
     /// variants without panicking on any input.
     #[test]
@@ -8542,20 +8883,216 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert_eq!(acp_stop_to_core(&StopReason::Refusal), CoreStop::Unknown);
     }
 
-    /// `publish_agent_turn_metric` is a no-op when `usage` is `None`.
-    #[tokio::test]
-    async fn test_publish_agent_turn_metric_noop_on_no_usage() {
-        let ctx = make_prompt_context_no_owner();
-        // usage = None → early return, no panic.
-        publish_agent_turn_metric(
+    /// Owner + terminal completion publishes a valid encrypted metric even
+    /// when the adapter reported no usage.
+    #[test]
+    fn test_build_agent_turn_metric_event_publishes_no_usage() {
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        let event = build_agent_turn_metric_event(
             &ctx,
             None,
-            None,
-            "sess-1",
-            "turn-1",
-            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &metric_test_provenance("sess-1", "turn-1", None),
+            successful_metric_completion(),
         )
-        .await;
+        .expect("metric build")
+        .expect("owner permits publication");
+        let payload = buzz_core::agent_turn_metric::decrypt_agent_turn_metric(&owner_keys, &event)
+            .expect("decrypt metric");
+        assert_eq!(payload.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(payload.adapter_session_id.as_deref(), Some("sess-1"));
+        assert!(payload.turn.is_none());
+        assert!(payload.cumulative.is_none());
+        assert!(payload.turn_seq.is_none());
+        assert!(payload.model.is_none());
+        assert!(payload.pricing_identity.is_none());
+        assert!(!payload.delta_reliable);
+    }
+
+    #[test]
+    fn test_hermes_no_usage_terminal_outcomes_build_metrics() {
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let mut ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        ctx.harness_name = "hermes-acp".to_string();
+        let cases = [
+            (
+                buzz_core::agent_turn_metric::StopReason::EndTurn,
+                buzz_core::agent_turn_metric::TurnOutcome::Success,
+                buzz_core::agent_turn_metric::TerminalEvidence::PromptResponse,
+            ),
+            (
+                buzz_core::agent_turn_metric::StopReason::Cancelled,
+                buzz_core::agent_turn_metric::TurnOutcome::Cancelled,
+                buzz_core::agent_turn_metric::TerminalEvidence::CancelResponse,
+            ),
+            (
+                buzz_core::agent_turn_metric::StopReason::Error,
+                buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                buzz_core::agent_turn_metric::TerminalEvidence::Error,
+            ),
+        ];
+        for (index, (stop_reason, outcome, evidence)) in cases.into_iter().enumerate() {
+            let event = build_agent_turn_metric_event(
+                &ctx,
+                None,
+                &metric_test_provenance("hermes-session", &format!("turn-{index}"), None),
+                TurnMetricCompletion::new(stop_reason, outcome.clone(), evidence.clone(), None),
+            )
+            .expect("metric build")
+            .expect("owner permits publication");
+            let payload =
+                buzz_core::agent_turn_metric::decrypt_agent_turn_metric(&owner_keys, &event)
+                    .expect("decrypt Hermes metric");
+            assert_eq!(payload.harness, "hermes-acp");
+            assert_eq!(payload.outcome, Some(outcome));
+            assert_eq!(payload.terminal_evidence, Some(evidence));
+            assert!(payload.turn.is_none());
+            assert!(payload.cumulative.is_none());
+            assert!(!payload.delta_reliable);
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_terminal_paths_publish_exactly_one_no_usage_metric_each() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let cases = vec![
+            successful_metric_completion(),
+            TurnMetricCompletion::new(
+                buzz_core::agent_turn_metric::StopReason::Cancelled,
+                buzz_core::agent_turn_metric::TurnOutcome::Cancelled,
+                buzz_core::agent_turn_metric::TerminalEvidence::CancelResponse,
+                Some("Cancelled".to_string()),
+            ),
+            TurnMetricCompletion::new(
+                buzz_core::agent_turn_metric::StopReason::Error,
+                buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                buzz_core::agent_turn_metric::TerminalEvidence::AgentExit,
+                None,
+            ),
+            TurnMetricCompletion::new(
+                buzz_core::agent_turn_metric::StopReason::Error,
+                buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                buzz_core::agent_turn_metric::TerminalEvidence::Timeout,
+                None,
+            ),
+            TurnMetricCompletion::new(
+                buzz_core::agent_turn_metric::StopReason::Error,
+                buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                buzz_core::agent_turn_metric::TerminalEvidence::Error,
+                None,
+            ),
+            TurnMetricCompletion::new(
+                buzz_core::agent_turn_metric::StopReason::Error,
+                buzz_core::agent_turn_metric::TurnOutcome::Unknown,
+                buzz_core::agent_turn_metric::TerminalEvidence::Error,
+                None,
+            ),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind metric capture server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let expected_count = cases.len();
+        let server = tokio::spawn(async move {
+            let mut events = Vec::with_capacity(expected_count);
+            for _ in 0..expected_count {
+                let (mut socket, _) = listener.accept().await.expect("accept metric request");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let read = socket.read(&mut buffer).await.expect("read metric request");
+                    request.extend_from_slice(&buffer[..read]);
+                    let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .expect("content length");
+                    if request.len() >= header_end + 4 + content_length {
+                        let body = &request[header_end + 4..header_end + 4 + content_length];
+                        events.push(
+                            serde_json::from_slice::<nostr::Event>(body)
+                                .expect("submitted Nostr event"),
+                        );
+                        break;
+                    }
+                }
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .await
+                    .expect("respond to metric submission");
+            }
+            events
+        });
+
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let mut ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        ctx.harness_name = "hermes-acp".to_string();
+        ctx.rest_client.base_url = base_url;
+        let mut provenance =
+            metric_test_provenance("hermes-session", "turn-parent", Some(uuid::Uuid::new_v4()));
+        provenance.triggering_event_ids = vec!["causal-event".to_string()];
+
+        for completion in cases {
+            publish_initial_turn_metric(&ctx, None, &provenance, completion).await;
+        }
+
+        let expected_terminals = [
+            (
+                buzz_core::agent_turn_metric::TurnOutcome::Success,
+                buzz_core::agent_turn_metric::TerminalEvidence::PromptResponse,
+            ),
+            (
+                buzz_core::agent_turn_metric::TurnOutcome::Cancelled,
+                buzz_core::agent_turn_metric::TerminalEvidence::CancelResponse,
+            ),
+            (
+                buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                buzz_core::agent_turn_metric::TerminalEvidence::AgentExit,
+            ),
+            (
+                buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                buzz_core::agent_turn_metric::TerminalEvidence::Timeout,
+            ),
+            (
+                buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                buzz_core::agent_turn_metric::TerminalEvidence::Error,
+            ),
+            (
+                buzz_core::agent_turn_metric::TurnOutcome::Unknown,
+                buzz_core::agent_turn_metric::TerminalEvidence::Error,
+            ),
+        ];
+        let events = server.await.expect("metric capture task");
+        assert_eq!(events.len(), expected_count);
+        for (event, (outcome, evidence)) in events.into_iter().zip(expected_terminals) {
+            assert_eq!(
+                event.kind,
+                nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16)
+            );
+            let payload =
+                buzz_core::agent_turn_metric::decrypt_agent_turn_metric(&owner_keys, &event)
+                    .expect("decrypt initial metric");
+            assert_eq!(payload.turn_id.as_deref(), Some("turn-parent:initial"));
+            assert!(payload.triggering_event_ids.is_empty());
+            assert_eq!(payload.outcome, Some(outcome));
+            assert_eq!(payload.terminal_evidence, Some(evidence));
+            assert!(payload.turn.is_none());
+            assert!(payload.cumulative.is_none());
+            assert!(!payload.delta_reliable);
+        }
     }
 
     /// `publish_agent_turn_metric` is a no-op when `owner_pubkey` is absent.
@@ -8585,10 +9122,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         publish_agent_turn_metric(
             &ctx,
             Some(usage),
-            None,
-            "sess-1",
-            "turn-1",
-            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &metric_test_provenance("sess-1", "turn-1", None),
+            successful_metric_completion(),
         )
         .await;
     }
@@ -8624,10 +9159,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         publish_agent_turn_metric(
             &ctx,
             Some(usage),
-            Some(uuid::Uuid::new_v4()),
-            "sess-1",
-            "turn-1",
-            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &metric_test_provenance("sess-1", "turn-1", Some(uuid::Uuid::new_v4())),
+            successful_metric_completion(),
         )
         .await;
     }
@@ -8664,10 +9197,13 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         publish_agent_turn_metric(
             &ctx,
             Some(usage),
-            Some(uuid::Uuid::new_v4()),
-            "sess-cancel",
-            "turn-cancel",
-            Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+            &metric_test_provenance("sess-cancel", "turn-cancel", Some(uuid::Uuid::new_v4())),
+            TurnMetricCompletion::new(
+                buzz_core::agent_turn_metric::StopReason::Cancelled,
+                buzz_core::agent_turn_metric::TurnOutcome::Cancelled,
+                buzz_core::agent_turn_metric::TerminalEvidence::CancelResponse,
+                Some("Cancelled".to_string()),
+            ),
         )
         .await;
     }
@@ -8704,10 +9240,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         publish_agent_turn_metric(
             &ctx,
             Some(usage),
-            Some(uuid::Uuid::new_v4()),
-            "sess-ba",
-            "turn-ba",
-            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &metric_test_provenance("sess-ba", "turn-ba", Some(uuid::Uuid::new_v4())),
+            successful_metric_completion(),
         )
         .await;
     }
