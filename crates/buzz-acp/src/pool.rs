@@ -69,6 +69,10 @@ pub struct TaskMeta {
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
+    /// Lifecycle event IDs delivered by this prompt. Kept independently from
+    /// `recoverable_batch` because drop-mode prompts are not panic-requeued but
+    /// still need durable completion acknowledgement after success.
+    pub lifecycle_event_ids: Vec<String>,
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
     pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
@@ -7506,6 +7510,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 scope: Some(busy_scope),
                 turn_id: "t".into(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),

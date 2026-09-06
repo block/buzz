@@ -8,6 +8,7 @@ mod observer;
 mod pi_launcher;
 mod pool;
 mod pool_lifecycle;
+mod project_lifecycle;
 mod prompt_framing;
 mod prompt_project;
 mod queue;
@@ -648,7 +649,12 @@ impl QueuedNormalListenerEvent {
         let Some(signal) = mode_gate_signal(handling, &self.effective_author, owner) else {
             return;
         };
-        let native_attempted = matches!(signal, ControlSignal::Steer)
+        // A lifecycle completion must remain attached to a tracked prompt task
+        // until that task returns successfully. Native steer acknowledgements
+        // are transport-level and can arrive after the owning task returns, so
+        // lifecycle wakeups use the universal cancel+merge path instead.
+        let native_attempted = self.prompt_tag_for_steer != project_lifecycle::PROMPT_TAG
+            && matches!(signal, ControlSignal::Steer)
             && try_native_steer(
                 pool,
                 queue,
@@ -2668,7 +2674,22 @@ async fn tokio_main() -> Result<()> {
     }
     let owner_cache = OwnerCache::new(startup_owner.clone());
 
-    let mut relay_observer_control_rx = None;
+    // One global addressed subscription carries both observer controls and
+    // kind:1631 merge lifecycle events. The lifecycle manager validates and
+    // durably records merge events before returning them for normal admission.
+    relay
+        .subscribe_observer_controls()
+        .await
+        .map_err(|e| anyhow::anyhow!("addressed event subscribe error: {e}"))?;
+    let addressed_rx = relay
+        .take_observer_control_rx()
+        .ok_or_else(|| anyhow::anyhow!("addressed event receiver already taken"))?;
+    let (lifecycle_handle, mut addressed_event_rx, mut lifecycle_task) =
+        project_lifecycle::start(config.keys.clone(), relay_rest_client.clone(), addressed_rx)
+            .await
+            .map_err(|e| anyhow::anyhow!("project lifecycle startup error: {e}"))?;
+    tracing::info!("subscribed to addressed observer and project lifecycle events");
+
     let mut relay_observer_publisher_task = None;
     let mut relay_observer_publisher = None;
     if config.relay_observer {
@@ -2685,11 +2706,6 @@ async fn tokio_main() -> Result<()> {
                         owner_pubkey_hex,
                         owner_pubkey,
                     ));
-                    relay
-                        .subscribe_observer_controls()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("observer control subscribe error: {e}"))?;
-                    relay_observer_control_rx = relay.take_observer_control_rx();
                     tracing::info!("relay observer enabled");
                 }
                 Err(error) => {
@@ -3208,16 +3224,13 @@ async fn tokio_main() -> Result<()> {
                     }
                     None
                 }
-                control_event = async {
-                    match relay_observer_control_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
+                addressed_event = addressed_event_rx.recv() => {
                     let _ = result_rx;
-                    match control_event {
-                        Some(event) => {
-                            if let Some(ref owner_hex) = owner_cache.pubkey {
+                    match addressed_event {
+                        Some(project_lifecycle::AddressedEvent::ObserverControl(event)) => {
+                            if !config.relay_observer {
+                                tracing::debug!("observer control received while relay observer is disabled — dropping");
+                            } else if let Some(ref owner_hex) = owner_cache.pubkey {
                                 handle_relay_observer_control_event(
                                     &config.keys,
                                     event,
@@ -3230,12 +3243,84 @@ async fn tokio_main() -> Result<()> {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
                         }
+                        Some(project_lifecycle::AddressedEvent::Merge(wakeup)) => {
+                            let event_id = wakeup.buzz_event.event.id.to_hex();
+                            let channel_id = wakeup.buzz_event.channel_id;
+                            if !subscribed_channel_ids.contains(&channel_id) {
+                                tracing::info!(
+                                    %channel_id,
+                                    %event_id,
+                                    "ignoring merged PR wakeup outside current channel subscriptions"
+                                );
+                                if let Err(error) = lifecycle_handle.ignore(event_id) {
+                                    tracing::error!(%error, "failed to record ignored lifecycle wakeup");
+                                }
+                            } else if let Some(authorized_event) = authorize_normal_listener_event(
+                                &mut author_gate_ctx,
+                                wakeup.buzz_event,
+                                &config.respond_to,
+                                &config.respond_to_allowlist,
+                                &owner_cache,
+                                &ctx.channel_info,
+                                &ctx.rest_client,
+                            )
+                            .await
+                            {
+                                let (buzz_event, effective_author) = authorized_event.into_parts();
+                                let session_scope = scope::SessionScope::derive(
+                                    config.session_policy,
+                                    buzz_event.channel_id,
+                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
+                                    &buzz_event.event,
+                                );
+                                let ingress = NormalListenerIngress {
+                                    buzz_event,
+                                    effective_author,
+                                    prompt_tag: project_lifecycle::PROMPT_TAG.into(),
+                                };
+                                let queued = ingress.push(&mut queue, session_scope);
+                                if queued.accepted {
+                                    // Lifecycle events are not chat messages, so do not add a
+                                    // synthetic-looking seen reaction to the global status event.
+                                    queued.steer_or_interrupt(
+                                        config.multiple_event_handling,
+                                        owner_cache.get(),
+                                        &mut pool,
+                                        &mut queue,
+                                        &steer_ack_tx,
+                                    );
+                                    if pool_ready {
+                                        for (scope, thread_tags) in dispatch_pending(
+                                            &mut pool,
+                                            &mut queue,
+                                            &ctx,
+                                            &mut last_activity,
+                                            observer.as_ref(),
+                                        ) {
+                                            typing_channels.insert(scope, thread_tags);
+                                        }
+                                    }
+                                } else if let Err(error) = lifecycle_handle.ignore(event_id) {
+                                    tracing::error!(%error, "failed to record policy-dropped lifecycle wakeup");
+                                }
+                            } else if let Err(error) = lifecycle_handle.ignore(event_id) {
+                                tracing::error!(%error, "failed to record unauthorized lifecycle wakeup");
+                            }
+                        }
                         None => {
-                            relay_observer_control_rx = None;
-                            tracing::warn!("relay observer control channel closed");
+                            tracing::error!("addressed lifecycle event processor stopped — exiting");
+                            break;
                         }
                     }
                     None
+                }
+                lifecycle_result = &mut lifecycle_task => {
+                    let _ = result_rx;
+                    match lifecycle_result {
+                        Ok(()) => tracing::error!("project lifecycle manager exited unexpectedly"),
+                        Err(error) => tracing::error!(%error, "project lifecycle manager failed"),
+                    }
+                    break;
                 }
                 // Remaining branches don't touch pool — evaluated when pool is idle.
                 buzz_event = relay.next_event() => {
@@ -3342,6 +3427,14 @@ async fn tokio_main() -> Result<()> {
                                     // case is a known limitation — fix belongs in
                                     // the relay (clean up bot reactions on removal).
                                     if !drained_ids.is_empty() {
+                                        if let Err(error) =
+                                            lifecycle_handle.ignore_many(drained_ids.clone())
+                                        {
+                                            tracing::error!(
+                                                %error,
+                                                "failed to record lifecycle events drained on channel removal"
+                                            );
+                                        }
                                         let rc = ctx.rest_client.clone();
                                         let ids = drained_ids.clone();
                                         tokio::spawn(async move {
@@ -3742,6 +3835,30 @@ async fn tokio_main() -> Result<()> {
 
         match pool_event {
             Some(PoolEvent::Result(result)) => {
+                let lifecycle_event_ids = pool
+                    .task_map()
+                    .values()
+                    .find(|meta| meta.agent_index == result.agent.index)
+                    .map(|meta| meta.lifecycle_event_ids.clone())
+                    .unwrap_or_default();
+                if matches!(&result.outcome, PromptOutcome::Ok(_)) {
+                    if let Err(error) = lifecycle_handle.complete(lifecycle_event_ids) {
+                        // The encrypted pending ledger remains authoritative; a
+                        // restart will retry rather than silently losing the wakeup.
+                        tracing::error!(%error, "failed to record successful lifecycle turn");
+                    }
+                } else if result
+                    .source
+                    .channel_id()
+                    .is_some_and(|channel_id| removed_channels.contains(&channel_id))
+                {
+                    if let Err(error) = lifecycle_handle.ignore_many(lifecycle_event_ids) {
+                        tracing::error!(
+                            %error,
+                            "failed to record lifecycle turn dropped after channel removal"
+                        );
+                    }
+                }
                 // Stop the typing indicator for the completed turn's exact scope,
                 // not the whole channel — a sibling thread still running in the
                 // same channel must keep its indicator.
@@ -4140,6 +4257,7 @@ async fn tokio_main() -> Result<()> {
     if let Some(handle) = relay_observer_publisher_task.take() {
         handle.abort();
     }
+    lifecycle_task.abort();
 
     // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s
     // for the background task to finish, rather than aborting immediately (#40).
@@ -4508,6 +4626,7 @@ fn dispatch_pending(
             DedupMode::Queue => Some(batch.clone()),
             DedupMode::Drop => None,
         };
+        let lifecycle_event_ids = project_lifecycle::batch_event_ids(&batch);
 
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
@@ -4553,6 +4672,7 @@ fn dispatch_pending(
                 scope: Some(scope.clone()),
                 turn_id,
                 recoverable_batch,
+                lifecycle_event_ids,
                 control_tx: Some(control_tx),
                 steer_tx,
                 successful_steer_deliveries: HashSet::new(),
@@ -5227,6 +5347,7 @@ fn dispatch_heartbeat(
             scope: None,
             turn_id,
             recoverable_batch: None,
+            lifecycle_event_ids: Vec::new(),
             control_tx: None,
             steer_tx: None,
             successful_steer_deliveries: HashSet::new(),
@@ -6043,6 +6164,7 @@ mod owner_control_command_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: Some(control_tx),
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -6089,6 +6211,7 @@ mod owner_control_command_tests {
                 scope: Some(scope),
                 turn_id: "t".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: Some(control_tx),
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -9394,6 +9517,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -9469,6 +9593,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -9591,6 +9716,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -9660,6 +9786,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -9740,6 +9867,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -9832,6 +9960,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope.clone()),
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: Some(batch),
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -9931,6 +10060,7 @@ mod error_outcome_emission_tests {
                     scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
+                    lifecycle_event_ids: Vec::new(),
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
@@ -10028,6 +10158,7 @@ mod error_outcome_emission_tests {
                     scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
+                    lifecycle_event_ids: Vec::new(),
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
@@ -10136,6 +10267,7 @@ mod error_outcome_emission_tests {
                     scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
+                    lifecycle_event_ids: Vec::new(),
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
@@ -10214,6 +10346,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -10311,6 +10444,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -10431,6 +10565,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -10573,6 +10708,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -10706,6 +10842,7 @@ mod error_outcome_emission_tests {
                 scope: Some(session_scope.clone()),
                 turn_id: "indeterminate-project".into(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -10861,6 +10998,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -10949,6 +11087,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                lifecycle_event_ids: Vec::new(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),

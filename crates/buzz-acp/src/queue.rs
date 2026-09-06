@@ -1356,6 +1356,11 @@ pub(crate) fn format_event_block(
         block.push_str(&format!("\nParsed: {}", parsed_parts.join(", ")));
     }
 
+    if let Some(guidance) = crate::project_lifecycle::prompt_guidance(&be.event, &be.prompt_tag) {
+        block.push('\n');
+        block.push_str(&guidance);
+    }
+
     block
 }
 

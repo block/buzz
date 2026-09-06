@@ -117,8 +117,8 @@ const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 use std::time::Instant;
 
 use buzz_core::kind::{
-    KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_TYPING_INDICATOR,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIT_STATUS_MERGED, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
@@ -657,8 +657,11 @@ enum RelayMessage {
 
 /// Subscription ID for the global membership notification subscription.
 const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
-/// Subscription ID for encrypted owner-to-agent observer control frames.
-const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
+/// Subscription ID for events addressed globally to this agent.
+///
+/// The REQ carries separate filters for encrypted observer controls and durable
+/// project-lifecycle events so each can use the correct replay window.
+const OBSERVER_CONTROL_SUB_ID: &str = "agent-addressed-events";
 
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
 enum RelayCommand {
@@ -1140,6 +1143,11 @@ struct BgState {
     active_subscriptions: HashMap<Uuid, String>,
     /// Most recent `created_at` timestamp seen per channel (for `since` filter).
     last_seen: HashMap<Uuid, u64>,
+    /// Newest successfully forwarded merge lifecycle timestamp.
+    lifecycle_last_seen: Option<u64>,
+    /// Oldest merge lifecycle timestamp dropped under addressed-channel
+    /// backpressure. Included in the next combined addressed REQ.
+    lifecycle_dropped_since: Option<u64>,
     /// Two-generation dedup set of event IDs seen.
     seen_ids: TwoGenDedup,
     /// Per-channel filter used on subscribe (for resubscribe after reconnect).
@@ -1230,6 +1238,8 @@ impl BgState {
         Self {
             active_subscriptions: HashMap::new(),
             last_seen: HashMap::new(),
+            lifecycle_last_seen: None,
+            lifecycle_dropped_since: None,
             seen_ids: TwoGenDedup::new(SEEN_ID_LIMIT),
             active_filters: HashMap::new(),
             membership_dropped_since: None,
@@ -1291,6 +1301,16 @@ impl BgState {
                 .get(channel_id)
                 .copied()
                 .or(self.startup_watermark),
+        }
+    }
+
+    /// Replay cursor for durable project lifecycle events.
+    fn lifecycle_since(&self) -> Option<u64> {
+        match (self.lifecycle_last_seen, self.lifecycle_dropped_since) {
+            (Some(last), Some(dropped)) => Some(last.min(dropped)),
+            (Some(last), None) => Some(last),
+            (None, Some(dropped)) => Some(dropped),
+            (None, None) => self.startup_watermark,
         }
     }
 
@@ -1656,9 +1676,12 @@ async fn execute_connected_command(
                 state.observer_resub_needed = true;
                 return true;
             }
-            let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
+            let sent =
+                send_observer_control_subscribe(ws, agent_pubkey_hex, state.lifecycle_since())
+                    .await;
             if sent {
                 state.observer_resub_needed = false;
+                state.lifecycle_dropped_since = None;
                 true
             } else {
                 warn!("observer control subscribe REQ failed — recording intent for reconnect");
@@ -1932,8 +1955,15 @@ async fn run_background_task(
                     }
                 }
                 if state.observer_resub_needed && budget > 0 {
-                    if send_observer_control_subscribe(&mut ws, &agent_pubkey_hex).await {
+                    if send_observer_control_subscribe(
+                        &mut ws,
+                        &agent_pubkey_hex,
+                        state.lifecycle_since(),
+                    )
+                    .await
+                    {
                         state.observer_resub_needed = false;
+                        state.lifecycle_dropped_since = None;
                         budget = budget.saturating_sub(1);
                         any_sent = true;
                     } else {
@@ -2298,10 +2328,36 @@ async fn handle_ws_message(
                     };
 
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                        let is_lifecycle = event.kind.as_u16() as u32 == KIND_GIT_STATUS_MERGED;
+                        let event_id_hex = event.id.to_hex();
+                        let ts = event.created_at.as_secs();
+                        if is_lifecycle && !state.seen_ids.insert(event_id_hex.clone()) {
+                            debug!(event_id = %event_id_hex, "duplicate project lifecycle event — skipping");
+                            return true;
+                        }
                         match observer_control_tx.try_send(*event) {
-                            Ok(()) => {}
+                            Ok(()) => {
+                                if is_lifecycle {
+                                    state.lifecycle_last_seen =
+                                        Some(state.lifecycle_last_seen.unwrap_or(0).max(ts));
+                                }
+                            }
                             Err(mpsc::error::TrySendError::Full(_)) => {
-                                warn!("observer control event dropped because control channel is full");
+                                if is_lifecycle {
+                                    state.seen_ids.remove(&event_id_hex);
+                                    state.lifecycle_dropped_since = Some(
+                                        state.lifecycle_dropped_since.map_or(ts, |d| d.min(ts)),
+                                    );
+                                    state.observer_resub_needed = true;
+                                    state.proactive_resubscribe_needed = true;
+                                    warn!(
+                                        event_id = %event_id_hex,
+                                        ts,
+                                        "project lifecycle event dropped under backpressure — proactive replay queued"
+                                    );
+                                } else {
+                                    warn!("observer control event dropped because control channel is full");
+                                }
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
@@ -2505,9 +2561,15 @@ async fn handle_ws_message(
                     // resubscribe_after_reconnect() needs the subscription to
                     // still be in state so it can restore it.
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
-                        let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
+                        let sent = send_observer_control_subscribe(
+                            ws,
+                            agent_pubkey_hex,
+                            state.lifecycle_since(),
+                        )
+                        .await;
                         if sent {
                             state.observer_control_sub_active = true;
+                            state.lifecycle_dropped_since = None;
                         } else {
                             warn!("observer control resubscribe failed after CLOSED — triggering reconnect");
                             return false;
@@ -2843,12 +2905,14 @@ async fn resubscribe_after_reconnect(
             if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
                 return ResubscribeResult::Shutdown;
             }
-            if !send_observer_control_subscribe(ws, agent_pubkey_hex).await {
-                warn!("failed to resubscribe observer controls after reconnect");
+            if !send_observer_control_subscribe(ws, agent_pubkey_hex, state.lifecycle_since()).await
+            {
+                warn!("failed to resubscribe addressed events after reconnect");
                 retain_deferred_command_intent(state, &mut deferred_commands);
                 return ResubscribeResult::RetryConnection;
             }
             state.observer_resub_needed = false;
+            state.lifecycle_dropped_since = None;
         }
     }
 
@@ -3526,36 +3590,62 @@ async fn send_membership_subscribe(
     }
 }
 
-/// Send a NIP-01 REQ for owner-to-agent observer control frames.
-async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> bool {
-    let req = json!([
+/// Build the combined global addressed-event REQ.
+fn addressed_subscription_request(
+    agent_pubkey_hex: &str,
+    lifecycle_since: Option<u64>,
+    now: u64,
+) -> Value {
+    let lifecycle_since = lifecycle_since
+        .unwrap_or(now)
+        .saturating_sub(SINCE_SKEW_SECS);
+    json!([
         "REQ",
         OBSERVER_CONTROL_SUB_ID,
         {
             "kinds": [KIND_AGENT_OBSERVER_FRAME],
             "#p": [agent_pubkey_hex],
-            "since": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            "since": now,
+        },
+        {
+            "kinds": [KIND_GIT_STATUS_MERGED],
+            "#p": [agent_pubkey_hex],
+            "since": lifecycle_since,
         }
-    ]);
+    ])
+}
+
+/// Send a NIP-01 REQ for global events addressed to this agent.
+///
+/// Observer controls intentionally start at `now`; replaying old pause/resume
+/// commands is unsafe. Merged statuses are durable and replay from their own
+/// watermark so a reconnect cannot lose a successful merge.
+async fn send_observer_control_subscribe(
+    ws: &mut WsStream,
+    agent_pubkey_hex: &str,
+    lifecycle_since: Option<u64>,
+) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let req = addressed_subscription_request(agent_pubkey_hex, lifecycle_since, now);
 
     match serde_json::to_string(&req) {
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    debug!("subscribed to observer control frames");
+                    debug!("subscribed to addressed observer and project lifecycle events");
                     true
                 }
                 Err(e) => {
-                    warn!("failed to send observer control REQ: {e}");
+                    warn!("failed to send addressed event REQ: {e}");
                     false
                 }
             }
         }
         Err(e) => {
-            warn!("failed to serialize observer control REQ: {e}");
+            warn!("failed to serialize addressed event REQ: {e}");
             false
         }
     }
@@ -4251,6 +4341,30 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addressed_subscription_separates_control_and_lifecycle_replay_windows() {
+        let pubkey = "a".repeat(64);
+        let request = addressed_subscription_request(&pubkey, Some(1_000), 2_000);
+        assert_eq!(request[0], "REQ");
+        assert_eq!(request[1], OBSERVER_CONTROL_SUB_ID);
+        assert_eq!(request[2]["kinds"], json!([KIND_AGENT_OBSERVER_FRAME]));
+        assert_eq!(request[2]["#p"], json!([pubkey]));
+        assert_eq!(request[2]["since"], 2_000);
+        assert_eq!(request[3]["kinds"], json!([KIND_GIT_STATUS_MERGED]));
+        assert_eq!(request[3]["#p"], request[2]["#p"]);
+        assert_eq!(request[3]["since"], 995);
+    }
+
+    #[test]
+    fn lifecycle_reconnect_cursor_covers_oldest_dropped_event() {
+        let mut state = BgState::new();
+        state.startup_watermark = Some(900);
+        assert_eq!(state.lifecycle_since(), Some(900));
+        state.lifecycle_last_seen = Some(1_100);
+        state.lifecycle_dropped_since = Some(1_050);
+        assert_eq!(state.lifecycle_since(), Some(1_050));
+    }
 
     async fn nip11_test_client(
         responses: HashMap<String, (u16, String)>,
@@ -5033,6 +5147,41 @@ mod tests {
             observer_control_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_backpressure_preserves_replay_cursor_and_dedup_recovery() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let blocker = make_signed_channel_event(&keys, "blocker", 1_999);
+        observer_control_tx.send(blocker).await.unwrap();
+        let lifecycle = EventBuilder::new(Kind::Custom(KIND_GIT_STATUS_MERGED as u16), "")
+            .tags([])
+            .custom_created_at(nostr::Timestamp::from(2_000))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let event_id = lifecycle.id.to_hex();
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                OBSERVER_CONTROL_SUB_ID,
+                &lifecycle,
+            )
+            .await
+        );
+
+        assert!(!state.seen_ids.contains(&event_id));
+        assert_eq!(state.lifecycle_dropped_since, Some(2_000));
+        assert!(state.observer_resub_needed);
+        assert!(state.proactive_resubscribe_needed);
+        assert!(observer_control_rx.try_recv().is_ok());
     }
 
     fn test_channel_filter() -> ChannelFilter {
