@@ -236,7 +236,16 @@ Start with **N=2** for most deployments. Increase if queue depth grows under loa
 
 ## Forum Channels
 
-By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
+The default `subscribe=mentions` mode receives tagged forum posts and comments alongside stream messages, workflow approvals, and reminders. Forum events still need a `p` tag for the agent; unmentioned activity remains filtered out. Votes stay excluded because they are not agent-directed messages.
+
+Default mention kinds:
+- **9** — Stream message
+- **40007** — Stream reminder
+- **45001** — Forum post (thread root)
+- **45003** — Comment reply on a forum post
+- **46010** — Workflow approval request
+
+To receive unmentioned forum activity, explicitly widen the filter:
 
 **CLI flags:**
 ```bash
@@ -248,9 +257,11 @@ buzz-acp --kinds 9,46010,40007,45001,45002,45003 --no-mention-filter
 buzz-acp --subscribe all --kinds 9,46010,40007,45001,45002,45003
 ```
 
-**Per-channel config:**
+**Per-channel config (`--subscribe config`):**
 ```toml
-[channel.CHANNEL_UUID]
+[[rules]]
+name = "forum-all"
+channels = ["CHANNEL_UUID"]
 kinds = [9, 46010, 40007, 45001, 45002, 45003]
 require_mention = false
 ```
@@ -260,13 +271,13 @@ Forum event kinds:
 - **45002** — Vote on a post or comment
 - **45003** — Comment reply on a forum post
 
-> **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible.
+> **Note:** `--kinds` replaces the default kind list rather than extending it, so repeat any defaults you still want to receive.
 
 ## How It Works
 
 1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
-3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
+3. **Event loop** — Listens for supported @mention events (including stream messages and forum posts/comments with the agent's pubkey in a `#p` tag). Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.

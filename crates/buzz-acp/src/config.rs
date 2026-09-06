@@ -35,6 +35,15 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
+/// Event kinds delivered by the default `mentions` subscription.
+pub(crate) const DEFAULT_MENTION_KINDS: [u32; 5] = [
+    buzz_core::kind::KIND_STREAM_MESSAGE,
+    buzz_core::kind::KIND_FORUM_POST,
+    buzz_core::kind::KIND_FORUM_COMMENT,
+    buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+    buzz_core::kind::KIND_STREAM_REMINDER,
+];
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -1338,10 +1347,6 @@ pub fn resolve_channel_filters(
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
         overrides
             .iter()
@@ -1356,13 +1361,10 @@ pub fn resolve_channel_filters(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => {
-            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            });
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(|| DEFAULT_MENTION_KINDS.to_vec());
             let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
@@ -1440,10 +1442,6 @@ pub fn resolve_dynamic_channel_filter(
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
 ) -> Option<ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     // In Mentions/All mode, if the operator explicitly constrained channels
     // with --channels, only allow dynamic subscription to channels in that
     // allowlist. Config mode ignores --channels (per CLI contract) and uses
@@ -1461,13 +1459,12 @@ pub fn resolve_dynamic_channel_filter(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
-            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            })),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_MENTION_KINDS.to_vec()),
+            ),
             require_mention: !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
@@ -1617,7 +1614,24 @@ mod tests {
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
+            assert!(kinds.contains(&buzz_core::kind::KIND_FORUM_POST));
+            assert!(kinds.contains(&buzz_core::kind::KIND_FORUM_COMMENT));
         }
+    }
+
+    #[test]
+    fn test_dynamic_mentions_mode_default_kinds() {
+        let config = test_config(SubscribeMode::Mentions);
+        let filter = resolve_dynamic_channel_filter(&config, Uuid::new_v4(), &[])
+            .expect("channel should be present");
+
+        assert!(filter.require_mention, "mentions mode requires mention");
+        let kinds = filter.kinds.as_ref().expect("should have kinds");
+        assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
+        assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
+        assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
+        assert!(kinds.contains(&buzz_core::kind::KIND_FORUM_POST));
+        assert!(kinds.contains(&buzz_core::kind::KIND_FORUM_COMMENT));
     }
 
     #[test]
