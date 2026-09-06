@@ -291,6 +291,7 @@ test("resolveSnapshotCard: .team.json with sha256 returns team snapshot card", (
   assert.equal(card.filename, "my-team.team.json");
   assert.equal(card.snapshotKind, "team");
   assert.equal(card.sha256, SHA256);
+  assert.equal(card.displayName, "My Team");
 });
 
 test("resolveSnapshotCard: .team.png with image/png returns team snapshot card", () => {
