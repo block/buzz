@@ -266,23 +266,46 @@ class ChannelsPage extends HookConsumerWidget {
 
     // Only surface fetch errors while the relay is stably connected. During a
     // reconnect the session owns recovery, so a cancelled in-flight query must
-    // not turn into a manual Retry page.
+    // not turn into a manual Retry page. The exception is a terminal session
+    // failure (rejected AUTH), which never recovers on its own.
     final showError = useState(false);
     final hasError = channelsAsync.hasError && channels == null;
     final canSurfaceError =
         hasError &&
-        sessionState.status != SessionStatus.connecting &&
-        sessionState.status != SessionStatus.reconnecting;
+        (sessionState.isTerminal ||
+            (sessionState.status != SessionStatus.connecting &&
+                sessionState.status != SessionStatus.reconnecting));
     useEffect(() {
       if (!canSurfaceError) {
         showError.value = false;
+        return null;
+      }
+      if (sessionState.isTerminal) {
+        showError.value = true;
         return null;
       }
       final timer = Timer(const Duration(seconds: 2), () {
         showError.value = true;
       });
       return timer.cancel;
-    }, [canSurfaceError]);
+    }, [canSurfaceError, sessionState.isTerminal]);
+
+    // A cold start that never lands a first payload would otherwise shimmer
+    // forever: the provider stays AsyncLoading (no error to surface) while the
+    // session loops connecting/reconnecting. Bound that wait so the user gets
+    // a retry instead of an endless skeleton.
+    final stalledWithoutContent = useState(false);
+    final isStalled = channels == null && !channelsAsync.hasError;
+    useEffect(() {
+      if (!isStalled) {
+        stalledWithoutContent.value = false;
+        return null;
+      }
+      final timer = Timer(const Duration(seconds: 20), () {
+        stalledWithoutContent.value = true;
+      });
+      return timer.cancel;
+    }, [isStalled]);
 
     // Keep cached content steady through brief socket flaps. A sustained
     // reconnect swaps to element-shaped skeletons that match desktop.
@@ -368,13 +391,23 @@ class ChannelsPage extends HookConsumerWidget {
         channels: channels,
         channelsAsync: channelsAsync,
         showError: showError.value,
+        showStalled: stalledWithoutContent.value,
         sessionStatus: sessionState.status,
         showConnectionSkeleton: showConnectionSkeleton.value,
         currentPubkey: currentPubkey,
         topSectionHeight: topSectionHeight,
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
-        onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
+        onRefresh: () async {
+          // `refresh()` deliberately no-ops while the socket is down, which is
+          // precisely when Retry is on screen. Re-establish the session first
+          // so the button actually does something.
+          if (ref.read(relaySessionProvider).status !=
+              SessionStatus.connected) {
+            await ref.read(relaySessionProvider.notifier).reconnect();
+          }
+          await ref.read(channelsProvider.notifier).refresh();
+        },
         onSelectChannel: openChannel,
       ),
     );

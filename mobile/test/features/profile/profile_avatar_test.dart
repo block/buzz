@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -13,17 +15,21 @@ void main() {
     bool showPresence = true,
     String presence = 'online',
     String? avatarUrl,
+    VoidCallback? onTap,
+    ProfileNotifier Function()? profileNotifier,
   }) {
     return ProviderScope(
       overrides: [
         profileProvider.overrideWith(
-          () => _FakeProfileNotifier(avatarUrl: avatarUrl),
+          profileNotifier ?? () => _FakeProfileNotifier(avatarUrl: avatarUrl),
         ),
         presenceProvider.overrideWith(() => _FakePresenceNotifier(presence)),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
-        home: Center(child: ProfileAvatar(showPresence: showPresence)),
+        home: Center(
+          child: ProfileAvatar(showPresence: showPresence, onTap: onTap),
+        ),
       ),
     );
   }
@@ -83,6 +89,24 @@ void main() {
     expect(dotColor(tester), theme.colorScheme.outline);
   });
 
+  testWidgets('stays tappable while the profile is still loading', (
+    tester,
+  ) async {
+    var taps = 0;
+    await tester.pumpWidget(
+      harness(
+        onTap: () => taps++,
+        profileNotifier: _PendingProfileNotifier.new,
+      ),
+    );
+    await tester.pump();
+
+    // The profile never resolves, so the placeholder is on screen. It must
+    // still route to Settings — that is the only way out of a stalled relay.
+    await tester.tap(find.byType(ProfileAvatar));
+    expect(taps, 1);
+  });
+
   testWidgets('leaves the avatar unmasked when presence is hidden', (
     tester,
   ) async {
@@ -128,6 +152,12 @@ void main() {
       posterUrl,
     );
   });
+}
+
+/// Never resolves — mirrors a stalled relay, where the profile query hangs.
+class _PendingProfileNotifier extends ProfileNotifier {
+  @override
+  Future<UserProfile?> build() => Completer<UserProfile?>().future;
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {

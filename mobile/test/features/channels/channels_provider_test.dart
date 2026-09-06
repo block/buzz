@@ -2083,6 +2083,45 @@ void main() {
     },
   );
 
+  test('fails instead of hanging when the session rejects AUTH', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      initialStatus: SessionStatus.disconnected,
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    final pending = container.read(channelsProvider.future);
+    // The provider is parked waiting for a connection that will never come.
+    await Future<void>.delayed(Duration.zero);
+    expect(container.read(channelsProvider).isLoading, isTrue);
+
+    session.failTerminally();
+
+    await expectLater(pending, throwsA(isA<RelayAuthRejectedException>()));
+    expect(container.read(channelsProvider).hasError, isTrue);
+  });
+
+  test('fails immediately when the session is already terminal', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      initialStatus: SessionStatus.disconnected,
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    // Initialize the session notifier before mutating its state, then fail it
+    // *before* channelsProvider ever builds.
+    container.read(relaySessionProvider);
+    session.failTerminally();
+
+    await expectLater(
+      container.read(channelsProvider.future),
+      throwsA(isA<RelayAuthRejectedException>()),
+    );
+  });
+
   test('initial fetch issues membership + metadata queries', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -2238,7 +2277,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.huddleStarts = const [],
     this.recentMessages = const [],
     this.membershipFailures = 0,
+    this.initialStatus = SessionStatus.connected,
   });
+
+  final SessionStatus initialStatus;
 
   List<NostrEvent> memberships;
   final List<List<NostrEvent>>? membershipPages;
@@ -2463,7 +2505,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }
 
   @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
+  SessionState build() => SessionState(status: initialStatus);
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -2700,6 +2742,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   void setStatus(SessionStatus status) {
     state = SessionState(status: status);
+  }
+
+  /// Mimic a rejected NIP-42 AUTH: the real session stops here and schedules
+  /// no reconnect.
+  void failTerminally() {
+    state = const SessionState(
+      status: SessionStatus.disconnected,
+      terminalError: RelayAuthRejectedException('auth-rejected'),
+    );
   }
 
   /// Emit a live event to all subscribers.

@@ -518,7 +518,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _flushTimer = null;
     if (error is RelayAuthRejectedException) {
       _reconnectTimer?.cancel();
-      state = const SessionState(status: SessionStatus.disconnected);
+      state = SessionState(
+        status: SessionStatus.disconnected,
+        terminalError: error,
+      );
       return;
     }
     _scheduleReconnect();

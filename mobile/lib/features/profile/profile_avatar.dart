@@ -53,9 +53,17 @@ class ProfileAvatar extends ConsumerWidget {
   }
 
   Widget _buildPlaceholder(BuildContext context) {
-    return CircleAvatar(
-      radius: size / 2,
-      backgroundColor: context.colors.primaryContainer,
+    // Must stay tappable: while the profile is loading this is the only route
+    // to Settings, and a stalled relay keeps it in exactly this state — the
+    // case where reaching Settings (relay config, identity, leave community)
+    // matters most.
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: CircleAvatar(
+        radius: size / 2,
+        backgroundColor: context.colors.primaryContainer,
+      ),
     );
   }
 

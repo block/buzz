@@ -4,6 +4,7 @@ class _ChannelsBody extends StatelessWidget {
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
+  final bool showStalled;
   final SessionStatus sessionStatus;
   final bool showConnectionSkeleton;
   final String? currentPubkey;
@@ -17,6 +18,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.channels,
     required this.channelsAsync,
     required this.showError,
+    required this.showStalled,
     required this.sessionStatus,
     required this.showConnectionSkeleton,
     required this.currentPubkey,
@@ -31,12 +33,26 @@ class _ChannelsBody extends StatelessWidget {
   Widget build(BuildContext context) {
     final barHeight = topSectionHeight;
     final loadedChannels = channels;
+    // `showStalled` covers the cold start that never lands a payload: the
+    // provider is still AsyncLoading, so there is no error to surface, but
+    // shimmering indefinitely is worse than offering a retry.
+    final stalled = showStalled && loadedChannels == null && !showError;
     final loading =
-        showConnectionSkeleton || (loadedChannels == null && !showError);
+        showConnectionSkeleton ||
+        (loadedChannels == null && !showError && !stalled);
     final content = showError && channelsAsync.hasError
         ? Padding(
             padding: EdgeInsets.only(top: barHeight),
             child: _ErrorView(error: channelsAsync.error!, onRetry: onRefresh),
+          )
+        : stalled
+        ? Padding(
+            padding: EdgeInsets.only(top: barHeight),
+            child: _ErrorView(
+              error: TimeoutException('Channel list did not load'),
+              title: 'Still connecting',
+              onRetry: onRefresh,
+            ),
           )
         : loadedChannels == null
         ? const SizedBox.shrink()

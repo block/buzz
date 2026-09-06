@@ -113,7 +113,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final waitingForInitialConnection =
         sessionState.status != SessionStatus.connected;
     ref.listen(relaySessionProvider, (previous, next) {
-      if (next.status != SessionStatus.connected) return;
+      if (next.status != SessionStatus.connected) {
+        // A terminal session failure (rejected AUTH) never reconnects, so the
+        // initial-connection wait below would hang forever on a permanent
+        // skeleton. Surface it as a provider error instead.
+        if (next.isTerminal && !connected.isCompleted) {
+          connected.completeError(next.terminalError!, StackTrace.current);
+        }
+        return;
+      }
       if (waitingForInitialConnection &&
           !_hasLoaded &&
           !connected.isCompleted) {
@@ -145,6 +153,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     if (sessionState.status != SessionStatus.connected) {
       // Keep the prior community's cache visible until the new relay connects.
       if (_hasLoaded) return state.value ?? const [];
+      // Already terminal before we started listening — fail now rather than
+      // awaiting a completer nothing will ever complete.
+      if (sessionState.isTerminal) throw sessionState.terminalError!;
       await connected.future;
     }
 

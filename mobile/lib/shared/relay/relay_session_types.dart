@@ -18,7 +18,19 @@ class SessionState {
   final SessionStatus status;
   final int reconnectAttempt;
 
-  const SessionState({required this.status, this.reconnectAttempt = 0});
+  /// Non-null when the session stopped for a reason no amount of waiting will
+  /// fix — currently a rejected NIP-42 AUTH. The session schedules no
+  /// reconnect in this case, so consumers blocked on "wait for connected"
+  /// must fail instead of hanging forever.
+  final Object? terminalError;
+
+  const SessionState({
+    required this.status,
+    this.reconnectAttempt = 0,
+    this.terminalError,
+  });
+
+  bool get isTerminal => terminalError != null;
 }
 
 /// Recovery lifecycle for a live relay subscription.
