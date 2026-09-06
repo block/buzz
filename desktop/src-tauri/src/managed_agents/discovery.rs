@@ -606,18 +606,6 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         }
     }
 
-    // On Windows, also scan PATH for .cmd/.bat shims (npm globals).
-    #[cfg(windows)]
-    {
-        for basename in command_basenames(command).iter().skip(1) {
-            for candidate in path_candidates_from_env_raw(basename) {
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-
     if let Some(path) = find_via_login_shell(command) {
         return Some(path);
     }
@@ -649,23 +637,11 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
 }
 
 fn path_candidates_from_env(command: &str) -> Vec<PathBuf> {
+    let basenames = command_basenames(command);
     std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths)
-                .map(|dir| dir.join(executable_basename(command)))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
-/// Like `path_candidates_from_env` but joins `basename` as-is (no `.exe` suffix).
-/// Used for `.cmd`/`.bat` shim resolution on Windows.
-#[cfg(windows)]
-fn path_candidates_from_env_raw(basename: &str) -> Vec<PathBuf> {
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .map(|dir| dir.join(basename))
+                .flat_map(|dir| basenames.iter().map(move |basename| dir.join(basename)))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()

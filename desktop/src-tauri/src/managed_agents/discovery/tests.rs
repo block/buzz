@@ -1270,6 +1270,38 @@ fn test_cmd_shim_resolves_from_path() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn test_cmd_shim_precedes_later_exe_on_path() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let npm_dir = temp.path().join("npm");
+    let windows_apps_dir = temp.path().join("WindowsApps");
+    std::fs::create_dir_all(&npm_dir).expect("create npm dir");
+    std::fs::create_dir_all(&windows_apps_dir).expect("create WindowsApps dir");
+
+    let npm_shim = npm_dir.join("test-path-order-codex.cmd");
+    let store_binary = windows_apps_dir.join("test-path-order-codex.exe");
+    std::fs::write(&npm_shim, "@echo off\r\n").expect("write npm shim");
+    std::fs::write(&store_binary, "not a real executable").expect("write store binary");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let joined =
+        std::env::join_paths([npm_dir.as_path(), windows_apps_dir.as_path()]).expect("join PATH");
+    std::env::set_var("PATH", &joined);
+
+    let result = super::resolve_command_uncached("test-path-order-codex");
+
+    std::env::set_var("PATH", &old_path);
+
+    assert_eq!(
+        result.as_deref(),
+        Some(npm_shim.as_path()),
+        "an earlier PATH directory's .cmd shim must win over a later .exe"
+    );
+}
+
 // ── Phase A: no-shell-resolved error on Windows ────────────────────────────
 
 /// When all resolution sources are empty AND the registry is disabled,
