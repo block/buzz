@@ -787,13 +787,46 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+/// Managed Grok Build ACP argv. `--no-leader` keeps the subprocess off the
+/// interactive TUI leader socket when `[cli] use_leader` is on.
+const GROK_ACP_ARGS: &[&str] = &["agent", "--always-approve", "--no-leader", "stdio"];
+
+fn grok_acp_args() -> Vec<String> {
+    GROK_ACP_ARGS.iter().map(|arg| (*arg).to_string()).collect()
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "grok" => Some(grok_acp_args()),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
+}
+
+/// Insert `--no-leader` for Grok ACP argv that omitted it. Leaves an explicit
+/// `--leader` or existing `--no-leader` alone so operators can still share a
+/// leader on purpose. Does not rewrite stored persona JSON.
+fn with_grok_managed_stdio(command: &str, mut args: Vec<String>) -> Vec<String> {
+    if normalize_agent_command_identity(command) != "grok" {
+        return args;
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--no-leader" || arg == "--leader")
+    {
+        return args;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--always-approve") {
+        args.insert(index + 1, "--no-leader".to_string());
+        return args;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "agent") {
+        args.insert(index + 1, "--no-leader".to_string());
+        return args;
+    }
+    args
 }
 
 /// Per-runtime environment defaults applied when Buzz owns the agent process.
@@ -808,9 +841,20 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 /// startup budget (see block/buzz#3355). Skip that unrelated global startup
 /// by default; an operator or persona can still opt back in by setting the
 /// variable explicitly.
+/// Grok's bash tool drops `*KEY*` / `*SECRET*` / `*TOKEN*` unless this overlay
+/// turns default excludes off. `BUZZ_PRIVATE_KEY` matches `*KEY*`, so grokShell
+/// cannot run `buzz messages send` and the model scrapes `/proc` for the parent
+/// env. Overlay-allowlisted filter fields only — it cannot inject secret values
+/// (those already sit on the grok process). Some grok security gates read
+/// `~/.grok/config.toml` instead of this overlay; operators can pin the same
+/// table on disk if bash still strips the key.
+const GROK_SHELL_KEEP_BUZZ_AUTH: &str =
+    r#"{"shell_environment_policy":{"inherit":"all","ignore_default_excludes":true}}"#;
+
 pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
     match normalize_agent_command_identity(command).as_str() {
         "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+        "grok" => &[("GROK_CONFIG", GROK_SHELL_KEEP_BUZZ_AUTH)],
         _ => &[],
     }
 }
@@ -876,11 +920,11 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         .collect::<Vec<_>>();
 
     let Some(default_args) = default_agent_args(command) else {
-        return normalized;
+        return with_grok_managed_stdio(command, normalized);
     };
 
     if normalized.is_empty() {
-        return default_args;
+        return with_grok_managed_stdio(command, default_args);
     }
 
     // Older callers relied on the Goose-specific default even for runtimes like
@@ -888,10 +932,10 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     // providers so desktop- and env-based launches behave the same way.
     if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
     {
-        return default_args;
+        return with_grok_managed_stdio(command, default_args);
     }
 
-    normalized
+    with_grok_managed_stdio(command, normalized)
 }
 
 /// Propagate legacy env-var aliases to their canonical names.
@@ -1761,6 +1805,53 @@ mod tests {
                 "non-Hermes command must have no env defaults: {command}"
             );
         }
+    }
+
+    #[test]
+    fn default_agent_env_keeps_buzz_auth_in_grok_shell() {
+        for command in ["grok", "/usr/local/bin/grok", r"C:\Users\test\grok.exe"] {
+            let env = default_agent_env(command);
+            assert_eq!(env[0].0, "GROK_CONFIG", "unexpected env key for {command}");
+            assert!(
+                env[0].1.contains("ignore_default_excludes"),
+                "GROK_CONFIG must disable *KEY* stripping for {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_grok_args_to_headless_stdio_without_leader() {
+        let expected = vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "--no-leader".to_string(),
+            "stdio".to_string(),
+        ];
+        assert_eq!(normalize_agent_args("grok", Vec::new()), expected);
+        assert_eq!(
+            normalize_agent_args("/usr/local/bin/grok", vec!["".into()]),
+            expected
+        );
+        assert_eq!(
+            normalize_agent_args(
+                r"C:\Users\test\grok.exe",
+                vec!["agent".into(), "--always-approve".into(), "stdio".into()]
+            ),
+            expected
+        );
+        assert_eq!(
+            normalize_agent_args("grok", expected.clone()),
+            expected,
+            "already-headless argv must stay idempotent"
+        );
+        assert_eq!(
+            normalize_agent_args(
+                "grok",
+                vec!["agent".into(), "--leader".into(), "stdio".into()]
+            ),
+            vec!["agent", "--leader", "stdio"],
+            "explicit --leader must not be rewritten"
+        );
     }
 
     #[test]

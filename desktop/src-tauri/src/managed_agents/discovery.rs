@@ -319,13 +319,45 @@ pub fn try_record_agent_command(
     Ok(default_agent_command())
 }
 
+/// Managed Grok Build ACP argv. `--no-leader` keeps the subprocess off the
+/// interactive TUI leader socket when `[cli] use_leader` is on.
+const GROK_ACP_ARGS: &[&str] = &["agent", "--always-approve", "--no-leader", "stdio"];
+
+fn grok_acp_args() -> Vec<String> {
+    GROK_ACP_ARGS.iter().map(|arg| (*arg).to_string()).collect()
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "grok" => Some(grok_acp_args()),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
+}
+
+/// Insert `--no-leader` for Grok ACP argv that omitted it. Leaves an explicit
+/// `--leader` or existing `--no-leader` alone. Does not rewrite stored JSON.
+fn with_grok_managed_stdio(command: &str, mut args: Vec<String>) -> Vec<String> {
+    if normalize_command_identity(command) != "grok" {
+        return args;
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--no-leader" || arg == "--leader")
+    {
+        return args;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--always-approve") {
+        args.insert(index + 1, "--no-leader".to_string());
+        return args;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "agent") {
+        args.insert(index + 1, "--no-leader".to_string());
+        return args;
+    }
+    args
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -336,19 +368,19 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         .collect::<Vec<_>>();
 
     let Some(default_args) = default_agent_args(command) else {
-        return normalized;
+        return with_grok_managed_stdio(command, normalized);
     };
 
     if normalized.is_empty() {
-        return default_args;
+        return with_grok_managed_stdio(command, default_args);
     }
 
     if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
     {
-        return default_args;
+        return with_grok_managed_stdio(command, default_args);
     }
 
-    normalized
+    with_grok_managed_stdio(command, normalized)
 }
 
 fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
