@@ -10,6 +10,7 @@ import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/text/initial.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
@@ -187,7 +188,7 @@ class DirectoryUser {
   }
 
   /// First visible character used when no avatar image is available.
-  String get initial => label.isNotEmpty ? label[0].toUpperCase() : '?';
+  String get initial => avatarInitial(label);
 }
 
 /// Whether the mobile DM directory should show local preview identities.

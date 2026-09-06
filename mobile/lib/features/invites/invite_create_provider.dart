@@ -9,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/text/initial.dart';
 
 /// The default lifetime of a newly minted community invite link.
 const defaultCommunityInviteTtlSeconds = 3 * 24 * 60 * 60;
@@ -123,7 +124,7 @@ class CommunityInviteDirectoryUser {
   }
 
   /// The uppercase first character of [label], or `?` when unavailable.
-  String get initial => label.isEmpty ? '?' : label[0].toUpperCase();
+  String get initial => avatarInitial(label);
 }
 
 /// Abbreviates a hexadecimal public key for compact display.

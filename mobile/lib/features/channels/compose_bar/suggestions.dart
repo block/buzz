@@ -47,7 +47,7 @@ class _MentionSuggestions extends StatelessWidget {
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,
                 fallback: Text(
-                  name[0].toUpperCase(),
+                  avatarInitial(name),
                   style: context.textTheme.labelMedium?.copyWith(
                     color: context.colors.onPrimaryContainer,
                     fontWeight: FontWeight.w600,

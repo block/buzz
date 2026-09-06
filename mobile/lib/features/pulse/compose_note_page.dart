@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/text/initial.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -191,7 +192,7 @@ class _ReplyContext extends ConsumerWidget {
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,
                 fallback: Text(
-                  (profile?.initial ?? displayName[0]).toUpperCase(),
+                  profile?.initial ?? avatarInitial(displayName),
                   style: context.textTheme.labelMedium?.copyWith(
                     color: context.colors.onPrimaryContainer,
                   ),

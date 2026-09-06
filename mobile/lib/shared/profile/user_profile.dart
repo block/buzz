@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../../shared/text/initial.dart';
+
 @immutable
 class UserProfile {
   final String pubkey;
@@ -38,8 +40,7 @@ class UserProfile {
 
   /// First letter for fallback avatar.
   String get initial =>
-      (displayName?.isNotEmpty == true ? displayName! : pubkey)[0]
-          .toUpperCase();
+      avatarInitial(displayName?.isNotEmpty == true ? displayName! : pubkey);
 }
 
 /// Optional profile handle shown beside a message author's display name.
