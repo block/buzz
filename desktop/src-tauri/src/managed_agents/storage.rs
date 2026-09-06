@@ -985,6 +985,19 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
                 code: Some(-32002),
             });
         }
+        // #4888 silent-idle variant: harness connected to an empty tenant
+        // (often loopback Host mismatch) and will never answer mentions.
+        if line.contains("no channel subscriptions resolved")
+            && line.contains("agent will sit idle")
+        {
+            return Some(AgentLogError {
+                message: "Agent connected but discovered no channels — the relay \
+Host may not match this community (e.g. localhost vs 127.0.0.1). \
+Check the harness dial URL in the agent log."
+                    .to_string(),
+                code: None,
+            });
+        }
         None
     })
 }

@@ -502,14 +502,31 @@ pub fn spawn_agent_child(
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 
+    // Identity (`runtime_key.relay_url`) is the canonical pair key — loopback
+    // hosts fold to 127.0.0.1 for dedup. The child must dial the workspace's
+    // configured authority instead: relay tenancy keys off the literal Host,
+    // so spawning with the canonical spelling while the desktop joined as
+    // `localhost` puts the agent in a different community (#4888). Resolve
+    // before log markers / process spawn so a mismatch leaves no side effects.
+    let workspace_relay_url = {
+        let state = app.state::<crate::app_state::AppState>();
+        crate::relay::relay_ws_url_with_override(&state)
+    };
+    let effective_relay_url = crate::relay::resolve_agent_dial_relay_url(
+        &workspace_relay_url,
+        &runtime_key.relay_url,
+    )?;
+
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
         &format!(
-            "\n=== starting {} ({}) at {} ===",
+            "\n=== starting {} ({}) at {} ===\n=== relay identity={} dial={} ===",
             record.name,
             record.pubkey,
-            now_iso()
+            now_iso(),
+            runtime_key.relay_url,
+            effective_relay_url,
         ),
     )?;
 
@@ -540,9 +557,6 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
     //   - nvm-managed node/npm (nvm initializes only in interactive shells)
