@@ -229,6 +229,10 @@ The named boundary contracts for implementation are:
   and normalized managed-agent pubkey;
 - `ExternalAudioEgressGrant`: exact session key, local human pubkey, provider,
   grant generation, and explicit enabled state;
+- `CapturedHuddlePcm`: exact Huddle and capture generations, capture-source
+  identity, and bounded PCM from the human-peer transmission gate;
+- `ProviderSessionBudget`: fixed wall-clock, admitted-input, and decoded-output
+  audio allowances plus one terminal exhaustion reason;
 - `NormalizedAudioFrame`: mono PCM samples plus an adapter-owned validated sample
   rate and one fixed maximum sample count;
 - `ProviderSessionState`: `preparing`, `ready`, `active`, `draining`, or `closed`,
@@ -254,9 +258,15 @@ and remains send-only in VOICE 2; it is not a provider interface.
 
 Provider input comes from a bounded tee after the existing local microphone's
 mute/PTT, device, Huddle-generation, and human-peer transmission gates, but
-before that same admitted PCM is encoded to Opus. Raw capture that the current
-human peer is not authorized to transmit must have no provider path. Forwarding
-requires one named `ExternalAudioEgressGrant`: an explicit local-user choice
+before that same admitted PCM is encoded to Opus. The WebView-to-Tauri IPC
+carries one `CapturedHuddlePcm` envelope rather than unversioned raw bytes. Its
+Huddle generation, capture generation, and capture-source identity are checked
+against the current capture lease before the single fan-out to both relay Opus
+encoding and provider input. A delayed callback from a prior device or
+leave/rejoin therefore cannot be rebound to the current sender. Raw capture that
+the current human peer is not authorized to transmit must have no provider
+path. Forwarding requires one named `ExternalAudioEgressGrant`: an explicit
+local-user choice
 bound to the Huddle lifetime, managed-agent pubkey, provider, and the local
 human pubkey held by the Desktop. That pubkey must be a current non-bot room
 member allowed by the managed agent's existing `respond_to` policy. Room
@@ -397,22 +407,33 @@ VOICE 2 is fail-closed and does not add automatic reconnect. VOICE 6 may add
 bounded reconnect only after it proves single ownership and no duplicated
 speech or effects.
 
+The first slice has a fixed Buzz-owned per-session resource/spend budget:
+20 minutes wall clock, 15 minutes of PCM admitted to provider input, and
+5 minutes of decoded provider output. Budget is charged from validated frame
+sample counts before queueing, so provider metadata cannot reduce it. Reaching
+any limit closes input, cancels the active response, drains unsent output,
+closes provider and publisher sockets, releases the output lease, and records
+terminal reason `budget_exhausted`. It never auto-starts a replacement session.
+VOICE 7 may replace these conservative constants only with an approved product
+spend policy and equivalent fail-closed tests; telemetry alone is not a budget.
+
 ## VOICE 2 implementation slice
 
 The first implementation should be one independently verifiable vertical slice.
-Its acceptance run uses at least 20 completed, non-overlapping turns after one
-warm-up turn on an isolated/headset route. The run manifest pins the exact
-Desktop commit, provider endpoint/API revision, model, voice, VAD mode, input
-and output PCM formats, machine, route, and network type. `t0` is the local
-Buzz capture/VAD speech-end marker before provider endpointing; `t1` is the
-first non-DTX agent frame accepted by the local human peer's normal playout.
-Latency is `t1 - t0`; median and nearest-rank p95 are computed over completed,
-non-cancelled turns. Failed and cancelled turns are retained as separate counts,
-not silently discarded. The target is median at most 800 ms and p95 at most
-1,500 ms. The raw retained artifact contains only the pinned manifest,
-timestamps, durations, counters, and terminal reasons—no PCM, transcript, or
-instructions. VOICE 2 additionally requires that no new frame obtains send
-authorization after cancellation completes.
+Its acceptance run predeclares exactly 20 non-overlapping scripted attempts
+after one warm-up turn on an isolated/headset route; failed or cancelled
+attempts are not retried. The run manifest pins the exact Desktop commit,
+provider endpoint/API revision, model, voice, VAD mode, input and output PCM
+formats, machine, route, and network type. `t0` is the local Buzz capture/VAD
+speech-end marker before provider endpointing; `t1` is the first non-DTX agent
+frame accepted by the local human peer's normal playout. Latency is `t1 - t0`.
+Every non-completion is scored as an infinite threshold miss; median and
+nearest-rank p95 are computed over all 20 attempts, and completion rate must be
+at least 95%. The target is median at most 800 ms and p95 at most 1,500 ms. The
+raw retained artifact contains only the pinned manifest, timestamps, durations,
+counters, and terminal reasons—no PCM, transcript, or instructions. VOICE 2
+additionally requires that no new frame obtains send authorization after
+cancellation completes.
 
 The roadmap interruption target, owned by VOICE 5 rather than silently pulled
 into this slice, is human speech onset to locally rendered agent silence within
@@ -433,8 +454,9 @@ The vertical slice is:
    NIP-42 plus owner-auth path; reuse its auth/encode contract but do not mark
    this peer as locally synthesized TTS, so the host's human socket receives and
    plays provider audio through the same normal agent-peer path as Mobile;
-3. tee only PCM admitted by the granted local user's current human-peer
-   transmission gates to OpenAI; no raw muted capture or relay-received media is
+3. carry capture/source generations through the IPC boundary and tee only the
+   granted local user's current `CapturedHuddlePcm` to OpenAI after one exact
+   lease validation; no raw muted, stale-source, or relay-received media is
    connected to provider input;
 4. convert returned audio to the existing 48 kHz mono Opus room contract and
    publish it as the authenticated agent peer; and
@@ -456,8 +478,9 @@ VOICE 2 is ready only when focused local tests demonstrate all of the following:
 - a missing/mismatched managed identity, invalid owner authorization, absent
   `bot` membership, wrong room protocol, absent/mismatched egress grant, or
   denied `respond_to` policy prevents startup or forwarding;
-- only capture owned by the current, non-bot local user named by the
-  exact-session egress grant reaches the provider;
+- only `CapturedHuddlePcm` owned by the current, non-bot local user named by the
+  exact-session egress grant reaches relay/provider fan-out; delayed prior
+  Huddle, capture-generation, and source callbacks fail before either output;
 - relay-received media is not connected to provider input, proving that remote
   humans, bots, unknown indices, and v2 index-reuse races have no egress path;
 - muted, wrong-device, stale-generation, and post-cancel local capture never
@@ -472,6 +495,9 @@ VOICE 2 is ready only when focused local tests demonstrate all of the following:
   frames whose sequence and 48 kHz timestamp advance by 1 and 960 respectively,
   including the v2 contract's defined integer wrapping boundaries;
 - bounded media queues prefer freshness and cannot grow without limit;
+- exact and max-plus-one tests cover all three `ProviderSessionBudget` limits;
+  exhaustion is terminal, tears down both sockets, and releases the output lease
+  without automatic restart;
 - provider transport tests accept the exact raw-message, encoded-audio, decoded
   byte, and sample-count maxima, reject each maximum plus one before the next
   allocation/transformation stage, and reject forged rate metadata that would
