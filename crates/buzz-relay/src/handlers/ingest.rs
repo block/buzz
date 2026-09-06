@@ -29,12 +29,12 @@ use buzz_core::kind::{
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
     KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_READ_STATE, KIND_REPORT, KIND_SESSION_LINK, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -139,6 +139,55 @@ async fn validate_huddle_lifecycle_event(
         }
     }
 
+    Ok(())
+}
+
+async fn validate_session_link(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+) -> Result<(), IngestError> {
+    if event_kind_u32(event) != KIND_SESSION_LINK {
+        return Ok(());
+    }
+    let parent_channel_id = extract_channel_id(event).ok_or_else(|| {
+        IngestError::Rejected("invalid: Session link must name its parent channel".into())
+    })?;
+    let content: serde_json::Value = serde_json::from_str(&event.content)
+        .map_err(|_| IngestError::Rejected("invalid: Session link content must be JSON".into()))?;
+    let session_channel_id = content
+        .get("session_channel_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            IngestError::Rejected("invalid: Session link must name a session_channel_id".into())
+        })?;
+    if session_channel_id == parent_channel_id {
+        return Err(IngestError::Rejected(
+            "invalid: a Session cannot be its own parent channel".into(),
+        ));
+    }
+    let backing = state
+        .db
+        .get_channel_for_event_write(tenant.community(), session_channel_id)
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::ChannelNotFound(_) => {
+                IngestError::Rejected("invalid: Session channel not found".into())
+            }
+            error => IngestError::Internal(format!("error: loading Session channel: {error}")),
+        })?;
+    if backing.created_by.as_slice() != event.pubkey.to_bytes().as_slice()
+        || backing.channel_type != "stream"
+        || backing.visibility != "private"
+        || backing.ttl_seconds.is_some()
+        || backing.archived_at.is_some()
+    {
+        return Err(IngestError::Rejected(
+            "invalid: Session link must reference the signer's active private stream channel"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
@@ -515,7 +564,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
                 Ok(Scope::ChannelsWrite)
             }
         }
-        KIND_NIP29_CREATE_GROUP | KIND_CANVAS => Ok(Scope::ChannelsWrite),
+        KIND_NIP29_CREATE_GROUP | KIND_CANVAS | KIND_SESSION_LINK => Ok(Scope::ChannelsWrite),
         KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST | KIND_NIP43_LEAVE_REQUEST => {
             Ok(Scope::ChannelsRead)
         }
@@ -715,6 +764,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_STREAM_MESSAGE_SCHEDULED
             | KIND_STREAM_REMINDER
             | KIND_STREAM_MESSAGE_DIFF
+            | KIND_SESSION_LINK
             | KIND_CANVAS
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
@@ -757,7 +807,16 @@ pub(crate) async fn check_channel_membership(
         Ok(false) => {}
         Err(e) => return Err(format!("error: database error: {e}")),
     }
-    // Not a member — check if channel is open.
+    match state
+        .db
+        .has_session_parent_access(tenant.community(), ch_id, pubkey_bytes)
+        .await
+    {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => return Err(format!("error: database error: {e}")),
+    }
+    // Not a member and no inherited Session access — check if channel is open.
     let is_open = match channel {
         Some(ch) => ch.visibility == "open",
         None => state
@@ -2667,6 +2726,7 @@ async fn ingest_event_inner(
     }
 
     validate_huddle_lifecycle_event(tenant, state, &event, kind_u32).await?;
+    validate_session_link(tenant, state, &event).await?;
 
     if crate::handlers::side_effects::is_admin_kind(kind_u32) {
         crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
@@ -3209,6 +3269,10 @@ async fn ingest_event_inner(
             accepted: true,
             message: "duplicate:".into(),
         });
+    }
+
+    if kind_u32 == KIND_SESSION_LINK {
+        state.invalidate_all_accessible_channels(tenant);
     }
 
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {

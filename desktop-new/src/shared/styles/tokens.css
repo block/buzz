@@ -1,0 +1,446 @@
+/*
+ * Buzz colour tokens.
+ *
+ * Three layers, and only the role layer is ever used when building a screen:
+ *
+ *   LAYER 1  private ramps          --neutral-*, --accent-*, --glass-*, gradients
+ *   LAYER 2  public roles           --bg-panel, --text-secondary, ...
+ *   LAYER 3  components             bg-panel, text-secondary  (Tailwind utilities)
+ *
+ * Rules:
+ *   - Literal values exist only in the ramps. Nothing above a ramp holds one,
+ *     except the documented exceptions at the bottom of this file.
+ *   - A component never references a ramp step directly.
+ *   - Transparency is never applied to a token. It lives inside the value.
+ *   - Every role holds a light and a dark value under the same name.
+ *
+ * See DESIGN.md for the judgement this vocabulary cannot express.
+ */
+
+/* ============================================================
+   LAYER 1 — PRIVATE RAMPS
+   ============================================================ */
+
+:root {
+  /* --- Neutral. Twelve steps, each step a fixed job. -------- */
+  --neutral-1: #ffffff; /* app background        */
+  --neutral-2: #fafafa; /* subtle background     */
+  --neutral-3: #f5f5f5; /* component background  */
+  --neutral-4: #f0f0f0; /* component hover       */
+  --neutral-5: #e8e8e8; /* component selected    */
+  --neutral-6: #e5e5e5; /* subtle border         */
+  --neutral-7: #d4d4d4; /* border                */
+  --neutral-8: #b8b8b8; /* border hover          */
+  --neutral-9: #909090; /* solid fill, tertiary text */
+  --neutral-10: #737373; /* solid fill hover     */
+  --neutral-11: #262626; /* dark fill            */
+  --neutral-12: #0a0a0a; /* high-contrast text   */
+
+  /* --- Accent. A slot, not a colour. -----------------------
+     Nothing above this ramp knows the hue. Replace these five
+     values to change the accent; every role below follows.
+     Reference hue: the blue from the design exploration.      */
+  --accent-2: #e7f1ff; /* tinted surface          */
+  --accent-3: #d0e3ff; /* tint hover / selected   */
+  --accent-8: #3d87ff; /* border, focus ring      */
+  --accent-9: #237eff; /* solid fill              */
+  --accent-11: #1d4ed8; /* accent text            */
+
+  /* --- Status. Same five jobs as accent, per family. -------- */
+  --danger-2: #fee2e2;
+  --danger-3: #fecaca;
+  --danger-8: #f5b5b5;
+  --danger-9: #dc2626;
+  --danger-11: #a80008;
+
+  --success-2: #e8f7ee;
+  --success-3: #d1f0dd;
+  --success-8: #a3e0bd;
+  --success-9: #16a34a;
+  --success-11: #15803d;
+
+  --warning-2: #fef3c7;
+  --warning-3: #fde68a;
+  --warning-8: #f2d98a;
+  --warning-9: #eab308;
+  --warning-11: #9c5e00;
+
+  --info-2: #e7f1ff;
+  --info-3: #d0e3ff;
+  --info-8: #b8d4ff;
+  --info-9: #3d87ff;
+  --info-11: #1d4ed8;
+
+  /* --- Glass. A translucency ramp of fills. ---------------- */
+  --glass-1: #ffffff5c; /* barely there   */
+  --glass-2: #ffffff85; /* quiet glass    */
+  --glass-3: #ffffff9e; /* default glass  */
+  --glass-4: #ffffffc7; /* glass hovered  */
+  --glass-5: #ffffffe0; /* nearly solid   */
+
+  /* --- Categorical. Named by appearance, deliberately: the
+     choice IS appearance — telling two projects apart. ------- */
+  --tint-blue: #e7f1ff;
+  --tint-purple: #f3e8ff;
+  --tint-orange: #ffedd5;
+  --tint-green: #ecfccb;
+  --tint-red: #fee2e2;
+  --tint-cyan: #cffafe;
+
+  /* --- Gradients. Numbered background treatments. ---------- */
+  --gradient-1:
+    radial-gradient(at 85% 88%, #eef2d4 0%, transparent 62%),
+    linear-gradient(158deg, #f5f7f8 0%, #dfeaf3 52%, #e9efe0 100%);
+
+  /* --- Texture. Separate from colour and gradient. --------- */
+  --texture-dots-color: #0a0a0a0f;
+  --texture-dots-size: 28px;
+
+  /* --- Blur. A separate axis from translucency. ------------ */
+  --blur-sm: 8px;
+  --blur-md: 16px;
+  --blur-lg: 32px;
+
+  /* --- Elevation. From the design exploration, unchanged. -- */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 0 2px rgba(0, 0, 0, 0.1), 0 4px 8px -2px rgba(0, 0, 0, 0.06);
+
+  /* --- Space. Six steps extracted from the Messages frame. --
+     The scale is intentionally short: 4/8/12/16/20/24 covers the repeated
+     panel gap, row inset, header inset, and workspace gutter without turning
+     every measured distance into a token.                                    */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+
+  /* --- Corner. Four shapes, each with a distinct job. ------- */
+  --corner-row: 0.625rem;
+  --corner-control: 0.75rem;
+  --corner-panel: 1.5rem;
+  --corner-round: 9999rem;
+
+  /* --- Time. State is quick; geometry settles deliberately. - */
+  --time-immediate: 0ms;
+  --time-fast: 120ms;
+  --time-state: 150ms;
+  --time-settle: 220ms;
+  --ease-state: ease;
+  --ease-settle: cubic-bezier(0.645, 0.045, 0.355, 1);
+}
+
+.dark {
+  --neutral-1: #0f0f0f;
+  --neutral-2: #161616;
+  --neutral-3: #1c1c1c;
+  --neutral-4: #232323;
+  --neutral-5: #2a2a2a;
+  --neutral-6: #333333;
+  --neutral-7: #424242;
+  --neutral-8: #5a5a5a;
+  /* Steps 9 and 10 are lighter than a linear ramp would put them, because in
+     dark mode they carry text and APCA is polarity-asymmetric: light-on-dark
+     needs more separation than the WCAG ratio implies. At #6e6e6e and #8f8f8f
+     they measured Lc 23–26 and Lc 38–41 against the Lc 60 body-text target
+     while passing WCAG AA — legal, and visibly murky. Sized against the
+     lightest dark surface (bg-float #2a2a2a), which is the binding case. */
+  --neutral-9: #a6a6a6;
+  --neutral-10: #c1c1c1;
+  --neutral-11: #e5e5e5;
+  --neutral-12: #f5f5f5;
+
+  /* Accent step 9 barely moves between modes — a saturated fill
+     reads correctly on white and on near-black. Step 11 inverts
+     direction: darker than the fill on light, lighter on dark. */
+  --accent-2: #152845;
+  --accent-3: #1a3358;
+  --accent-8: #356dbd;
+  --accent-9: #237eff;
+  --accent-11: #95c0ff;
+
+  --danger-2: #3a1515;
+  --danger-3: #4d1c1c;
+  --danger-8: #7a2e2e;
+  --danger-9: #dc2626;
+  --danger-11: #fca5a5;
+
+  --success-2: #10261a;
+  --success-3: #163524;
+  --success-8: #2a5c3f;
+  --success-9: #16a34a;
+  --success-11: #86e0aa;
+
+  --warning-2: #2e2410;
+  --warning-3: #423318;
+  --warning-8: #6b5320;
+  --warning-9: #eab308;
+  --warning-11: #f5d878;
+
+  --info-2: #152845;
+  --info-3: #1a3358;
+  --info-8: #356dbd;
+  --info-9: #3d87ff;
+  --info-11: #95c0ff;
+
+  --glass-1: #1c1c1c5c;
+  --glass-2: #1c1c1c85;
+  --glass-3: #1c1c1ca8;
+  --glass-4: #1c1c1cc7;
+  --glass-5: #1c1c1ce0;
+
+  --tint-blue: #152845;
+  --tint-purple: #2b1f45;
+  --tint-orange: #3a2412;
+  --tint-green: #23300f;
+  --tint-red: #3a1515;
+  --tint-cyan: #0e2e33;
+
+  --gradient-1:
+    radial-gradient(at 85% 88%, #23261a 0%, transparent 62%),
+    linear-gradient(158deg, #15171b 0%, #172231 52%, #191d19 100%);
+
+  --texture-dots-color: #ffffff14;
+}
+
+/* ============================================================
+   LAYER 2 — PUBLIC ROLES
+   The only layer a screen may use. Every value below points at
+   a ramp step, except the documented exceptions at the bottom.
+   ============================================================ */
+
+:root {
+  /* --- Structural surfaces. Named by region. ---------------
+     Ask one question: is it behind, on, above, or in?         */
+  --bg-app: var(--gradient-1);
+  --bg-panel: var(--neutral-1);
+  --bg-float: var(--neutral-1);
+  --bg-inset: var(--neutral-3);
+  --bg-hover: var(--neutral-4);
+
+  /* --- Emphasis. One ramp shared by text and borders. ------ */
+  --text-primary: var(--neutral-12);
+  --text-secondary: var(--neutral-10);
+  --text-tertiary: var(--neutral-9);
+  /* Deliberately below the contrast targets: low contrast is the signal that a
+     control is unavailable, and WCAG exempts inactive controls for the same
+     reason. Raising it to Lc 60 would make disabled read as enabled. Never put
+     information here that a person needs. */
+  --text-disabled: var(--neutral-8);
+
+  --border-primary: var(--neutral-7);
+  --border-secondary: var(--neutral-6);
+  --border-tertiary: var(--neutral-5);
+
+  /* --- Identity. Two arrangements only: SOLID fill with
+     paired text on it, or TINT fill with coloured text.       */
+  --bg-accent: var(--accent-9);
+  --bg-accent-tint: var(--accent-2);
+  --bg-accent-tint-hover: var(--accent-3);
+  --text-accent: var(--accent-11);
+  --border-accent: var(--accent-8);
+
+  --bg-inverse: var(--neutral-11);
+  --bg-inverse-hover: var(--neutral-10);
+
+  /* --- Status. Identical shape, four times over. ----------- */
+  --bg-danger: var(--danger-9);
+  --bg-danger-tint: var(--danger-2);
+  --bg-danger-tint-hover: var(--danger-3);
+  --text-danger: var(--danger-11);
+  --border-danger: var(--danger-8);
+
+  --bg-success: var(--success-9);
+  --bg-success-tint: var(--success-2);
+  --bg-success-tint-hover: var(--success-3);
+  --text-success: var(--success-11);
+  --border-success: var(--success-8);
+
+  --bg-warning: var(--warning-9);
+  --bg-warning-tint: var(--warning-2);
+  --bg-warning-tint-hover: var(--warning-3);
+  --text-warning: var(--warning-11);
+  --border-warning: var(--warning-8);
+
+  --bg-info: var(--info-9);
+  --bg-info-tint: var(--info-2);
+  --bg-info-tint-hover: var(--info-3);
+  --text-info: var(--info-11);
+  --border-info: var(--info-8);
+
+  /* --- Material. Translucency and blur live inside the value.
+     A component never assembles them.                        */
+  --bg-chrome-glass: var(--glass-3);
+  --bg-chrome-glass-hover: var(--glass-4);
+  --bg-chrome-selected: var(--neutral-1);
+  --bg-panel-glass: var(--glass-2);
+  --bg-float-glass: var(--glass-3);
+
+  /* --- Focus. ----------------------------------------------
+     Legible on every neutral surface (WCAG 3.0–3.5:1), but it is an accent
+     against accent: on `bg-accent` it measures 1.1:1 and disappears. A focused
+     primary button therefore needs the ring separated from the fill — an offset
+     in the surface colour, not a different ring hue, so one focus treatment
+     works everywhere. Whatever component layer introduces focus owns that
+     offset; there is no second ring token.                     */
+  --ring-focus: var(--accent-8);
+
+  /* --- Geometry. Repeated relationships from Messages. ----- */
+  --space-workspace-inset: var(--space-4);
+  --space-panel-gap: var(--space-2);
+  --space-panel-inset: var(--space-5);
+  --space-control-inset: var(--space-3);
+  --space-row-gap: var(--space-2);
+  /* An inline tile sits in a line of text, so its inset and gap are tighter
+     than a control's and are its own repeated relationship. */
+  --space-tile-inset: var(--space-1);
+  --space-tile-gap: 0.1875rem;
+  --size-topbar: 3.5rem;
+  --size-panel-header: 3.5rem;
+  --size-control: 2.25rem;
+  --size-row: 1.875rem;
+  --size-navigator: 13.5rem;
+  --radius-panel: var(--corner-panel);
+  --radius-control: var(--corner-control);
+  --radius-row: var(--corner-row);
+  --radius-pill: var(--corner-round);
+  /* A tile reads as a chip in running text, so it takes a tighter corner than
+     a control and gets its own role rather than borrowing one. */
+  --radius-tile: 0.375rem;
+  --duration-fast: var(--time-fast);
+  --duration-state: var(--time-state);
+  --duration-settle: var(--time-settle);
+  --easing-state: var(--ease-state);
+  --easing-settle: var(--ease-settle);
+
+  /* ==========================================================
+     DELIBERATE EXCEPTIONS — the entire list.
+     ==========================================================
+
+     1. Paired text. Computed from its fill's lightness rather
+        than fixed, because white is readable on a blue or
+        purple fill and unreadable on yellow or lime. Until the
+        computation lands, these hold literals.                */
+  --text-on-accent: #ffffff;
+  --text-on-inverse: var(--neutral-1);
+
+  /* The status families need their paired text for the same reason accent does:
+     `bg-danger` is a saturated fill, and text on it must be the paired value
+     rather than whatever it inherits. The registry documented these four before
+     they were declared, so `text-on-danger` resolved to nothing and text on a
+     danger button fell back to near-black on red. The token table found it.
+     Literals for now, on the same exception as text-on-accent — they become
+     computed when the lightness rule lands. */
+  --text-on-danger: #ffffff;
+  --text-on-success: #ffffff;
+  /* A literal, not `var(--neutral-12)`: the warning fill is the same amber in
+     both modes, so its paired text must be dark in both. neutral-12 flips to
+     near-white in dark mode, which put #f5f5f5 on #eab308 — APCA Lc 34, WCAG
+     1.76. A paired-text token follows its fill, never the mode. */
+  --text-on-warning: #0a0a0a;
+  --text-on-info: #ffffff;
+
+  /*  2. The glass rim. A directional light effect, not a solid
+        line: bright along the lit edge, dimmer on the opposite
+        one, from one fixed light direction every glass surface
+        in the product shares. Not on the glass ramp — that is
+        a ramp of fills, and in dark mode the fill is
+        translucent near-black while the rim stays translucent
+        white. Not one of the numbered gradients either: those
+        are background treatments, this is a material detail.
+
+        Implemented as two inset shadows because CSS borders
+        accept only solid colours. See DESIGN.md.              */
+  --rim-lit: #ffffff73;
+  --rim-shade: #ffffff1f;
+}
+
+.dark {
+  --bg-panel: var(--neutral-3);
+  --bg-float: var(--neutral-5);
+  --bg-inset: var(--neutral-2);
+  --bg-chrome-selected: var(--neutral-5);
+
+  --rim-lit: #ffffff2e;
+  --rim-shade: #ffffff0f;
+}
+
+/* ============================================================
+   LAYER 3 — TAILWIND REGISTRATION
+   `--color-*: initial` deletes Tailwind's default palette, so
+   `text-gray-500` does not exist. Only the roles above do.
+   ============================================================ */
+
+@theme inline {
+  --color-*: initial;
+
+  --color-app: var(--bg-app);
+  --color-panel: var(--bg-panel);
+  --color-float: var(--bg-float);
+  --color-inset: var(--bg-inset);
+  --color-hover: var(--bg-hover);
+
+  --color-primary: var(--text-primary);
+  --color-secondary: var(--text-secondary);
+  --color-tertiary: var(--text-tertiary);
+  --color-disabled: var(--text-disabled);
+
+  /* Borders register in their OWN namespace, not `--color-*`.
+     Text and borders share the emphasis names — primary, secondary, tertiary —
+     but hold different values: text is the dark end of the neutral ramp
+     (12/10/9), borders the light end (7/6/5). `--color-*` is a single namespace,
+     so registering borders there would make `border-primary` resolve to the text
+     colour and draw every hairline at near-black. It did exactly that until
+     these three lines existed. */
+  --border-color-primary: var(--border-primary);
+  --border-color-secondary: var(--border-secondary);
+  --border-color-tertiary: var(--border-tertiary);
+
+  --color-accent: var(--bg-accent);
+  --color-accent-tint: var(--bg-accent-tint);
+  --color-accent-tint-hover: var(--bg-accent-tint-hover);
+  --color-on-accent: var(--text-on-accent);
+
+  --color-inverse: var(--bg-inverse);
+  --color-inverse-hover: var(--bg-inverse-hover);
+  --color-on-inverse: var(--text-on-inverse);
+
+  --color-danger: var(--bg-danger);
+  --color-danger-tint: var(--bg-danger-tint);
+  --color-danger-tint-hover: var(--bg-danger-tint-hover);
+  --color-on-danger: var(--text-on-danger);
+  --color-success: var(--bg-success);
+  --color-success-tint: var(--bg-success-tint);
+  --color-success-tint-hover: var(--bg-success-tint-hover);
+  --color-on-success: var(--text-on-success);
+  --color-on-warning: var(--text-on-warning);
+  --color-on-info: var(--text-on-info);
+  --color-warning: var(--bg-warning);
+  --color-warning-tint: var(--bg-warning-tint);
+  --color-warning-tint-hover: var(--bg-warning-tint-hover);
+  --color-info: var(--bg-info);
+  --color-info-tint: var(--bg-info-tint);
+  --color-info-tint-hover: var(--bg-info-tint-hover);
+
+  --color-chrome-glass: var(--bg-chrome-glass);
+  --color-chrome-glass-hover: var(--bg-chrome-glass-hover);
+  --color-chrome-selected: var(--bg-chrome-selected);
+  --color-panel-glass: var(--bg-panel-glass);
+  --color-float-glass: var(--bg-float-glass);
+
+  --color-tint-blue: var(--tint-blue);
+  --color-tint-purple: var(--tint-purple);
+  --color-tint-orange: var(--tint-orange);
+  --color-tint-green: var(--tint-green);
+  --color-tint-red: var(--tint-red);
+  --color-tint-cyan: var(--tint-cyan);
+
+  --spacing-workspace-inset: var(--space-workspace-inset);
+  --spacing-panel-gap: var(--space-panel-gap);
+  --spacing-panel-inset: var(--space-panel-inset);
+  --spacing-control-inset: var(--space-control-inset);
+  --spacing-row-gap: var(--space-row-gap);
+  --spacing-tile-inset: var(--space-tile-inset);
+  --spacing-tile-gap: var(--space-tile-gap);
+}

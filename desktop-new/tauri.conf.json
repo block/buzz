@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Buzz Sessions",
+  "identifier": "xyz.block.buzz.sessions.dev",
+  "build": {
+    "beforeDevCommand": {
+      "script": "exec ./node_modules/.bin/vite --host 127.0.0.1",
+      "cwd": "../../desktop-new",
+      "wait": false
+    },
+    "devUrl": "http://127.0.0.1:1430",
+    "beforeBuildCommand": "pnpm --dir ../../desktop-new build",
+    "frontendDist": "../../desktop-new/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Buzz Sessions",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 760,
+        "minHeight": 540,
+        "visible": true
+      }
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["buzz-sessions"]
+      }
+    }
+  }
+}
