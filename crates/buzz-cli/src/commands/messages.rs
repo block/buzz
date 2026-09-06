@@ -658,11 +658,32 @@ pub async fn cmd_send_message(
         media_tags.push(crate::client::build_imeta_tag(&desc));
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
-        } else {
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else if desc.mime_type.starts_with("image/") {
             media_content.push_str("\n![image](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else {
+            // Generic files (JSON, text, PDF, octet-stream, ...) render as a
+            // plain link, not an inline image — an ![image](...) markdown tag
+            // for a non-image blob renders as a broken image in every client.
+            //
+            // Link text: escape `[`/`]` so an untrusted filename can't break
+            // out of the markdown link syntax, and never fall back to the
+            // full local path — that would leak the caller's filesystem
+            // layout into a channel-visible message.
+            let name = std::path::Path::new(file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.replace('[', "\\[").replace(']', "\\]"))
+                .unwrap_or_else(|| "attachment".to_string());
+            media_content.push_str("\n[");
+            media_content.push_str(&name);
+            media_content.push_str("](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
         }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
