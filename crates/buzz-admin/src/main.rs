@@ -508,6 +508,7 @@ async fn reconcile_channels(
             k
         }
     };
+    let relay_pubkey = relay_keys.public_key().to_bytes();
 
     let tenant = resolve_admin_tenant(&db).await?;
     let target_channel = channel_arg
@@ -609,17 +610,36 @@ async fn reconcile_channels(
 
         // kind:39002 — members
         {
+            let mut member_snapshot = db
+                .lock_member_snapshot(tenant.community(), channel.id, &relay_pubkey)
+                .await?;
             let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in &members {
+            let mut canonical_members = member_snapshot.members.iter().collect::<Vec<_>>();
+            canonical_members.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
+            for m in canonical_members {
                 let pk = hex::encode(&m.pubkey);
                 tags.push(Tag::parse(["p", &pk, "", &m.role])?);
             }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let ts = member_snapshot
+                .latest_member_event_timestamp(tenant.community(), channel.id, &relay_pubkey)
+                .await?
+                .map(|timestamp| timestamp + 1)
+                .unwrap_or(now)
+                .max(now);
             let event = EventBuilder::new(Kind::Custom(39002), "")
                 .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(ts))
+                .allow_self_tagging()
                 .sign_with_keys(&relay_keys)
                 .map_err(|e| anyhow::anyhow!("sign kind:39002: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
+            member_snapshot
+                .replace_member_event(tenant.community(), channel.id, &event)
                 .await?;
+            member_snapshot.release().await?;
         }
 
         reconciled += 1;
