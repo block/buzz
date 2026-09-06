@@ -501,6 +501,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Seconds between observer frame publishes. Lower values use more of the
+    /// agent's message quota (shared with real chat); higher values leave more
+    /// headroom at the price of doubled viewer latency. Default: 1.
+    #[arg(long, env = "BUZZ_ACP_OBSERVER_PUBLISH_TICK_SECS", default_value_t = 1)]
+    pub observer_publish_tick_secs: u64,
+
     /// Exit after this many seconds with no dispatched events and no turn in flight.
     /// 0 disables inactivity self-termination.
     #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
@@ -606,6 +612,8 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Seconds between observer frame publishes. Default: 1.
+    pub observer_publish_tick_secs: u64,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
@@ -1197,6 +1205,7 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            observer_publish_tick_secs: args.observer_publish_tick_secs,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
@@ -1573,6 +1582,7 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            observer_publish_tick_secs: 1,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
