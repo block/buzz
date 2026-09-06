@@ -238,14 +238,15 @@ pub async fn cmd_get_channel(client: &BuzzClient, channel_id: &str) -> Result<()
     });
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    if let Some(e) = events.first() {
-        let mut normalized = extract_channel_metadata(e);
-        normalized["pubkey"] =
-            serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
-        println!("{normalized}");
-    } else {
-        println!("null");
-    }
+    let Some(e) = events.first() else {
+        return Err(CliError::NotFound(format!(
+            "channel '{channel_id}' not found"
+        )));
+    };
+    let mut normalized = extract_channel_metadata(e);
+    normalized["pubkey"] =
+        serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
+    println!("{normalized}");
     Ok(())
 }
 
