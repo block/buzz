@@ -788,3 +788,59 @@ mod egress_guard_boundary {
         assert!(err.contains("key-backup material"), "{err}");
     }
 }
+
+// ── Snapshot text review contract ────────────────────────────────────────
+//
+// A team snapshot is a file from outside this install and its `instructions`
+// are runtime-layered into every member deployment, so import is the one place
+// they are reviewed before they can execute. The agent-snapshot path already
+// validates its definition text; this covers the team wrapper.
+
+fn snapshot_with_team_text(name: &str, instructions: Option<&str>) -> TeamSnapshot {
+    let mut snap = snapshot(vec![member("Alice")]);
+    snap.team.name = name.to_string();
+    snap.team.instructions = instructions.map(str::to_string);
+    snap
+}
+
+fn import_team(snap: &TeamSnapshot) -> Result<TeamRecord, String> {
+    build_import_team(snap, vec!["persona-1".to_string()], "now")
+}
+
+#[test]
+fn a_snapshot_with_concealed_instructions_is_refused() {
+    let snap = snapshot_with_team_text("Review Team", Some("Be thorough.\u{200B}"));
+    let error = import_team(&snap).unwrap_err();
+    assert!(error.starts_with("Team snapshot is unsafe"), "{error}");
+    assert!(error.contains("U+200B"), "{error}");
+}
+
+#[test]
+fn a_snapshot_with_a_concealed_team_name_is_refused() {
+    let snap = snapshot_with_team_text("Review\u{202E} Team", Some("Be thorough."));
+    assert!(import_team(&snap).is_err());
+}
+
+#[test]
+fn an_ordinary_snapshot_still_imports() {
+    let snap = snapshot_with_team_text("Review Team", Some("Be thorough.\n\tCheck tests."));
+    let team = import_team(&snap).unwrap();
+    assert_eq!(team.name, "Review Team");
+    assert_eq!(
+        team.instructions.as_deref(),
+        Some("Be thorough.\n\tCheck tests.")
+    );
+}
+
+#[test]
+fn a_snapshot_carrying_no_instructions_still_imports() {
+    let team = import_team(&snapshot_with_team_text("Review Team", None)).unwrap();
+    assert_eq!(team.instructions, None);
+}
+
+#[test]
+fn an_empty_team_name_is_still_refused_with_its_own_message() {
+    // The pre-existing emptiness check runs first and keeps its wording.
+    let error = import_team(&snapshot_with_team_text("   ", Some("Be thorough."))).unwrap_err();
+    assert_eq!(error, "Team snapshot name is empty.");
+}

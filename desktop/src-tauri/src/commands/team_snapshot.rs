@@ -168,6 +168,17 @@ pub(crate) fn build_import_team(
     if name.is_empty() {
         return Err("Team snapshot name is empty.".to_string());
     }
+    // Same review contract the agent-snapshot path applies to its definition
+    // text (`agent_snapshot.rs`). A snapshot is a file from outside this
+    // install, and a team's instructions are runtime-layered into every member
+    // deployment -- so this is the one place they are reviewed before they can
+    // execute. Phase 1 runs before key minting and before any store write, so a
+    // rejection here leaves nothing behind.
+    crate::managed_agents::validate_team_definition_text(
+        name,
+        snapshot.team.instructions.as_deref(),
+    )
+    .map_err(|error| format!("Team snapshot is unsafe: {error}"))?;
 
     Ok(TeamRecord {
         id: Uuid::new_v4().to_string(),
