@@ -5,6 +5,7 @@ import {
   classifyTool,
   parseBuzzCliCommand,
   tokenizeShellCommand,
+  tokenizeShellCommandTokens,
 } from "./agentSessionToolClassifier.ts";
 
 test("tokenizeShellCommand preserves quoted strings and command separators", () => {
@@ -103,6 +104,94 @@ test("parseBuzzCliCommand preserves --content=inline for sends", () => {
 
   assert.equal(descriptor?.renderClass, "message");
   assert.equal(descriptor?.preview, "Acknowledged");
+});
+
+test("tokenizeShellCommandTokens flags only tokens that can be substituted", () => {
+  const tokens = tokenizeShellCommandTokens(
+    "buzz messages send --content 'a `literal` $HOME' --channel \"$CHANNEL\"",
+  );
+  const flagged = tokens.map((token) => [token.value, token.hasSubstitution]);
+
+  assert.deepEqual(flagged, [
+    ["buzz", false],
+    ["messages", false],
+    ["send", false],
+    ["--content", false],
+    ["a `literal` $HOME", false],
+    ["--channel", false],
+    ["$CHANNEL", true],
+  ]);
+});
+
+test("parseBuzzCliCommand preserves single-quoted literal backticks in --content", () => {
+  const descriptor = parseBuzzCliCommand(
+    "buzz messages send --channel agents --content 'Fixed `labelForStatus` in the rail'",
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, "Fixed `labelForStatus` in the rail");
+  assert.equal(descriptor?.object, "Fixed `labelForStatus` in the rail");
+});
+
+test("parseBuzzCliCommand preserves a single-quoted literal dollar in --content", () => {
+  const descriptor = parseBuzzCliCommand(
+    "buzz messages send --channel agents --content 'Costs $5 per run, not $MESSAGE'",
+  );
+
+  assert.equal(descriptor?.preview, "Costs $5 per run, not $MESSAGE");
+});
+
+test("parseBuzzCliCommand preserves single-quoted literals in the --content=value form", () => {
+  const descriptor = parseBuzzCliCommand(
+    "buzz messages send --channel agents --content='use `pnpm test`'",
+  );
+
+  assert.equal(descriptor?.preview, "use `pnpm test`");
+});
+
+test("parseBuzzCliCommand rejects backslash-escaped substitution characters as non-portable", () => {
+  // bash treats `\$MESSAGE` as literal text, but PowerShell keeps the backslash
+  // and expands the variable anyway, so the escaped form cannot be trusted as a
+  // literal. Only single quoting is literal across the shells BUZZ_SHELL allows.
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel agents --content "literal \\$MESSAGE and \\`code\\`"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand still rejects an unquoted substitution in --content", () => {
+  for (const command of [
+    "buzz messages send --channel agents --content $MESSAGE",
+    "buzz messages send --channel agents --content `cat /tmp/f`",
+    "buzz messages send --channel agents --content=$MESSAGE",
+  ]) {
+    const descriptor = parseBuzzCliCommand(command);
+    assert.equal(descriptor?.renderClass, "message");
+    assert.equal(
+      descriptor?.preview,
+      null,
+      `send preview leaked a substitution for: ${command}`,
+    );
+  }
+});
+
+test("parseBuzzCliCommand rejects --content that mixes a literal with a substitution", () => {
+  const descriptor = parseBuzzCliCommand(
+    "buzz messages send --channel agents --content 'a `literal` '\"$MESSAGE\"",
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand keeps double-quoted backticks rejected as command substitution", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel agents --content "run `cat /tmp/f` now"',
+  );
+
+  assert.equal(descriptor?.preview, null);
 });
 
 test("parseBuzzCliCommand never surfaces --channel as preview for sends", () => {
