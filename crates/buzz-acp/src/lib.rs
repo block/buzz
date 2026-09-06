@@ -5306,6 +5306,24 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    /// Regression for a delivery-contract defect: a local edit once replaced
+    /// this section with "The Buzz bridge publishes your completed response
+    /// automatically" and told agents not to run `buzz messages send`
+    /// themselves. No code path turns a completed ACP turn's text into a
+    /// published relay event — `handle_session_update`'s `agent_message_chunk`
+    /// arm only logs it (see `acp.rs`) — so that claim silently dropped every
+    /// reply that didn't explicitly invoke the CLI. Pin the correct contract:
+    /// publishing is something the agent must actively do.
+    #[test]
+    fn shared_base_prompt_requires_explicit_publish_not_implicit_bridge_delivery() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("If your turn produced anything worth knowing, you MUST publish it."));
+        assert!(prompt.contains("Use `buzz messages send`."));
+        assert!(prompt.contains("If a human asked you something, you MUST reply to them"));
+        assert!(!prompt.contains("The Buzz bridge publishes your completed response automatically"));
+        assert!(!prompt.contains("Do not run `buzz messages send` yourself"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
