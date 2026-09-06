@@ -12,17 +12,17 @@ import { deriveConfiguredAgentStatuses } from "./agentStatusModel.ts";
 import { decodeLatestAgentMetricSnapshot } from "./useAgentStatusAdapter.ts";
 
 const NOW_SECONDS = 1_789_000_000;
-const VIC_TRA_PUBKEY = "a".repeat(64);
-const CLAUDE_PUBKEY = "b".repeat(64);
+const AGENT_ALPHA_PUBKEY = "a".repeat(64);
+const AGENT_BETA_PUBKEY = "b".repeat(64);
 
 const agents = [
-  { id: "victra", label: "Victra", agentPubkey: VIC_TRA_PUBKEY },
-  { id: "claude", label: "Claude", agentPubkey: CLAUDE_PUBKEY },
+  { id: "agent-alpha", label: "Agent Alpha", agentPubkey: AGENT_ALPHA_PUBKEY },
+  { id: "agent-beta", label: "Agent Beta", agentPubkey: AGENT_BETA_PUBKEY },
 ];
 
 function snapshot(overrides = {}) {
   return {
-    agentPubkey: VIC_TRA_PUBKEY,
+    agentPubkey: AGENT_ALPHA_PUBKEY,
     model: "opus-4.1",
     harness: "claude-code",
     contextUsedTokens: 75_000n,
@@ -36,7 +36,7 @@ function snapshot(overrides = {}) {
 describe("configured agent status model", () => {
   it("decodes RFC3339 windows and preserves u64 token precision", () => {
     const decoded = decodeLatestAgentMetricSnapshot({
-      agentPubkey: VIC_TRA_PUBKEY,
+      agentPubkey: AGENT_ALPHA_PUBKEY,
       model: "gpt-5.6-sol",
       harness: "hermes-agent",
       contextUsedTokens: "18446744073709551615",
@@ -101,7 +101,7 @@ describe("configured agent status model", () => {
 
   it("keeps source errors distinct from missing and unconfigured data", () => {
     const statuses = deriveConfiguredAgentStatuses({
-      agents: [agents[0], { id: "claude", label: "Claude" }],
+      agents: [agents[0], { id: "unconfigured", label: "Unconfigured agent" }],
       error: "Metrics unavailable",
       nowSeconds: NOW_SECONDS,
       snapshots: [],
@@ -129,7 +129,7 @@ describe("agent status surfaces", () => {
         ],
       }),
       snapshot({
-        agentPubkey: CLAUDE_PUBKEY,
+        agentPubkey: AGENT_BETA_PUBKEY,
         contextUsedTokens: 10_000n,
         contextLimitTokens: 200_000n,
         model: "sonnet-4",
@@ -145,7 +145,7 @@ describe("agent status surfaces", () => {
       AgentStatusDetails({ status: statuses[0], nowSeconds: NOW_SECONDS }),
     );
 
-    assert.match(indicator, /aria-label="Victra usage: 75%"/);
+    assert.match(indicator, /aria-label="Agent Alpha usage: 75%"/);
     assert.match(indicator, />75%</);
     assert.doesNotMatch(indicator, /5 hour/);
     assert.match(details, /75K \/ 100K tokens/);
@@ -169,7 +169,7 @@ describe("agent status surfaces", () => {
     });
     const indicator = renderToStaticMarkup(AgentStatusIndicator({ status }));
 
-    assert.match(indicator, /aria-label="Victra usage: 87%"/);
+    assert.match(indicator, /aria-label="Agent Alpha usage: 87%"/);
   });
 
   it("lists agent names compactly instead of rendering permanent metric cards", () => {
@@ -178,8 +178,8 @@ describe("agent status surfaces", () => {
     );
 
     assert.match(desktop, /aria-label="Agent usage"/);
-    assert.match(desktop, /Victra/);
-    assert.match(desktop, /Claude/);
+    assert.match(desktop, /Agent Alpha/);
+    assert.match(desktop, /Agent Beta/);
     assert.doesNotMatch(desktop, /role="progressbar"/);
     assert.doesNotMatch(desktop, /Context unavailable/);
   });
@@ -194,7 +194,7 @@ describe("agent status surfaces", () => {
       AgentStatusIndicator({ status: emptyStatuses[0] }),
     );
 
-    assert.match(markup, /aria-label="Victra usage unavailable"/);
+    assert.match(markup, /aria-label="Agent Alpha usage unavailable"/);
     assert.doesNotMatch(markup, /0%/);
   });
 });
