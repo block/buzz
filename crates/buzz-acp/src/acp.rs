@@ -4037,14 +4037,25 @@ mod tests {
     ///
     /// The steer request is the first thing this read loop writes, so the
     /// captured line IS the steer request bytes.
+    /// Render a path for interpolation into a `bash -c` script.
+    ///
+    /// A Windows path must not reach bash with its backslashes intact: unquoted,
+    /// bash consumes them as escapes, so `C:\Users\x\Temp\cap.json` collapses to
+    /// the relative `C:UsersxTempcap.json` and the redirect lands a junk file in
+    /// the working directory instead. Forward slashes are accepted by the MSYS
+    /// bash used on Windows, and the quotes the caller adds cover spaces.
+    fn bash_path(path: &std::path::Path) -> String {
+        path.display().to_string().replace('\\', "/")
+    }
+
     async fn spawn_steer_capture_script(
         capture_path: &std::path::Path,
         response: &str,
     ) -> AcpClient {
         let script = format!(
-            "read -r line; printf '%s' \"$line\" > {capture}; \
+            "read -r line; printf '%s' \"$line\" > \"{capture}\"; \
              printf '%s\\n' '{response}'; sleep 10",
-            capture = capture_path.display(),
+            capture = bash_path(capture_path),
             response = response,
         );
         spawn_script(&script).await
