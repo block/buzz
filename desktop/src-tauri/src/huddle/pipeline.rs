@@ -19,6 +19,7 @@ use crate::app_state::AppState;
 use crate::events;
 
 use super::models;
+use super::openai_stt::{self, OpenAiSttConfig};
 use super::relay_api::{self, fetch_channel_members, parse_channel_uuid};
 use super::state::{HuddlePhase, HuddleState, VoiceInputMode};
 use super::stt;
@@ -88,7 +89,10 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
             eprintln!("buzz-desktop: TTS hotstart failed: {e}");
         }
     }
-    if transcription_enabled && !has_stt && (stt_ready || models::is_stt_ready()) {
+    if transcription_enabled
+        && !has_stt
+        && (openai_stt::is_configured()? || stt_ready || models::is_stt_ready())
+    {
         if let Some(eph_id) = &ephemeral_channel_id {
             if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
                 eprintln!("buzz-desktop: STT hotstart failed: {e}");
@@ -226,7 +230,7 @@ pub(crate) async fn post_connect_setup(
     // explicit user choices remain authoritative.
     if let Some(mgr) = models::global_model_manager() {
         mgr.start_tts_download(state.http_client.clone());
-        if state.huddle()?.transcription_enabled {
+        if state.huddle()?.transcription_enabled && !openai_stt::is_configured()? {
             mgr.start_stt_download(state.http_client.clone());
         }
     }
@@ -292,10 +296,15 @@ pub(crate) async fn maybe_start_stt_pipeline(
         hs.huddle_generation
     };
 
-    if !models::is_stt_ready() {
-        return Ok(false); // Models not downloaded yet — voice-only mode.
-    }
-    let model_dir = models::stt_model_dir().ok_or("STT model directory not found")?;
+    let openai_config = OpenAiSttConfig::from_env()?;
+    let model_dir = if openai_config.is_none() {
+        if !models::is_stt_ready() {
+            return Ok(false);
+        }
+        Some(models::stt_model_dir().ok_or("STT model directory not found")?)
+    } else {
+        None
+    };
 
     let channel_uuid = parse_channel_uuid(ephemeral_channel_id)?;
 
@@ -361,14 +370,21 @@ pub(crate) async fn maybe_start_stt_pipeline(
     // Drop the old pipeline OUTSIDE the lock — thread join happens here.
     drop(old_stt);
 
-    let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(
-            model_dir,
+    let constructed = tokio::task::spawn_blocking(move || match openai_config {
+        Some(config) => stt::SttPipeline::new_openai(
+            config,
             ptt_active_for_stt,
             manual_mic_unmuted_for_stt,
             human_floor,
             output_device,
-        )
+        ),
+        None => stt::SttPipeline::new(
+            model_dir.ok_or("STT model directory not found")?,
+            ptt_active_for_stt,
+            manual_mic_unmuted_for_stt,
+            human_floor,
+            output_device,
+        ),
     })
     .await;
     let (pipeline, text_rx) = match constructed {
@@ -406,8 +422,17 @@ pub(crate) async fn maybe_start_stt_pipeline(
 
 /// Start STT after agent presence automatically enables transcription.
 pub(crate) async fn start_auto_enabled_transcription(state: &AppState, ephemeral_channel_id: &str) {
-    if let Some(manager) = models::global_model_manager() {
-        manager.start_stt_download(state.http_client.clone());
+    let openai_configured = match openai_stt::is_configured() {
+        Ok(configured) => configured,
+        Err(error) => {
+            tracing::warn!(error = %error, "automatic STT start rejected invalid configuration");
+            return;
+        }
+    };
+    if !openai_configured {
+        if let Some(manager) = models::global_model_manager() {
+            manager.start_stt_download(state.http_client.clone());
+        }
     }
     if let Err(error) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
         eprintln!("buzz-desktop: auto-enabled STT failed to start: {error}");
@@ -619,6 +644,69 @@ pub(crate) fn sign_and_guard_stt_body(
     Ok(body_bytes)
 }
 
+#[derive(Default)]
+struct TranscriptPublicationFilter {
+    previous: Option<String>,
+}
+
+impl TranscriptPublicationFilter {
+    fn should_publish(&mut self, text: &str) -> bool {
+        let normalized = normalize_transcript(text);
+        if normalized.is_empty()
+            || is_caption_hallucination(&normalized)
+            || is_pathological_repetition(&normalized)
+            || self.previous.as_deref() == Some(normalized.as_str())
+        {
+            return false;
+        }
+        self.previous = Some(normalized);
+        true
+    }
+}
+
+fn normalize_transcript(text: &str) -> String {
+    text.chars()
+        .flat_map(|character| match character {
+            'İ' => 'i'.to_lowercase(),
+            'I' => 'ı'.to_lowercase(),
+            character => character.to_lowercase(),
+        })
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_caption_hallucination(normalized: &str) -> bool {
+    [
+        "abone ol",
+        "izlediğiniz için teşekkür ederim",
+        "altyazı m k",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(&normalize_transcript(phrase)))
+}
+
+fn is_pathological_repetition(normalized: &str) -> bool {
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+    if words.len() < 8 {
+        return false;
+    }
+    let most_repeated = words
+        .iter()
+        .map(|candidate| words.iter().filter(|word| *word == candidate).count())
+        .max()
+        .unwrap_or_default();
+    most_repeated * 10 >= words.len() * 7
+}
+
 /// Spawn a tokio task that reads text_rx and posts kind:9 events.
 ///
 /// Fix 1: `agent_pubkeys_arc` is an `Arc<Mutex<Vec<String>>>` cloned from
@@ -645,10 +733,11 @@ pub(crate) fn spawn_transcription_task(
     let relay_base_url = crate::relay::relay_api_base_url_with_override(state);
 
     tauri::async_runtime::spawn(async move {
+        let mut publication_filter = TranscriptPublicationFilter::default();
         // recv().await yields (not blocks) until text arrives or sender is dropped.
         // When the STT worker exits and drops its Sender, recv() returns None → loop ends.
         while let Some(t) = text_rx.recv().await {
-            if t.is_empty() {
+            if !publication_filter.should_publish(&t) {
                 continue;
             }
 
@@ -877,5 +966,45 @@ mod tts_start_race_tests {
             .expect("huddle state")
             .tts_starting
             .load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+mod transcript_publication_filter_tests {
+    use super::TranscriptPublicationFilter;
+
+    #[test]
+    fn rejects_common_caption_hallucinations() {
+        let mut filter = TranscriptPublicationFilter::default();
+
+        assert!(!filter.should_publish("abone ol"));
+        assert!(!filter.should_publish("Abone ol, videoyu beğen."));
+        assert!(!filter.should_publish("İzlediğiniz için teşekkür ederim."));
+    }
+
+    #[test]
+    fn rejects_pathological_token_repetition() {
+        let mut filter = TranscriptPublicationFilter::default();
+
+        assert!(!filter.should_publish("iki iki iki iki iki iki iki iki"));
+    }
+
+    #[test]
+    fn rejects_only_consecutive_duplicates() {
+        let mut filter = TranscriptPublicationFilter::default();
+
+        assert!(filter.should_publish("Sorunu önce netleştirelim."));
+        assert!(!filter.should_publish("Sorunu önce netleştirelim."));
+        assert!(filter.should_publish("Sonra issue açalım."));
+        assert!(filter.should_publish("Sorunu önce netleştirelim."));
+    }
+
+    #[test]
+    fn preserves_real_turkish_slang() {
+        let mut filter = TranscriptPublicationFilter::default();
+
+        assert!(filter.should_publish(
+            "Kubilay bu iş böyle olmaz, amına koyayım. Önce problemi netleştirelim."
+        ));
     }
 }
