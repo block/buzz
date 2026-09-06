@@ -308,6 +308,29 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+## Device-only hosting policy
+
+Client-only mode is an installation preference, never a synchronized definition
+field. Native mint, import, execute, deploy and definition-management boundaries
+enforce it. Local runnable inventory is empty; `list_personas` projects inactive
+definitions without saving them. Do not infer permission to host from relay
+presence or create a secretless managed record for a remotely hosted identity.
+Automatic control-plane publication pauses while inbound public state still
+applies. Preferred exact identities narrow discovery within one owner/community;
+explicit historical keys remain exact. See `docs/agent-device-policy.md` at the
+repository root. Configuration edits to these rules must preserve the native
+guards and the restart boundary.
+
+Unique-name hosting separates execution from automatic control-plane sync:
+`client_only: false, unique_names: true` permits distinct local names while
+protecting remote names, keys and definition IDs. Apply the guard to the old
+identity before edits, to proposed names, and to indirect persona/team cascades.
+Only explicit local lifecycle retention can register keys for selective 30177,
+deletion and archive publication. Inbound replay and old queue scans cannot
+register keys. Runnable templates and the old backlog remain local. Never reuse
+the execution predicate to resume the whole queue. Discovery visibility controls
+must not remove the bindings used for execution protection.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness

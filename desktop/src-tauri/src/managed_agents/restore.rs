@@ -96,6 +96,9 @@ pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
 ) -> Result<(), String> {
+    if super::device_policy::is_client_only(app) {
+        return Ok(());
+    }
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -174,6 +177,7 @@ pub async fn restore_managed_agents_on_launch(
         let candidates: Vec<String> = records
             .iter()
             .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+            .filter(|record| super::device_policy::can_host_record(app, record))
             .map(|record| record.pubkey.clone())
             .collect();
 
@@ -499,6 +503,9 @@ fn profile_reconcile_completed(outcome: crate::commands::ProfileReconcileOutcome
 }
 
 pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, workspace_relay: &str) {
+    if super::device_policy::pauses_sync(app) {
+        return;
+    }
     let state = app.state::<AppState>();
     if !state
         .managed_agent_profile_reconcile_enabled()

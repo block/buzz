@@ -293,11 +293,35 @@ pub async fn flush_pending_events(
 /// The scope snapshots its relay, owner keys, and database path together
 /// before network work starts. Switching communities during the flush cannot
 /// redirect rows from the old scope into the new relay.
-pub async fn flush_active_pending_events(
-    app: &tauri::AppHandle,
+pub async fn flush_active_pending_events<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
 ) -> Result<u32, String> {
+    if super::device_policy::is_client_only(app) {
+        return Ok(0);
+    }
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    let policy = super::device_policy::active(app)?;
+    if policy.unique_names {
+        let mut keys = {
+            let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+            super::device_policy::sync::registered(&conn)?
+        };
+        keys.retain(|key| {
+            !policy
+                .preferred_agents
+                .iter()
+                .any(|agent| agent.pubkey.eq_ignore_ascii_case(key))
+        });
+        return flush_pending_events_selected(
+            &scope.db_path,
+            state,
+            &scope.relay_url,
+            &scope.owner_keys,
+            Some(keys),
+        )
+        .await;
+    }
     flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
 }
 
@@ -321,6 +345,146 @@ pub(crate) async fn flush_pending_events_at(
     state: &AppState,
     relay_url: &str,
     owner_keys: &nostr::Keys,
+) -> Result<u32, String> {
+    flush_pending_events_selected(db_path, state, relay_url, owner_keys, None).await
+}
+
+#[cfg(test)]
+mod unique_name_sync_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn selective_publisher_delivers_local_lifecycle_and_preserves_old_backlog() {
+        use crate::managed_agents::retention::{
+            get_pending_sync, open_retention_db, retain_event, RetainedEvent,
+        };
+        use nostr::JsonUtil;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("queue.sqlite");
+        let keys = nostr::Keys::generate();
+        let target = nostr::Keys::generate().public_key().to_hex();
+        let old_target = nostr::Keys::generate().public_key().to_hex();
+        let state = crate::app_state::build_app_state();
+        *state.keys.lock().unwrap() = keys.clone();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let received_by_server = received.clone();
+        let server = axum::Router::new().route("/events", axum::routing::post(move |body: String| {
+            let received = received_by_server.clone();
+            async move {
+                let event: nostr::Event = nostr::Event::from_json(body).unwrap();
+                event.verify().unwrap();
+                received.lock().unwrap().push(event.kind.as_u16() as u32);
+                axum::Json(serde_json::json!({"event_id":event.id.to_hex(),"accepted":true,"message":""}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, server).await.unwrap();
+        });
+        {
+            let conn = open_retention_db(&path).unwrap();
+            for (kind, d_tag) in [
+                (30177, target.clone()),
+                (5, format!("30177:{target}")),
+                (9035, target.clone()),
+                (30177, old_target.clone()),
+                (5, format!("30177:{old_target}")),
+                (30175, "local-template".into()),
+            ] {
+                let event = nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), "{}")
+                    .tags([nostr::Tag::parse(["d", &d_tag]).unwrap()])
+                    .sign_with_keys(&keys)
+                    .unwrap();
+                retain_event(
+                    &conn,
+                    &RetainedEvent {
+                        kind,
+                        pubkey: keys.public_key().to_hex(),
+                        d_tag,
+                        content: event.content.clone(),
+                        created_at: event.created_at.as_secs() as i64,
+                        raw_event: event.as_json(),
+                        pending_sync: true,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        let result = flush_pending_events_selected(
+            &path,
+            &state,
+            &url,
+            &keys,
+            Some(std::collections::HashSet::from([target])),
+        )
+        .await;
+        server_task.abort();
+        assert_eq!(result, Ok(3));
+        let mut kinds = received.lock().unwrap().clone();
+        kinds.sort();
+        assert_eq!(kinds, vec![5, 9035, 30177]);
+        let remaining = get_pending_sync(&open_retention_db(&path).unwrap()).unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining.iter().any(|row| row.d_tag == old_target));
+        assert!(remaining.iter().any(|row| row.kind == 30175));
+    }
+
+    #[tokio::test]
+    async fn selective_publisher_leaves_unregistered_backlog_and_templates_untouched() {
+        use crate::managed_agents::retention::{
+            get_pending_sync, open_retention_db, retain_event, RetainedEvent,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("queue.sqlite");
+        let keys = nostr::Keys::generate();
+        let state = crate::app_state::build_app_state();
+        {
+            let conn = open_retention_db(&path).unwrap();
+            for (kind, d_tag) in [
+                (30177, "old-remote"),
+                (5, "30177:old-remote"),
+                (30175, "new-local"),
+            ] {
+                retain_event(
+                    &conn,
+                    &RetainedEvent {
+                        kind,
+                        pubkey: keys.public_key().to_hex(),
+                        d_tag: d_tag.into(),
+                        content: "old backlog".into(),
+                        created_at: 1,
+                        raw_event: "must never be parsed or submitted".into(),
+                        pending_sync: true,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        let result = flush_pending_events_selected(
+            &path,
+            &state,
+            "http://127.0.0.1:1",
+            &keys,
+            Some(std::collections::HashSet::from(["new-local".into()])),
+        )
+        .await;
+        assert_eq!(result, Ok(0));
+        assert_eq!(
+            get_pending_sync(&open_retention_db(&path).unwrap())
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+}
+
+async fn flush_pending_events_selected(
+    db_path: &std::path::Path,
+    state: &AppState,
+    relay_url: &str,
+    owner_keys: &nostr::Keys,
+    local_keys: Option<std::collections::HashSet<String>>,
 ) -> Result<u32, String> {
     use crate::managed_agents::retention::{
         deferred_behind_failed_tombstone, get_pending_sync, get_retained_event, mark_synced,
@@ -352,6 +516,11 @@ pub(crate) async fn flush_pending_events_at(
     let mut failed_tombstones: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
     for row in pending {
+        if local_keys.as_ref().is_some_and(|keys| {
+            !super::device_policy::sync::allows_coordinate(keys, row.kind, &row.d_tag)
+        }) {
+            continue;
+        }
         if row.pubkey != owner_pubkey {
             continue;
         }

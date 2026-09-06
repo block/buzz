@@ -452,6 +452,7 @@ pub fn spawn_agent_child(
     owner_hex: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    super::device_policy::require_record(app, record)?;
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }

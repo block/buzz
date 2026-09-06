@@ -44,6 +44,12 @@ pub struct AppState {
     /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
     /// Never perform network I/O while holding this lock.
     pub managed_agent_runtime_transition: Mutex<()>,
+    /// Device execution policy is fixed until restart; never synchronized.
+    pub(crate) agent_device_policy: std::sync::OnceLock<
+        Result<crate::managed_agents::device_policy::model::DeviceAgentPolicy, String>,
+    >,
+    /// Serializes local agent name checks through durable creation or rename.
+    pub(crate) agent_name_transition: Arc<tokio::sync::Mutex<()>>,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
@@ -220,6 +226,8 @@ pub fn build_app_state() -> AppState {
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
+        agent_device_policy: std::sync::OnceLock::new(),
+        agent_name_transition: Arc::new(tokio::sync::Mutex::new(())),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),

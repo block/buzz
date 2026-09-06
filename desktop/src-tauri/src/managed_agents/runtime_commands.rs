@@ -142,6 +142,9 @@ pub fn put_managed_agent_runtime_lifecycle(
 pub async fn list_managed_agent_runtimes(
     app: AppHandle,
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
+    if super::device_policy::is_client_only(&app) {
+        return Ok(Vec::new());
+    }
     tokio::task::spawn_blocking(move || {
         // This command is polled whenever the members sidebar opens and refetched
         // on every status event — load the per-row status inputs once, outside
@@ -248,6 +251,7 @@ fn start_pair(
     expected_updated_at: Option<&str>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    super::device_policy::require_hosting(&app)?;
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -262,6 +266,7 @@ fn start_pair(
         .map_err(|e| e.to_string())?;
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
+    super::device_policy::require_record(&app, record)?;
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
     }
@@ -332,6 +337,7 @@ pub fn stop_managed_agent_runtime(
         .map_err(|e| e.to_string())?;
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
+    super::device_policy::require_record(&app, record)?;
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
     let mut runtimes = state
         .managed_agent_processes
@@ -468,6 +474,9 @@ pub async fn reconcile_managed_agent_runtimes(
     app: AppHandle,
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
     use futures_util::{stream, StreamExt};
+    if super::device_policy::is_client_only(&app) {
+        return Ok(Vec::new());
+    }
 
     let records = load_managed_agents(&app)?;
     let mut jobs = Vec::new();
@@ -475,6 +484,7 @@ pub async fn reconcile_managed_agent_runtimes(
         for record in records
             .iter()
             .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+            .filter(|record| super::device_policy::can_host_record(&app, record))
         // The legacy per-record relay pin is deliberately ignored here — see
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.

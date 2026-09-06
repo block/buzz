@@ -145,6 +145,35 @@ pub async fn update_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
+    crate::managed_agents::device_policy::require_hosting(&app)?;
+    let _name_guard = state.agent_name_transition.clone().lock_owned().await;
+    {
+        let records = load_managed_agents(&app)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == input.pubkey)
+            .ok_or("Agent not found")?;
+        crate::managed_agents::device_policy::require_record(&app, record)?;
+        if let Some(name) = input.name.as_deref() {
+            crate::managed_agents::device_policy::active(&app)?
+                .check_name_update(
+                    &record.name,
+                    name,
+                    Some(&record.pubkey),
+                    record.persona_id.as_deref(),
+                    || {
+                        crate::managed_agents::device_policy::unique_names::preflight(
+                            &app,
+                            &state,
+                            name,
+                            record.persona_id.as_deref(),
+                            Some(&record.pubkey),
+                        )
+                    },
+                )
+                .await?;
+        }
+    }
     // Phase 1: local save (synchronous, under lock)
     let (mut summary, sync_params, rollback, access_policy_changed, access_restart_relays) = {
         let _store_guard = state
@@ -163,6 +192,7 @@ pub async fn update_managed_agent(
         }
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
+        crate::managed_agents::device_policy::require_record(&app, record)?;
         let previous_record = record.clone();
 
         let mut name_changed = false;

@@ -93,6 +93,7 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?
     };
+    crate::managed_agents::device_policy::require_record(app, &record_snapshot)?;
     if record_snapshot.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is not a local agent"));
     }
@@ -182,6 +183,7 @@ pub(super) async fn start_local_agent_with_preflight(
             .ok_or_else(|| format!("agent {pubkey} not found"))?
     };
 
+    crate::managed_agents::device_policy::require_record(app, &record_snapshot)?;
     if record_snapshot.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is not a local agent"));
     }
@@ -291,6 +293,9 @@ pub(crate) use provider_deploy::deploy_to_provider;
 // and `std::sync::MutexGuard` is not `Send`.
 #[tauri::command]
 pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSummary>, String> {
+    if crate::managed_agents::device_policy::is_client_only(&app) {
+        return Ok(Vec::new());
+    }
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -322,6 +327,7 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
             crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
         records
             .iter()
+            .filter(|record| crate::managed_agents::device_policy::can_host_record(&app, record))
             .map(|record| {
                 build_managed_agent_summary(
                     &app,
@@ -344,6 +350,7 @@ pub async fn create_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CreateManagedAgentResponse, String> {
+    crate::managed_agents::device_policy::require_hosting(&app)?;
     let name = input.name.trim().to_string();
     let requested_persona_id = input
         .persona_id
@@ -351,6 +358,15 @@ pub async fn create_managed_agent(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let _name_guard = state.agent_name_transition.clone().lock_owned().await;
+    crate::managed_agents::device_policy::unique_names::preflight(
+        &app,
+        &state,
+        &name,
+        requested_persona_id.as_deref(),
+        None,
+    )
+    .await?;
     validate_create_definition(&name, requested_persona_id.as_deref(), &input)?;
     if let Some(parallelism) = input.parallelism {
         if !(1..=32).contains(&parallelism) {
@@ -400,7 +416,11 @@ pub async fn create_managed_agent(
             let personas = load_personas(&app)?;
             ensure_persona_is_active(&personas, persona_id)?;
         }
-        let keys = Keys::generate();
+        let keys = crate::managed_agents::device_policy::generate_agent_keys(
+            &app,
+            &name,
+            requested_persona_id.as_deref(),
+        )?;
         let pubkey = keys.public_key().to_hex();
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
@@ -727,6 +747,7 @@ pub async fn create_managed_agent(
                     .lock()
                     .map_err(|e| e.to_string())?;
                 let record = find_managed_agent_mut(&mut records, &pubkey)?;
+                crate::managed_agents::device_policy::require_record(&app, record)?;
                 record.updated_at = now_iso();
                 record.last_error = Some(error.clone());
                 save_managed_agents(&app, &records)?;
@@ -827,6 +848,7 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    crate::managed_agents::device_policy::require_hosting(&app)?;
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
@@ -887,6 +909,7 @@ pub async fn start_managed_agent(
         }
 
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
+        crate::managed_agents::device_policy::require_record(&app, record)?;
 
         // Resolve the effective harness for the avatar-fallback derivation in
         // profile reconcile (the create-time snapshot may be empty or stale for
@@ -1032,6 +1055,7 @@ pub async fn stop_managed_agent(
 
         {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
+            crate::managed_agents::device_policy::require_record(&app, record)?;
             // Remote agents are stopped via !shutdown @mention from the frontend,
             // not via this backend command. Reject the call.
             if record.backend != BackendKind::Local {
@@ -1076,6 +1100,7 @@ pub async fn delete_managed_agent(
     force_remote_delete: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
+    crate::managed_agents::device_policy::require_hosting(&app)?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -1113,6 +1138,7 @@ pub async fn delete_managed_agent(
             // remote deployment. The frontend sends force_remote_delete: true only after
             // the user confirms the orphan warning.
             if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
+                crate::managed_agents::device_policy::require_record(&app, record)?;
                 if record.backend != BackendKind::Local
                     && record.backend_agent_id.is_some()
                     && !force_remote_delete.unwrap_or(false)

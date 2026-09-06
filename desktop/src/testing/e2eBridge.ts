@@ -587,6 +587,17 @@ type E2eConfig = {
       model: string | null;
       preferred_runtime?: string | null;
     };
+    /** Per-device hosting preference; active mode stays fixed until restart. */
+    agentDevicePolicy?: {
+      client_only: boolean;
+      unique_names?: boolean;
+      preferred_agents: Array<{
+        relay_url: string;
+        owner_pubkey: string;
+        name: string;
+        pubkey: string;
+      }>;
+    };
     /** Explicit owner-only agent-access capability; independent of baked defaults. */
     ownerOnlyAccessBuild?: boolean;
     /** File-layer config returned by runtime id. */
@@ -8601,6 +8612,26 @@ let installCallCount = 0;
 const installCallCountByRuntime: Record<string, number> = {};
 let addChannelMembersCallCount = 0;
 let setGlobalAgentConfigCallCount = 0;
+let mockAgentDevicePolicy: {
+  client_only: boolean;
+  unique_names?: boolean;
+  preferred_agents: Array<{
+    relay_url: string;
+    owner_pubkey: string;
+    name: string;
+    pubkey: string;
+  }>;
+} = {
+  client_only: false,
+  preferred_agents: [] as Array<{
+    relay_url: string;
+    owner_pubkey: string;
+    name: string;
+    pubkey: string;
+  }>,
+};
+let mockActiveClientOnly = false;
+let mockActiveUniqueNames = false;
 let mockGlobalAgentConfig: {
   env_vars: Record<string, string>;
   provider: string | null;
@@ -11363,6 +11394,14 @@ export function maybeInstallE2eTauriMocks() {
     return queued.length;
   };
   window.__BUZZ_E2E_USERS_BATCH_PENDING__ = () => heldUsersBatchReleases.length;
+  mockAgentDevicePolicy = structuredClone(
+    config.mock?.agentDevicePolicy ?? {
+      client_only: false,
+      preferred_agents: [],
+    },
+  );
+  mockActiveClientOnly = mockAgentDevicePolicy.client_only;
+  mockActiveUniqueNames = mockAgentDevicePolicy.unique_names ?? false;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -14129,6 +14168,27 @@ export function maybeInstallE2eTauriMocks() {
           ?.runtimeId;
         if (!runtimeId) return null;
         return config.mock?.runtimeFileConfigs?.[runtimeId] ?? null;
+      }
+      case "get_agent_device_policy":
+        return {
+          activeClientOnly: mockActiveClientOnly,
+          activeUniqueNames: mockActiveUniqueNames,
+          saved: mockAgentDevicePolicy,
+          restartRequired:
+            mockActiveClientOnly !== mockAgentDevicePolicy.client_only,
+          loadError: null,
+        };
+      case "set_agent_device_policy": {
+        mockAgentDevicePolicy = structuredClone(
+          (payload as { policy: typeof mockAgentDevicePolicy }).policy,
+        );
+        return {
+          activeClientOnly: mockActiveClientOnly,
+          activeUniqueNames: mockActiveUniqueNames,
+          saved: mockAgentDevicePolicy,
+          restartRequired: true,
+          loadError: null,
+        };
       }
       case "get_global_agent_config": {
         // Return the mutable persisted mock value, seeded from the test config.

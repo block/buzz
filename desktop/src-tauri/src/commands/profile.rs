@@ -267,6 +267,33 @@ pub async fn search_users(
     limit: Option<u32>,
     cursor: Option<String>,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<SearchUsersResponse, String> {
+    let policy = crate::managed_agents::device_policy::active(&app)?;
+    let relay_url = crate::relay::relay_api_base_url_with_override(&state);
+    let exact_key = nostr::PublicKey::parse(query.trim()).is_ok();
+    let mut response = search_users_unfiltered(query, limit, cursor, state).await?;
+    // Name-based invitation and people pickers share the preferred identity
+    // rule. Explicit public-key requests and pagination keep their authority.
+    if !exact_key {
+        response.users.retain(|user| {
+            !user.is_agent
+                || policy.allows_identity(
+                    &relay_url,
+                    user.owner_pubkey.as_deref(),
+                    user.display_name.as_deref().unwrap_or(""),
+                    &user.pubkey,
+                )
+        });
+    }
+    Ok(response)
+}
+
+async fn search_users_unfiltered(
+    query: String,
+    limit: Option<u32>,
+    cursor: Option<String>,
+    state: State<'_, AppState>,
 ) -> Result<SearchUsersResponse, String> {
     let trimmed = query.trim();
     let max = limit.unwrap_or(8).min(500) as usize;

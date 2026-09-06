@@ -32,6 +32,11 @@ pub(crate) fn retain_managed_agent_pending(
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let conn = open_retention_db(&scope.db_path)?;
+        let policy = crate::managed_agents::device_policy::active(app)?;
+        if policy.unique_names {
+            crate::managed_agents::device_policy::require_record(app, record)?;
+            crate::managed_agents::device_policy::sync::register(&conn, &record.pubkey)?;
+        }
         // Shared engine with the boot-time reconcile: projection content diff
         // (no republish for runtime-only churn) + monotonic created_at bump
         // past the retained head (NIP-AP step 3).
