@@ -35,6 +35,22 @@ test("explains authenticated GitLab clone failures with glab login guidance", ()
   );
 });
 
+test("preserves missing credential helper remediation", () => {
+  assert.deepEqual(
+    projectCloneErrorPresentation(
+      new Error(
+        "fatal: could not read Username. If this repository is private, install the glab CLI, run `glab auth login`, and restart Buzz before trying again.",
+      ),
+      "https://gitlab.onlyarag.com/example/app.git",
+    ),
+    {
+      title: "GitLab CLI required",
+      description:
+        "Install the GitLab CLI, run `glab auth login`, restart Buzz, and try again.",
+    },
+  );
+});
+
 test("presents missing and network failures clearly", () => {
   assert.equal(
     projectCloneErrorPresentation(new Error("Repository not found")).title,

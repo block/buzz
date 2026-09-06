@@ -11,7 +11,7 @@ use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
     build_git_auth_config, build_git_auth_config_for_url, run_git,
-    validate_local_clone_url_for_workspace,
+    validate_local_clone_url_for_workspace, validate_workspace_clone_url,
 };
 use super::project_git_workflow::clone_project_repository_blocking;
 use super::project_repo_paths::find_local_repo_dir;
@@ -170,7 +170,7 @@ pub async fn open_project_merge_recovery_terminal(
     input: ProjectMergeRecoveryTerminalInput,
     state: State<'_, AppState>,
 ) -> Result<ProjectMergeRecoveryTerminalResult, String> {
-    validate_local_clone_url_for_workspace(&input.target_clone_url, &state)?;
+    validate_workspace_clone_url(&input.target_clone_url, &state)?;
     validate_local_clone_url_for_workspace(&input.source_clone_url, &state)?;
     let target_branch = normalize_branch_option(Some(&input.target_branch))
         .ok_or_else(|| "Invalid target branch.".to_string())?;

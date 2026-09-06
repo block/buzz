@@ -46,7 +46,17 @@ fn git_subcommand<'a>(args: &'a [&str]) -> Option<&'a str> {
 fn git_needs_credentials(args: &[&str]) -> bool {
     matches!(
         git_subcommand(args),
-        Some("clone" | "fetch" | "push" | "pull" | "ls-remote" | "merge")
+        Some(
+            "clone"
+                | "fetch"
+                | "push"
+                | "pull"
+                | "ls-remote"
+                | "merge"
+                | "checkout"
+                | "show"
+                | "diff"
+        )
     )
 }
 
@@ -162,8 +172,21 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_SSH_COMMAND",
         "GIT_EXTERNAL_DIFF",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_EXEC_PATH",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "NOSTR_PRIVATE_KEY",
+        TRUSTED_EXTERNAL_GIT_ORIGINS_ENV,
     ] {
         command.env_remove(key);
+    }
+    for (key, _) in std::env::vars_os() {
+        let key = key.to_string_lossy();
+        if key.starts_with("GIT_CONFIG_KEY_") || key.starts_with("GIT_CONFIG_VALUE_") {
+            command.env_remove(key.as_ref());
+        }
     }
     // Git for Windows maps `/dev/null` to `NUL` internally, so this value
     // disables the global config file on every platform.
@@ -351,6 +374,13 @@ pub(crate) fn validate_clone_url(clone_url: &str) -> Result<(), String> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("clone URL must be http or https".into());
     }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("clone URL must not contain credentials, a query, or fragment".into());
+    }
     // Buzz git remotes are served at `…/git/<owner-pubkey>/<repo-id>` — a
     // literal `git` segment followed by the 64-hex owner pubkey and a
     // non-empty repository id (the relay may live under a path prefix).
@@ -501,7 +531,7 @@ fn external_https_remote_with_trusted(
         return Err("GitHub clone URL must name one owner and repository".into());
     }
     let origin = parsed.origin().ascii_serialization();
-    let is_trusted = host == "github.com" || trusted_origins.contains(&origin);
+    let is_trusted = origin == "https://github.com" || trusted_origins.contains(&origin);
     if !is_trusted {
         return Err(
             "external clone URL host must be github.com or a host listed in \
@@ -1007,6 +1037,7 @@ mod tests {
 
         assert!(validate_local_clone_url("https://github.com/block/buzz").is_ok());
         assert!(validate_local_clone_url("https://github.com/block/buzz.git").is_ok());
+        assert!(validate_local_clone_url("https://github.com:8443/block/buzz").is_err());
         assert!(validate_local_clone_url("http://github.com/block/buzz").is_err());
         assert!(validate_local_clone_url("https://github.com/block/buzz/issues").is_err());
         assert!(validate_local_clone_url("https://user@github.com/block/buzz").is_err());

@@ -474,7 +474,13 @@ pub async fn get_project_local_repo_diff(
     target_commit: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Option<ProjectRepoDiffInfo>, String> {
-    let auth = build_git_auth_config(&state)?;
+    let auth = match clone_url.as_deref() {
+        Some(clone_url) => {
+            validate_local_clone_url_for_workspace(clone_url, &state)?;
+            build_git_auth_config_for_url(clone_url, &state)?
+        }
+        None => build_git_auth_config(&state)?,
+    };
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
     let base_commit = clean_commit(base_commit);

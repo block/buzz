@@ -47,6 +47,20 @@ export function projectCloneErrorPresentation(
         "You need access to the repository’s channel before you can clone it.",
     };
   }
+  if (message.includes("install the gh cli")) {
+    return {
+      title: "GitHub CLI required",
+      description:
+        "Install the GitHub CLI, run `gh auth login`, restart Buzz, and try again.",
+    };
+  }
+  if (message.includes("install the glab cli")) {
+    return {
+      title: "GitLab CLI required",
+      description:
+        "Install the GitLab CLI, run `glab auth login`, restart Buzz, and try again.",
+    };
+  }
   if (
     /\b(?:401|403)\b|authenticat|authoriz|permission denied|access denied|ssh certificate/.test(
       message,
