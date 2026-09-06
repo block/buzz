@@ -25,9 +25,14 @@ pub use storage::{
     ObjectVersionKind, ObjectVersionRef, ObjectVersionsPage,
 };
 pub use types::BlobDescriptor;
-pub use upload::{process_file_upload, process_upload, process_video_upload};
+pub use upload::{
+    process_file_upload, process_file_upload_with_hints, process_upload, process_video_upload,
+    FileUploadHints,
+};
 pub use upload_record::{
-    parse_port, parse_public_ip, upload_record_key, UploadAttribution, UploadNetworkInfo,
-    UploadRecord, UPLOAD_RECORD_VERSION,
+    parse_port, parse_public_ip, process_upload_record_repair_page, upload_record_key,
+    UploadAttribution, UploadNetworkInfo, UploadRecord, UploadRecordRepairFuture,
+    UploadRecordRepairOutcome, UploadRecordRepairPage, UploadRecordRepairProtector,
+    UPLOAD_RECORD_REPAIR_PREFIX, UPLOAD_RECORD_VERSION,
 };
 pub use validation::{looks_like_iso_bmff, serve_inline, validate_video_file, VideoMeta};

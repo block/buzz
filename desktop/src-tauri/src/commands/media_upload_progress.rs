@@ -64,9 +64,29 @@ pub(super) struct UploadAttempt<'a> {
     pub auth_header: &'a str,
     pub mime: &'a str,
     pub sha256: &'a str,
+    pub file_extension: Option<&'a str>,
     pub body: bytes::Bytes,
     pub progress: Option<&'a (tauri::AppHandle, String)>,
     pub cancellation: Option<&'a CancellationToken>,
+}
+
+fn build_upload_request(
+    client: &reqwest::Client,
+    url: &str,
+    auth_header: &str,
+    mime: &str,
+    sha256: &str,
+    file_extension: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .put(url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", mime)
+        .header("X-SHA-256", sha256);
+    match file_extension {
+        Some(extension) => request.header("X-Buzz-File-Extension", extension),
+        None => request,
+    }
 }
 
 pub(super) async fn send_upload_attempt(
@@ -78,16 +98,19 @@ pub(super) async fn send_upload_attempt(
         auth_header,
         mime,
         sha256,
+        file_extension,
         body,
         progress,
         cancellation,
     } = attempt;
-    let req = state
-        .http_client
-        .put(url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", mime)
-        .header("X-SHA-256", sha256);
+    let req = build_upload_request(
+        &state.http_client,
+        &url,
+        auth_header,
+        mime,
+        sha256,
+        file_extension,
+    );
 
     let response = if let Some((app, progress_id)) = progress {
         let app = app.clone();
@@ -150,6 +173,25 @@ pub(super) fn emit_media_upload_phase(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_upload_request_carries_exact_classification_headers() {
+        let request = build_upload_request(
+            &reqwest::Client::new(),
+            "https://relay.example/upload",
+            "Nostr token",
+            "text/calendar",
+            "abc123",
+            Some("ics"),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(request.url().path(), "/upload");
+        assert_eq!(request.headers()["Content-Type"], "text/calendar");
+        assert_eq!(request.headers()["X-Buzz-File-Extension"], "ics");
+        assert_eq!(request.headers()["X-SHA-256"], "abc123");
+    }
 
     #[test]
     fn cancellation_before_begin_is_retained() {
