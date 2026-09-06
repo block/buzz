@@ -155,11 +155,19 @@ session.close()
 ```
 
 PCM chunks have an explicit sample rate, mono channel count, sample format, and
-bounded duration. Buzz performs exactly one normalization at each media
-boundary: local captured PCM to the provider's required PCM input, and provider
-PCM to 48 kHz mono frames for Huddle Opus publication. The VOICE 2 input path
-never decodes Huddle Opus. Provider wire messages and provider-specific
-rate/format negotiation stay inside the adapter.
+bounded duration. Duration is not the memory bound: each adapter must enforce a
+fixed raw WebSocket-message byte limit before JSON or audio decoding, reject an
+encoded audio field over its fixed byte limit before base64 decoding, and reject
+decoded PCM over fixed byte and sample-count limits before conversion or
+resampling. The limits belong to the typed adapter input contract and must be
+sized for the largest supported provider frame, not from provider-declared rate
+metadata.
+
+Buzz performs exactly one normalization at each media boundary: local captured
+PCM to the provider's required PCM input, and provider PCM to 48 kHz mono frames
+for Huddle Opus publication. The VOICE 2 input path never decodes Huddle Opus.
+Provider wire messages and provider-specific rate/format negotiation stay
+inside the adapter.
 
 The session configuration may contain provider model/voice settings and
 non-secret dialogue instructions. It does not contain Nostr keys, relay auth,
@@ -270,6 +278,10 @@ VOICE 2 is ready only when focused local tests demonstrate all of the following:
   frames whose sequence and 48 kHz timestamp advance by 1 and 960 respectively,
   including the v2 contract's defined integer wrapping boundaries;
 - bounded media queues prefer freshness and cannot grow without limit;
+- provider transport tests accept the exact raw-message, encoded-audio, decoded
+  byte, and sample-count maxima, reject each maximum plus one before the next
+  allocation/transformation stage, and reject forged rate metadata that would
+  otherwise bypass duration-only validation;
 - cancellation prevents queued provider audio from being published;
 - provider disconnect tears down the agent audio peer without ending the human
   Huddle, while audio authority loss tears down the provider session;
