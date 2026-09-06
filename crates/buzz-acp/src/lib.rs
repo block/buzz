@@ -25,7 +25,8 @@ use std::time::Duration;
 use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2,
     KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
@@ -2717,13 +2718,10 @@ async fn tokio_main() -> Result<()> {
             vec![SubscriptionRule {
                 name: "mentions".into(),
                 channels: filter::ChannelScope::All("all".into()),
-                kinds: config.kinds_override.clone().unwrap_or_else(|| {
-                    vec![
-                        KIND_STREAM_MESSAGE,
-                        KIND_WORKFLOW_APPROVAL_REQUESTED,
-                        KIND_STREAM_REMINDER,
-                    ]
-                }),
+                kinds: config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_mention_kinds),
                 require_mention: !config.no_mention_filter,
                 filter: None,
                 compiled_filter: None,
@@ -4164,6 +4162,29 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
         t.as_slice().first().map(|s| s.as_str()) == Some("p")
             && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
     })
+}
+
+/// Event kinds `--subscribe mentions` listens to by default.
+///
+/// A forum channel carries its conversation as kind:45001 posts and kind:45003
+/// comments, not kind:9 — so an agent left on the default subscription was
+/// deaf in exactly the channels built for threaded discussion: it joined, it
+/// showed online, and an `@mention` in a forum post produced no inbound event
+/// at all (#5268).
+///
+/// The canonical message kinds are 9 *and* 40002; `buzz-db`'s mentions query
+/// (`feed.rs`) selects both alongside the two forum kinds, and this list has
+/// to match it or an agent stays deaf to direct mentions in v2 stream
+/// messages.
+fn default_mention_kinds() -> Vec<u32> {
+    vec![
+        KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_V2,
+        KIND_FORUM_POST,
+        KIND_FORUM_COMMENT,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_STREAM_REMINDER,
+    ]
 }
 
 fn is_owner_control_command(
@@ -11246,5 +11267,45 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod default_mention_kinds_tests {
+    use super::default_mention_kinds;
+    use buzz_core::kind::{
+        KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2,
+        KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    };
+
+    #[test]
+    fn mentions_cover_forum_channels() {
+        // A forum channel's conversation is 45001/45003, so leaving them out
+        // makes the default subscription deaf there (#5268).
+        let kinds = default_mention_kinds();
+        assert!(kinds.contains(&KIND_FORUM_POST), "{kinds:?}");
+        assert!(kinds.contains(&KIND_FORUM_COMMENT), "{kinds:?}");
+    }
+
+    #[test]
+    fn mentions_still_cover_the_stream_kinds_they_always_did() {
+        let kinds = default_mention_kinds();
+        for kind in [
+            KIND_STREAM_MESSAGE,
+            KIND_WORKFLOW_APPROVAL_REQUESTED,
+            KIND_STREAM_REMINDER,
+        ] {
+            assert!(kinds.contains(&kind), "{kind} missing from {kinds:?}");
+        }
+    }
+
+    #[test]
+    fn mentions_cover_both_canonical_message_kinds() {
+        // buzz-db's mentions query selects 9 and 40002 together; a default
+        // that carries only 9 leaves an agent deaf to direct mentions in v2
+        // stream messages.
+        let kinds = default_mention_kinds();
+        assert!(kinds.contains(&KIND_STREAM_MESSAGE), "{kinds:?}");
+        assert!(kinds.contains(&KIND_STREAM_MESSAGE_V2), "{kinds:?}");
     }
 }
