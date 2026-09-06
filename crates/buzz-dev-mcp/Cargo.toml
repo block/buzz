@@ -40,8 +40,11 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 buzz-core = { workspace = true }
 
+# "fs" is needed by the temp-dir lease and the hardened marker read in
+# `sweep`: flock's FD_CLOEXEC handling (fcntl/FdFlag) and the O_NOFOLLOW /
+# O_NONBLOCK open flags (OFlag) all live behind it.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "signal", "process"] }
 
 # Windows Job Object APIs for the shell tool's timeout kill path: terminating a
 # job kills the bash child AND every MSYS grandchild it forked, the Windows
@@ -50,4 +53,6 @@ nix = { version = "0.31", default-features = false, features = ["signal", "proce
 # required because CreateJobObjectW takes a SECURITY_ATTRIBUTES parameter;
 # Win32_System_Threading supplies IO_COUNTERS inside the extended-limit struct.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading"] }
+# Win32_Storage_FileSystem supplies the FILE_SHARE_* flags the temp-dir lease
+# opens with (`sweep::acquire_lease`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading"] }
