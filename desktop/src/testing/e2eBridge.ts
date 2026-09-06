@@ -1364,6 +1364,8 @@ declare global {
     __BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__?: boolean;
     /** Project event kinds accepted once but reported as failed to test lost acknowledgements. */
     __BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?: number[];
+    /** Makes hiding a DM fail, to exercise the error path of the sidebar close action. */
+    __BUZZ_E2E_FAIL_HIDE_DM__?: string;
     /**
      * Extra project events appended to the mock store on first access.
      * Use to seed standalone repositories (kind 30617) or other project-scoped
@@ -7401,6 +7403,11 @@ async function handleHideDm(
   args: { channelId: string },
   config: E2eConfig | undefined,
 ) {
+  const forcedFailure = window.__BUZZ_E2E_FAIL_HIDE_DM__;
+  if (forcedFailure) {
+    throw new Error(forcedFailure);
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const index = mockChannels.findIndex(
