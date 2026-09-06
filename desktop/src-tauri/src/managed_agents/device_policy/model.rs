@@ -122,7 +122,19 @@ pub fn load_policy(path: &Path) -> Result<DeviceAgentPolicy, String> {
     if bytes.len() > 65_536 {
         return Err("Agent device policy exceeds 64 KiB".into());
     }
-    serde_json::from_slice(&bytes).map_err(|error| format!("Invalid agent device policy: {error}"))
+    let mut policy: DeviceAgentPolicy = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Invalid agent device policy: {error}"))?;
+    for (index, preferred) in policy.preferred_agents.iter_mut().enumerate() {
+        for (field, value) in [
+            ("pubkey", &mut preferred.pubkey),
+            ("owner_pubkey", &mut preferred.owner_pubkey),
+        ] {
+            *value = nostr::PublicKey::from_hex(value.as_str())
+                .map_err(|_| format!("Invalid agent device policy: preferred_agents[{index}].{field} must be a 64-character hexadecimal public key"))?
+                .to_hex();
+        }
+    }
+    Ok(policy)
 }
 
 /// Freeze execution policy for this application lifetime so a preference change
@@ -266,6 +278,36 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
             assert!(load_policy(&path).is_err(), "accepted {bytes}");
         }
+    }
+
+    #[test]
+    fn policy_load_rejects_malformed_preferred_keys_and_normalizes_valid_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        for (field, value) in [
+            ("pubkey", "typo"),
+            ("owner_pubkey", "typo"),
+            ("pubkey", ""),
+            ("pubkey", "gggg"),
+        ] {
+            let mut input = serde_json::json!({"client_only": false, "preferred_agents": [{
+                "relay_url": "https://relay.example", "name": "Scout",
+                "owner_pubkey": owner, "pubkey": agent
+            }]});
+            input["preferred_agents"][0][field] = value.into();
+            std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+            assert!(load_policy(&path).is_err(), "accepted invalid {field}");
+        }
+        let input = serde_json::json!({"client_only": false, "preferred_agents": [{
+            "relay_url": "https://relay.example", "name": "Scout",
+            "owner_pubkey": owner.to_uppercase(), "pubkey": agent.to_uppercase()
+        }]});
+        std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+        let loaded = load_policy(&path).unwrap();
+        assert_eq!(loaded.preferred_agents[0].pubkey, agent);
+        assert_eq!(loaded.preferred_agents[0].owner_pubkey, owner);
     }
 
     #[test]

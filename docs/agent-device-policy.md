@@ -7,6 +7,14 @@ public keys and optional `persona_id` bindings cannot be created, started,
 renamed, deleted or managed locally. An unrelated name can be created and run.
 The ordinary Client-only switch still disables all local hosting.
 
+Hosting reservations apply across this installation's local agent catalog,
+including after switching accounts or communities. A protected name remains
+reserved locally, and a copied protected public key or definition ID cannot be
+started by changing the active community. The `relay_url` and `owner_pubkey`
+fields below scope discovery preferences; they do not create separate local
+hosting namespaces. Hosting unrelated same-name agents in different communities
+would require a separate change to the local catalog's collision rules.
+
 Existing-identity protection requires explicit `preferred_agents` bindings in
 the device policy file described below. Settings does not infer which computer
 should host a copied record. An empty binding list still checks new names for

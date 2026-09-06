@@ -86,6 +86,16 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+// Keep cleanup and the restore decision in one production seam so client-only
+// startup cannot bypass stale-process reaping after a prior Desktop crash.
+fn prepare_restore_housekeeping<T>(
+    client_only: bool,
+    housekeeping: impl FnOnce() -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    let state = housekeeping()?;
+    Ok((!client_only).then_some(state))
+}
+
 /// Restore managed agents that were running before the app was closed.
 ///
 /// Split into three phases to minimise lock contention with the frontend:
@@ -96,9 +106,7 @@ pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
 ) -> Result<(), String> {
-    if super::device_policy::is_client_only(app) {
-        return Ok(());
-    }
+    let client_only = super::device_policy::is_client_only(app);
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -127,52 +135,65 @@ pub async fn restore_managed_agents_on_launch(
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
-        let (mut changed, _exited) = sync_managed_agent_processes(
-            &mut records,
-            &mut runtimes,
-            &super::current_instance_id(app),
-        );
-        changed |=
-            kill_stale_tracked_processes(&mut records, &runtimes, &super::current_instance_id(app));
+        let Some(mut changed) = prepare_restore_housekeeping(client_only, || {
+            let (mut changed, _exited) = sync_managed_agent_processes(
+                &mut records,
+                &mut runtimes,
+                &super::current_instance_id(app),
+            );
+            changed |= kill_stale_tracked_processes(
+                &mut records,
+                &runtimes,
+                &super::current_instance_id(app),
+            );
 
-        let tracked_pids: Vec<u32> = runtimes
-            .values()
-            .map(|runtime| runtime.child.id())
-            .chain(
-                super::read_all_agent_runtime_receipts(app)
-                    .into_iter()
-                    .filter_map(|(path, receipt)| {
-                        super::valid_agent_runtime_receipt(
-                            &path,
-                            &receipt,
-                            &super::current_instance_id(app),
-                        )
-                        .then_some(receipt.pid)
-                    }),
-            )
-            .collect();
-        super::sweep_orphaned_agent_processes(app, &tracked_pids);
+            let tracked_pids: Vec<u32> = runtimes
+                .values()
+                .map(|runtime| runtime.child.id())
+                .chain(
+                    super::read_all_agent_runtime_receipts(app)
+                        .into_iter()
+                        .filter_map(|(path, receipt)| {
+                            super::valid_agent_runtime_receipt(
+                                &path,
+                                &receipt,
+                                &super::current_instance_id(app),
+                            )
+                            .then_some(receipt.pid)
+                        }),
+                )
+                .collect();
+            super::sweep_orphaned_agent_processes(app, &tracked_pids);
 
-        // System-wide sweep: enumerate all user processes and kill any known
-        // agent binaries not tracked by this session. Catches orphans whose
-        // PID files were already cleaned up (e.g. agent workers in their own
-        // process group whose parent harness exited).
-        super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
+            // System-wide sweep: enumerate all user processes and kill any known
+            // agent binaries not tracked by this session. Catches orphans whose
+            // PID files were already cleaned up (e.g. agent workers in their own
+            // process group whose parent harness exited).
+            super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
 
-        // Dead-instance reaping: find agents belonging to Buzz instances
-        // whose desktop process is no longer running and reap them.
-        super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
+            // Dead-instance reaping: find agents belonging to Buzz instances
+            // whose desktop process is no longer running and reap them.
+            super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
 
-        // Exact-path sweep: kill any buzz-acp process whose executable path
-        // matches this bundle's harness binary but is not in the tracked set.
-        // Complements the env-var sweep above — catches orphans that predate
-        // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
-        //
-        // TODO: the three sweeps above each walk the PID table independently.
-        // A future consolidation should collect a single shared process snapshot
-        // at the top of this block and thread it through all sweep functions,
-        // replacing the three separate kernel enumerations.
-        super::sweep_untracked_bundle_harnesses(&tracked_pids);
+            // Exact-path sweep: kill any buzz-acp process whose executable path
+            // matches this bundle's harness binary but is not in the tracked set.
+            // Complements the env-var sweep above — catches orphans that predate
+            // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
+            //
+            // TODO: the three sweeps above each walk the PID table independently.
+            // A future consolidation should collect a single shared process snapshot
+            // at the top of this block and thread it through all sweep functions,
+            // replacing the three separate kernel enumerations.
+            super::sweep_untracked_bundle_harnesses(&tracked_pids);
+
+            if client_only && changed {
+                save_managed_agents(app, &records)?;
+            }
+            Ok(changed)
+        })?
+        else {
+            return Ok(());
+        };
 
         let candidates: Vec<String> = records
             .iter()
@@ -584,4 +605,43 @@ fn persist_restore_error(
     record.updated_at = util::now_iso();
     record.last_error = Some(error);
     save_managed_agents(app, &records)
+}
+
+#[cfg(test)]
+mod device_policy_restore_tests {
+    use super::prepare_restore_housekeeping;
+    use std::cell::Cell;
+
+    #[test]
+    fn client_only_restore_runs_housekeeping_before_suppressing_spawns() {
+        let cleaned = Cell::new(false);
+        let result = prepare_restore_housekeeping(true, || {
+            cleaned.set(true);
+            Ok(vec!["would-be-started-agent"])
+        })
+        .unwrap();
+        assert!(cleaned.get(), "client-only mode skipped crash cleanup");
+        assert!(
+            result.is_none(),
+            "client-only mode released restore candidates"
+        );
+    }
+
+    #[test]
+    fn cleanup_errors_propagate_in_both_hosting_modes() {
+        for client_only in [true, false] {
+            assert_eq!(
+                prepare_restore_housekeeping::<()>(client_only, || Err("cleanup failed".into())),
+                Err("cleanup failed".into())
+            );
+        }
+    }
+
+    #[test]
+    fn hosting_restoration_receives_cleaned_state() {
+        assert_eq!(
+            prepare_restore_housekeeping(false, || Ok(42)).unwrap(),
+            Some(42)
+        );
+    }
 }
