@@ -7,7 +7,7 @@
 //! External (non-Buzz) remotes are restricted to the github.com built-in
 //! plus any exact HTTPS origins the operator lists in
 //! `BUZZ_TRUSTED_EXTERNAL_GIT_ORIGINS` (see [`parse_trusted_external_origins`]).
-//! Those remotes authenticate through the OS-keyring-backed `gh`/`glab` CLI
+//! Those remotes authenticate through CLI-managed `gh`/`glab` credentials
 //! rather than the Buzz identity — never a value read from that env var.
 
 use crate::{app_state::AppState, managed_agents::resolve_command};
@@ -142,7 +142,7 @@ pub(crate) fn run_git(
         if needs_credentials {
             if let Some(helper_name) = auth.missing_credential_helper {
                 message.push_str(&format!(
-                    "\n\nIf this repository is private, install the {helper_name} CLI and run `{helper_name} auth login`, then try again."
+                    "\n\nIf this repository is private, install the {helper_name} CLI, run `{helper_name} auth login`, and restart Buzz before trying again."
                 ));
             }
         }

@@ -4,7 +4,8 @@ use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
     build_git_auth_config_for_url, build_git_auth_config_for_url_with_keys, clone_url_owner,
-    run_git, validate_local_clone_url, validate_local_clone_url_for_workspace, GitAuthConfig,
+    run_git, validate_local_clone_url, validate_local_clone_url_for_workspace,
+    validate_workspace_clone_url, GitAuthConfig,
 };
 use super::project_repo_paths::{
     canonical_repos_roots, canonicalize_repos_root, default_repos_root_candidates,
@@ -506,7 +507,10 @@ pub async fn merge_project_pull_request(
         source_branch,
         expected_commit,
     } = input;
-    validate_local_clone_url_for_workspace(&target_clone_url, &state)?;
+    // Merge targets remain Buzz-hosted because target ownership is enforced
+    // from the relay-shaped URL. External repositories are supported as
+    // readable/source remotes, not as Buzz-managed merge targets.
+    validate_workspace_clone_url(&target_clone_url, &state)?;
     validate_local_clone_url_for_workspace(&source_clone_url, &state)?;
     let target_owner = target_owner.trim().to_ascii_lowercase();
     if target_owner.len() != 64 || !target_owner.chars().all(|c| c.is_ascii_hexdigit()) {

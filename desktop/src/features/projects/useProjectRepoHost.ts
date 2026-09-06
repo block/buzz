@@ -24,9 +24,10 @@ export function useProjectRepoPresentation(
   return {
     host,
     webUrl,
-    canCloneLocally:
-      host.kind === "buzz" ||
-      (host.kind === "external" && host.host === "github.com"),
+    // The backend enforces the exact trusted-origin allowlist before cloning.
+    // Keep the affordance available for configured GitLab/self-hosted remotes
+    // instead of hiding every external host except github.com.
+    canCloneLocally: host.kind !== "unresolved",
     controls: {
       externalUrl: host.kind === "external" ? webUrl : null,
       remoteKind: host.kind === "unresolved" ? undefined : host.kind,
