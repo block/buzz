@@ -3,6 +3,10 @@
 Status: VOICE 1 discovery decision. This document defines the implementation
 boundary for VOICE 2; it does not deliver a realtime provider.
 
+Evidence was taken against `block/buzz` commit
+`3c7f288c60d67df78577b237e27c3dfc8831aaa1`. No speech payload, credential,
+or provider response body is retained in this document.
+
 ## Scope
 
 VOICE 1 answers one question: where can a realtime speech provider attach
@@ -96,6 +100,113 @@ human-floor signals. The local agent TTS publisher already proves that a second
 socket can publish audio under the managed agent's identity, but it intentionally
 ignores received binary audio and is not a realtime provider bridge.
 
+## Measured current baseline
+
+The repository's ignored `huddle::latency_bench` test drives the production
+Desktop STT and TTS pipelines with a zero-delay fake LLM. A checked-in Parakeet
+test WAV was converted from PCM16 mono 16 kHz to float32 mono 48 kHz, then fed
+in real-time 100 ms batches. On this host, a three-turn debug-profile run at the
+evidence commit measured:
+
+| Turn | STT after speech end | First TTS audio after handoff | End to first audio |
+| --- | ---: | ---: | ---: |
+| short reply | 731 ms | 495 ms | 1,226 ms |
+| medium reply | 1,042 ms | 466 ms | 1,508 ms |
+| long reply | 2,496 ms | 972 ms | 3,468 ms |
+
+The median end-to-first-audio was 1,508 ms with no model/relay agent delay. This
+is a bounded synthetic diagnostic, not a release-performance claim: debug
+inference is slower than release, the third turn includes the longest reply, and
+three samples do not support a percentile. For comparison, the release-profile
+production harness recorded 924–1,087 ms before the exact TTS conditioning cache
+and 347–384 ms with all experimental local latency levers enabled in PR #5671.
+The current source keeps those levers gated, so neither historical extreme is
+claimed as the current default.
+
+Reproduction, after creating the standard Tauri sidecar stubs:
+
+```bash
+ffmpeg -i ~/.buzz/models/parakeet-tdt-ctc-110m-en/test_wavs/0.wav \
+  -ac 1 -ar 48000 -c:a pcm_f32le /tmp/huddle-baseline.wav
+BUZZ_BENCH_WAV=/tmp/huddle-baseline.wav BUZZ_BENCH_TURNS=3 \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib \
+  huddle::latency_bench::baseline_stt_fake_llm_tts_first_audio \
+  -- --ignored --nocapture
+```
+
+Current interruption policy is independently pinned in production-bound tests:
+an isolated output route accepts confirmed onset immediately; an acoustically
+coupled route requires 20 consecutive 16 ms VAD-positive frames, or 320 ms,
+before taking the human floor. Cancel/drain starts a 100 ms output-tail
+hangover. PR #6431 records the physical reason for the coupled-route debounce
+and the regression evidence. This is a policy bound, not a measured device
+silence percentile.
+
+Desktop and Mobile keep the Huddle alive during audio-only reconnect. Both use
+the bounded delay sequence `0, 100, 250, 500, 1000, 2000, 2000 ms`; after the
+last failed attempt they leave rather than retaining a false-connected session.
+The relay and client media paths are lossy and bounded. The current local TTS
+text queue has eight entries; the agent publisher input queue has eight packets
+and caps expanded pending output at 1,500 20 ms frames (30 seconds), dropping
+new overflow rather than growing without limit. VOICE 2 deliberately requires
+a much shallower freshness-oriented provider output bound so stale generated
+speech cannot consume this whole legacy allowance.
+
+A physical two-endpoint Huddle timing run was not completed in VOICE 1: only
+macOS was available as a Flutter target, and no OpenAI or ElevenLabs sandbox
+credential was present. This is explicit missing runtime evidence, not inferred
+success. VOICE 2 remains gated on a credentialed, spend-capped provider probe;
+VOICE 5 owns the physical interruption matrix and VOICE 8 owns Desktop plus
+unchanged-Mobile acceptance.
+
+## Provider contract comparison
+
+OpenAI Realtime is the first provider. It already exposes one realtime session
+with streamed input/output audio, server or semantic VAD, response cancellation,
+conversation-item truncation for unheard audio, function-call proposals, and
+per-response usage. Its PCM path is the narrowest fit: Buzz converts local PCM
+to the provider's negotiated mono PCM input and converts returned mono PCM once
+to the existing 48 kHz Huddle path. The provider WebSocket is owned by a Tauri
+backend task; the API credential is read only by that host process and is never
+sent to the WebView, relay, Nostr events, logs, or session configuration.
+
+ElevenLabs Agents is a credible second consumer, not a requirement for the first
+slice. Its WebSocket similarly negotiates PCM/telephony formats and emits audio,
+VAD/speech-state, transcripts, interruption, and client-tool-call events. It
+normally uses an agent configuration plus a signed conversation URL. That
+additional agent/configuration lifecycle is unnecessary to prove the Buzz seam,
+and implementing it now would turn VOICE 2 into a two-provider framework.
+
+| Contract question | OpenAI Realtime | ElevenLabs Agents | VOICE 2 decision |
+| --- | --- | --- | --- |
+| Media | Negotiated PCM or telephony audio; streamed deltas | Negotiated PCM or μ-law input/output | Use OpenAI mono PCM; no provider Opus |
+| Turn detection | `server_vad` or `semantic_vad`; client may commit | Provider VAD/turn state | Start with provider VAD; Buzz still owns floor |
+| Interruption | Cancel response and truncate unheard assistant audio | Interruption event and buffered-audio controls | Local Buzz cancellation wins first |
+| Tools | Streamed function-call arguments and function result items | Client tool calls and tool results | Advertise none; reject tool events inside the adapter until VOICE 4 |
+| Session auth | Host-held API credential on the provider connection | Host API key obtains/opens an authorized conversation | Credential never crosses Buzz media/control planes |
+| Retention/region | Account/project policy dependent | Workspace/plan policy dependent | No universal claim; enforce product policy in VOICE 7 |
+| Usage | Response usage fields | Conversation metadata/API | Record only redacted counts, audio duration, latency, and cost units |
+
+Official contract references used for this decision are the OpenAI
+[Realtime WebSocket](https://platform.openai.com/docs/guides/realtime-websocket),
+[conversation](https://platform.openai.com/docs/guides/realtime-conversations),
+[VAD](https://platform.openai.com/docs/guides/realtime-vad), and
+[function-calling](https://platform.openai.com/docs/guides/realtime-function-calling)
+guides, plus the ElevenLabs Agents
+[WebSocket](https://elevenlabs.io/docs/agents-platform/libraries/web-sockets)
+and [client tools](https://elevenlabs.io/docs/agents-platform/customization/tools/client-tools)
+guides. Account-specific zero-retention, data-residency, and regional processing
+were not verified and must not be represented as product guarantees.
+
+A no-secret network probe confirmed that the ElevenLabs signed-URL endpoint
+rejects an unauthenticated request (`401`, `needs_authorization`). An
+unauthenticated OpenAI `POST /v1/realtime/sessions` probe returned `404`; that
+observation alone does not prove endpoint lifecycle. VOICE 2 must pin the actual
+endpoint, authentication method, event schema, and negotiated audio format from
+the then-current official WebSocket guide and a credentialed sandbox probe.
+Codec, VAD, cancellation, and function-call behavior remain unverified until
+that probe passes.
+
 ## Ownership boundaries
 
 | Concern | Owner after VOICE 2 | Reason |
@@ -112,6 +223,24 @@ ignores received binary audio and is not a realtime provider bridge.
 | Barge-in and floor policy | Buzz | Shared across providers and tied to Huddle participants |
 | Credentials, spend policy, and telemetry | Buzz | Provider must not decide operational policy |
 
+The named boundary contracts for implementation are:
+
+- `RealtimeVoiceSessionKey`: normalized ephemeral channel ID, Huddle generation,
+  and normalized managed-agent pubkey;
+- `ExternalAudioEgressGrant`: exact session key, local human pubkey, provider,
+  grant generation, and explicit enabled state;
+- `NormalizedAudioFrame`: mono PCM samples plus an adapter-owned validated sample
+  rate and one fixed maximum sample count;
+- `ProviderSessionState`: `preparing`, `ready`, `active`, `draining`, or `closed`,
+  with one terminal reason and generation-fenced transitions;
+- `RedactedVoiceMetrics`: session correlation ID, stage timestamps, audio
+  duration, drop/cancel counters, provider usage units, and terminal reason—no
+  PCM, transcript, instructions, arguments, credentials, or signed events.
+
+Each external/provider input is validated and normalized once before these
+contracts are consumed. Provider event names, JSON shapes, and base64 fields do
+not escape the adapter.
+
 ## Selected minimum seam
 
 There are two sides, but only one is provider-pluggable.
@@ -123,14 +252,18 @@ must keep the current socket authentication, Opus settings, bounded queue, and
 cancellation conventions. It accepts normalized provider PCM for publication
 and remains send-only in VOICE 2; it is not a provider interface.
 
-Provider input comes from a bounded tee at the existing local microphone PCM
-boundary, before the human peer encodes that same capture to Opus. Forwarding
+Provider input comes from a bounded tee after the existing local microphone's
+mute/PTT, device, Huddle-generation, and human-peer transmission gates, but
+before that same admitted PCM is encoded to Opus. Raw capture that the current
+human peer is not authorized to transmit must have no provider path. Forwarding
 requires one named `ExternalAudioEgressGrant`: an explicit local-user choice
 bound to the Huddle lifetime, managed-agent pubkey, provider, and the local
 human pubkey held by the Desktop. That pubkey must be a current non-bot room
 member allowed by the managed agent's existing `respond_to` policy. Room
 membership or provider readiness alone is not consent to third-party audio
-processing. The tee is closed unless the complete grant remains current.
+processing. The tee closes immediately on mute, device/capture loss, leave,
+stale capture generation, or grant loss and remains closed unless the complete
+grant is current.
 
 VOICE 2 does not decode or forward any audio received by the agent socket, so
 remote-human and bot streams have no path to the provider. Multi-participant
@@ -150,7 +283,7 @@ framework. Its provider-independent vocabulary is intentionally small:
 start(session configuration) -> session
 session.send_audio(PCM chunk)
 session.cancel_response()
-session.next_event() -> audio | transcript | speech-state | tool-proposal | closed
+session.next_event() -> audio | transcript | speech-state | closed
 session.close()
 ```
 
@@ -173,16 +306,21 @@ The session configuration may contain provider model/voice settings and
 non-secret dialogue instructions. It does not contain Nostr keys, relay auth,
 channel membership authority, or effect capabilities.
 
-A `tool-proposal` is inert data. VOICE 2 must advertise no tools and reject an
-unexpected tool proposal without executing it. VOICE 4 may connect proposals
-to the existing managed-agent effect boundary, where Buzz rechecks actor,
-channel, policy, arguments, and audit requirements before any effect.
+VOICE 2 advertises no tools. Any unexpected provider tool event is rejected
+inside the adapter without propagating arguments or executing anything. VOICE 4
+owns the later introduction of proposal/result contracts at the existing
+managed-agent effect boundary, where Buzz rechecks actor, channel, policy,
+arguments, and audit requirements before any effect.
 
 Realtime and local TTS also need one Buzz-owned output lease keyed by the same
-Huddle lifetime and agent pubkey. Acquiring realtime ownership prevents
-`speak_agent_message` and its local TTS publisher from speaking for that agent;
-releasing it restores the existing local route. This is a mutual-exclusion
-rule, not a new audio framework, and it must be atomic with session ownership.
+Huddle lifetime and agent pubkey. Lease acquisition is a generation-fenced
+quiescence handshake: it first cancels and drains active/queued local synthesis,
+invalidates pending local-publisher packets, confirms that generation can no
+longer send, and only then grants realtime ownership. While held, it prevents
+new `speak_agent_message` work and local TTS publication for that agent.
+Releasing it restores the existing local route without replaying stale queued
+speech. This is a mutual-exclusion rule, not a new audio framework, and it must
+be atomic with session ownership.
 
 ## Why this option
 
@@ -220,16 +358,40 @@ It may start only when all of these facts are current:
 - no realtime session or local TTS output lease already owns the same key.
 
 Huddle leave/end, generation change, agent removal, local-user membership or
-egress-grant loss, or explicit disable cancels both sides. Provider failure
-closes only that agent publisher and reports degraded voice state; it must not
-end the human Huddle. Publisher failure cancels the provider session so a paid
-or recording session cannot survive after it loses its Buzz authority.
+egress-grant loss, explicit disable, or local mute/capture loss cancels the
+applicable input or both sides. Canonical authority comes from the current
+`HuddleState` generation and local controls, an exact managed-agent policy
+snapshot, and authoritative channel membership—not a 15-second poll. The audio
+roster is attribution only; it does not prove continuing membership or policy.
+Existing Nostr membership-change notifications trigger
+`fetch_channel_members_with_roles` revalidation, while local managed-agent
+record changes and owner-authorization expiry trigger policy revalidation. No
+new event kind is needed. Watchers and the expiry timer are armed before the
+initial snapshots; events observed during snapshot reads are reconciled before
+the session/output lease can activate. Every callback carries the session
+generation. Any relevant notification closes the shared media-authorization
+gate synchronously before asynchronous revalidation; only an exact-session
+snapshot passing under that same gate may reopen it. Loss of the membership
+subscription, failed revalidation, managed-record watcher, or expiry timer
+closes provider input and publisher output rather than retaining stale
+authority. Provider failure closes only that agent publisher and reports
+degraded voice state; it must not end the human Huddle.
+Publisher failure cancels the provider session so a paid or recording session
+cannot survive after it loses its Buzz authority.
 
 All media channels are bounded. Fresh audio may replace/drop stale audio under
 backpressure; it must not accumulate unbounded latency. State-bearing control,
 authorization, and tool data are never silently dropped: loss or malformed data
-closes the relevant session. Cancellation wins over queued provider audio, so
-no stale speech is published after teardown.
+closes the relevant session. One Buzz-owned cancellation generation is checked
+before provider decode, PCM normalization, queue insertion, Opus encode, and
+socket send. Send authorization and cancellation are linearized by one bounded
+gate: cancellation advances the generation under the same synchronization
+boundary, drains unsent bridge audio, and waits for any previously authorized
+socket write before reporting completion. No send authorization may begin after
+that completion point. Audio already transmitted to other peers cannot be
+recalled; the separate VOICE 5 playout/floor slice must drain or suppress
+matching local receive/jitter/playout state to meet the speech-to-silence
+threshold.
 
 VOICE 2 is fail-closed and does not add automatic reconnect. VOICE 6 may add
 bounded reconnect only after it proves single ownership and no duplicated
@@ -237,15 +399,43 @@ speech or effects.
 
 ## VOICE 2 implementation slice
 
-The first implementation should be one independently verifiable vertical slice:
+The first implementation should be one independently verifiable vertical slice.
+Its acceptance run uses at least 20 completed, non-overlapping turns after one
+warm-up turn on an isolated/headset route. The run manifest pins the exact
+Desktop commit, provider endpoint/API revision, model, voice, VAD mode, input
+and output PCM formats, machine, route, and network type. `t0` is the local
+Buzz capture/VAD speech-end marker before provider endpointing; `t1` is the
+first non-DTX agent frame accepted by the local human peer's normal playout.
+Latency is `t1 - t0`; median and nearest-rank p95 are computed over completed,
+non-cancelled turns. Failed and cancelled turns are retained as separate counts,
+not silently discarded. The target is median at most 800 ms and p95 at most
+1,500 ms. The raw retained artifact contains only the pinned manifest,
+timestamps, durations, counters, and terminal reasons—no PCM, transcript, or
+instructions. VOICE 2 additionally requires that no new frame obtains send
+authorization after cancellation completes.
+
+The roadmap interruption target, owned by VOICE 5 rather than silently pulled
+into this slice, is human speech onset to locally rendered agent silence within
+250 ms at p95 on an isolated/headset route. The coupled-speaker route keeps its
+current 320 ms anti-echo debounce until VOICE 5 proves a faster safe policy, so
+it is reported separately and is not disguised as meeting the headset target.
+
+These are product acceptance thresholds, not claims about the uncredentialed
+VOICE 1 run. They require realtime to materially beat the measured turn-based
+median while preserving the known speaker-echo trade-off.
+
+The vertical slice is:
 
 1. after explicit local-user enablement, create an
    `ExternalAudioEgressGrant`, acquire the selected enrolled managed agent's
    output lease, and create one OpenAI Realtime session;
 2. authenticate a send-only Huddle socket as that agent using the existing
-   NIP-42 plus owner-auth path;
-3. tee only the granted local user's captured PCM to OpenAI; no relay-received
-   media is connected to provider input;
+   NIP-42 plus owner-auth path; reuse its auth/encode contract but do not mark
+   this peer as locally synthesized TTS, so the host's human socket receives and
+   plays provider audio through the same normal agent-peer path as Mobile;
+3. tee only PCM admitted by the granted local user's current human-peer
+   transmission gates to OpenAI; no raw muted capture or relay-received media is
+   connected to provider input;
 4. convert returned audio to the existing 48 kHz mono Opus room contract and
    publish it as the authenticated agent peer; and
 5. tear both connections and the output lease down together on any authority or
@@ -270,10 +460,14 @@ VOICE 2 is ready only when focused local tests demonstrate all of the following:
   exact-session egress grant reaches the provider;
 - relay-received media is not connected to provider input, proving that remote
   humans, bots, unknown indices, and v2 index-reuse races have no egress path;
-- post-cancel local capture and provider audio never cross the bridge;
+- muted, wrong-device, stale-generation, and post-cancel local capture never
+  reaches the provider; after cancellation starts no new provider frame obtains
+  send authorization, unsent queued audio is drained, and completion waits for
+  writes already authorized before cancellation;
 - local TTS and realtime output cannot simultaneously own one agent/Huddle key,
-  including concurrent-start races, and local TTS becomes available after the
-  realtime lease is released;
+  including acquisition during active synthesis, queued publication, and
+  concurrent-start races; acquisition quiesces old TTS before realtime sends,
+  and release neither replays stale speech nor blocks fresh local TTS;
 - provider PCM is normalized once and emitted as 48 kHz mono, 20 ms Huddle Opus
   frames whose sequence and 48 kHz timestamp advance by 1 and 960 respectively,
   including the v2 contract's defined integer wrapping boundaries;
@@ -285,7 +479,11 @@ VOICE 2 is ready only when focused local tests demonstrate all of the following:
 - cancellation prevents queued provider audio from being published;
 - provider disconnect tears down the agent audio peer without ending the human
   Huddle, while audio authority loss tears down the provider session;
-- OpenAI tools are disabled and an unexpected tool proposal has no effect; and
+- provider credentials use a secret-bearing type with redacted diagnostics;
+  query strings, transport traces, response bodies, surfaced errors, metrics,
+  and Nostr events pass a canary-secret non-disclosure test;
+- OpenAI tools are disabled and an unexpected tool event is rejected inside
+  the adapter without propagating its arguments or producing any effect; and
 - focused tests cover normal bidirectional media, each authorization/consent
   refusal, malformed provider messages, backpressure, provider/publisher
   failure, output-lease exclusion, and teardown races.
