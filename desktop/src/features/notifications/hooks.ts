@@ -77,14 +77,26 @@ function sanitizeSoundsMap(value: unknown): SlotSounds {
   return result;
 }
 
-function sanitizeSlotAlertsEnabled(value: unknown): Record<SoundSlot, boolean> {
+export function sanitizeSlotAlertsEnabled(
+  value: unknown,
+): Record<SoundSlot, boolean> {
   const result = { ...DEFAULT_SLOT_ALERTS_ENABLED };
   if (!value || typeof value !== "object") return result;
   const candidate = value as Partial<Record<SoundSlot, unknown>>;
+  const storedLiveValues = SOUND_SLOTS.filter(
+    (slot) => !COMING_SOON_SLOTS.has(slot),
+  )
+    .map((slot) => candidate[slot])
+    .filter((picked): picked is boolean => typeof picked === "boolean");
+  const preserveAllDisabledState =
+    storedLiveValues.length > 0 && storedLiveValues.every((picked) => !picked);
+
   for (const slot of SOUND_SLOTS) {
     const picked = candidate[slot];
     if (typeof picked === "boolean") {
       result[slot] = picked;
+    } else if (preserveAllDisabledState && !COMING_SOON_SLOTS.has(slot)) {
+      result[slot] = false;
     }
   }
   return result;

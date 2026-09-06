@@ -14,6 +14,11 @@ const DM_NOTIFIABLE_KINDS = new Set<number>(DM_NOTIFIABLE_EVENT_KINDS);
 // event in the channel (kind:5/7/9005/edits/etc.), so we must filter to
 // human-visible message kinds before firing a toast. Huddle starts are included
 // only for DMs because the start card is the invite.
-export function isDmNotifiableKind(kind: number): boolean {
-  return DM_NOTIFIABLE_KINDS.has(kind);
+export function isDmNotifiableKind(
+  kind: number,
+  { muted = false }: { muted?: boolean } = {},
+): boolean {
+  return (
+    DM_NOTIFIABLE_KINDS.has(kind) && !(kind === KIND_HUDDLE_STARTED && muted)
+  );
 }

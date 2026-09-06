@@ -350,6 +350,7 @@ export function AppShell() {
   const {
     handleChannelNotification,
     handleDmNotification,
+    handleDmHuddleLifecycleEvent,
     handleThreadReplyDesktopNotification,
   } = useAppShellDesktopNotifications({
     channels,
@@ -359,6 +360,7 @@ export function AppShell() {
     notificationSettings: notificationSettings.settings,
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
+    mutedChannelIds,
     silentChannelIds: huddleBackingChannelIds,
   });
   const {
@@ -401,6 +403,7 @@ export function AppShell() {
       notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
       onChannelMessage: handleChannelNotification,
       onDmMessage: handleDmNotification,
+      onDmHuddleLifecycleEvent: handleDmHuddleLifecycleEvent,
       onLiveMention: refetchHomeFeedFromLiveSignal,
       onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
       followedRootIds,
