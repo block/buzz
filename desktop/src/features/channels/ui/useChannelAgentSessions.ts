@@ -124,6 +124,13 @@ export function getChannelAgentSessionAgents({
   const memberPubkeys = channelMembers
     ? new Set(channelMembers.map((member) => normalizePubkey(member.pubkey)))
     : null;
+  const relayActivityMemberPubkeys = channelMembers
+    ? new Set(
+        channelMembers
+          .filter((member) => member.role === "bot" || member.role === "owner")
+          .map((member) => normalizePubkey(member.pubkey)),
+      )
+    : null;
   const botMemberPubkeys = channelMembers
     ? new Set(
         channelMembers
@@ -158,14 +165,16 @@ export function getChannelAgentSessionAgents({
     }
 
     // A present channel-membership snapshot is authoritative for relay agents:
-    // only current bot membership may surface their activity in a normal channel.
+    // only current bot or owner membership may surface their activity in a
+    // normal channel. The agent must already be a relay candidate; this does
+    // not turn ordinary owners into agents.
     // When the snapshot is unavailable, keep the legacy declared-scope fallback.
     if (
       activeChannel.channelType !== "dm" &&
       agent.agentSource === "relay" &&
       channelMembers !== undefined
     ) {
-      return botMemberPubkeys?.has(normalizedPubkey) ?? false;
+      return relayActivityMemberPubkeys?.has(normalizedPubkey) ?? false;
     }
 
     if (agent.agentSource === "member-bot") {

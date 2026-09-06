@@ -135,7 +135,37 @@ test("MyBuzz: current bot membership admits a relay agent without declared chann
     channelMembers: [{ pubkey: CLAUDE_HOST, role: "bot" }],
   });
 
-  assert.deepEqual(result.map((agent) => agent.pubkey), [CLAUDE_HOST]);
+  assert.deepEqual(
+    result.map((agent) => agent.pubkey),
+    [CLAUDE_HOST],
+  );
+});
+
+test("MyBuzz: current owner membership admits a known relay agent", () => {
+  const stream = streamChannel("dynamic-stream", "dynamic-stream");
+  const result = getChannelAgentSessionAgents({
+    activeChannel: stream,
+    activeChannelId: stream.id,
+    agents: [relayAgent(CLAUDE_HOST, [])],
+    channelMembers: [{ pubkey: CLAUDE_HOST, role: "owner" }],
+  });
+
+  assert.deepEqual(
+    result.map((agent) => agent.pubkey),
+    [CLAUDE_HOST],
+  );
+});
+
+test("MyBuzz: an ordinary owner is not a relay activity candidate", () => {
+  const stream = streamChannel("dynamic-stream", "dynamic-stream");
+  const result = getChannelAgentSessionAgents({
+    activeChannel: stream,
+    activeChannelId: stream.id,
+    agents: [],
+    channelMembers: [{ pubkey: CLAUDE_HOST, role: "owner" }],
+  });
+
+  assert.deepEqual(result, []);
 });
 
 test("MyBuzz: a present empty membership snapshot rejects stale declared channel scope", () => {
@@ -150,16 +180,33 @@ test("MyBuzz: a present empty membership snapshot rejects stale declared channel
   assert.deepEqual(result, []);
 });
 
-test("MyBuzz: non-bot membership does not admit a relay agent to stream activity", () => {
+test("MyBuzz: admin and member membership do not admit a relay agent to stream activity", () => {
+  const stream = streamChannel("dynamic-stream", "dynamic-stream");
+  for (const role of ["admin", "member"]) {
+    const result = getChannelAgentSessionAgents({
+      activeChannel: stream,
+      activeChannelId: stream.id,
+      agents: [relayAgent(CLAUDE_HOST, [stream.id])],
+      channelMembers: [{ pubkey: CLAUDE_HOST, role }],
+    });
+
+    assert.deepEqual(result, []);
+  }
+});
+
+test("MyBuzz: undefined membership snapshot retains relay declared-scope fallback", () => {
   const stream = streamChannel("dynamic-stream", "dynamic-stream");
   const result = getChannelAgentSessionAgents({
     activeChannel: stream,
     activeChannelId: stream.id,
     agents: [relayAgent(CLAUDE_HOST, [stream.id])],
-    channelMembers: [{ pubkey: CLAUDE_HOST, role: "member" }],
+    channelMembers: undefined,
   });
 
-  assert.deepEqual(result, []);
+  assert.deepEqual(
+    result.map((agent) => agent.pubkey),
+    [CLAUDE_HOST],
+  );
 });
 
 test("MyBuzz: DM eligibility keeps its declared-scope fallback with a membership snapshot", () => {
@@ -171,7 +218,10 @@ test("MyBuzz: DM eligibility keeps its declared-scope fallback with a membership
     channelMembers: [],
   });
 
-  assert.deepEqual(result.map((agent) => agent.pubkey), [CLAUDE_HOST]);
+  assert.deepEqual(
+    result.map((agent) => agent.pubkey),
+    [CLAUDE_HOST],
+  );
 });
 
 test("BUZZ-DESKTOP-003: participant rule applies only to DM channels", () => {
