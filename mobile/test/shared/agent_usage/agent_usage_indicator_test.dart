@@ -78,6 +78,57 @@ void main() {
     expect(find.bySemanticsLabel('Agent usage: 50% used'), findsOneWidget);
   });
 
+  testWidgets('shows a visible usage percentage beside an agent name', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          agentUsageRelayProvider.overrideWith(
+            () => _FixedAgentUsageRelayNotifier(
+              AgentUsageRelayState(
+                connection: AgentUsageConnectionState.open,
+                snapshotsByAgent: {
+                  _agentPubkey: AgentUsageSnapshot(
+                    harness: 'goose',
+                    lastEventAt: DateTime.now(),
+                    contextUsedTokens: 50,
+                    contextLimitTokens: 100,
+                  ),
+                },
+              ),
+            ),
+          ),
+        ],
+        child: const AgentUsagePercentText(agentPubkey: _agentPubkey),
+      ),
+    );
+
+    expect(find.text('50%'), findsOneWidget);
+  });
+
+  testWidgets('does not invent a percentage when usage is unknown', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          agentUsageRelayProvider.overrideWith(
+            () => _FixedAgentUsageRelayNotifier(
+              const AgentUsageRelayState(
+                connection: AgentUsageConnectionState.open,
+                snapshotsByAgent: {},
+              ),
+            ),
+          ),
+        ],
+        child: const AgentUsagePercentText(agentPubkey: _agentPubkey),
+      ),
+    );
+
+    expect(find.text('0%'), findsNothing);
+  });
+
   testWidgets('flags stale data once it exceeds the freshness window', (
     tester,
   ) async {

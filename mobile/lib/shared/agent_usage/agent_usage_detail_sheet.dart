@@ -146,7 +146,7 @@ class _UsageRow extends StatelessWidget {
         ? context.colors.error
         : fraction! >= 0.7
         ? context.appColors.warning
-        : context.appColors.success;
+        : context.colors.onSurfaceVariant;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: Grid.quarter),

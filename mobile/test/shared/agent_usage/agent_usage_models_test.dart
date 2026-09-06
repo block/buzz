@@ -69,15 +69,48 @@ void main() {
       expect(payload.accountUsageWindows.last.resetAt, isNull);
     });
 
-    test('rejects negative contextUsedTokens', () {
+    test('rejects negative or fractional token counts', () {
+      for (final value in [-1, 1.5]) {
+        expect(
+          () => AgentTurnMetricPayload.fromJson({
+            'harness': 'goose',
+            'timestamp': '2026-07-01T20:11:03Z',
+            'contextUsedTokens': value,
+          }),
+          throwsFormatException,
+        );
+      }
       expect(
         () => AgentTurnMetricPayload.fromJson({
           'harness': 'goose',
           'timestamp': '2026-07-01T20:11:03Z',
-          'contextUsedTokens': -1,
+          'cumulative': {'inputTokens': -1},
         }),
         throwsFormatException,
       );
+    });
+
+    test('rejects malformed usage-window shapes and reset times', () {
+      for (final windows in [
+        'not-an-array',
+        ['not-an-object'],
+        [
+          {
+            'label': 'Session',
+            'usedPercent': 12,
+            'resetAt': 'not-rfc3339',
+          },
+        ],
+      ]) {
+        expect(
+          () => AgentTurnMetricPayload.fromJson({
+            'harness': 'goose',
+            'timestamp': '2026-07-01T20:11:03Z',
+            'accountUsageWindows': windows,
+          }),
+          throwsFormatException,
+        );
+      }
     });
 
     test(
@@ -308,6 +341,29 @@ void main() {
           snapshot,
           subscriptionErrored: false,
           now: DateTime.parse('2026-07-01T10:00:00Z'),
+        ),
+        AgentUsageStatus.stale,
+      );
+    });
+
+    test('uses the shared 45 minute freshness window', () {
+      final snapshot = AgentUsageSnapshot(
+        harness: 'goose',
+        lastEventAt: DateTime.parse('2026-07-01T10:00:00Z'),
+      );
+      expect(
+        agentUsageStatusFor(
+          snapshot,
+          subscriptionErrored: false,
+          now: DateTime.parse('2026-07-01T10:45:00Z'),
+        ),
+        AgentUsageStatus.fresh,
+      );
+      expect(
+        agentUsageStatusFor(
+          snapshot,
+          subscriptionErrored: false,
+          now: DateTime.parse('2026-07-01T10:45:01Z'),
         ),
         AgentUsageStatus.stale,
       );

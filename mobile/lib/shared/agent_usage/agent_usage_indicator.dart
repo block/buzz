@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -95,7 +96,7 @@ class AgentUsageIndicator extends ConsumerWidget {
     if (fraction == null) return context.colors.onSurfaceVariant;
     if (fraction >= 0.9) return context.colors.error;
     if (fraction >= 0.7) return context.appColors.warning;
-    return context.appColors.success;
+    return context.colors.onSurfaceVariant;
   }
 
   static String _semanticsLabel(AgentUsageStatus status, double? fraction) {
@@ -113,6 +114,38 @@ class AgentUsageIndicator extends ConsumerWidget {
             : 'active';
         return 'Agent usage: $pct';
     }
+  }
+}
+
+/// Small visible percentage placed next to an agent name. The ring remains the
+/// tap target; this label deliberately renders nothing for unknown usage rather
+/// than inventing a zero.
+class AgentUsagePercentText extends ConsumerWidget {
+  final String agentPubkey;
+
+  const AgentUsagePercentText({super.key, required this.agentPubkey});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final relayState = ref.watch(agentUsageRelayProvider);
+    final snapshot = relayState.snapshotsByAgent[agentPubkey.toLowerCase()];
+    final fraction = primaryUsageFraction(snapshot);
+    if (fraction == null) return const SizedBox.shrink();
+
+    final status = agentUsageStatusFor(
+      snapshot,
+      subscriptionErrored:
+          relayState.connection == AgentUsageConnectionState.error,
+    );
+    final percent = (fraction * 100).round();
+    return Text(
+      '$percent%',
+      style: context.textTheme.labelSmall?.copyWith(
+        color: AgentUsageIndicator._colorFor(context, status, fraction),
+        fontFeatures: const [FontFeature.tabularFigures()],
+        fontWeight: FontWeight.w600,
+      ),
+    );
   }
 }
 

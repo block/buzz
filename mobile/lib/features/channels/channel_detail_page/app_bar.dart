@@ -313,6 +313,10 @@ class _DmAppBarTitle extends ConsumerWidget {
                       style: context.textTheme.titleSmall,
                     ),
                   ),
+                  if (isAgent && otherPubkey != null) ...[
+                    const SizedBox(width: Grid.half),
+                    AgentUsagePercentText(agentPubkey: otherPubkey),
+                  ],
                   if (channel.isEphemeral) ...[
                     const SizedBox(width: Grid.quarter),
                     _HeaderEphemeralBadge(channel: channel),

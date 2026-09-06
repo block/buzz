@@ -2,7 +2,39 @@ import 'package:flutter/foundation.dart';
 
 /// How stale [AgentUsageSnapshot.lastEventAt] must be before the compact
 /// indicator stops presenting cached data as current.
-const staleAfter = Duration(hours: 6);
+const staleAfter = Duration(minutes: 45);
+
+int? _optionalTokenCount(Map<String, dynamic> json, String field) {
+  if (!json.containsKey(field)) return null;
+  final value = json[field];
+  if (value is! int || value < 0) {
+    throw FormatException('$field must be a non-negative integer');
+  }
+  return value;
+}
+
+double? _optionalCost(Map<String, dynamic> json, String field) {
+  if (!json.containsKey(field)) return null;
+  final value = json[field];
+  if (value is! num) {
+    throw FormatException('$field must be a non-negative finite number');
+  }
+  final parsed = value.toDouble();
+  if (!parsed.isFinite || parsed < 0) {
+    throw FormatException('$field must be a non-negative finite number');
+  }
+  return parsed;
+}
+
+DateTime _parseRfc3339(Object? value, String field) {
+  if (value is! String ||
+      !RegExp(r'(?:Z|[+-]\d{2}:\d{2})$').hasMatch(value)) {
+    throw FormatException('$field must be RFC 3339');
+  }
+  final parsed = DateTime.tryParse(value);
+  if (parsed == null) throw FormatException('$field must be RFC 3339');
+  return parsed;
+}
 
 /// Token-usage counters for one measurement window (a turn or a session
 /// cumulative), decoded from a NIP-AM `kind:44200` payload. Null fields mean
@@ -29,18 +61,13 @@ class AgentTokenCounts {
   /// mirroring NIP-AM §Numeric validity (`buzz-core`'s
   /// `AgentTurnMetricPayload::validate`).
   factory AgentTokenCounts.fromJson(Map<String, dynamic> json) {
-    final cost = json['costUsd'];
-    final costUsd = cost is num ? cost.toDouble() : null;
-    if (costUsd != null && (!costUsd.isFinite || costUsd < 0)) {
-      throw const FormatException('costUsd must be finite and non-negative');
-    }
     return AgentTokenCounts(
-      inputTokens: (json['inputTokens'] as num?)?.toInt(),
-      outputTokens: (json['outputTokens'] as num?)?.toInt(),
-      totalTokens: (json['totalTokens'] as num?)?.toInt(),
-      costUsd: costUsd,
-      cacheReadTokens: (json['cacheReadTokens'] as num?)?.toInt(),
-      cacheWriteTokens: (json['cacheWriteTokens'] as num?)?.toInt(),
+      inputTokens: _optionalTokenCount(json, 'inputTokens'),
+      outputTokens: _optionalTokenCount(json, 'outputTokens'),
+      totalTokens: _optionalTokenCount(json, 'totalTokens'),
+      costUsd: _optionalCost(json, 'costUsd'),
+      cacheReadTokens: _optionalTokenCount(json, 'cacheReadTokens'),
+      cacheWriteTokens: _optionalTokenCount(json, 'cacheWriteTokens'),
     );
   }
 }
@@ -75,11 +102,13 @@ class AgentUsageWindow {
         'accountUsageWindows.usedPercent must be finite and non-negative',
       );
     }
-    final resetAtRaw = json['resetAt'] as String?;
+    final resetAt = json.containsKey('resetAt')
+        ? _parseRfc3339(json['resetAt'], 'accountUsageWindows.resetAt')
+        : null;
     return AgentUsageWindow(
       label: label,
       usedPercent: usedPercent,
-      resetAt: resetAtRaw != null ? DateTime.tryParse(resetAtRaw) : null,
+      resetAt: resetAt,
     );
   }
 }
@@ -116,31 +145,29 @@ class AgentTurnMetricPayload {
     if (harness == null || harness.isEmpty) {
       throw const FormatException('agent turn metric missing harness');
     }
-    final timestampRaw = json['timestamp'] as String?;
-    final timestamp = timestampRaw != null
-        ? DateTime.tryParse(timestampRaw)
-        : null;
-    if (timestamp == null) {
-      throw const FormatException('agent turn metric missing timestamp');
-    }
+    final timestamp = _parseRfc3339(json['timestamp'], 'timestamp');
 
-    final contextUsedTokens = (json['contextUsedTokens'] as num?)?.toInt();
-    final contextLimitTokens = (json['contextLimitTokens'] as num?)?.toInt();
-    if (contextUsedTokens != null && contextUsedTokens < 0) {
-      throw const FormatException('contextUsedTokens must be non-negative');
-    }
-    if (contextLimitTokens != null && contextLimitTokens < 0) {
-      throw const FormatException('contextLimitTokens must be non-negative');
-    }
+    final contextUsedTokens = _optionalTokenCount(json, 'contextUsedTokens');
+    final contextLimitTokens = _optionalTokenCount(json, 'contextLimitTokens');
 
     final windowsRaw = json['accountUsageWindows'];
-    final windows = <AgentUsageWindow>[
-      if (windowsRaw is List)
-        for (final entry in windowsRaw)
-          if (entry is Map<String, dynamic>) AgentUsageWindow.fromJson(entry),
-    ];
+    if (windowsRaw != null && windowsRaw is! List) {
+      throw const FormatException('accountUsageWindows must be an array');
+    }
+    final windows = <AgentUsageWindow>[];
+    for (final entry in windowsRaw as List? ?? const []) {
+      if (entry is! Map<String, dynamic>) {
+        throw const FormatException(
+          'accountUsageWindows entries must be objects',
+        );
+      }
+      windows.add(AgentUsageWindow.fromJson(entry));
+    }
 
     final cumulativeRaw = json['cumulative'];
+    if (cumulativeRaw != null && cumulativeRaw is! Map<String, dynamic>) {
+      throw const FormatException('cumulative must be an object');
+    }
 
     return AgentTurnMetricPayload(
       harness: harness,
@@ -299,16 +326,14 @@ AgentUsageStatus agentUsageStatusFor(
 }
 
 /// The single most urgent usage fraction (0.0–1.0) to surface on the compact
-/// ring: the highest provider-account quota window when any are known,
-/// otherwise the context-window fraction, otherwise null (nothing to show).
+/// ring: the highest known provider-account or context-window usage, or null
+/// when the publisher did not report either.
 double? primaryUsageFraction(AgentUsageSnapshot? snapshot) {
   if (snapshot == null) return null;
-  final windows = snapshot.accountUsageWindows;
-  if (windows.isNotEmpty) {
-    final maxPercent = windows
-        .map((w) => w.usedPercent)
-        .reduce((a, b) => a > b ? a : b);
-    return (maxPercent / 100).clamp(0.0, 1.0);
-  }
-  return snapshot.contextUsedFraction;
+  final known = <double>[
+    ...snapshot.accountUsageWindows.map((window) => window.usedPercent / 100),
+    if (snapshot.contextUsedFraction != null) snapshot.contextUsedFraction!,
+  ];
+  if (known.isEmpty) return null;
+  return known.reduce((a, b) => a > b ? a : b).clamp(0.0, 1.0);
 }

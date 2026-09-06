@@ -13,6 +13,15 @@ import 'agent_usage_models.dart';
 /// `_maxObserverEvents` cap).
 const _maxRecentEventIds = 500;
 
+bool _hasValidNip01Signature(NostrEvent event) {
+  try {
+    nostr.Event.fromMap(event.toJson(), verify: true);
+    return true;
+  } on Object {
+    return false;
+  }
+}
+
 /// Owner-scoped live state for all agents' usage snapshots.
 @immutable
 class AgentUsageRelayState {
@@ -163,6 +172,13 @@ class AgentUsageRelayNotifier extends Notifier<AgentUsageRelayState> {
   }
 
   void _handleEvent(NostrEvent event) {
+    // Relays are untrusted. Verify the canonical event id and Schnorr
+    // signature before deduplication so a forged duplicate cannot poison the
+    // recent-id cache and suppress a later valid event.
+    if (!_hasValidNip01Signature(event)) {
+      return;
+    }
+
     if (!_recentEventIdSet.add(event.id)) {
       return;
     }

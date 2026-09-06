@@ -225,23 +225,33 @@ class _MemberTile extends ConsumerWidget {
     final initial = label.substring(0, 1).toUpperCase();
     final showManagementActions = canManage && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
+    final isAgent = member.isBot || profile?.isAgent == true;
 
     final avatar = _MemberAvatar(
       avatarUrl: profile?.avatarUrl,
       initial: initial,
-      isAgent: member.isBot || profile?.isAgent == true,
+      isAgent: isAgent,
     );
 
     return ListTile(
       contentPadding: EdgeInsets.zero,
-      leading: member.isBot
+      leading: isAgent
           ? AgentUsageIndicator(
               agentPubkey: member.pubkey,
               agentLabel: label,
               child: avatar,
             )
           : avatar,
-      title: Text(label),
+      title: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
+          if (isAgent) ...[
+            const SizedBox(width: Grid.half),
+            AgentUsagePercentText(agentPubkey: member.pubkey),
+          ],
+        ],
+      ),
       subtitle: isWorking
           ? Row(
               mainAxisSize: MainAxisSize.min,

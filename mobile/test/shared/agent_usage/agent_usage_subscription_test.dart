@@ -106,6 +106,43 @@ void main() {
     expect(snapshot.contextLimitTokens, 272000);
   });
 
+  test('drops an event with an invalid NIP-01 signature', () async {
+    final ownerKeychain = nostr.Keys.generate();
+    final agentKeychain = nostr.Keys.generate();
+    final relaySession = _RecordingRelaySession();
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relaySession),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(nsec: ownerKeychain.nsec),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(agentUsageRelayProvider);
+    await Future<void>.delayed(Duration.zero);
+
+    final validEvent = _turnMetricEvent(
+      ownerKeychain: ownerKeychain,
+      agentKeychain: agentKeychain,
+      payload: {
+        'harness': 'goose',
+        'timestamp': '2026-07-01T20:11:03Z',
+        'contextUsedTokens': 15392,
+        'contextLimitTokens': 272000,
+      },
+    );
+    relaySession.emit(
+      NostrEvent.fromJson({...validEvent.toJson(), 'sig': '00' * 64}),
+    );
+
+    final state = container.read(agentUsageRelayProvider);
+    expect(state.connection, AgentUsageConnectionState.open);
+    expect(state.snapshotsByAgent, isEmpty);
+    expect(state.errorMessage, isNull);
+  });
+
   test('drops an event with the wrong p tag without erroring', () async {
     final ownerKeychain = nostr.Keys.generate();
     final otherOwnerKeychain = nostr.Keys.generate();
