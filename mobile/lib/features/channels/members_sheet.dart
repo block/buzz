@@ -11,7 +11,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../profile/user_status.dart';
 import '../profile/user_status_cache_provider.dart';
-import 'agent_activity/agent_activity_sheet.dart';
+import 'agent_activity/show_agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
@@ -52,14 +52,10 @@ class MembersSheet extends HookConsumerWidget {
       navigator.pop();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!navigator.mounted) return;
-        showBuzzModalBottomSheet<void>(
+        showAgentActivitySheet(
           context: navigator.context,
-          isScrollControlled: true,
-          showDragHandle: true,
-          builder: (_) => AgentActivitySheet(
-            channelId: channel.id,
-            agentPubkey: bot.pubkey,
-          ),
+          channelId: channel.id,
+          agentPubkey: bot.pubkey,
         );
       });
     }
