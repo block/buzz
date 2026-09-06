@@ -2691,14 +2691,18 @@ async fn ingest_event_inner(
     }
 
     if channel_id.is_some() {
-        // Allow kind:9002 with archived=false (unarchive operation)
+        // Allow kind:9002 with archived=false (unarchive operation) and
+        // kind:9008 (delete) — a valid terminal transition from archived
+        // state; validate_admin_event still enforces kind:9008 authorization
+        // (owner, or the owning human of an owner-role agent).
         let is_unarchive = kind_u32 == KIND_NIP29_EDIT_METADATA
             && event.tags.iter().any(|t| {
                 let parts = t.as_slice();
                 parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
             });
+        let is_delete = kind_u32 == KIND_NIP29_DELETE_GROUP;
 
-        if !is_unarchive {
+        if !is_unarchive && !is_delete {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
                     return Err(IngestError::Rejected("invalid: channel is archived".into()));
