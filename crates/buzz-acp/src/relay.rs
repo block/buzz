@@ -2371,6 +2371,13 @@ async fn handle_ws_message(
                     } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
+                        debug!(
+                            channel_id = %channel_id,
+                            subscription_id = %subscription_id,
+                            event_id = %event_id_hex,
+                            kind = event.kind.as_u16(),
+                            "channel event received from relay"
+                        );
                         if state.record_event(channel_id, &event) {
                             let buzz_event = BuzzEvent {
                                 connection_generation: state.connection_generation,
@@ -2388,7 +2395,14 @@ async fn handle_ws_message(
                                 );
                             }
                             match event_tx.try_send(Some(buzz_event)) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    debug!(
+                                        channel_id = %channel_id,
+                                        subscription_id = %subscription_id,
+                                        event_id = %event_id_hex,
+                                        "channel event forwarded to harness"
+                                    );
+                                }
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     // Remove from dedup set so the replayed event
                                     // won't be rejected as a duplicate after reconnect.
@@ -3457,12 +3471,12 @@ async fn send_subscribe(
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
                     debug!(
-                        "subscribed to channel {channel_id}{}",
-                        if since.is_some() {
-                            " (with since filter)"
-                        } else {
-                            " (since=now)"
-                        }
+                        channel_id = %channel_id,
+                        subscription_id = %sub_id,
+                        kinds = ?filter.kinds,
+                        require_mention = filter.require_mention,
+                        since = since_ts,
+                        "channel subscription REQ sent"
                     );
                     true
                 }
@@ -4790,6 +4804,42 @@ mod tests {
             .await
             .expect("connect test websocket");
         (client, server.await.expect("join test websocket server"))
+    }
+
+    #[tokio::test]
+    async fn channel_event_is_forwarded_from_matching_subscription() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (observer_tx, _observer_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let event = make_test_event(&nostr::Keys::generate(), 1_000_000);
+        let event_id = event.id;
+        let text = serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), event,]))
+            .expect("serialize relay event");
+
+        assert!(
+            handle_ws_message(
+                Message::Text(text.into()),
+                &mut client,
+                &event_tx,
+                &observer_tx,
+                &mut state,
+                &nostr::Keys::generate(),
+                "ws://relay.example",
+                "agent-pubkey",
+                None,
+            )
+            .await
+        );
+
+        let forwarded = timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timed out waiting for forwarded channel event")
+            .expect("event channel unexpectedly closed")
+            .expect("connection-loss sentinel instead of channel event");
+        assert_eq!(forwarded.channel_id, channel_id);
+        assert_eq!(forwarded.event.id, event_id);
     }
 
     async fn next_test_frame(
