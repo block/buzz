@@ -72,6 +72,25 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Reject a message whose content is empty or whitespace-only, unless it
+/// attaches files (attachment-only messages are legitimate).
+///
+/// This closes a silent-failure mode for agent callers: `--content -` with a
+/// broken or missing stdin producer reads 0 bytes, the relay accepts the
+/// event, mentions still notify, and every layer reports success while the
+/// recipient sees a blank message.
+pub fn validate_message_content(content: &str, has_files: bool) -> Result<(), CliError> {
+    if content.trim().is_empty() && !has_files {
+        return Err(CliError::Usage(
+            "message content is empty; pass non-empty --content or attach --file \
+             (with `--content -`, an empty read usually means the stdin producer \
+             sent nothing)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Percent-encode for URL path segments and query parameter values.
 /// Encodes all bytes except RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
 #[cfg(test)]
@@ -274,6 +293,30 @@ mod tests {
     #[test]
     fn validate_content_size_empty() {
         assert!(validate_content_size("").is_ok());
+    }
+
+    // --- validate_message_content ---
+
+    #[test]
+    fn validate_message_content_nonempty_ok() {
+        assert!(validate_message_content("hello", false).is_ok());
+    }
+
+    #[test]
+    fn validate_message_content_empty_rejected() {
+        let err = validate_message_content("", false).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn validate_message_content_whitespace_only_rejected() {
+        let err = validate_message_content(" \n\t ", false).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn validate_message_content_empty_with_files_ok() {
+        assert!(validate_message_content("", true).is_ok());
     }
 
     // --- percent_encode ---
