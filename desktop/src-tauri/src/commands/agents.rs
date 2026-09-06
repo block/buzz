@@ -108,6 +108,7 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         );
     ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false).await?;
 
+    let mut retention_error = None;
     {
         let _store_guard = state
             .managed_agents_store_lock
@@ -124,7 +125,7 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         }
         save_managed_agents(app, &records)?;
         if let Some(saved_record) = records.iter().find(|record| record.pubkey == pubkey) {
-            retain_managed_agent_pending(app, state, saved_record);
+            retention_error = retain_managed_agent_pending(app, state, saved_record).err();
         }
     }
 
@@ -158,6 +159,9 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    if let Some(error) = retention_error {
+        return Err(error);
+    }
     summarize_from_disk(app, record, &runtimes)
 }
 
@@ -267,7 +271,7 @@ pub(super) async fn start_local_agent_with_preflight(
     )?;
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
-        retain_managed_agent_pending(app, state, saved_record);
+        retain_managed_agent_pending(app, state, saved_record)?;
     }
     let record = records
         .iter()
@@ -468,7 +472,7 @@ pub async fn create_managed_agent(
     };
 
     // ── Phase 3: save record (sync lock) ───────────────────────────────────────
-    let (agent, resolved_avatar_url, profile_about) = {
+    let (agent, resolved_avatar_url, profile_about, retention_error) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -720,13 +724,14 @@ pub async fn create_managed_agent(
         // Publish the agent to the relay. Inside the Phase-3 lock, after save,
         // before any .await — owner-authored, every agent (Will's ruling: no
         // is_builtin/persona-membership gate).
-        retain_managed_agent_pending(&app, &state, record);
+        let retention_error = retain_managed_agent_pending(&app, &state, record).err();
         // Effective owner-authored description for the kind:0 `about`.
         let profile_about = crate::managed_agents::record_effective_description(record, &personas);
         (
             summarize_from_disk(&app, record, &runtimes)?,
             resolved_avatar_url,
             profile_about,
+            retention_error,
         )
     };
 
@@ -780,6 +785,7 @@ pub async fn create_managed_agent(
     .await;
     profile_sync_error =
         super::agent_models::flush_managed_agent_policy(&app, &state, profile_sync_error).await;
+    profile_sync_error = retention_error.or(profile_sync_error);
 
     let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
@@ -1084,6 +1090,7 @@ fn run_managed_agent_deletion<T>(
     base_dir: &std::path::Path,
     pubkey: &str,
     records: &mut Vec<ManagedAgentRecord>,
+    prepare: impl FnOnce(&ManagedAgentRecord) -> Result<(), String>,
     delete: impl FnOnce(&mut Vec<ManagedAgentRecord>) -> Result<T, String>,
 ) -> Result<T, String> {
     recover_pending_assignment_cleanup(base_dir, |pending_pubkey| {
@@ -1091,6 +1098,11 @@ fn run_managed_agent_deletion<T>(
             .iter()
             .any(|record| record.pubkey.eq_ignore_ascii_case(pending_pubkey))
     })?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    prepare(record)?;
     with_agent_assignments_cleared(base_dir, pubkey, || delete(records))
 }
 
@@ -1153,14 +1165,28 @@ pub async fn delete_managed_agent(
             if !records.iter().any(|record| record.pubkey == pubkey) {
                 return Err(format!("agent {pubkey} not found"));
             }
-            run_managed_agent_deletion(&base_dir, &pubkey, &mut records, |records| {
-                if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
-                    stop_managed_agent_process(&app, record, &mut runtimes)?;
-                }
-                state.clear_agent_session_caches(&pubkey);
-                records.retain(|record| record.pubkey != pubkey);
-                save_managed_agents(&app, records)
-            })?;
+            run_managed_agent_deletion(
+                &base_dir,
+                &pubkey,
+                &mut records,
+                |record| {
+                    // Fail before stopping/removing the only local record if its
+                    // durable deletion retry cannot be authorized.
+                    if crate::managed_agents::device_policy::active(&app)?.unique_names {
+                        retain_managed_agent_pending(&app, &state, record)?;
+                    }
+                    Ok(())
+                },
+                |records| {
+                    if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey)
+                    {
+                        stop_managed_agent_process(&app, record, &mut runtimes)?;
+                    }
+                    state.clear_agent_session_caches(&pubkey);
+                    records.retain(|record| record.pubkey != pubkey);
+                    save_managed_agents(&app, records)
+                },
+            )?;
             crate::managed_agents::delete_agent_key(&pubkey);
             // Tombstone after confirmed removal (inside lock; every published
             // agent tombstones). The NIP-IA kind:9035 archive request — which

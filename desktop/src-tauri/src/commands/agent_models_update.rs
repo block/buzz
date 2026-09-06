@@ -175,7 +175,14 @@ pub async fn update_managed_agent(
         }
     }
     // Phase 1: local save (synchronous, under lock)
-    let (mut summary, sync_params, rollback, access_policy_changed, access_restart_relays) = {
+    let (
+        mut summary,
+        sync_params,
+        rollback,
+        access_policy_changed,
+        access_restart_relays,
+        retention_error,
+    ) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -360,7 +367,8 @@ pub async fn update_managed_agent(
         // Publish the edit to the relay. After-save, inside the lock, before
         // any .await. The retention upsert hashes the opt-IN projection, so an
         // update that touched only runtime/local fields is a no-op publish.
-        super::super::agents::retain_managed_agent_pending(&app, &state, record);
+        let retention_error =
+            super::super::agents::retain_managed_agent_pending(&app, &state, record).err();
 
         let sync_params = if name_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
@@ -404,6 +412,7 @@ pub async fn update_managed_agent(
             rollback,
             access_policy_changed,
             access_restart_relays,
+            retention_error,
         )
     }; // lock dropped here
 
@@ -451,7 +460,10 @@ pub async fn update_managed_agent(
             let rollback = rollback.ok_or_else(|| {
                 "missing local rollback state after relay profile sync failure".to_string()
             })?;
-            rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
+            let rollback_sync_error =
+                rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?
+                    .map(|error| format!(" Rollback synchronization also failed: {error}"))
+                    .unwrap_or_default();
             let restart_suffix = if access_restart_relays.is_empty() {
                 String::new()
             } else {
@@ -475,7 +487,7 @@ pub async fn update_managed_agent(
                 "No changes were saved"
             };
             return Err(format!(
-                "Agent rename failed because its relay profile could not be updated. {rollback_message}: {sync_error}.{restart_suffix}"
+                "Agent rename failed because its relay profile could not be updated. {rollback_message}: {sync_error}.{restart_suffix}{rollback_sync_error}"
             ));
         }
     }
@@ -497,7 +509,7 @@ pub async fn update_managed_agent(
 
     Ok(UpdateManagedAgentResponse {
         agent: summary,
-        profile_sync_error: profile_sync_error.take(),
+        profile_sync_error: retention_error.or(profile_sync_error.take()),
     })
 }
 

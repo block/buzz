@@ -559,7 +559,7 @@ pub async fn confirm_agent_snapshot_import(
     };
 
     // ── Phase 3a: create AgentDefinition + ManagedAgentRecord (sync lock) ──────
-    let (persona, record) = {
+    let (persona, record, retention_error) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -689,7 +689,7 @@ pub async fn confirm_agent_snapshot_import(
         // Enqueue the kind:30177 managed-agent event via retention.
         // (Uses the same pattern as agents.rs::retain_managed_agent_pending
         // inlined here to avoid cross-module private-fn access.)
-        retain_agent_pending(&app, &state, &record);
+        let retention_error = retain_agent_pending(&app, &state, &record).err();
 
         crate::managed_agents::try_regenerate_nest(&app);
 
@@ -697,7 +697,7 @@ pub async fn confirm_agent_snapshot_import(
         // matching the contract used by other local managed-agent mutations.
         let _ = app.emit("agents-data-changed", ());
 
-        (persona, record)
+        (persona, record, retention_error)
     };
 
     // ── Phase 3b: publish kind:0 profile (async, outside lock) ───────────────
@@ -772,15 +772,19 @@ pub async fn confirm_agent_snapshot_import(
         memory_written,
         memory_total,
         memory_errors,
-        profile_sync_error,
+        profile_sync_error: retention_error.or(profile_sync_error),
     })
 }
 
 /// Inline retention for the managed-agent kind:30177 event — mirrors
 /// `agents::retain_managed_agent_pending` without requiring cross-module
 /// private function access.
-fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgentRecord) {
-    crate::commands::agents::retain_managed_agent_pending(app, state, record);
+fn retain_agent_pending(
+    app: &AppHandle,
+    state: &AppState,
+    record: &ManagedAgentRecord,
+) -> Result<(), String> {
+    crate::commands::agents::retain_managed_agent_pending(app, state, record)
 }
 
 /// POST a pre-built signed engram event to the relay, authenticating as the

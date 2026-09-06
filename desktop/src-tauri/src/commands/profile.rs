@@ -271,29 +271,60 @@ pub async fn search_users(
 ) -> Result<SearchUsersResponse, String> {
     let policy = crate::managed_agents::device_policy::active(&app)?;
     let relay_url = crate::relay::relay_api_base_url_with_override(&state);
-    let exact_key = nostr::PublicKey::parse(query.trim()).is_ok();
-    let mut response = search_users_unfiltered(query, limit, cursor, state).await?;
-    // Name-based invitation and people pickers share the preferred identity
-    // rule. Explicit public-key requests and pagination keep their authority.
-    if !exact_key {
-        response.users.retain(|user| {
-            !user.is_agent
-                || policy.allows_identity(
-                    &relay_url,
-                    user.owner_pubkey.as_deref(),
-                    user.display_name.as_deref().unwrap_or(""),
-                    &user.pubkey,
+    let keys = state.signing_keys()?;
+    let response = search_users_unfiltered(
+        query.clone(),
+        limit,
+        preferred_search::base_cursor(cursor.as_deref()),
+        &state,
+        &relay_url,
+        &keys,
+    )
+    .await?;
+    let response = preferred_search::complete_search(
+        &policy,
+        &relay_url,
+        &query,
+        limit,
+        cursor.as_deref(),
+        response,
+        |authors| {
+            let state = &state;
+            let relay_url = &relay_url;
+            let keys = &keys;
+            async move {
+                query_relay_at_with_keys(
+                    state,
+                    relay_url,
+                    &[serde_json::json!({
+                        "kinds": [0], "authors": authors, "limit": 500,
+                    })],
+                    keys,
+                    None,
                 )
-        });
+                .await
+            }
+        },
+    )
+    .await?;
+    if current_pubkey_hex(&state)? != keys.public_key().to_hex()
+        || crate::relay::relay_api_base_url_with_override(&state) != relay_url
+    {
+        return Err("Account or community changed during user search; retry the search".into());
     }
     Ok(response)
 }
+
+#[path = "profile_preferred_search.rs"]
+mod preferred_search;
 
 async fn search_users_unfiltered(
     query: String,
     limit: Option<u32>,
     cursor: Option<String>,
-    state: State<'_, AppState>,
+    state: &AppState,
+    relay_url: &str,
+    keys: &nostr::Keys,
 ) -> Result<SearchUsersResponse, String> {
     let trimmed = query.trim();
     let max = limit.unwrap_or(8).min(500) as usize;
@@ -311,13 +342,16 @@ async fn search_users_unfiltered(
     }
 
     if trimmed.is_empty() {
-        let events = query_relay(
-            &state,
+        let events = query_relay_at_with_keys(
+            state,
+            relay_url,
             &[serde_json::json!({
                 "kinds": [0],
                 "limit": max,
                 "page": page,
             })],
+            keys,
+            None,
         )
         .await?;
 
@@ -352,7 +386,14 @@ async fn search_users_unfiltered(
     // the relay runs whole-word `websearch_to_tsquery` matching and "tyl"
     // returns zero results for "Tyler". Same bridge-only extension the topbar
     // message search uses (see `build_search_messages_filter`).
-    let events = query_relay(&state, &[build_user_search_filter(trimmed, max, page)]).await?;
+    let events = query_relay_at_with_keys(
+        state,
+        relay_url,
+        &[build_user_search_filter(trimmed, max, page)],
+        keys,
+        None,
+    )
+    .await?;
 
     let mut response = nostr_convert::rank_user_search_results(&events, trimmed, max);
     if events.len() >= max {

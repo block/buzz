@@ -23,11 +23,25 @@ fn ensure_table(conn: &rusqlite::Connection) -> Result<(), String> {
 /// is saved. Inbound replay and old queue scans never enroll identities here.
 pub(crate) fn register(conn: &rusqlite::Connection, pubkey: &str) -> Result<(), String> {
     ensure_table(conn)?;
-    conn.execute(
-        "INSERT OR IGNORE INTO device_local_agent_keys (pubkey) VALUES (?1)",
-        [pubkey],
-    )
-    .map_err(|e| format!("Cannot retain local agent sync permission: {e}"))?;
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO device_local_agent_keys (pubkey)
+         SELECT ?1 WHERE (SELECT COUNT(*) FROM device_local_agent_keys) < 5000",
+            [pubkey],
+        )
+        .map_err(|e| format!("Cannot retain local agent sync permission: {e}"))?;
+    if inserted == 0 {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM device_local_agent_keys WHERE pubkey = ?1)",
+                [pubkey],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Cannot read local agent sync permission: {e}"))?;
+        if !exists {
+            return Err("Local agent sync permission limit reached (5000 identities)".into());
+        }
+    }
     Ok(())
 }
 
@@ -51,6 +65,22 @@ pub(crate) fn registered(conn: &rusqlite::Connection) -> Result<HashSet<String>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_registry_refuses_new_keys_but_keeps_existing_publication_working() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        ensure_table(&conn).unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE keys(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM keys WHERE n < 5000)
+             INSERT INTO device_local_agent_keys SELECT printf('key-%d', n) FROM keys;",
+        )
+        .unwrap();
+        register(&conn, "key-1").unwrap();
+        assert!(register(&conn, "overflow").is_err());
+        let keys = registered(&conn).unwrap();
+        assert_eq!(keys.len(), 5000);
+        assert!(allows_coordinate(&keys, 9035, "key-1"));
+    }
     #[test]
     fn local_agent_publication_never_releases_old_deletions_or_runnable_templates() {
         let keys = HashSet::from(["new-local-key".into()]);

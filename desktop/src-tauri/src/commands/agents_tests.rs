@@ -259,9 +259,13 @@ fn production_delete_orchestration_restores_bestie_when_agent_save_fails() {
     record.pubkey.clone_from(&pubkey);
     let mut records = vec![record];
 
-    let result = run_managed_agent_deletion(dir.path(), &pubkey, &mut records, |_records| {
-        Err::<(), _>("injected managed-agent save failure".to_string())
-    });
+    let result = run_managed_agent_deletion(
+        dir.path(),
+        &pubkey,
+        &mut records,
+        |_| Ok(()),
+        |_records| Err::<(), _>("injected managed-agent save failure".to_string()),
+    );
 
     assert_eq!(
         result,

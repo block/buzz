@@ -20,31 +20,49 @@ use crate::{app_state::AppState, managed_agents::ManagedAgentRecord};
 /// [`agent_event_content`] projection — the retention upsert's content-equality
 /// guard compares this projection, so an operational start/stop that mutates
 /// only runtime fields produces an identical row and never re-enqueues a
-/// publish. Best-effort: a failure here is logged and swallowed so a retention
-/// hiccup never blocks the disk-authoritative write.
+/// publish. Unique-name mode propagates failures because boot reconciliation
+/// intentionally holds unregistered identities. Unrestricted mode remains best-effort.
 pub(crate) fn retain_managed_agent_pending(
     app: &AppHandle,
     state: &AppState,
     record: &ManagedAgentRecord,
-) {
-    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
+) -> Result<(), String> {
+    use crate::managed_agents::retention::open_retention_db;
 
+    let policy = crate::managed_agents::device_policy::active(app)?;
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let conn = open_retention_db(&scope.db_path)?;
-        let policy = crate::managed_agents::device_policy::active(app)?;
-        if policy.unique_names {
-            crate::managed_agents::device_policy::require_record(app, record)?;
-            crate::managed_agents::device_policy::sync::register(&conn, &record.pubkey)?;
-        }
-        // Shared engine with the boot-time reconcile: projection content diff
-        // (no republish for runtime-only churn) + monotonic created_at bump
-        // past the retained head (NIP-AP step 3).
-        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
+        retain_managed_agent_with_policy(&conn, &scope.owner_keys, record, &policy)
     })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: agent-retain: {e}");
+    if policy.unique_names {
+        result.map_err(|error| format!("Agent saved locally, but synchronization failed: {error}. Retry saving this agent."))
+    } else {
+        if let Err(error) = result {
+            eprintln!("buzz-desktop: agent-retain: {error}");
+        }
+        Ok(())
     }
+}
+
+fn retain_managed_agent_with_policy(
+    conn: &rusqlite::Connection,
+    keys: &nostr::Keys,
+    record: &ManagedAgentRecord,
+    policy: &crate::managed_agents::device_policy::model::DeviceAgentPolicy,
+) -> Result<(), String> {
+    use crate::managed_agents::{device_policy::sync, reconcile::retain_agent_record};
+    policy.require_local_agent(
+        &record.name,
+        Some(&record.pubkey),
+        record.persona_id.as_deref(),
+    )?;
+    let transaction = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    if policy.unique_names {
+        sync::register(&transaction, &record.pubkey)?;
+    }
+    retain_agent_record(&transaction, keys, record)?;
+    transaction.commit().map_err(|e| e.to_string())
 }
 
 /// Purge a deleted agent's pending row and enqueue a NIP-09 tombstone, both
@@ -441,3 +459,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "agents_pending_policy_tests.rs"]
+mod policy_tests;
