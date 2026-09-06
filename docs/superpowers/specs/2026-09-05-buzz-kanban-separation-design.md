@@ -81,10 +81,10 @@ Every roadmap description must preserve these decisions:
 ## Migration Safety
 
 Before any write, create a consistent backup of the live SQLite database using
-SQLite's online backup mechanism. Apply project creation, task moves, and task
-creation in one transaction. Abort the transaction if the source task set is
-not exactly the five approved Buzz-native tasks or if the requested epic ID has
-appeared since discovery.
+SQLite's online backup mechanism and verify its integrity. Apply project and
+owner-collaborator creation, task moves, and task creation in one transaction.
+Abort the transaction if the source task set is not exactly the five approved
+Buzz-native tasks or if the requested epic ID has appeared since discovery.
 
 After the transaction, verify:
 
@@ -92,7 +92,8 @@ After the transaction, verify:
 - The five existing Buzz-native IDs now belong to `Buzz` and retain all other
   fields.
 - All nine realtime voice tasks exist in `Buzz` with the intended statuses.
-- No `[DISCOVERY][BUZZ→LINZA]` task moved out of `linza`.
+- The exact preflight set of 11 `[DISCOVERY][BUZZ→LINZA]` task IDs remains in
+  `linza`.
 - The `linza` project and its unrelated task count are otherwise unchanged.
 
 The backup path and verification counts form the rollback receipt. No secrets

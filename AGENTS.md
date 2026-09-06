@@ -51,6 +51,17 @@ access information.
 
 ---
 
+## Kanban AI
+
+The operator-managed Buzz roadmap is tracked in a dedicated private `Buzz`
+project on its self-hosted Kanban AI instance; this is not a contributor-wide
+project requirement. Operators with access must read
+[docs/kanban-ai.md](docs/kanban-ai.md) before reading or changing that board; it
+defines project ownership, safe access, backup requirements, and the realtime
+voice roadmap boundary.
+
+---
+
 ## Repo Structure
 
 ```
