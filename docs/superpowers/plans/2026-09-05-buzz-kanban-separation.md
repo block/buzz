@@ -146,9 +146,15 @@ Docs: required identifiers, receipt basename, secret-pattern scan, git diff --ch
 
 Rollback is the verified backup in `/data/backups`. Restoring it discards every
 board write after the receipt timestamp. Restore only if later verification
-reveals a migration defect: stop the application to prevent concurrent-write
-corruption, inventory and explicitly accept or export later changes, verify the
-recorded SHA-256, replace the database, and rerun SQLite and MCP checks.
+reveals a migration defect. Inventory and explicitly accept or export later
+changes, stop the application completely, and use an operator shell with the
+data volume mounted without another writer. Stage and SHA/integrity-check the
+backup on the `/data` filesystem; quarantine the current database together with
+its `-wal` and `-shm` sidecars; preserve database ownership/mode; then atomically
+rename the staged database into place. Require a read-only integrity check while
+the application is still stopped and confirm no stale canonical sidecars remain
+before restart. If that check fails, keep the application stopped and restore
+the quarantined triplet. After restart, rerun authenticated MCP verification.
 
-The exact receipt and permanent operating rules live in
+The exact step-by-step procedure, receipt, and permanent operating rules live in
 [`docs/kanban-ai.md`](../../kanban-ai.md).

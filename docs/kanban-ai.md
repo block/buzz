@@ -136,6 +136,24 @@ realtime speech-to-speech.
 The verified backup is the rollback source for this one-time migration. A restore
 always discards every board write made after `2026-09-06T07:12:21.062Z`; stopping
 the application prevents concurrent-write corruption but does not preserve
-those later writes. Before restoring, stop the application, inventory and
-explicitly accept or export post-migration changes, verify the backup SHA-256,
-then replace the database and rerun SQLite and MCP verification.
+those later writes.
+
+Restore only from an operator shell with the application fully stopped and the
+data volume mounted without another writer. Inventory and explicitly accept or
+export post-migration changes first. Then:
+
+1. Copy the backup to a uniquely named staging file on the same `/data`
+   filesystem; verify its recorded SHA-256 and run `PRAGMA integrity_check`
+   against that staging file.
+2. Record the ownership and mode of `/data/kanban.sqlite`. Move the current
+   database and any `/data/kanban.sqlite-wal` and `/data/kanban.sqlite-shm`
+   sidecars together into a uniquely named quarantine directory. Never copy a
+   backup over the existing database in place.
+3. Apply the recorded ownership and mode to the staged database and atomically
+   rename it to `/data/kanban.sqlite`. Confirm that no WAL or SHM sidecar remains
+   at the canonical database path.
+4. While the application is still stopped, open the restored canonical database
+   read-only and require `PRAGMA integrity_check` to return `ok`. On failure,
+   keep the application stopped and restore the quarantined database triplet.
+5. Start the application, then verify projects, task counts, statuses, and
+   selected comments through authenticated MCP reads.
