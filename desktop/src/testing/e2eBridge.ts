@@ -514,6 +514,13 @@ type E2eConfig = {
     /** Delay (ms) applied to `start_pairing` so pairing loading UI is observable. */
     pairingStartDelayMs?: number;
     /**
+     * Relay embedded in the `nostrpair://` codes returned by `start_pairing`
+     * and `start_identity_recovery_pairing`. Defaults to a public relay; set
+     * to e.g. `ws://localhost:3000` to reproduce the unconfigured-desktop
+     * default that a phone cannot reach.
+     */
+    pairingRelayUrl?: string;
+    /**
      * Sequenced results for `confirm_team_snapshot_import`. String = throw
      * with that message; null = succeed. Call N uses results[N]; last entry
      * repeats when exhausted. Follows the `nsecErrors` precedent.
@@ -14697,14 +14704,14 @@ export function maybeInstallE2eTauriMocks() {
         if (delayMs > 0) {
           await new Promise((resolve) => window.setTimeout(resolve, delayMs));
         }
-        return "nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1";
+        return `nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=${encodeURIComponent(activeConfig?.mock?.pairingRelayUrl ?? "wss://relay.example.com")}&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1`;
       }
       case "start_identity_recovery_pairing": {
         const delayMs = activeConfig?.mock?.pairingStartDelayMs ?? 0;
         if (delayMs > 0) {
           await new Promise((resolve) => window.setTimeout(resolve, delayMs));
         }
-        return `nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1&mode=recover`;
+        return `nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=${encodeURIComponent(activeConfig?.mock?.pairingRelayUrl ?? "wss://relay.example.com")}&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1&mode=recover`;
       }
       case "cancel_pairing":
       case "confirm_pairing_sas":
