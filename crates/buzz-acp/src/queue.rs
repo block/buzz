@@ -1441,6 +1441,58 @@ fn resolve_reply_anchor(
     )
 }
 
+/// Human-facing destination for a reply produced by the current turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReplyDestination {
+    /// Event ID passed as the ordinary reply anchor. A top-level DM is
+    /// human-facing but deliberately has no anchor.
+    pub reply_to: Option<String>,
+    /// Root tag for direct harness publication.
+    pub thread_root: Option<String>,
+    /// Immediate parent tag for direct harness publication.
+    pub thread_parent: Option<String>,
+}
+
+/// Resolve whether a batch expects a human-facing reply and, if so, its anchor.
+///
+/// This is shared by prompt rendering and harness-side publication so the two
+/// paths cannot disagree about agent-only turns, channel threads, or DMs.
+pub(crate) fn reply_destination_for_batch(
+    batch: &FlushBatch,
+    channel_info: Option<&PromptChannelInfo>,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> Option<ReplyDestination> {
+    let last_event = batch.events.last()?;
+    let thread_tags = parse_thread_tags(&last_event.event);
+    let is_dm = channel_info
+        .map(|info| info.channel_type == "dm")
+        .unwrap_or(false);
+
+    if is_dm {
+        let root = thread_tags.root_event_id.clone();
+        return Some(ReplyDestination {
+            reply_to: root.as_ref().map(|_| last_event.event.id.to_hex()),
+            thread_root: root,
+            thread_parent: thread_tags
+                .root_event_id
+                .as_ref()
+                .map(|_| last_event.event.id.to_hex()),
+        });
+    }
+
+    resolve_reply_anchor(
+        &last_event.event.pubkey.to_hex(),
+        &thread_tags,
+        &last_event.event.id.to_hex(),
+        profile_lookup,
+    )
+    .map(|reply_to| ReplyDestination {
+        thread_root: Some(reply_to.clone()),
+        thread_parent: Some(reply_to.clone()),
+        reply_to: Some(reply_to),
+    })
+}
+
 /// Maximum length (in characters) of a channel description rendered into `<context>`.
 ///
 /// Limits prompt bloat from unusually long descriptions. Multi-line
@@ -2017,21 +2069,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
-    let sender_pubkey = last_event.event.pubkey.to_hex();
-    let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
-    } else {
-        resolve_reply_anchor(
-            &sender_pubkey,
-            &thread_tags,
-            &last_event.event.id.to_hex(),
-            args.profile_lookup,
-        )
-    };
+    // there. Top-level DMs remain unthreaded; DM replies preserve their thread.
+    let reply_anchor = reply_destination_for_batch(batch, args.channel_info, args.profile_lookup)
+        .and_then(|destination| destination.reply_to);
     sections.push(format_context_hints(
         &batch.scope,
         args.channel_info,
@@ -4002,6 +4042,26 @@ mod tests {
                         description: None,
                         project: None,
                     };
+                    let destination = reply_destination_for_batch(&batch, Some(&ci), None)
+                        .expect("human-facing turn has a reply destination");
+                    if is_dm && !is_reply {
+                        assert_eq!(destination.reply_to, None);
+                        assert_eq!(destination.thread_root, None);
+                        assert_eq!(destination.thread_parent, None);
+                    } else if is_dm {
+                        assert_eq!(destination.reply_to, Some(reply.id.to_hex()));
+                        assert_eq!(destination.thread_root, Some(root.to_uppercase()));
+                        assert_eq!(destination.thread_parent, Some(reply.id.to_hex()));
+                    } else {
+                        let expected = if is_reply {
+                            root.to_uppercase()
+                        } else {
+                            root.clone()
+                        };
+                        assert_eq!(destination.reply_to, Some(expected.clone()));
+                        assert_eq!(destination.thread_root, Some(expected.clone()));
+                        assert_eq!(destination.thread_parent, Some(expected));
+                    }
                     // Session scope must remain visible on every turn, even
                     // after standing context was sent or via modern ACP.
                     for modern in [false, true] {

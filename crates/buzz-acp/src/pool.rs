@@ -31,8 +31,8 @@ use uuid::Uuid;
 
 use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
-    model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport,
+    model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, CapturedTurnReply, EnvVar,
+    McpServer, ModelSwitchMethod, StopReason, SystemPromptTransport,
 };
 use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -271,6 +271,19 @@ pub struct OwnedAgent {
     pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
     pub protocol_version: u32,
+}
+
+/// Harness-owned destination for publishing a completed ACP response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReplyFallbackContext {
+    /// Channel receiving the signed kind-9 response.
+    pub channel_id: Uuid,
+    /// NIP-10 root tag, absent for an unthreaded top-level DM.
+    pub thread_root: Option<String>,
+    /// NIP-10 reply tag, absent for an unthreaded top-level DM.
+    pub thread_parent: Option<String>,
+    /// Coarse lower timestamp bound for duplicate detection.
+    pub turn_started_at_secs: u64,
 }
 
 /// Package name reported by `claude-agent-acp` in its `initialize` response.
@@ -2132,6 +2145,7 @@ pub async fn run_prompt_task(
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = source.channel_id();
+    let turn_started_at_secs = nostr::Timestamp::now().as_secs();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2692,6 +2706,7 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    let mut reply_fallback: Option<ReplyFallbackContext> = None;
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
@@ -2756,6 +2771,18 @@ pub async fn run_prompt_task(
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+
+        reply_fallback = crate::queue::reply_destination_for_batch(
+            b,
+            channel_info.as_ref(),
+            profile_lookup.as_ref(),
+        )
+        .map(|destination| ReplyFallbackContext {
+            channel_id: b.channel_id,
+            thread_root: destination.thread_root,
+            thread_parent: destination.thread_parent,
+            turn_started_at_secs,
+        });
 
         let known_names: Vec<&str> = profile_lookup
             .iter()
@@ -3006,6 +3033,10 @@ pub async fn run_prompt_task(
                             );
                         }
                         log_stop_reason(&source, &StopReason::EndTurn);
+                        // The prompt future was dropped, so its actual stop reason
+                        // (end_turn, max_tokens, refusal, etc.) is unavailable.
+                        // Fail closed rather than risk publishing partial output.
+                        let _ = agent.acp.take_turn_reply();
                         if let PromptSource::Channel(scope) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
                             record_scope_delivery_success(
@@ -3048,6 +3079,18 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            if matches!(stop_reason, StopReason::EndTurn) {
+                finish_turn_reply_fallback(
+                    &mut agent,
+                    &ctx.rest_client,
+                    reply_fallback.as_ref(),
+                )
+                .await;
+            } else {
+                // Never publish partial, refused, limited, or cancelled output.
+                let _ = agent.acp.take_turn_reply();
+            }
 
             if let PromptSource::Channel(scope) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
@@ -5054,6 +5097,205 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum ReplyFallbackOutcome {
+    ExistingReply,
+    Published(String),
+}
+
+fn is_explicit_silence(content: &str) -> bool {
+    let marker = content
+        .trim()
+        .trim_matches(|character: char| matches!(character, '`' | '.' | '!' | ':' | ';'))
+        .trim();
+    ["NO_REPLY", "ANNOUNCE_SKIP", "REPLY_SKIP"]
+        .iter()
+        .any(|candidate| marker.eq_ignore_ascii_case(candidate))
+}
+
+async fn finish_turn_reply_fallback(
+    agent: &mut OwnedAgent,
+    rest: &crate::relay::RestClient,
+    context: Option<&ReplyFallbackContext>,
+) {
+    let content = match agent.acp.take_turn_reply() {
+        CapturedTurnReply::Empty => return,
+        CapturedTurnReply::Overflow => {
+            tracing::warn!(
+                "reply fallback suppressed: final ACP response exceeded the 64 KiB message limit"
+            );
+            agent.acp.observe(
+                "delivery_fallback_failed",
+                serde_json::json!({ "reason": "final response exceeded 64 KiB" }),
+            );
+            return;
+        }
+        CapturedTurnReply::Text(content) => content,
+    };
+    if is_explicit_silence(&content) {
+        tracing::debug!("reply fallback suppressed for explicit silence marker");
+        return;
+    }
+    let Some(context) = context else {
+        return;
+    };
+
+    match post_agent_reply_fallback(rest, context, &content).await {
+        Ok(ReplyFallbackOutcome::ExistingReply) => tracing::debug!(
+            channel = %context.channel_id,
+            "agent already published during turn — suppressing reply fallback"
+        ),
+        Ok(ReplyFallbackOutcome::Published(event_id)) => {
+            tracing::warn!(
+                channel = %context.channel_id,
+                event_id,
+                "content-delivery fallback published the ACP final response"
+            );
+            agent.acp.observe(
+                "delivery_fallback",
+                serde_json::json!({ "eventId": event_id }),
+            );
+        }
+        Err(reason) => {
+            tracing::warn!(
+                channel = %context.channel_id,
+                "content-delivery fallback failed: {reason}"
+            );
+            agent.acp.observe(
+                "delivery_fallback_failed",
+                serde_json::json!({ "reason": reason }),
+            );
+        }
+    }
+}
+
+async fn fallback_event_persisted(
+    rest: &crate::relay::RestClient,
+    event_id: nostr::EventId,
+) -> Result<bool, String> {
+    let filter = nostr::Filter::new()
+        .id(event_id)
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .limit(1);
+    let value = tokio::time::timeout(Duration::from_secs(5), rest.query(&[filter]))
+        .await
+        .map_err(|_| "event-ID reconciliation timed out".to_string())?
+        .map_err(|error| format!("event-ID reconciliation failed: {error}"))?;
+    value
+        .as_array()
+        .map(|events| !events.is_empty())
+        .ok_or_else(|| "event-ID reconciliation returned malformed data".to_string())
+}
+
+/// Publish the final ACP response only when the agent did not already send a
+/// reply during this turn. Relay reads fail closed to prevent duplicate sends.
+async fn post_agent_reply_fallback(
+    rest: &crate::relay::RestClient,
+    context: &ReplyFallbackContext,
+    content: &str,
+) -> Result<ReplyFallbackOutcome, String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let content = content.trim();
+    if content.is_empty() {
+        return Ok(ReplyFallbackOutcome::ExistingReply);
+    }
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let e_tag = SingleLetterTag::lowercase(Alphabet::E);
+    let channel = context.channel_id.to_string();
+    let mut filter = nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .author(rest.keys.public_key())
+        .custom_tags(h_tag, [channel.as_str()])
+        .since(nostr::Timestamp::from(context.turn_started_at_secs))
+        .limit(1);
+    if let Some(root) = context.thread_root.as_deref() {
+        filter = filter.custom_tags(e_tag, [root]);
+    }
+
+    let existing = tokio::time::timeout(
+        Duration::from_secs(5),
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    .map_err(|_| "duplicate check timed out".to_string())?
+    .map_err(|error| format!("duplicate check failed: {error}"))?
+    .as_array()
+    .map(|events| !events.is_empty())
+    .ok_or_else(|| "duplicate check returned malformed data".to_string())?;
+    if existing {
+        return Ok(ReplyFallbackOutcome::ExistingReply);
+    }
+
+    let thread_ref = match (
+        context.thread_root.as_deref(),
+        context.thread_parent.as_deref(),
+    ) {
+        (None, None) => None,
+        (Some(root), Some(parent)) => Some(buzz_sdk::ThreadRef {
+            root_event_id: nostr::EventId::from_hex(root)
+                .map_err(|error| format!("invalid reply root: {error}"))?,
+            parent_event_id: nostr::EventId::from_hex(parent)
+                .map_err(|error| format!("invalid reply parent: {error}"))?,
+        }),
+        _ => return Err("incomplete reply thread destination".to_string()),
+    };
+    let builder = buzz_sdk::build_message(
+        context.channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+    )
+    .map_err(|error| format!("build failed: {error}"))?;
+    let event = builder
+        .sign_with_keys(&rest.keys)
+        .map_err(|error| format!("sign failed: {error}"))?;
+    let event_id = event.id;
+    let event_id_hex = event_id.to_hex();
+
+    let uncertain_reason = match tokio::time::timeout(
+        Duration::from_secs(5),
+        rest.submit_event(&event),
+    )
+    .await
+    {
+        Ok(Ok(response))
+            if response.get("accepted").and_then(|value| value.as_bool()) == Some(true) =>
+        {
+            return Ok(ReplyFallbackOutcome::Published(event_id_hex));
+        }
+        Ok(Ok(response))
+            if response.get("accepted").and_then(|value| value.as_bool()) == Some(false) =>
+        {
+            let message = response
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("relay rejected the event");
+            return Err(format!("relay rejected the event: {message}"));
+        }
+        Ok(Ok(_)) => "relay returned no acceptance decision".to_string(),
+        Ok(Err(error)) => format!("publish request failed: {error}"),
+        Err(_) => "publish acknowledgement timed out".to_string(),
+    };
+
+    match fallback_event_persisted(rest, event_id).await {
+        Ok(true) => Ok(ReplyFallbackOutcome::Published(event_id_hex)),
+        Ok(false) => Err(uncertain_reason),
+        Err(reconciliation_error) => Err(format!(
+            "{uncertain_reason}; {reconciliation_error}"
+        )),
+    }
+}
+
 /// Best-effort: post a visible failure notice (kind:9) to a channel after a
 /// batch is dead-lettered. Replies into the thread of `thread_tags` when the
 /// triggering event was threaded. Errors are logged and swallowed — the
@@ -5230,6 +5472,170 @@ mod tests {
     /// (equivalent to the pre-thread-scoping channel key).
     fn conv(channel_id: Uuid) -> SessionScope {
         SessionScope::Conversation { channel_id }
+    }
+
+    async fn read_test_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut bytes = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let count = socket.read(&mut chunk).await.expect("read test request");
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let header_end = header_end + 4;
+            let headers = String::from_utf8_lossy(&bytes[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if bytes.len() >= header_end + content_length {
+                break;
+            }
+        }
+        String::from_utf8(bytes).expect("UTF-8 test request")
+    }
+
+    async fn write_test_http_json(socket: &mut tokio::net::TcpStream, body: &str) {
+        use tokio::io::AsyncWriteExt;
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write test response");
+    }
+
+    #[test]
+    fn explicit_silence_markers_are_not_publishable() {
+        for marker in ["NO_REPLY", "`announce_skip`", " reply_skip. "] {
+            assert!(is_explicit_silence(marker));
+        }
+        assert!(!is_explicit_silence("No reply was received."));
+    }
+
+    #[tokio::test]
+    async fn reply_fallback_requires_relay_acceptance() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let base_url = format!("http://{}", listener.local_addr().expect("test address"));
+        let server = tokio::spawn(async move {
+            let (mut query, _) = listener.accept().await.expect("accept duplicate query");
+            let _ = read_test_http_request(&mut query).await;
+            write_test_http_json(&mut query, "[]").await;
+
+            let (mut submit, _) = listener.accept().await.expect("accept submit");
+            let _ = read_test_http_request(&mut submit).await;
+            write_test_http_json(
+                &mut submit,
+                r#"{"accepted":false,"message":"blocked by policy"}"#,
+            )
+            .await;
+        });
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let context = ReplyFallbackContext {
+            channel_id: Uuid::new_v4(),
+            thread_root: None,
+            thread_parent: None,
+            turn_started_at_secs: Timestamp::now().as_secs(),
+        };
+
+        let result = post_agent_reply_fallback(&rest, &context, "reply").await;
+        assert!(
+            result
+                .expect_err("relay rejection must fail")
+                .contains("blocked by policy")
+        );
+        server.await.expect("test server");
+    }
+
+    #[tokio::test]
+    async fn reply_fallback_reconciles_an_uncertain_ack_by_event_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let base_url = format!("http://{}", listener.local_addr().expect("test address"));
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut submitted_tx = Some(submitted_tx);
+            for (index, body) in ["[]", "{}", "[{}]"].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let request = read_test_http_request(&mut socket).await;
+                if index == 1 {
+                    let body = request
+                        .split_once("\r\n\r\n")
+                        .expect("HTTP request has a body")
+                        .1
+                        .to_string();
+                    submitted_tx
+                        .take()
+                        .expect("submit sender available")
+                        .send(body)
+                        .expect("capture submitted event");
+                }
+                write_test_http_json(&mut socket, body).await;
+            }
+        });
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let channel_id = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let parent = "b".repeat(64);
+        let context = ReplyFallbackContext {
+            channel_id,
+            thread_root: Some(root.clone()),
+            thread_parent: Some(parent.clone()),
+            turn_started_at_secs: Timestamp::now().as_secs(),
+        };
+
+        assert!(matches!(
+            post_agent_reply_fallback(&rest, &context, "reply").await,
+            Ok(ReplyFallbackOutcome::Published(_))
+        ));
+        let event: serde_json::Value = serde_json::from_str(
+            &submitted_rx.await.expect("submitted event body"),
+        )
+        .expect("submitted event JSON");
+        assert_eq!(event["kind"], json!(9));
+        assert_eq!(event["content"], json!("reply"));
+        let tags = event["tags"].as_array().expect("event tags");
+        assert!(tags.iter().any(|tag| tag == &json!(["h", channel_id])));
+        assert!(tags.iter().any(|tag| {
+            tag.as_array().is_some_and(|parts| {
+                parts.first() == Some(&json!("e")) && parts.get(1) == Some(&json!(root))
+            })
+        }));
+        assert!(tags.iter().any(|tag| {
+            tag.as_array().is_some_and(|parts| {
+                parts.first() == Some(&json!("e")) && parts.get(1) == Some(&json!(parent))
+            })
+        }));
+        server.await.expect("test server");
     }
 
     fn test_mcp_server() -> McpServer {
