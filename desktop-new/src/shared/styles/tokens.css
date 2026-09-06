@@ -292,6 +292,10 @@
   --space-panel-inset: var(--space-5);
   --space-control-inset: var(--space-3);
   --space-row-gap: var(--space-2);
+  /* An inline tile sits in a line of text, so its inset and gap are tighter
+     than a control's and are its own repeated relationship. */
+  --space-tile-inset: var(--space-1);
+  --space-tile-gap: 0.1875rem;
   --size-topbar: 3.5rem;
   --size-panel-header: 3.5rem;
   --size-control: 2.25rem;
@@ -301,6 +305,9 @@
   --radius-control: var(--corner-control);
   --radius-row: var(--corner-row);
   --radius-pill: var(--corner-round);
+  /* A tile reads as a chip in running text, so it takes a tighter corner than
+     a control and gets its own role rather than borrowing one. */
+  --radius-tile: 0.375rem;
   --duration-fast: var(--time-fast);
   --duration-state: var(--time-state);
   --duration-settle: var(--time-settle);
@@ -434,4 +441,6 @@
   --spacing-panel-inset: var(--space-panel-inset);
   --spacing-control-inset: var(--space-control-inset);
   --spacing-row-gap: var(--space-row-gap);
+  --spacing-tile-inset: var(--space-tile-inset);
+  --spacing-tile-gap: var(--space-tile-gap);
 }

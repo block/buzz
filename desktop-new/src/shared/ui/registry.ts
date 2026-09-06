@@ -39,6 +39,16 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     owner: "desktop-new Messages",
   },
   {
+    slug: "inline-tile",
+    name: "InlineTile",
+    purpose:
+      "A reference to a person, agent, or channel shown inline in a sentence.",
+    behavior: "Semantic native button or image role",
+    variants: ["person", "agent", "channel"],
+    status: "proposed",
+    owner: "desktop-new Messages",
+  },
+  {
     slug: "workspace-surface",
     name: "WorkspaceSurface",
     purpose: "A major panel sitting on the atmospheric workspace backdrop.",

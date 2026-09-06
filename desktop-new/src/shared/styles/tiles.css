@@ -1,0 +1,119 @@
+@layer components {
+  /**
+   * Inline tile — a reference to a person, agent, or channel sitting in a line
+   * of text. Shared by the composer and the conversation, so the same
+   * reference looks identical whether it is being written or read.
+   *
+   * `inline-flex` is deliberate here, unlike the existing client's mention
+   * decorations: a tile is a real object the caret cannot enter, so it does
+   * not need to behave as a run of text and can align its icon properly.
+   */
+  .inline-tile {
+    display: inline-flex;
+    max-width: 16rem;
+    align-items: center;
+    gap: var(--space-tile-gap);
+    border: 0;
+    border-radius: var(--radius-tile);
+    padding-inline: var(--space-tile-inset);
+    background: var(--bg-accent-tint);
+    color: var(--text-accent);
+    font: inherit;
+    /* Sits on the text baseline without stretching the line it lives in. */
+    line-height: 1.25;
+    vertical-align: baseline;
+    /* A tile is an object: dragging or double-clicking must not select into
+       its label the way it would with text. */
+    user-select: none;
+    transition:
+      background-color var(--duration-state) var(--easing-state),
+      color var(--duration-state) var(--easing-state);
+  }
+
+  button.inline-tile {
+    cursor: pointer;
+  }
+
+  button.inline-tile:hover {
+    background: var(--bg-accent-tint-hover);
+  }
+
+  .inline-tile:focus-visible {
+    outline: 2px solid var(--ring-focus);
+    outline-offset: 2px;
+  }
+
+  /* A channel is structure, not an identity, so it takes the neutral inset
+     rather than the accent tint. Colour is signal; a #channel reference is
+     not a signal about a person. */
+  .inline-tile[data-kind="channel"] {
+    background: var(--bg-inset);
+    color: var(--text-secondary);
+  }
+
+  button.inline-tile[data-kind="channel"]:hover {
+    background: var(--bg-inset);
+    color: var(--text-primary);
+  }
+
+  .inline-tile-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .inline-tile-icon {
+    width: 0.875em;
+    height: 0.875em;
+    flex: 0 0 auto;
+  }
+
+  .inline-tile-avatar {
+    width: 0.875em;
+    height: 0.875em;
+    flex: 0 0 auto;
+    border-radius: var(--radius-pill);
+    object-fit: cover;
+  }
+
+  .inline-tile-status {
+    width: 0.375em;
+    height: 0.375em;
+    flex: 0 0 auto;
+    border-radius: var(--radius-pill);
+  }
+
+  .inline-tile-status[data-status="online"] {
+    background: var(--bg-success);
+  }
+
+  .inline-tile-status[data-status="busy"] {
+    background: var(--bg-warning);
+  }
+
+  .inline-tile-status[data-status="offline"] {
+    background: var(--border-secondary);
+  }
+
+  /* Still resolving its face. Quiet rather than animated: a pulsing tile in a
+     sentence draws the eye away from the words around it. */
+  .inline-tile[data-loading] .inline-tile-label {
+    color: var(--text-tertiary);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .inline-tile {
+      transition-duration: 0ms;
+    }
+  }
+}
+
+@layer components {
+  /* The editor's wrapper around a tile node. Must not introduce its own box:
+     any padding or display change here shifts the caret target at the tile's
+     edges, which is the one boundary the browser already gets wrong. */
+  .tile-node-view {
+    display: inline;
+  }
+}

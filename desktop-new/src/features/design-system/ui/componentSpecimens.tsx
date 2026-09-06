@@ -8,6 +8,7 @@ import {
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { Avatar } from "@/shared/ui/Avatar";
+import { InlineTile } from "@/shared/ui/InlineTile";
 import { Button } from "@/shared/ui/Button";
 import { IconButton } from "@/shared/ui/IconButton";
 import { NavigatorRow } from "@/shared/ui/NavigatorRow";
@@ -16,6 +17,8 @@ import { PanelHeader } from "@/shared/ui/PanelHeader";
 import { SearchField } from "@/shared/ui/SearchField";
 import { SegmentedNavigation } from "@/shared/ui/SegmentedNavigation";
 import { WorkspaceSurface } from "@/shared/ui/WorkspaceSurface";
+import type { TileAddress } from "@/shared/tiles/address";
+import { tileFaces } from "@/shared/tiles/faceResolver";
 
 const DESTINATIONS = [
   { value: "home", label: "Home" },
@@ -380,10 +383,106 @@ function NavigatorRowSpecimen() {
   );
 }
 
+const TILE_PERSON: TileAddress = { kind: "person", id: "pk-morgan" };
+const TILE_AGENT: TileAddress = { kind: "agent", id: "pk-vogue" };
+const TILE_CHANNEL: TileAddress = { kind: "channel", id: "ch-design" };
+const TILE_UNRESOLVED: TileAddress = {
+  kind: "person",
+  id: "9f2c4a1b7e5d8306a4b2c1d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9",
+};
+const TILE_LONG: TileAddress = { kind: "person", id: "pk-long" };
+
+/**
+ * Seeds faces so the specimens show resolved tiles. The product resolves these
+ * from real identity; the page only needs the shapes to be visible.
+ */
+function seedTileFaces() {
+  tileFaces.put(TILE_PERSON, {
+    label: "Morgan",
+    status: "online",
+    loading: false,
+    resolved: true,
+  });
+  tileFaces.put(TILE_AGENT, {
+    label: "Vogue",
+    status: "busy",
+    loading: false,
+    resolved: true,
+  });
+  tileFaces.put(TILE_CHANNEL, {
+    label: "design",
+    loading: false,
+    resolved: true,
+  });
+  tileFaces.put(TILE_LONG, {
+    label: "A deliberately very long display name that must truncate",
+    loading: false,
+    resolved: true,
+  });
+}
+
+function InlineTileSpecimen() {
+  const [activated, setActivated] = useState<string | null>(null);
+  seedTileFaces();
+
+  return (
+    <div className="component-specimen-stack">
+      <SpecimenGroup label="Kinds">
+        <div className="component-specimen-row">
+          <InlineTile address={TILE_PERSON} />
+          <InlineTile address={TILE_AGENT} />
+          <InlineTile address={TILE_CHANNEL} />
+        </div>
+      </SpecimenGroup>
+
+      <SpecimenGroup label="In a sentence">
+        <p className="text-body text-primary">
+          Asked <InlineTile address={TILE_PERSON} /> and{" "}
+          <InlineTile address={TILE_AGENT} /> to look at the thread in{" "}
+          <InlineTile address={TILE_CHANNEL} /> before the review.
+        </p>
+      </SpecimenGroup>
+
+      <SpecimenGroup label="Read-only, as a conversation renders it">
+        <p className="text-body text-primary">
+          A tile in a sent message is not a control when the surface has no
+          detail to open:{" "}
+          <InlineTile address={TILE_PERSON} interactive={false} />
+        </p>
+      </SpecimenGroup>
+
+      <SpecimenGroup label="Unresolved identity">
+        <div className="component-specimen-row">
+          <InlineTile address={TILE_UNRESOLVED} />
+        </div>
+      </SpecimenGroup>
+
+      <SpecimenGroup label="Long label truncates">
+        <div className="component-specimen-row">
+          <InlineTile address={TILE_LONG} />
+        </div>
+      </SpecimenGroup>
+
+      <SpecimenGroup label="Activation">
+        <div className="component-specimen-row">
+          <InlineTile
+            address={TILE_PERSON}
+            onActivate={(address) => setActivated(address.id)}
+          />
+          <span className="text-body-sm text-tertiary">
+            {activated ? `Opened ${activated}` : "Not activated"}
+          </span>
+        </div>
+      </SpecimenGroup>
+    </div>
+  );
+}
+
 export const COMPONENT_SPECIMENS: Record<string, () => ReactNode> = {
   button: ButtonSpecimen,
   "icon-button": IconButtonSpecimen,
   avatar: AvatarSpecimen,
+  "inline-tile": InlineTileSpecimen,
   "workspace-surface": WorkspaceSurfaceSpecimen,
   "segmented-navigation": SegmentedNavigationSpecimen,
   "panel-header": PanelHeaderSpecimen,
