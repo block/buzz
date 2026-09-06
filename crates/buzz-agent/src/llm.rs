@@ -1092,6 +1092,18 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         Some("completed") => ProviderStop::EndTurn,
         _ => ProviderStop::Other,
     };
+    // DeepSeek reasoning models on the Responses API route may put the answer
+    // in `reasoning` items while leaving `output_text` empty. Promote reasoning
+    // to visible text so the model's answer is not silently lost.
+    if text.is_empty() && !reasoning.is_empty() {
+        tracing::warn!(
+            target: "buzz_agent::llm",
+            reasoning_bytes = reasoning.len(),
+            "Responses API: model returned empty output_text with non-empty \
+             reasoning — promoting reasoning to visible text"
+        );
+        std::mem::swap(&mut text, &mut reasoning);
+    }
     let input_tokens = sum_usage(&v, &["input_tokens"]).and_then(SumUsageResult::into_exact);
     let output_tokens = sum_usage(&v, &["output_tokens"]).and_then(SumUsageResult::into_exact);
     // The Responses API nests the cache split under `input_tokens_details`.
@@ -1277,6 +1289,13 @@ fn str_field(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_owned()
 }
 
+/// Prefix of a gateway placeholder injected when the model returns
+/// empty `content` (e.g. some OpenAI-compat gateways sanitise empty
+/// responses). Treat responses consisting only of this placeholder as
+/// empty content and promote `reasoning_content` to visible text instead.
+const GATEWAY_PLACEHOLDER_PREFIX: &str =
+    "[System: Empty message content sanitised to satisfy protocol";
+
 /// Append `part` to `buf` on its own line, ignoring empties.
 fn push_part(buf: &mut String, part: &str) {
     if part.is_empty() {
@@ -1300,7 +1319,14 @@ fn openai_content_parts(content: Option<&Value>) -> (String, String) {
     let mut text = String::new();
     let mut reasoning = String::new();
     match content {
-        Some(Value::String(s)) => text.push_str(s),
+        Some(Value::String(s))
+            // Some OpenAI-compat gateways inject a placeholder when the
+            // model returns empty content. Treat it as empty so
+            // reasoning_content (the actual answer) is promoted to text.
+            if !s.starts_with(GATEWAY_PLACEHOLDER_PREFIX) =>
+        {
+            text.push_str(s);
+        }
         Some(Value::Array(blocks)) => {
             for b in blocks {
                 match b.get("type").and_then(Value::as_str) {
@@ -1402,6 +1428,18 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
     // Anthropic reports cache-creation tokens as `cache_creation_input_tokens`;
     // also a subset of `input_tokens` (already folded in above).
     let cache_write_tokens = usage_first(&v, &["cache_creation_input_tokens"], &[]);
+    // Anthropic extended thinking may leave the text block empty when the
+    // model exhausts its thinking budget. Promote thinking to visible text
+    // so the answer is not silently lost.
+    if text.is_empty() && !reasoning.is_empty() {
+        tracing::warn!(
+            target: "buzz_agent::llm",
+            reasoning_bytes = reasoning.len(),
+            "Anthropic: model returned empty text with non-empty thinking — \
+             promoting thinking to visible text"
+        );
+        std::mem::swap(&mut text, &mut reasoning);
+    }
     Ok(LlmResponse {
         text,
         tool_calls,
@@ -1464,13 +1502,13 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     let msg = choice
         .get("message")
         .ok_or_else(|| AgentError::Llm("missing message".into()))?;
-    let (text, block_reasoning) = openai_content_parts(msg.get("content"));
+    let (mut text, block_reasoning) = openai_content_parts(msg.get("content"));
     // DeepSeek and vLLM-style OpenAI-compat hosts expose reasoning tokens on the
     // message object. Prefer `reasoning_content` (DeepSeek's field name); fall
     // back to `reasoning` (some other providers), and last to reasoning blocks
     // found inside `content`. All three are absent for standard OpenAI
     // responses, which leaves this empty without any special-casing.
-    let reasoning = {
+    let mut reasoning = {
         let rc = str_field(msg, "reasoning_content");
         let rc = if rc.is_empty() {
             str_field(msg, "reasoning")
@@ -1483,6 +1521,21 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
             rc
         }
     };
+    // DeepSeek reasoning models sometimes put the entire answer in
+    // `reasoning_content` while returning empty `content` (or a gateway
+    // placeholder like "[System: Empty message content sanitised to satisfy
+    // protocol...]"). When the visible text is empty but reasoning is non-empty,
+    // promote the reasoning to visible text so the model's answer is not
+    // silently lost.
+    if text.is_empty() && !reasoning.is_empty() {
+        tracing::warn!(
+            target: "buzz_agent::llm",
+            reasoning_bytes = reasoning.len(),
+            "model returned empty content with non-empty reasoning_content — \
+             promoting reasoning to visible text"
+        );
+        std::mem::swap(&mut text, &mut reasoning);
+    }
     let mut tool_calls = Vec::new();
     if stop != ProviderStop::MaxTokens {
         if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
@@ -5472,6 +5525,112 @@ mod tests {
     }
 
     #[test]
+    fn parse_openai_promotes_reasoning_content_to_text_when_content_empty() {
+        // DeepSeek reasoning model: answer in `reasoning_content`, empty
+        // `content`. The parser must promote reasoning to visible text.
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "The answer is 42 because..."
+                }
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 200}
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.text, "The answer is 42 because...");
+        assert_eq!(r.reasoning, "");
+        assert_eq!(r.stop, ProviderStop::EndTurn);
+    }
+
+    #[test]
+    fn parse_openai_promotes_reasoning_content_when_content_is_gateway_placeholder() {
+        // Gateway placeholder: "[System: Empty message content sanitised
+        // to satisfy protocol...". The parser must recognize this as empty
+        // and promote reasoning_content.
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "[System: Empty message content sanitised to satisfy protocol...]",
+                    "reasoning_content": "The answer is 42 because..."
+                }
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 200}
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.text, "The answer is 42 because...");
+        assert_eq!(r.reasoning, "");
+        assert_eq!(r.stop, ProviderStop::EndTurn);
+    }
+
+    #[test]
+    fn parse_openai_empty_end_turn_with_no_reasoning_is_warned() {
+        // Truly empty end_turn: no content, no reasoning, no tool calls.
+        // The parser must allow it (the model may choose silence) but the
+        // agent should warn about it at the turn level.
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": ""
+                }
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 0}
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.text, "");
+        assert_eq!(r.stop, ProviderStop::EndTurn);
+    }
+
+    #[test]
+    fn parse_openai_does_not_promote_reasoning_when_content_present() {
+        // Normal case: content present, reasoning present. Both survive.
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello world",
+                    "reasoning_content": "thinking step by step"
+                }
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50}
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.text, "Hello world");
+        assert_eq!(r.reasoning, "thinking step by step");
+        assert_eq!(r.stop, ProviderStop::EndTurn);
+    }
+
+    #[test]
+    fn parse_openai_does_not_reject_empty_end_turn_with_tool_calls() {
+        // Tool calls with empty text is a valid end_turn (e.g. model just
+        // calls tools without speaking). Must not be rejected.
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "test", "arguments": "{}"}
+                    }]
+                }
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10}
+        });
+        let r = parse_openai(v).unwrap();
+        assert!(r.tool_calls.len() == 1);
+    }
+
+    #[test]
     fn parse_responses_total_tokens_present_is_read() {
         // Responses API: `usage.total_tokens` is a genuine provider total.
         let v = serde_json::json!({
@@ -5495,6 +5654,36 @@ mod tests {
         });
         let r = parse_responses(v).unwrap();
         assert_eq!(r.total_tokens, None);
+    }
+
+    #[test]
+    fn parse_responses_promotes_reasoning_to_text_when_text_empty() {
+        // Responses API: reasoning items present but no output_text.
+        let v = serde_json::json!({
+            "output": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "The answer is 42"}]},
+                {"type": "message", "content": []}
+            ],
+            "status": "completed",
+            "usage": {"input_tokens": 80, "output_tokens": 20}
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.text, "The answer is 42");
+        assert_eq!(r.reasoning, "");
+    }
+
+    #[test]
+    fn parse_responses_empty_end_turn_with_no_reasoning_is_ok() {
+        // Responses API: empty output, no reasoning, status completed.
+        // The parser allows it (model may choose silence).
+        let v = serde_json::json!({
+            "output": [{"type": "message", "content": []}],
+            "status": "completed",
+            "usage": {"input_tokens": 80, "output_tokens": 0}
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.text, "");
+        assert_eq!(r.stop, ProviderStop::EndTurn);
     }
 
     #[test]
