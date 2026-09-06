@@ -29,6 +29,50 @@
 
 use std::collections::HashSet;
 
+/// Case-fold a user-facing name for matching.
+///
+/// Names are arbitrary Unicode — display names, channel names, agent names —
+/// so folding them with `to_ascii_lowercase` leaves every non-ASCII letter
+/// untouched and `ÉQUIPE` never matches `équipe`. Desktop uses JavaScript's
+/// `toLowerCase`, which is Unicode-aware, so an ASCII-only fold here also
+/// means the CLI and the app disagree about who a mention names.
+///
+/// Lives here rather than in buzz-cli because both crates resolve names and
+/// must fold them identically: buzz-cli builds its `name → pubkey` map with
+/// this, and [`extract_at_mentions_with_known`] returns keys folded with it.
+///
+/// Use this for names only. Hex, pubkeys and UUIDs are ASCII by construction
+/// and stay on `to_ascii_lowercase`, which cannot be surprised by a Turkish
+/// dotless i.
+pub fn fold_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// Length in **source** bytes of the prefix of `rest` that folds to
+/// `folded_known`, if there is one.
+///
+/// A folded prefix cannot be located by byte length, because folding can
+/// change it: `İ` is two bytes and folds to `i̇`, which is three. Comparing
+/// `rest[..known.len()]` would slice the wrong span — or panic on a non-
+/// boundary. So fold `rest` one character at a time and report how much of the
+/// original was consumed when the folds agree.
+fn folded_prefix_len(rest: &str, folded_known: &str) -> Option<usize> {
+    if folded_known.is_empty() {
+        return None;
+    }
+    let mut folded = String::with_capacity(folded_known.len());
+    for (offset, ch) in rest.char_indices() {
+        folded.extend(ch.to_lowercase());
+        if !folded_known.starts_with(&folded) {
+            return None;
+        }
+        if folded == folded_known {
+            return Some(offset + ch.len_utf8());
+        }
+    }
+    None
+}
+
 use nostr::{FromBech32, PublicKey};
 
 /// Maximum number of mention p-tags allowed on a single message.
@@ -109,10 +153,13 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
         return vec![];
     }
 
-    let mut sorted: Vec<&str> = known_names
+    // Folded once up front: the fold is what both the comparison and the
+    // returned key are made of, and it is the same for every `@` in the body.
+    let mut sorted: Vec<String> = known_names
         .iter()
         .copied()
         .filter(|n| !n.trim().is_empty())
+        .map(fold_name)
         .collect();
     sorted.sort_by_key(|k| std::cmp::Reverse(k.len()));
 
@@ -129,11 +176,11 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
             continue;
         }
 
-        let lower = if let Some(&known) = sorted.iter().find(|&&k| {
-            rest.get(..k.len())
-                .is_some_and(|s| s.eq_ignore_ascii_case(k) && is_word_boundary(&rest[k.len()..]))
+        let lower = if let Some(known) = sorted.iter().find_map(|k| {
+            let consumed = folded_prefix_len(rest, k)?;
+            is_word_boundary(&rest[consumed..]).then(|| k.clone())
         }) {
-            known.to_ascii_lowercase()
+            known
         } else {
             let end = rest
                 .find(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '.' | '-' | '_'))
@@ -533,6 +580,54 @@ mod tests {
         // Multi-byte known name followed by a space (valid boundary).
         let result = extract_at_mentions_with_known("@日本 hello", &["日本"]);
         assert_eq!(result, vec!["日本"]);
+    }
+
+    /// The known-name comparison was `eq_ignore_ascii_case`, which folds only
+    /// ASCII letters, so a member named `ÉQUIPE` was not found from `@équipe`
+    /// and the mention resolved to nobody.
+    #[test]
+    fn known_name_matches_non_ascii_across_case() {
+        assert_eq!(
+            extract_at_mentions_with_known("cc @équipe please", &["ÉQUIPE"]),
+            vec!["équipe"]
+        );
+        assert_eq!(
+            extract_at_mentions_with_known("cc @ОБЩИЙ please", &["Общий"]),
+            vec!["общий"]
+        );
+        // Multi-word display names keep working across case too.
+        assert_eq!(
+            extract_at_mentions_with_known("cc @josé garcía!", &["José García"]),
+            vec!["josé garcía"]
+        );
+    }
+
+    /// Folding can change a name's byte length — `İ` is two bytes and folds to
+    /// `i̇`, which is three — so the match cannot be located by slicing the
+    /// content at the known name's length. It has to report how much of the
+    /// *source* it consumed.
+    #[test]
+    fn known_name_match_survives_a_length_changing_fold() {
+        assert_eq!(
+            extract_at_mentions_with_known("hi @İstanbul team", &["İstanbul"]),
+            vec![fold_name("İstanbul")]
+        );
+        assert_ne!(
+            fold_name("İstanbul").len(),
+            "İstanbul".len(),
+            "the premise: this fold changes the byte length"
+        );
+    }
+
+    /// The boundary check runs on the source slice after the consumed prefix,
+    /// so a longer name must not be matched by its prefix.
+    #[test]
+    fn known_name_still_requires_a_word_boundary() {
+        assert_eq!(
+            extract_at_mentions_with_known("cc @équipement", &["ÉQUIPE"]),
+            Vec::<String>::new(),
+            "a longer word must not match the shorter known name"
+        );
     }
 
     #[test]
