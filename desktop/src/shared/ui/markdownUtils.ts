@@ -101,6 +101,12 @@ export function shallowRecordEqual(
   return true;
 }
 
+/**
+ * Memo comparator for `Markdown`. Every prop the renderer reads has to be
+ * listed here: anything omitted cannot re-render the subtree on its own, so a
+ * message whose only change is, say, link-preview suppression keeps rendering
+ * its old previews.
+ */
 export function markdownPropsAreEqual(
   prev: MarkdownProps,
   next: MarkdownProps,
@@ -124,6 +130,13 @@ export function markdownPropsAreEqual(
     prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
     prev.searchQuery === next.searchQuery &&
     prev.snapshotSharedBy === next.snapshotSharedBy &&
-    prev.videoReviewContext === next.videoReviewContext
+    prev.videoReviewContext === next.videoReviewContext &&
+    prev.messageId === next.messageId &&
+    prev.linkPreviewsSuppressed === next.linkPreviewsSuppressed &&
+    // Callers pass the event's own tag array, so identity is stable per event.
+    prev.linkPreviewTags === next.linkPreviewTags &&
+    prev.leadingInlineContent === next.leadingInlineContent &&
+    prev.onRemoveLinkPreviewsForEveryone ===
+      next.onRemoveLinkPreviewsForEveryone
   );
 }
