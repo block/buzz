@@ -2,6 +2,24 @@ export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
 
+export type AgentOperationsConfig = {
+  enabled: boolean;
+  channelId: string | null;
+  assistantPubkey: string | null;
+};
+
+export type AgentOperationsStatus = {
+  config: AgentOperationsConfig;
+  schedule: string;
+  nextManilaBoundaryUtc: string;
+  metricCoverageSince: number | null;
+  lastConfirmedDigest: {
+    date: string;
+    eventId: string;
+    eventCreatedAt: number;
+  } | null;
+};
+
 export type Channel = {
   id: string;
   name: string;

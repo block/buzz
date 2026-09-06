@@ -47,6 +47,57 @@ fn test_schema_init_is_idempotent() {
     conn.execute_batch(SCHEMA).unwrap();
 }
 
+#[test]
+fn syn79_metric_window_is_exactly_scoped_and_half_open() {
+    let conn = in_memory();
+    let insert = |id: &str, owner: &str, relay: &str, kind: i64, author: &str, at: i64| {
+        conn.execute(
+            "INSERT INTO archived_events
+             (identity_pubkey, relay_url, id, kind, pubkey, created_at, raw_json, archived_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', 99)",
+            params![owner, relay, id, kind, author, at],
+        )
+        .unwrap();
+    };
+    insert("start", "owner", "wss://relay", 44200, "agent-a", 100);
+    insert("inside", "owner", "wss://relay", 44200, "agent-b", 199);
+    insert("end", "owner", "wss://relay", 44200, "agent-a", 200);
+    insert("wrong-owner", "other", "wss://relay", 44200, "agent-a", 150);
+    insert("wrong-relay", "owner", "wss://other", 44200, "agent-a", 150);
+    insert("wrong-kind", "owner", "wss://relay", 9, "agent-a", 150);
+
+    let rows = read_agent_metric_window(&conn, "owner", "wss://relay", 100, 200).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["start", "inside"]
+    );
+    assert_eq!(rows[0].author_pubkey, "agent-a");
+    assert_eq!(rows[1].author_pubkey, "agent-b");
+}
+
+#[test]
+fn syn79_metric_coverage_requires_the_exact_owner_subscription() {
+    let conn = in_memory();
+    upsert_save_subscription(
+        &conn,
+        "owner",
+        "wss://relay",
+        "owner_p",
+        "owner",
+        "[9,44200]",
+        123,
+    )
+    .unwrap();
+    assert_eq!(
+        owner_metric_subscription_created_at(&conn, "owner", "wss://relay").unwrap(),
+        Some(123)
+    );
+    assert_eq!(
+        owner_metric_subscription_created_at(&conn, "owner", "wss://other").unwrap(),
+        None
+    );
+}
+
 // ── Save subscriptions ───────────────────────────────────────────────────
 
 #[test]
