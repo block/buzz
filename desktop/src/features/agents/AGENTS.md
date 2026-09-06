@@ -221,7 +221,7 @@ with a TypeScript lookup table or an id comparison in a component.
    hosting location, availability, or permission. Keep all identity surfaces on
    the shared provenance context, without per-row directory subscriptions. See
    [the provenance contract](../../../../docs/agent-management-provenance.md).
-14. **Thinking effort has two surfaces: a local-only WRITE control and a
+14. **Saved thinking effort has a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
    `AgentInstanceEditDialog` beside the Model block. It is **Save-gated, not
@@ -245,17 +245,21 @@ with a TypeScript lookup table or an id comparison in a component.
    spawn will launch with) and, when a running ACP session differs,
    `field.overriddenValue` struck through (the live session's current effort).
    No component owns "configured vs current" logic; the reader's canonical tier
-   ordering feeds both facts. Do not add a second effort write path or restate
+   ordering feeds both facts. Do not add a second saved-effort write path or restate
    the two-facts logic in a component.
 
-   **Cut invariant — live mid-conversation effort machinery was deliberately
-   removed.** Effort is spawn-scoped only: the worker holds one `startup_effort`
-   read from `BUZZ_ACP_EFFORT_LEVEL` and applies it once at session creation
-   (`apply_startup_effort` in `buzz-acp/src/pool.rs`); there is no pool-level
-   effort authority, no live effort switching, and no effort-ack frame. Do not
-   reintroduce a live effort-switch RPC, a pool effort field, or a
-   mid-conversation effort control without a plan ruling. The archived live-effort
-   machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
+   **Conversation overrides are separate from saved effort.** The activity pane
+   exposes `ConversationEffortPicker` only to the owner and only when an exact
+   session snapshot advertises `liveEffortSwitching` and native `thought_level`
+   options. The owner selects the conversation explicitly when several are
+   available. The encrypted observer control carries channel, session, request
+   ID, session token, and effort; it never writes a default. `buzz-acp` queues the edit until
+   the response ends, fences its worker before the next claim, and reports
+   `applied` only after the native response confirms the value. A missing result
+   is unconfirmed; a queued result must not optimistically update the selection.
+   `startup_effort` remains the sole saved default applied at session creation.
+   See [the conversation-effort design](../../../../docs/conversation-effort.md)
+   for the scope of this follow-up to the live control deferred in #4557.
 
 15. **The persona `description` is public display metadata.** It is optional,
    capped at 280 characters, and validated through the shared visible-text

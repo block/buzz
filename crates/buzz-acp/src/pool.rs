@@ -118,6 +118,8 @@ pub struct ChannelDeliveryState {
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
+    /// Last accepted native configuration, scoped exactly like the ACP session.
+    pub configs: HashMap<SessionScope, serde_json::Value>,
     /// session scope → session_id
     pub sessions: HashMap<SessionScope, String>,
     pub heartbeat_session: Option<String>,
@@ -161,6 +163,7 @@ impl SessionState {
     /// Invalidate a single session scope's session and turn counter.
     /// Returns `true` if the scope had an active session.
     pub fn invalidate_scope(&mut self, scope: &SessionScope) -> bool {
+        self.configs.remove(scope);
         self.turn_counts.remove(scope);
         self.core_sections.remove(scope);
         self.canvas_sections.remove(scope);
@@ -175,6 +178,7 @@ impl SessionState {
         let scopes: Vec<SessionScope> = self
             .sessions
             .keys()
+            .chain(self.configs.keys())
             .chain(self.turn_counts.keys())
             .chain(self.core_sections.keys())
             .chain(self.canvas_sections.keys())
@@ -196,6 +200,7 @@ impl SessionState {
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
     pub fn invalidate_all(&mut self) {
         self.sessions.clear();
+        self.configs.clear();
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
@@ -325,6 +330,7 @@ impl OwnedAgent {
 /// (running inside a spawned task). The `task_map` tracks in-flight
 /// tasks for panic recovery.
 pub struct AgentPool {
+    pub(crate) live_effort: crate::live_effort::LiveEffortQueue,
     agents: Vec<Option<OwnedAgent>>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
@@ -831,6 +837,7 @@ impl AgentPool {
             task_map: HashMap::new(),
             session_owners: HashMap::new(),
             held_since: HashMap::new(),
+            live_effort: Default::default(),
         }
     }
 
@@ -907,6 +914,14 @@ impl AgentPool {
     ///
     /// Returns `None` if all agents are checked out.
     pub fn try_claim(&mut self, scope: Option<&SessionScope>) -> Option<OwnedAgent> {
+        // Hold the worker at its response boundary until its exact-session edit
+        // settles. Other workers remain available to serve their conversations.
+        let effort_ready =
+            |agent: &OwnedAgent| {
+                !agent.state.sessions.iter().any(|(scope, session)| {
+                    self.live_effort.has_session(scope.channel_id(), session)
+                })
+            };
         // Pass 1: prefer agent with existing session for this scope.
         if let Some(scope) = scope {
             let idx = self.agents.iter().position(|slot| {
@@ -915,12 +930,18 @@ impl AgentPool {
                     .unwrap_or(false)
             });
             if let Some(i) = idx {
+                if !self.agents[i].as_ref().is_some_and(effort_ready) {
+                    return None;
+                }
                 return self.agents[i].take();
             }
         }
 
         // Pass 2: first idle agent.
-        let idx = self.agents.iter().position(|slot| slot.is_some());
+        let idx = self
+            .agents
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(effort_ready));
         idx.map(|i| self.agents[i].take().unwrap())
     }
 
@@ -1159,6 +1180,15 @@ impl AgentPool {
             return false;
         };
         scopes.any(|scope| scope != first)
+    }
+
+    pub(crate) fn effort_target_is_busy(&self, channel_id: Uuid) -> bool {
+        self.task_map.values().any(|task| {
+            task.channel_id == Some(channel_id)
+                || self.session_owners.iter().any(|(scope, owner)| {
+                    scope.channel_id() == channel_id && *owner == task.agent_index
+                })
+        })
     }
 
     /// Idle-path model switch: set `desired_model` on the idle agent for
@@ -1579,10 +1609,13 @@ async fn create_session_and_apply_model(
         }
         opts
     };
-    agent.acp.observe(
-        "session_config_captured",
-        serde_json::json!({
+    let mut captured_config = serde_json::json!({
             "configOptions": config_options_for_cache,
+            "effortSessionToken": Uuid::new_v4(),
+            "liveEffortSwitching": channel.scope.is_some(),
+            "conversationLabel": channel.name,
+            "conversationId": channel.scope.map(|scope| scope.root_event_id().map(str::to_owned)
+                .unwrap_or_else(|| scope.channel_id().to_string())),
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             // `models` must come from the SAME snapshot as configOptions — the
             // post-switch snapshot on a successful switch, session/new otherwise.
@@ -1596,8 +1629,29 @@ async fn create_session_and_apply_model(
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
             "relayUrl": ctx.relay_url,
-        }),
-    );
+    });
+    if let Some(scope) = channel.scope {
+        agent
+            .state
+            .remember_effort_config(scope, &mut captured_config);
+    }
+    if let (Some(scope), Some(observer)) = (channel.scope, agent.acp.observer_handle()) {
+        observer.emit(
+            "session_config_captured",
+            Some(agent.index),
+            &observer::ObserverContext {
+                channel_id: Some(scope.channel_id().to_string()),
+                session_id: Some(resp.session_id.clone()),
+                turn_id: None,
+                started_at: None,
+            },
+            captured_config,
+        );
+    } else {
+        agent
+            .acp
+            .observe("session_config_captured", captured_config);
+    }
 
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support

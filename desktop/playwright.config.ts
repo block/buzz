@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const port = process.env.BUZZ_E2E_PORT ?? "4173";
+const baseURL = `http://127.0.0.1:${port}`;
+
 export default defineConfig({
   testDir: "./tests/e2e",
   timeout: 30_000,
@@ -10,7 +13,7 @@ export default defineConfig({
     ["html", { open: "never", outputFolder: "playwright-report" }],
   ],
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL,
     screenshot: "only-on-failure",
     trace: "on-first-retry",
     video: "retain-on-failure",
@@ -149,6 +152,7 @@ export default defineConfig({
         "**/deep-link-invite.spec.ts",
         "**/invite-link-copy.spec.ts",
         "**/global-agent-config-screenshots.spec.ts",
+        "**/conversation-effort.spec.ts",
         "**/doctor-states.spec.ts",
         "**/onboarding-avatar-skip.spec.ts",
         "**/onboarding-backup.spec.ts",
@@ -211,9 +215,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "python3 -m http.server 4173 -d dist",
+    command: `python3 -m http.server ${port} -d dist`,
     cwd: ".",
     reuseExistingServer: !process.env.CI,
-    url: "http://127.0.0.1:4173",
+    url: baseURL,
   },
 });
