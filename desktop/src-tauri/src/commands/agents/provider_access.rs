@@ -62,15 +62,23 @@ pub(crate) async fn reconcile_on_workspace_apply(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<(), String> {
+    if crate::managed_agents::device_policy::is_client_only(app) {
+        return Ok(());
+    }
     let owner_only_access = crate::managed_agents::owner_only_access_build();
     let targets = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        collect_targets_with(load_managed_agents(app)?, owner_only_access, |record| {
-            super::build_deploy_payload(app, state, record)
-        })
+        collect_targets_with(
+            load_managed_agents(app)?
+                .into_iter()
+                .filter(|record| crate::managed_agents::device_policy::can_host_record(app, record))
+                .collect(),
+            owner_only_access,
+            |record| super::build_deploy_payload(app, state, record),
+        )
     };
 
     for target in targets {

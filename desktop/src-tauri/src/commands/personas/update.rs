@@ -126,6 +126,7 @@ pub async fn update_persona(
     input: UpdatePersonaRequest,
     app: AppHandle,
 ) -> Result<UpdatePersonaResult, String> {
+    crate::managed_agents::device_policy::require_hosting(&app)?;
     let (persona, ()) = update_persona_with(input, app, |app, state, persona| {
         retain_persona_pending(app, state, persona);
         // F2: immediately refresh any shared 30178 heads that include this
@@ -152,11 +153,45 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
 ) -> Result<(AgentDefinition, R), String> {
     use tauri::Manager;
 
+    let state = app.state::<AppState>();
+    let _name_guard = state.agent_name_transition.clone().lock_owned().await;
+    crate::managed_agents::device_policy::require_persona(&app, &input.id)?;
+    let linked = load_managed_agents(&app)?
+        .into_iter()
+        .filter(|record| record.persona_id.as_deref() == Some(&input.id))
+        .collect::<Vec<_>>();
+    for record in &linked {
+        crate::managed_agents::device_policy::require_record(&app, record)?;
+    }
+    let current_name = load_personas(&app)?
+        .into_iter()
+        .find(|persona| persona.id == input.id)
+        .ok_or_else(|| format!("agent {} not found", input.id))?
+        .display_name;
+    let existing_key = linked.first().map(|record| record.pubkey.as_str());
+    crate::managed_agents::device_policy::active(&app)?
+        .check_name_update(
+            &current_name,
+            &input.display_name,
+            existing_key,
+            Some(&input.id),
+            || {
+                crate::managed_agents::device_policy::unique_names::preflight(
+                    &app,
+                    &state,
+                    &input.display_name,
+                    Some(&input.id),
+                    existing_key,
+                )
+            },
+        )
+        .await?;
     // Phase 1: synchronous save (persona record + linked agent avatar updates)
-    let (result, retained, profile_sync_params) = tokio::task::spawn_blocking({
+    let (result, retained, profile_sync_params, retention_error) = tokio::task::spawn_blocking({
         let app = app.clone();
-        move || -> Result<(AgentDefinition, R, ProfileSyncParams), String> {
+        move || -> Result<(AgentDefinition, R, ProfileSyncParams, Option<String>), String> {
             let state = app.state::<AppState>();
+            let mut retention_error = None;
             let display_name = trim_required(&input.display_name, "Display name")?;
             let system_prompt = input.system_prompt.clone();
             validate_agent_definition_text(&display_name, &system_prompt)?;
@@ -170,6 +205,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .managed_agents_store_lock
                 .lock()
                 .map_err(|error| error.to_string())?;
+            crate::managed_agents::device_policy::require_persona(&app, &input.id)?;
             let mut personas = load_personas(&app)?;
             pending::project_active_persona_sharing(&app, &state, &mut personas);
             let persona = personas
@@ -282,7 +318,11 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                     // Avatar-only edits are excluded — the avatar is not in the
                     // projection, so retaining would be a guaranteed no-op.
                     for record in records.iter().filter(|r| renamed.contains(&r.pubkey)) {
-                        crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
+                        if let Err(error) = crate::commands::agents::retain_managed_agent_pending(
+                            &app, &state, record,
+                        ) {
+                            retention_error = Some(error);
+                        }
                     }
                 }
 
@@ -291,7 +331,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 Vec::new()
             };
 
-            Ok((result, retained, sync_params))
+            Ok((result, retained, sync_params, retention_error))
         }
     })
     .await
@@ -323,5 +363,8 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
         }
     }
 
+    if let Some(error) = retention_error {
+        return Err(error);
+    }
     Ok((result, retained))
 }

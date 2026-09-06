@@ -86,6 +86,17 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, Strin
             .map_err(|error| error.to_string())?;
         let mut personas = load_personas(&app)?;
         pending::project_active_persona_sharing(&app, &state, &mut personas);
+        // Effective local availability only: never persist this projection or
+        // publish it as a definition edit. Other devices keep their activation.
+        let policy = crate::managed_agents::device_policy::active(&app)?;
+        for persona in &mut personas {
+            if policy
+                .require_local_agent(&persona.display_name, None, Some(&persona.id))
+                .is_err()
+            {
+                persona.is_active = false;
+            }
+        }
         Ok(personas)
     })
     .await
@@ -147,6 +158,7 @@ fn commit_cascade_agents(
 
 #[tauri::command]
 pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
+    crate::managed_agents::device_policy::require_persona(&app, &id)?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -159,6 +171,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 .lock()
                 .map_err(|error| error.to_string())?;
 
+            crate::managed_agents::device_policy::require_persona(&app, &id)?;
             // Load and validate the persona before any destructive work.
             let mut personas = load_personas(&app)?;
             let persona = personas
@@ -295,6 +308,7 @@ pub async fn set_persona_active(
     active: bool,
     app: AppHandle,
 ) -> Result<AgentDefinition, String> {
+    crate::managed_agents::device_policy::require_persona(&app, &id)?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -308,6 +322,7 @@ pub async fn set_persona_active(
             .find(|record| record.id == id)
             .ok_or_else(|| format!("agent {id} not found"))?;
 
+        crate::managed_agents::device_policy::require_persona(&app, &id)?;
         let referenced_by_managed_agent = !active
             && load_managed_agents(&app)?
                 .iter()

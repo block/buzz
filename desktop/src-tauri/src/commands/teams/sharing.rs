@@ -49,6 +49,8 @@ pub async fn set_team_shared(
     shared: bool,
     app: AppHandle,
 ) -> Result<SetTeamSharedResult, String> {
+    crate::managed_agents::device_policy::require_full_hosting(&app)?;
+    crate::managed_agents::device_policy::require_team(&app, &id)?;
     let prepared = tokio::task::spawn_blocking({
         let app = app.clone();
         move || {

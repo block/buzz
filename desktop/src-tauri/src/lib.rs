@@ -719,6 +719,8 @@ pub fn run() {
             get_baked_build_env_keys,
             get_baked_build_env,
             put_agent_session_config,
+            managed_agents::device_policy::get_agent_device_policy,
+            managed_agents::device_policy::set_agent_device_policy,
             get_global_agent_config,
             set_global_agent_config,
             mesh_start_node,
