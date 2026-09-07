@@ -50,16 +50,12 @@
        worse than a specimen you swipe. */
     overflow-x: auto;
     padding: var(--space-6);
-    /* `neutral-6` rather than `border-primary` (neutral-4). This boundary has to
-       survive in both modes, and neutral-4 measured 1.23:1 against the light page
-       and 1.08:1 against the dark one — technically drawn, effectively invisible
-       in dark. neutral-6 is 1.41 and 1.35. Still a hairline, which is the point:
-       it separates the specimen without competing with what is inside it.
-
-       Written as a ramp step because the product's one border weight is for
-       product boundaries; the /design pages' own furniture is documentation
-       chrome and may be tuned for legibility on its own terms. */
-    border: 1px solid var(--neutral-6);
+    /* The product's border weight, now that it is mode-aware. This used to name
+       `neutral-6` directly because `border-primary` was neutral-4 in both modes
+       and measured 1.08:1 against the dark page — invisible. The role now takes
+       neutral-6 in dark, so the documentation furniture and the product agree
+       again, which is what a shared boundary role is for. */
+    border: 1px solid var(--border-primary);
     border-radius: var(--radius-panel);
     background: var(--bg-panel);
   }
@@ -168,7 +164,7 @@
   .component-overview-preview {
     height: 13rem;
     overflow: hidden;
-    border: 1px solid var(--neutral-6);
+    border: 1px solid var(--border-primary);
     border-radius: var(--radius-panel);
     background: var(--bg-panel);
   }

@@ -285,9 +285,9 @@
   --neutral-1: #ffffff; /* bg-panel, bg-float, bg-chrome-selected  */
   --neutral-2: #f9f9f9; /* unused in light; bg-inset in dark       */
   --neutral-3: #f0f0f0; /* bg-inset; bg-panel in dark              */
-  --neutral-4: #e8e8e8; /* border-primary — the one border weight  */
+  --neutral-4: #e8e8e8; /* border-primary in light mode            */
   --neutral-5: #e0e0e0; /* unused in light; float + selected, dark */
-  --neutral-6: #d9d9d9; /* the /design specimen frame edge only    */
+  --neutral-6: #d9d9d9; /* border-primary in dark mode             */
   --neutral-7: #cecece; /* no readers                              */
   --neutral-8: #bbbbbb; /* text-disabled                           */
   --neutral-9: #8d8d8d; /* text-tertiary                           */
@@ -667,6 +667,21 @@
   --bg-float: var(--neutral-5);
   --bg-inset: var(--neutral-2);
   --bg-chrome-selected: var(--neutral-5);
+
+  /* Two steps lighter than light mode's neutral-4, because a hairline needs more
+     separation on a dark surface than the same step number provides. Measured
+     against every surface a border sits on: neutral-4 is 1.08:1 on a panel and
+     1.09:1 on the floating composer — drawn, and effectively invisible.
+     neutral-6 is 1.35 and 1.14.
+
+     Not neutral-5, which is one step and would have been the obvious answer:
+     `bg-float` and `bg-chrome-selected` are both neutral-5 in dark, so a border
+     on a floating surface would measure 1.00:1 — the same colour as the thing it
+     is meant to bound.
+
+     **This asymmetry is the reason the role exists.** Light and dark do not have
+     to reach for the same step, and no `border-neutral-4` class could say this. */
+  --border-primary: var(--neutral-6);
 
   --rim-lit: #ffffff2e;
   --rim-shade: #ffffff0f;
