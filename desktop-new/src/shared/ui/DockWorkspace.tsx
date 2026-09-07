@@ -12,6 +12,9 @@ type WorkspacePanels = {
   conversation: ReactNode;
 };
 
+const DEFAULT_NAVIGATOR_WIDTH = 216;
+const MIN_NAVIGATOR_WIDTH = 176;
+
 const WorkspacePanelContext = createContext<WorkspacePanels | null>(null);
 
 function WorkspacePanel({ id }: { id: keyof WorkspacePanels }) {
@@ -27,6 +30,7 @@ const components = {
   ),
 };
 
+/** Layout-only workspace shell. Product panels own their own surface treatment. */
 export function DockWorkspace({ panels }: { panels: WorkspacePanels }) {
   const onReady = useCallback((event: DockviewReadyEvent) => {
     if (event.api.panels.length > 0) return;
@@ -34,7 +38,8 @@ export function DockWorkspace({ panels }: { panels: WorkspacePanels }) {
       id: "navigator",
       component: "navigator",
       title: "Browse",
-      initialWidth: 255,
+      initialWidth: DEFAULT_NAVIGATOR_WIDTH,
+      minimumWidth: MIN_NAVIGATOR_WIDTH,
     });
     navigator.group.header.hidden = true;
     const conversation = event.api.addPanel({
@@ -44,6 +49,9 @@ export function DockWorkspace({ panels }: { panels: WorkspacePanels }) {
       position: { referencePanel: navigator, direction: "right" },
     });
     conversation.group.header.hidden = true;
+    requestAnimationFrame(() => {
+      navigator.group.api.setSize({ width: DEFAULT_NAVIGATOR_WIDTH });
+    });
   }, []);
 
   return (

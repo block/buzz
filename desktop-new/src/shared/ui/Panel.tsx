@@ -1,26 +1,26 @@
 import type { ComponentProps, ElementType, ReactNode } from "react";
 
-type SurfaceVariant =
+type PanelVariant =
   | "panel"
   | "connected-left"
   | "connected-right"
   | "navigator-demo";
 
-type WorkspaceSurfaceProps<T extends ElementType> = {
+type PanelProps<T extends ElementType> = {
   as?: T;
   children: ReactNode;
-  variant?: SurfaceVariant;
+  variant?: PanelVariant;
 } & Omit<ComponentProps<T>, "as" | "children" | "className">;
 
-export function WorkspaceSurface<T extends ElementType = "section">({
+export function Panel<T extends ElementType = "section">({
   as,
   children,
   variant = "panel",
   ...props
-}: WorkspaceSurfaceProps<T>) {
+}: PanelProps<T>) {
   const Component = as ?? "section";
   return (
-    <Component {...props} className="workspace-surface" data-variant={variant}>
+    <Component {...props} className="panel" data-variant={variant}>
       {children}
     </Component>
   );
