@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import '../../helpers/widget_helpers.dart';
@@ -17,6 +18,27 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Scout'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('qualified chips wrap in narrow layouts at large text sizes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+          child: MessageContent(
+            content: '@Scout (${'b' * 64})',
+            mentionNames: {'b' * 64: 'Scout'},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
 

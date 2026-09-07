@@ -940,7 +940,9 @@ class _MentionPill extends StatelessWidget {
               offset: const Offset(0, -Grid.quarter),
               child: Text('@', style: style),
             ),
-          Text(label, style: style, semanticsLabel: semanticsLabel),
+          Flexible(
+            child: Text(label, style: style, semanticsLabel: semanticsLabel),
+          ),
         ],
       ),
     );
