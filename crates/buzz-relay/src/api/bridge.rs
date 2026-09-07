@@ -921,7 +921,7 @@ async fn submit_event_authed(
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    let nip_oa_owner = match super::relay_members::enforce_relay_membership(
+    let authorization = match super::relay_members::resolve_principal_authorization(
         state,
         tenant.community(),
         &pubkey_bytes,
@@ -930,17 +930,7 @@ async fn submit_event_authed(
     )
     .await
     {
-        Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(
-                    &pubkey_bytes,
-                    auth_tag,
-                    signed_auth_created_at,
-                )
-            } else {
-                None
-            }
-        }),
+        Ok(authorization) => authorization,
         Err(e) => {
             return SubmitOutcome::Err {
                 status: e.0,
@@ -948,6 +938,17 @@ async fn submit_event_authed(
             };
         }
     };
+    let nip_oa_owner = authorization.delegated_owner.or_else(|| {
+        if !state.config.require_relay_membership {
+            super::relay_members::extract_nip_oa_owner(
+                &pubkey_bytes,
+                auth_tag,
+                signed_auth_created_at,
+            )
+        } else {
+            None
+        }
+    });
     if let Some(owner) = nip_oa_owner {
         super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
     }
@@ -955,7 +956,7 @@ async fn submit_event_authed(
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     let auth = IngestAuth::Http {
         pubkey,
-        scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
+        scopes: authorization.scopes,
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };
 
@@ -1100,7 +1101,7 @@ async fn query_events_authed(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    super::relay_members::enforce_relay_membership(
+    let authorization = super::relay_members::resolve_principal_authorization(
         state,
         tenant.community(),
         &pubkey_bytes,
@@ -1108,6 +1109,15 @@ async fn query_events_authed(
         signed_auth_created_at,
     )
     .await?;
+    if !authorization
+        .scopes
+        .contains(&buzz_auth::Scope::MessagesRead)
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: insufficient scope for event reads",
+        ));
+    }
 
     // Two-pass parse: preserve raw JSON for custom extension fields (before_id,
     // depth_limit, feed_types) that nostr::Filter silently drops.
@@ -1641,7 +1651,7 @@ async fn count_events_authed(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    super::relay_members::enforce_relay_membership(
+    let authorization = super::relay_members::resolve_principal_authorization(
         state,
         tenant.community(),
         &pubkey_bytes,
@@ -1649,6 +1659,15 @@ async fn count_events_authed(
         signed_auth_created_at,
     )
     .await?;
+    if !authorization
+        .scopes
+        .contains(&buzz_auth::Scope::MessagesRead)
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: insufficient scope for event counts",
+        ));
+    }
 
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
@@ -3832,8 +3851,8 @@ mod postgres_tests {
     /// Build an AppState suitable for handler-level bridge tests.
     ///
     /// - `require_auth_token = false` → X-Pubkey dev-mode fallback active.
-    /// - `require_relay_membership = false` → membership check short-circuits to
-    ///   OpenRelay without a DB lookup.
+    /// - `require_relay_membership = false` → an absent direct role falls back to
+    ///   OpenRelay after the authoritative-role DB lookup.
     /// - `nip98_replay` replaced with an always-fresh guard → no Redis needed
     ///   for replay detection.
     /// - Redis pool points at the local dev instance for the admission check.
@@ -3894,6 +3913,16 @@ mod postgres_tests {
         pubkey_hex: &str,
         body: &[u8],
     ) -> axum::http::StatusCode {
+        post_bridge_route(state, host, pubkey_hex, "/events", body).await
+    }
+
+    async fn post_bridge_route(
+        state: Arc<crate::state::AppState>,
+        host: &str,
+        pubkey_hex: &str,
+        route: &str,
+        body: &[u8],
+    ) -> axum::http::StatusCode {
         use axum::body::Body;
         use axum::http::{header, Request};
         use tower::ServiceExt;
@@ -3902,7 +3931,7 @@ mod postgres_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/events")
+                    .uri(route)
                     .header(header::HOST, host)
                     .header("x-pubkey", pubkey_hex)
                     .body(Body::from(body.to_vec()))
@@ -3911,6 +3940,60 @@ mod postgres_tests {
             .await
             .expect("router oneshot")
             .status()
+    }
+
+    /// Production router regression for the observer's entire HTTP bridge
+    /// contract: query and count remain usable, while event submission reaches
+    /// the real ingest scope gate and is denied.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn observer_http_bridge_reads_succeed_and_submission_is_denied() {
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis are reachable");
+        let host = format!("observer-bridge-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure observer test community")
+            .id;
+        let observer = Keys::generate();
+        state
+            .db
+            .add_relay_member(community, &observer.public_key().to_hex(), "observer", None)
+            .await
+            .expect("provision observer");
+
+        for route in ["/query", "/count"] {
+            assert_eq!(
+                post_bridge_route(
+                    Arc::clone(&state),
+                    &host,
+                    &observer.public_key().to_hex(),
+                    route,
+                    br#"[{"kinds":[1],"limit":1}]"#,
+                )
+                .await,
+                StatusCode::OK,
+                "observer must retain read access through {route}"
+            );
+        }
+
+        let event = EventBuilder::new(Kind::TextNote, "observer must not write")
+            .sign_with_keys(&observer)
+            .expect("sign observer event");
+        assert_eq!(
+            post_events(
+                state,
+                &host,
+                &observer.public_key().to_hex(),
+                &serde_json::to_vec(&event).expect("serialize observer event"),
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "observer submission must be denied by the production HTTP route"
+        );
     }
 
     /// Collect buzz_events_rejected_total with (transport, reason) labels from

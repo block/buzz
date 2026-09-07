@@ -51,8 +51,10 @@ pub mod relay_members {
     pub enum MembershipDecision {
         /// Relay membership enforcement is disabled.
         OpenRelay,
-        /// Caller is directly present in `relay_members`.
+        /// Caller is directly present in `relay_members` with ordinary authority.
         Member,
+        /// Caller is a directly provisioned read-only observer.
+        Observer,
         /// Caller is admitted through a NIP-OA owner that is a relay member.
         ViaOwner(nostr::PublicKey),
         /// Caller is not admitted.
@@ -84,18 +86,22 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
     ) -> Result<MembershipDecision, String> {
-        if !state.config.require_relay_membership {
-            return Ok(MembershipDecision::OpenRelay);
-        }
-
         let pubkey_hex = hex::encode(pubkey_bytes);
-        let is_member = state
+        let member = state
             .db
-            .is_relay_member(community, &pubkey_hex)
+            .get_relay_member(community, &pubkey_hex)
             .await
             .map_err(|e| format!("relay membership check failed: {e}"))?;
-        if is_member {
-            return Ok(MembershipDecision::Member);
+        if let Some(member) = member {
+            return decision_for_direct_role(&member.role);
+        }
+
+        // Direct roles remain authoritative on an open relay. In particular,
+        // an operator-provisioned observer must not inherit open-relay write
+        // authority. The lookup therefore deliberately precedes this fallback;
+        // a lookup failure cannot silently upgrade an observer to OpenRelay.
+        if !state.config.require_relay_membership {
+            return Ok(MembershipDecision::OpenRelay);
         }
 
         if state.config.allow_nip_oa_auth {
@@ -114,18 +120,30 @@ pub mod relay_members {
                 ) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member = state
+                        let owner_member = state
                             .db
-                            .is_relay_member(community, &owner_hex)
+                            .get_relay_member(community, &owner_hex)
                             .await
-                            .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
-                        if owner_is_member {
-                            debug!(
-                                agent = %pubkey_hex,
-                                owner = %owner_hex,
-                                "NIP-OA membership granted via owner"
-                            );
-                            return Ok(MembershipDecision::ViaOwner(owner_pubkey));
+                            .map_err(|e| {
+                            format!("relay membership check (owner) failed: {e}")
+                        })?;
+                        if let Some(owner_member) = owner_member {
+                            return match owner_member.role.as_str() {
+                                "owner" | "admin" | "member" => {
+                                    debug!(
+                                        agent = %pubkey_hex,
+                                        owner = %owner_hex,
+                                        "NIP-OA membership granted via owner"
+                                    );
+                                    Ok(MembershipDecision::ViaOwner(owner_pubkey))
+                                }
+                                // Initial observer policy is deliberately direct-only:
+                                // a read-only principal cannot delegate even read authority.
+                                "observer" => Ok(MembershipDecision::Denied),
+                                role => Err(format!(
+                                    "relay membership check returned unknown owner role: {role}"
+                                )),
+                            };
                         }
                     }
                     Err(e) => {
@@ -138,14 +156,154 @@ pub mod relay_members {
         Ok(MembershipDecision::Denied)
     }
 
+    fn decision_for_direct_role(role: &str) -> Result<MembershipDecision, String> {
+        match role {
+            "owner" | "admin" | "member" => Ok(MembershipDecision::Member),
+            "observer" => Ok(MembershipDecision::Observer),
+            role => Err(format!(
+                "relay membership check returned unknown direct role: {role}"
+            )),
+        }
+    }
+
+    /// Authority resolved from one server-owned relay-membership lookup.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PrincipalAuthorization {
+        /// Permission scopes for the authenticated transport.
+        pub scopes: Vec<buzz_auth::Scope>,
+        /// NIP-OA owner when ordinary membership was delegated by that owner.
+        pub delegated_owner: Option<nostr::PublicKey>,
+        /// Whether the principal is the directly provisioned observer role.
+        pub observer: bool,
+    }
+
+    /// Resolve a Nostr principal to its server-owned role and effective authority.
+    pub async fn resolve_principal_authorization(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+    ) -> Result<PrincipalAuthorization, (StatusCode, Json<serde_json::Value>)> {
+        let decision = check_relay_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+        )
+        .await;
+        authorization_for_decision(decision)
+    }
+
+    /// Re-resolve a live WebSocket principal before accepting a write.
+    ///
+    /// The owner was cryptographically verified during NIP-42 authentication and
+    /// stored on the connection. Reusing that identity lets closed-relay NIP-OA
+    /// sessions revalidate the durable owner role without retaining credential
+    /// material. Direct roles remain authoritative, including on open relays.
+    pub async fn resolve_live_principal_authorization(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        verified_owner: Option<&nostr::PublicKey>,
+    ) -> Result<PrincipalAuthorization, (StatusCode, Json<serde_json::Value>)> {
+        let pubkey_hex = hex::encode(pubkey_bytes);
+        let direct = state
+            .db
+            .get_relay_member(community, &pubkey_hex)
+            .await
+            .map_err(|e| {
+                tracing::error!("live relay membership check failed: {e}");
+                super::internal_error(&format!("live relay membership check failed: {e}"))
+            })?;
+        if let Some(member) = direct {
+            return authorization_for_decision(decision_for_direct_role(&member.role));
+        }
+
+        if !state.config.require_relay_membership {
+            return authorization_for_decision(Ok(MembershipDecision::OpenRelay));
+        }
+
+        let decision = if let Some(owner) = verified_owner {
+            let owner_member = state
+                .db
+                .get_relay_member(community, &owner.to_hex())
+                .await
+                .map_err(|e| {
+                    tracing::error!("live relay owner membership check failed: {e}");
+                    super::internal_error(&format!("live relay owner membership check failed: {e}"))
+                })?;
+            match owner_member.as_ref().map(|member| member.role.as_str()) {
+                Some("owner" | "admin" | "member") => Ok(MembershipDecision::ViaOwner(*owner)),
+                Some("observer") | None => Ok(MembershipDecision::Denied),
+                Some(role) => Err(format!(
+                    "live relay membership check returned unknown owner role: {role}"
+                )),
+            }
+        } else {
+            Ok(MembershipDecision::Denied)
+        };
+        authorization_for_decision(decision)
+    }
+
+    fn authorization_for_decision(
+        decision: Result<MembershipDecision, String>,
+    ) -> Result<PrincipalAuthorization, (StatusCode, Json<serde_json::Value>)> {
+        match decision {
+            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => {
+                Ok(PrincipalAuthorization {
+                    scopes: buzz_auth::Scope::all_known(),
+                    delegated_owner: None,
+                    observer: false,
+                })
+            }
+            Ok(MembershipDecision::Observer) => Ok(PrincipalAuthorization {
+                scopes: buzz_auth::Scope::observer_read_only(),
+                delegated_owner: None,
+                observer: true,
+            }),
+            Ok(MembershipDecision::ViaOwner(owner)) => Ok(PrincipalAuthorization {
+                scopes: buzz_auth::Scope::all_known(),
+                delegated_owner: Some(owner),
+                observer: false,
+            }),
+            Ok(MembershipDecision::Denied) => Err(membership_denied()),
+            Err(e) => {
+                tracing::error!("relay principal resolution errored: {e}");
+                Err(super::internal_error(&e))
+            }
+        }
+    }
+
+    fn membership_denied() -> (StatusCode, Json<serde_json::Value>) {
+        (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "relay_membership_required",
+                "message": "You must be a relay member to access this relay"
+            })),
+        )
+    }
+
+    fn observer_mutation_denied() -> (StatusCode, Json<serde_json::Value>) {
+        (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "observer_read_only",
+                "message": "Read-only observers cannot use this operation"
+            })),
+        )
+    }
+
     /// Enforce relay membership for a pubkey, with NIP-OA agent delegation fallback.
     ///
     /// Returns `Ok(Some(owner_pubkey))` when the agent is not a direct member but
     /// its NIP-OA owner *is* — access is granted via delegation.
     ///
-    /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
-    /// immediately — no membership check is performed. Callers that need NIP-OA
-    /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
+    /// On open relays (`require_relay_membership = false`), direct roles are checked
+    /// first so a provisioned observer cannot inherit open-relay write authority.
+    /// An absent direct role returns `Ok(None)` without attempting NIP-OA fallback.
     ///
     /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
     /// no NIP-OA tag is present/applicable (open relay without auth tag).
@@ -156,29 +314,18 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        match check_relay_membership(
+        let authorization = resolve_principal_authorization(
             state,
             community,
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
         )
-        .await
-        {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
-            Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
-            Ok(MembershipDecision::Denied) => Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "relay_membership_required",
-                    "message": "You must be a relay member to access this relay"
-                })),
-            )),
-            Err(e) => {
-                tracing::error!("relay membership check errored: {e}");
-                Err(super::internal_error(&e))
-            }
+        .await?;
+        if authorization.observer {
+            return Err(observer_mutation_denied());
         }
+        Ok(authorization.delegated_owner)
     }
 
     /// Extract NIP-OA owner from an auth tag without membership enforcement.
@@ -284,6 +431,27 @@ pub mod relay_members {
         use axum::http::{HeaderMap, HeaderValue};
         use buzz_sdk::nip_oa::compute_auth_tag;
         use nostr::Keys;
+
+        #[test]
+        fn direct_role_resolution_is_fail_closed() {
+            assert_eq!(
+                decision_for_direct_role("owner"),
+                Ok(MembershipDecision::Member)
+            );
+            assert_eq!(
+                decision_for_direct_role("admin"),
+                Ok(MembershipDecision::Member)
+            );
+            assert_eq!(
+                decision_for_direct_role("member"),
+                Ok(MembershipDecision::Member)
+            );
+            assert_eq!(
+                decision_for_direct_role("observer"),
+                Ok(MembershipDecision::Observer)
+            );
+            assert!(decision_for_direct_role("future-role").is_err());
+        }
 
         #[test]
         fn auth_tag_header_must_be_unique() {
