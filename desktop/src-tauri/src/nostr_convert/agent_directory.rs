@@ -159,6 +159,7 @@ fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<
     Some(RelayAgentInfo {
         pubkey: agent_pubkey.to_string(),
         owner_pubkey: Some(event.pubkey.to_hex()),
+        persona_id: content.persona_id,
         name: content.name,
         agent_type: "agent".to_string(),
         channels: Vec::new(),

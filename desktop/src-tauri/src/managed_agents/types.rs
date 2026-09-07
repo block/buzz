@@ -215,6 +215,8 @@ pub struct RelayAgentInfo {
     pub pubkey: String,
     #[serde(default)]
     pub owner_pubkey: Option<String>,
+    #[serde(default)]
+    pub persona_id: Option<String>,
     pub name: String,
     pub agent_type: String,
     pub channels: Vec<String>,

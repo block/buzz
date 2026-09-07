@@ -923,6 +923,7 @@ type RawSendChannelMessageResponse = {
 type RawRelayAgent = {
   pubkey: string;
   owner_pubkey?: string | null;
+  persona_id?: string | null;
   name: string;
   agent_type: string;
   channels: string[];
@@ -4239,6 +4240,8 @@ function syncMockRelayAgentsFromManagedAgents() {
 
       return {
         pubkey: agent.pubkey,
+        owner_pubkey: MOCK_IDENTITY_PUBKEY,
+        persona_id: agent.persona_id,
         name: agent.name,
         agent_type: agent.agent_command,
         channels: memberships.channels,

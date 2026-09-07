@@ -76,6 +76,20 @@ export function buildMentionCandidates({
   relayAgents,
   userSearchResults,
 }: BuildMentionCandidatesInput): MentionCandidate[] {
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
+  const ownedRelayPersonaIds = new Set<string>();
+  for (const agent of relayAgents ?? []) {
+    if (
+      agent.personaId &&
+      normalizedCurrentPubkey &&
+      agent.ownerPubkey &&
+      normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey
+    ) {
+      ownedRelayPersonaIds.add(agent.personaId);
+    }
+  }
   const candidatesByPubkey = new Map<string, MentionCandidate>();
   const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
     const pubkey = normalizePubkey(candidate.pubkey);
@@ -166,6 +180,12 @@ export function buildMentionCandidates({
   }
   for (const agent of relayAgents ?? []) {
     const pubkey = normalizePubkey(agent.pubkey);
+    const ownedRelayPersonaId =
+      normalizedCurrentPubkey &&
+      agent.ownerPubkey &&
+      normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey
+        ? (agent.personaId ?? undefined)
+        : undefined;
     addCandidate({
       kind: "identity",
       pubkey,
@@ -179,6 +199,7 @@ export function buildMentionCandidates({
           agent.channelIds.includes(mentionChannelId)),
       personaId:
         managedAgentPersonaIdsByPubkey.get(pubkey) ??
+        ownedRelayPersonaId ??
         (activePersonaById.has(pubkey) ? pubkey : undefined),
       ownerPubkey: agent.ownerPubkey,
       isAgent: true,
@@ -226,7 +247,11 @@ export function buildMentionCandidates({
     }
   }
   const personaCandidates: MentionCandidate[] = activePersonas
-    .filter((persona) => !managedAgentPersonaIds.has(persona.id))
+    .filter(
+      (persona) =>
+        !managedAgentPersonaIds.has(persona.id) &&
+        !ownedRelayPersonaIds.has(persona.id),
+    )
     .map((persona) => ({
       kind: "persona" as const,
       personaId: persona.id,
