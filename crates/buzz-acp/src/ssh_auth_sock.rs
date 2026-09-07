@@ -76,10 +76,7 @@ fn is_tmp_ssh_auth_sock_parent(path: &Path) -> bool {
     // OpenSSH creates /tmp/ssh-* directories with mkdtemp, whose exclusive
     // create gives the user-owned directory a race-free name under /tmp. The
     // later one-entry socket check still rejects reused or populated dirs.
-    path_has_file_name_prefix(path, "ssh-")
-        && path
-            .parent()
-            .is_some_and(|parent| is_known_temp_root(parent))
+    path_has_file_name_prefix(path, "ssh-") && path.parent().is_some_and(is_known_temp_root)
 }
 
 fn is_macos_ssh_auth_sock_parent(path: &Path) -> bool {
