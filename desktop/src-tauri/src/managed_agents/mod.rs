@@ -40,6 +40,7 @@ mod restore;
 pub mod retention;
 mod runtime;
 mod runtime_commands;
+pub(crate) mod runtime_configurations;
 mod runtime_types;
 mod session_policy;
 pub(crate) mod snapshot_avatar;

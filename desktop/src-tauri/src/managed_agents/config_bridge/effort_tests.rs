@@ -28,6 +28,7 @@ fn buzz_agent() -> &'static KnownAcpRuntime {
 
 pub(super) fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        runtime_configurations: Default::default(),
         pubkey: "test".to_string(),
         name: "Test Agent".to_string(),
         persona_id: None,

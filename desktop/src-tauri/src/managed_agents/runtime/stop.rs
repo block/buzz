@@ -298,6 +298,7 @@ mod tests {
         let stored_key = ManagedAgentRuntimeKey::new(&pubkey, stored_relay).unwrap();
         let requested_key = ManagedAgentRuntimeKey::new(&pubkey, requested_relay).unwrap();
         let receipt = super::super::super::ManagedAgentRuntimeReceipt {
+            runtime_configuration: None,
             authority_version: 0,
             key: stored_key.clone(),
             pid,

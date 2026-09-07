@@ -20,6 +20,8 @@ mod channels;
 mod clipboard;
 mod desktop_capabilities;
 mod desktop_lifecycle;
+mod runtime_configurations;
+pub use runtime_configurations::*;
 mod desktop_profiles;
 pub(crate) mod desktop_stop;
 mod dms;

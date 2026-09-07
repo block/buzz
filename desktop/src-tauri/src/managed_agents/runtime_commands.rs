@@ -57,6 +57,7 @@ fn status_for_with<R: tauri::Runtime>(
     let effective = resolve_effective_agent_env(record, personas, metadata, global);
     let local_setup = matches!(agent_readiness(&effective), AgentReadiness::Ready);
     ManagedAgentRuntimeStatus {
+        running_configuration: runtime.and_then(|r| r.spawn_config.runtime_configuration.clone()),
         pubkey: key.pubkey.clone(),
         relay_url: key.relay_url.clone(),
         requested_relay_url,
@@ -282,6 +283,30 @@ pub(crate) fn start_pair_locked(
     broker: Option<&super::broker_launch::BrokerSession>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    start_pair_prepared_locked(
+        pubkey,
+        relay_url,
+        lazy,
+        expected_updated_at,
+        explicit_start,
+        broker,
+        None,
+        app,
+    )
+}
+
+/// Caller owns the transition lock and admission; no selection is persisted here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_pair_prepared_locked(
+    pubkey: String,
+    relay_url: String,
+    lazy: bool,
+    expected_updated_at: Option<&str>,
+    explicit_start: bool,
+    broker: Option<&super::broker_launch::BrokerSession>,
+    prepared: Option<&super::runtime_configurations::PreparedLaunch>,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
     if state.shutdown_started.load(Ordering::Acquire) {
         return Err("desktop shutdown has started".into());
@@ -299,6 +324,21 @@ pub(crate) fn start_pair_locked(
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    let owner = state.signing_keys()?.public_key().to_hex();
+    let resolved = if prepared.is_none() {
+        super::runtime_configurations::prepare_selected(&app, record, Some(&owner), &relay_url)?
+    } else {
+        None
+    };
+    let prepared = prepared.or(resolved.as_ref());
+    if let Some(plan) = prepared {
+        plan.check_scope(Some(&owner), &relay_url)?;
+        plan.revalidate(
+            record,
+            &super::load_personas(&app)?,
+            &super::load_global_agent_config(&app)?,
+        )?;
+    }
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -308,6 +348,23 @@ pub(crate) fn start_pair_locked(
         .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
     {
         let status = status_for(&app, record, &key, runtimes.get(&key), None);
+        let requested = match prepared {
+            Some(plan) => {
+                plan.check_scope(
+                    Some(&state.signing_keys()?.public_key().to_hex()),
+                    &relay_url,
+                )?;
+                plan.configuration()
+            }
+            None => super::runtime_configurations::selected_reference(
+                record,
+                Some(&state.signing_keys()?.public_key().to_hex()),
+                &relay_url,
+            )?,
+        };
+        if status.running_configuration != requested {
+            return Err("A different configuration is running; Stop before Start".into());
+        }
         return Ok(status);
     }
     runtimes.remove(&key);
@@ -337,14 +394,16 @@ pub(crate) fn start_pair_locked(
         None,
         resume.as_ref(),
         broker,
+        prepared,
     )?;
     let now = crate::util::now_iso();
-    let receipt = ManagedAgentRuntimeReceipt::new(
+    let mut receipt = ManagedAgentRuntimeReceipt::new(
         key.clone(),
         process.child.id(),
         current_instance_id(&app),
         now.clone(),
     );
+    receipt.runtime_configuration = process.spawn_config.runtime_configuration.clone();
     if let Err(error) = write_agent_runtime_receipt(&app, &receipt) {
         let _ = terminate_process(process.child.id());
         let _ = process.child.wait();
@@ -501,6 +560,7 @@ fn unkeyable_failed_status(
     let metadata = super::known_acp_runtime(&command);
     let effective = resolve_effective_agent_env(record, personas, metadata, global);
     ManagedAgentRuntimeStatus {
+        running_configuration: None,
         pubkey: record.pubkey.clone(),
         relay_url: requested.clone(),
         requested_relay_url: Some(requested),
@@ -868,6 +928,7 @@ mod stop_scope_tests {
         let stored_key = super::ManagedAgentRuntimeKey::new(&pubkey, stored_relay).unwrap();
         let requested_key = super::ManagedAgentRuntimeKey::new(&pubkey, requested_relay).unwrap();
         let receipt = super::ManagedAgentRuntimeReceipt {
+            runtime_configuration: None,
             authority_version: 0,
             key: stored_key.clone(),
             pid,

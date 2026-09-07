@@ -159,6 +159,7 @@ pub(in crate::managed_agents) fn fixture(
     auth_tag: Option<String>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        runtime_configurations: Default::default(),
         description: None,
         pubkey: "p".into(),
         name: "n".into(),

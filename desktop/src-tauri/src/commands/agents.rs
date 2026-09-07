@@ -174,6 +174,9 @@ async fn start_local_agent_with_preflight(
     expected_relay_url: Option<&str>,
     expected_signer_pubkey: Option<&str>,
     replay_floor_unix: Option<u64>,
+    requested: Option<
+        Option<&crate::managed_agents::runtime_configurations::RuntimeConfigurationRef>,
+    >,
 ) -> Result<ManagedAgentSummary, String> {
     let launch_owner = workspace_owner_hex(state)?;
     // Runtime keys preserve the workspace host authority. Bind that same
@@ -220,18 +223,47 @@ async fn start_local_agent_with_preflight(
     // default, which record-byte sniffing could never see.
     let personas = load_personas(app).unwrap_or_default();
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
-    let mesh_model_id =
-        crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
-            &record_snapshot,
-            &personas,
-            &global,
-        );
-    ensure_relay_mesh_for_record(
-        app,
-        mesh_model_id.as_deref(),
-        matches!(intent, LocalStartIntent::Create),
-    )
-    .await?;
+    let selected = crate::managed_agents::runtime_configurations::selected_reference(
+        &record_snapshot,
+        Some(&launch_owner),
+        launch_relay.as_str(),
+    )?;
+    let configuration = requested.map(|r| r.cloned()).unwrap_or(selected);
+    let prepared = if requested.is_some() || configuration.is_some() {
+        Some(
+            crate::managed_agents::runtime_configurations::prepare_for_app(
+                app,
+                &record_snapshot,
+                configuration.as_ref(),
+                &launch_owner,
+                launch_relay.as_str(),
+            )?,
+        )
+    } else {
+        None
+    };
+    if let Some(plan) = &prepared {
+        crate::managed_agents::runtime_configurations::preflight_prepared(
+            app,
+            plan,
+            &launch_owner,
+            launch_relay.as_str(),
+        )
+        .await?;
+    } else {
+        let mesh_model_id =
+            crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
+                &record_snapshot,
+                &personas,
+                &global,
+            );
+        ensure_relay_mesh_for_record(
+            app,
+            mesh_model_id.as_deref(),
+            matches!(intent, LocalStartIntent::Create),
+        )
+        .await?;
+    }
 
     // The mesh preflight above is the suspension window Projects callbacks
     // capture their scope against: a community switch during that await
@@ -268,6 +300,22 @@ async fn start_local_agent_with_preflight(
     if record.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
+    if let Some(plan) = &prepared {
+        if requested.is_none()
+            && crate::managed_agents::runtime_configurations::selected_reference(
+                record,
+                Some(&launch_owner),
+                launch_relay.as_str(),
+            )? != configuration
+        {
+            return Err("Selected configuration changed during preflight".into());
+        }
+        plan.revalidate(
+            record,
+            &load_personas(app)?,
+            &crate::managed_agents::load_global_agent_config(app)?,
+        )?;
+    }
     // Re-snapshot the persona onto the record at every spawn so the agent always
     // starts with the current persona config (system_prompt, model, provider,
     // runtime). This clears the "out of date" drift badge without requiring a
@@ -276,7 +324,7 @@ async fn start_local_agent_with_preflight(
     // Load personas once: used for snapshot application below and summary build
     // at the end — avoids a second disk read for the same file in the same call.
     let personas = load_personas(app).unwrap_or_default();
-    if let Some(persona_id) = record.persona_id.clone() {
+    if let Some(persona_id) = record.persona_id.clone().filter(|_| prepared.is_none()) {
         match personas.iter().find(|p| p.id == persona_id) {
             Some(persona) => {
                 crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
@@ -289,7 +337,7 @@ async fn start_local_agent_with_preflight(
             }
         }
     }
-    start_managed_agent_process(
+    crate::managed_agents::start_managed_agent_process_prepared(
         app,
         record,
         &mut runtimes,
@@ -297,6 +345,7 @@ async fn start_local_agent_with_preflight(
         &workspace_relay_url,
         replay_floor_unix,
         resume.as_ref(),
+        prepared.as_ref(),
     )?;
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
@@ -635,6 +684,7 @@ pub async fn create_managed_agent(
             linked_persona.as_ref(),
         )?;
         let record = ManagedAgentRecord {
+            runtime_configurations: Default::default(),
             pubkey: pubkey.clone(),
             name: name.clone(),
             description: None,
@@ -753,6 +803,7 @@ pub async fn create_managed_agent(
             &state,
             &pubkey,
             LocalStartIntent::Create,
+            None,
             None,
             None,
             None,
@@ -973,6 +1024,7 @@ pub async fn start_managed_agent(
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
                 replay_floor_unix,
+                None,
             )
             .await
         }
@@ -1223,3 +1275,30 @@ use profile::{profile_needs_sync, resolve_legacy_avatar};
 #[cfg(test)]
 #[path = "agents_tests.rs"]
 mod tests;
+
+/// Start the explicitly reviewed revision through ordinary local async preflight.
+#[tauri::command]
+pub async fn start_runtime_configuration(
+    app: AppHandle,
+    owner: String,
+    community: String,
+    agent: String,
+    configuration: Option<crate::managed_agents::runtime_configurations::RuntimeConfigurationRef>,
+) -> Result<ManagedAgentSummary, String> {
+    let state = app.state::<AppState>();
+    super::desktop_profiles::scope(&app, &state, &owner, &community)?;
+    if !super::desktop_stop::owned_local(&app, &state, &owner, &agent)? {
+        return Err("Agent ownership is unavailable on this Desktop".into());
+    }
+    start_local_agent_with_preflight(
+        &app,
+        &state,
+        &agent,
+        LocalStartIntent::Explicit,
+        Some(&community),
+        Some(&owner),
+        None,
+        Some(configuration.as_ref()),
+    )
+    .await
+}

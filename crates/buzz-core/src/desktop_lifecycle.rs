@@ -1,8 +1,10 @@
 //! Owner-private lifecycle requests. Signed order is intent, not process state.
+mod configuration;
 use crate::{
     desktop_stop::{hex, read, sign, StopTarget},
     kind::{KIND_DESKTOP_LIFECYCLE, KIND_DESKTOP_LIFECYCLE_RESULT},
 };
+pub use configuration::{RuntimeConfigurationRef, RuntimeConfigurationSummary};
 use nostr::{Event, Keys, Tag};
 use serde::{Deserialize, Serialize};
 

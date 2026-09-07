@@ -90,7 +90,7 @@ pub(crate) struct EffectiveAgentEnv {
 /// args, and layered env.  This is the single source of truth for what will
 /// actually run — computed once and shared across every consumer that needs
 /// the effective values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EffectiveHarnessDescriptor {
     /// The raw effective command string (e.g. `"buzz-agent"`, `"my-acp-agent"`).
     /// Used for `known_acp_runtime` lookup and hashing.
@@ -127,6 +127,20 @@ pub(crate) fn resolve_effective_harness_descriptor(
     personas: &[crate::managed_agents::types::AgentDefinition],
     global: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<EffectiveHarnessDescriptor, String> {
+    // A transient projection, never persisted back onto the stable agent/persona.
+    let projected;
+    let record = if let Some(config) = super::runtime_configurations::selected(record)? {
+        projected = {
+            let mut copy = record.clone();
+            copy.runtime = Some(config.runtime.clone());
+            copy.agent_args.clear();
+            copy.agent_command_override = None;
+            copy
+        };
+        &projected
+    } else {
+        record
+    };
     let effective_command = crate::managed_agents::try_record_agent_command(record, personas)?;
     let runtime_meta = known_acp_runtime(&effective_command);
 
@@ -166,11 +180,13 @@ pub(crate) fn resolve_effective_harness_descriptor(
     let effective_env =
         resolve_effective_agent_env_with_def(record, personas, runtime_meta, global, harness_def);
 
-    Ok(EffectiveHarnessDescriptor {
+    let mut descriptor = EffectiveHarnessDescriptor {
         command: effective_command,
         args,
         env: effective_env.env,
-    })
+    };
+    super::runtime_configurations::apply_descriptor(record, &mut descriptor)?;
+    Ok(descriptor)
 }
 
 /// Assemble the effective agent env from a record, personas, optional
@@ -1493,6 +1509,7 @@ mod tests {
         );
         // Minimal record: only the fields resolve_effective_agent_env reads.
         let record = crate::managed_agents::types::ManagedAgentRecord {
+            runtime_configurations: Default::default(),
             description: None,
             pubkey: "test-pubkey".to_string(),
             name: "test-agent".to_string(),

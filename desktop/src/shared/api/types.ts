@@ -335,7 +335,12 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;
-  modelSource: "definition" | "global" | "instance_legacy" | null;
+  modelSource:
+    | "definition"
+    | "global"
+    | "instance_legacy"
+    | "runtime_configuration"
+    | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
   /** True when the linked persona has been edited since this agent was created. */

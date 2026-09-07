@@ -15,6 +15,7 @@ pub enum ConfigSource {
     Definition,
     Global,
     InstanceLegacy,
+    RuntimeConfiguration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +24,7 @@ pub struct ResolvedField<T> {
     pub source: ConfigSource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveAgentConfig {
     pub model: ResolvedField<String>,
     pub provider: ResolvedField<String>,
@@ -249,7 +250,7 @@ pub fn resolve_effective_config(
     definitions: &[AgentDefinition],
     global: &GlobalAgentConfig,
 ) -> EffectiveConfigResult {
-    match &record.persona_id {
+    let mut result = match &record.persona_id {
         Some(pid) => match definitions.iter().find(|d| d.id == *pid) {
             Some(def) => EffectiveConfigResult::Resolved(resolve_linked(def, global)),
             None => EffectiveConfigResult::OrphanedInstance {
@@ -258,7 +259,17 @@ pub fn resolve_effective_config(
             },
         },
         None => EffectiveConfigResult::Resolved(resolve_definition_less(record, global)),
+    };
+    // Persona still owns identity/instructions, not an explicitly selected runtime.
+    if let (EffectiveConfigResult::Resolved(config), Ok(Some(selected))) =
+        (&mut result, super::runtime_configurations::selected(record))
+    {
+        config.model.value = Some(selected.model.clone());
+        config.model.source = ConfigSource::RuntimeConfiguration;
+        config.provider.source = ConfigSource::RuntimeConfiguration;
+        config.provider.value = selected.provider.clone();
     }
+    result
 }
 
 pub fn resolve_effective_model_provider_pair(

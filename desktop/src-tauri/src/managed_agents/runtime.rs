@@ -332,7 +332,25 @@ pub fn build_managed_agent_summary(
         last_error: record.last_error.clone(),
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
-        auto_restart_on_config_change: record.auto_restart_on_config_change,
+        auto_restart_on_config_change: record.auto_restart_on_config_change
+            && !pair_runtime
+                .is_some_and(|runtime| runtime.spawn_config.runtime_configuration.is_some())
+            && app
+                .state::<crate::app_state::AppState>()
+                .signing_keys()
+                .ok()
+                .is_some_and(|keys| {
+                    record
+                        .runtime_configurations
+                        .get(
+                            &keys.public_key().to_hex(),
+                            &crate::relay::relay_ws_url_with_override(
+                                app.state::<crate::app_state::AppState>().inner(),
+                            ),
+                        )
+                        .entries
+                        .is_empty()
+                }),
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
@@ -464,6 +482,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         replay_floor_unix,
         resume,
         None,
+        None,
     )
 }
 
@@ -477,6 +496,7 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     replay_floor_unix: Option<u64>,
     resume: Option<&super::remote_stop::ResumeTicket>,
     broker: Option<&super::broker_launch::BrokerSession>,
+    prepared: Option<&super::runtime_configurations::PreparedLaunch>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
     super::remote_stop::check_launch(app, &key, relay_url, owner_hex, resume)?;
@@ -512,27 +532,37 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     // inherits it — no caller can bypass this by reaching `spawn_agent_child`
     // directly. Checked before any side effect (log marker, log file, process
     // spawn) so a refused spawn leaves no trace.
-    let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
-        record, &personas, &global,
-    )
-    .require_resolved()?;
-
-    // Single typed resolver: validates runtime id (dangling harness → Err), resolves
-    // command, args (instance wins over definition default), and the full env layer stack.
-    // This is the sole path for harness-definition lookup — spawn, snapshot,
-    // summary, and model probes all consume this descriptor rather than
-    // assembling values inline.
-    // Like the orphan refusal above, this runs before any side effect so a refused
-    // spawn leaves no trace.
-    let descriptor =
-        crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
-            .map_err(|e| {
-                format!(
-                    "cannot spawn agent {}: {}",
-                    record.pubkey,
-                    crate::managed_agents::user_facing_harness_error(&e)
-                )
-            })?;
+    let selected_ref =
+        super::runtime_configurations::selected_reference(record, owner_hex, relay_url)?;
+    let resolved;
+    let prepared = match prepared {
+        Some(plan) => {
+            plan.check_scope(owner_hex, relay_url)?;
+            plan.revalidate(record, &personas, &global)?;
+            Some(plan)
+        }
+        None if selected_ref.is_some() => {
+            resolved = super::runtime_configurations::prepare_for_app(
+                app,
+                record,
+                selected_ref.as_ref(),
+                owner_hex.ok_or("Desktop owner unavailable")?,
+                relay_url,
+            )?;
+            Some(&resolved)
+        }
+        None => None,
+    };
+    let record = prepared.map(|plan| &plan.record).unwrap_or(record);
+    let effective_cfg = match prepared {
+        Some(plan) => plan.effective.clone(),
+        None => super::effective_config::resolve_effective_config(record, &personas, &global)
+            .require_resolved()?,
+    };
+    let descriptor = match prepared {
+        Some(plan) => plan.descriptor.clone(),
+        None => super::resolve_effective_harness_descriptor(record, &personas, &global)?,
+    };
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 
@@ -872,6 +902,14 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
             },
         )?;
     }
+    // Applied last so inherited environment cannot weaken explicit model selection.
+    command.env_remove("BUZZ_ACP_REQUIRE_MODEL");
+    if let Some(config) = super::runtime_configurations::selected(record)? {
+        command.env("BUZZ_ACP_REQUIRE_MODEL", "true");
+        if let Some(workspace) = &config.workspace {
+            command.current_dir(workspace);
+        }
+    }
     let child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
@@ -928,7 +966,50 @@ pub fn start_managed_agent_process<R: tauri::Runtime>(
     replay_floor_unix: Option<u64>,
     resume: Option<&super::remote_stop::ResumeTicket>,
 ) -> Result<(), String> {
+    start_managed_agent_process_prepared(
+        app,
+        record,
+        runtimes,
+        owner_hex,
+        workspace_relay,
+        replay_floor_unix,
+        resume,
+        None,
+    )
+}
+
+/// Ordinary pair registration using a previously resolved immutable launch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_managed_agent_process_prepared<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    record: &mut ManagedAgentRecord,
+    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    owner_hex: Option<&str>,
+    workspace_relay: &crate::relay::ScopedWorkspaceRelay,
+    replay_floor_unix: Option<u64>,
+    resume: Option<&super::remote_stop::ResumeTicket>,
+    prepared: Option<&super::runtime_configurations::PreparedLaunch>,
+) -> Result<(), String> {
     let key = bound_runtime_key(record, workspace_relay)?;
+    let resolved = if prepared.is_none() {
+        super::runtime_configurations::prepare_selected(
+            app,
+            record,
+            owner_hex,
+            workspace_relay.as_str(),
+        )?
+    } else {
+        None
+    };
+    let prepared = prepared.or(resolved.as_ref());
+    if let Some(plan) = prepared {
+        plan.check_scope(owner_hex, workspace_relay.as_str())?;
+        plan.revalidate(
+            record,
+            &super::load_personas(app)?,
+            &super::load_global_agent_config(app)?,
+        )?;
+    }
     if let Some(runtime) = runtimes.get_mut(&key) {
         if runtime
             .child
@@ -936,6 +1017,20 @@ pub fn start_managed_agent_process<R: tauri::Runtime>(
             .map_err(|error| format!("failed to inspect running process: {error}"))?
             .is_none()
         {
+            let requested = match prepared {
+                Some(plan) => {
+                    plan.check_scope(owner_hex, workspace_relay.as_str())?;
+                    plan.configuration()
+                }
+                None => super::runtime_configurations::selected_reference(
+                    record,
+                    owner_hex,
+                    workspace_relay.as_str(),
+                )?,
+            };
+            if runtime.spawn_config.runtime_configuration != requested {
+                return Err("A different configuration is running; Stop before Start".into());
+            }
             return Ok(());
         }
 
@@ -950,7 +1045,7 @@ pub fn start_managed_agent_process<R: tauri::Runtime>(
     // replace. Selection enforces host-preserving authority provenance and
     // uses the ordinary process-tree termination contract.
     terminate_untracked_pair_runtime(app, &key)?;
-    let mut process = spawn_agent_child(
+    let mut process = spawn_agent_child_with_broker(
         app,
         record,
         workspace_relay.as_str(),
@@ -958,14 +1053,17 @@ pub fn start_managed_agent_process<R: tauri::Runtime>(
         owner_hex,
         replay_floor_unix,
         resume,
+        None,
+        prepared,
     )?;
     let now = now_iso();
-    let receipt = super::ManagedAgentRuntimeReceipt::new(
+    let mut receipt = super::ManagedAgentRuntimeReceipt::new(
         key.clone(),
         process.child.id(),
         current_instance_id(app),
         now.clone(),
     );
+    receipt.runtime_configuration = process.spawn_config.runtime_configuration.clone();
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
         let _ = terminate_process(process.child.id());
         let _ = process.child.wait();

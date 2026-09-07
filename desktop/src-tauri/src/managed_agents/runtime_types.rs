@@ -139,6 +139,7 @@ impl ManagedAgentPairRuntime {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeStatus {
+    pub running_configuration: Option<super::runtime_configurations::RuntimeConfigurationRef>,
     pub pubkey: String,
     pub relay_url: String,
     /// Exact descriptor URL echoed only by reconcile result rows so callers can
@@ -171,6 +172,8 @@ pub struct ManagedAgentCommunityTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeReceipt {
+    #[serde(default)]
+    pub runtime_configuration: Option<super::runtime_configurations::RuntimeConfigurationRef>,
     /// Version 0 is an unversioned legacy receipt. Its lossy host/path rendering
     /// cannot prove pair authority; it is usable only for instance-wide cleanup.
     #[serde(default)]
@@ -189,6 +192,7 @@ impl ManagedAgentRuntimeReceipt {
         started_at: String,
     ) -> Self {
         Self {
+            runtime_configuration: None,
             authority_version: RUNTIME_AUTHORITY_RECEIPT_VERSION,
             key,
             pid,

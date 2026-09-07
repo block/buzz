@@ -414,3 +414,27 @@ matches the code is worse than no rule; a new pattern that isn't written down
 here will be broken by the next agent that never learns it existed. Reviewers:
 treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 "no rules changed" note) as incomplete.
+
+## Named runtime configurations
+
+The Agents-page editor manages one exact agent in an owner + community scope.
+Durable configuration sets live on the global agent record keyed by that scope;
+IPC reads/replaces only the authorized set and preserves every other scope.
+Host is a configuration field, not the scope of the whole global record.
+A local editor may preserve another host's entries but cannot edit/delete/select
+them. Missing legacy sets mean Default, with the existing inheritance behavior.
+
+Selection/editing is next-launch state, never a model switch or a running receipt.
+Start sends the exact `{id, revision}` (null explicitly means Default). Native
+preparation projects immutable launch inputs without persisting over identity or
+persona fields, checks local identity access and destination prerequisites, then
+revalidates after async readiness and at shared spawn. A stale revision or missing
+prerequisite fails rather than falling back. Auto-restart is suppressed in the
+active scoped summary while named configurations or a named running launch exist;
+saving one scope does not change the global auto-restart preference.
+
+The editor's running revision comes from the live pair's spawn snapshot, not its
+selection. Unavailable choices never remove independent Stop controls. Model IDs
+are explicit authored values; credentials are provisioned locally, never entered
+or copied by this editor. See `docs/named-runtime-configurations.md` for the native
+contract and the distinction between fixture checks and real execution evidence.

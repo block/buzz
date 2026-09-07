@@ -140,6 +140,7 @@ fn production_start_refuses_live_unversioned_receipt_before_spawn() {
 
     let key = crate::managed_agents::ManagedAgentRuntimeKey::new(&pubkey, relay).unwrap();
     let receipt = crate::managed_agents::ManagedAgentRuntimeReceipt {
+        runtime_configuration: None,
         authority_version: 0,
         key: key.clone(),
         pid: child.id(),

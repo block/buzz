@@ -863,6 +863,7 @@ fn receipt_fixture(
     key: crate::managed_agents::ManagedAgentRuntimeKey,
 ) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
     crate::managed_agents::ManagedAgentRuntimeReceipt {
+        runtime_configuration: None,
         authority_version: crate::managed_agents::RUNTIME_AUTHORITY_RECEIPT_VERSION,
         key,
         pid: std::process::id(),
