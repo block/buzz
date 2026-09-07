@@ -17,6 +17,12 @@ use tauri::{AppHandle, Manager};
 
 mod configurations;
 
+// Tauri IPC command boundary: the nine parameters are the existing frontend
+// invoke contract (each named argument is passed individually from
+// `desktopLifecycle.ts`), so the shape is ABI-fixed here — a params struct
+// would change the wire format. Same command-boundary allow as the other
+// wide `#[tauri::command]` (`send_managed_agent_channel_message`).
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn prepare_desktop_lifecycle(
     app: AppHandle,

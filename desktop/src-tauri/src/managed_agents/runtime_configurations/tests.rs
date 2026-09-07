@@ -227,7 +227,7 @@ fn malformed_or_stale_reference_is_rejected_before_launch_resolution() {
 async fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() {
     use std::os::unix::fs::PermissionsExt;
     use tauri::Manager;
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let temp = tempfile::tempdir().unwrap();
     struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
     impl Drop for Restore {

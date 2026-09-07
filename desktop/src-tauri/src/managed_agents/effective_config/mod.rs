@@ -286,6 +286,11 @@ pub fn resolve_effective_model_provider_pair(
 /// never spawns (see `require_resolved`), so it never needs a mesh preflight
 /// either; the caller's own orphan handling downstream is unaffected, this
 /// just avoids tripping mesh bootstrap for a start that will be refused.
+///
+/// Bound only by `effective_config/tests.rs` now — production mesh preflights
+/// resolve through `PreparedLaunch`'s captured effective config — so the
+/// resolver stays as a `cfg(test)` seam for the mesh-model regression tests.
+#[cfg(test)]
 pub fn resolve_effective_relay_mesh_model_id(
     record: &ManagedAgentRecord,
     definitions: &[AgentDefinition],

@@ -220,7 +220,7 @@ impl Drop for Fixture {
 
 #[tokio::test]
 async fn provisioned_destination_catalog_start_and_same_host_switch_use_shared_launch() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let mut fixture = Fixture::new();
     let catalog = fixture.action(Action::Catalog, None).await;
     assert_eq!(catalog.outcome, Outcome::Ready);
@@ -285,7 +285,7 @@ async fn provisioned_destination_catalog_start_and_same_host_switch_use_shared_l
 
 #[tokio::test]
 async fn unavailable_identity_or_runtime_excludes_catalog_and_refuses_start() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     for missing in ["absent", "wrong", "runtime"] {
         let mut fixture = Fixture::new();
         match missing {
@@ -324,7 +324,7 @@ async fn unavailable_identity_or_runtime_excludes_catalog_and_refuses_start() {
 
 #[tokio::test]
 async fn revoked_key_keeps_existing_process_visible_and_restart_refuses_without_teardown() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let mut fixture = Fixture::new();
     assert_eq!(
         fixture.action(Action::Start, None).await.outcome,
@@ -350,7 +350,7 @@ async fn revoked_key_keeps_existing_process_visible_and_restart_refuses_without_
 
 #[tokio::test]
 async fn key_loss_during_preflight_is_rechecked_for_start_and_catalog() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     for action in [Action::Start, Action::Catalog] {
         let fixture = Fixture::new();
         let result = fixture
@@ -382,7 +382,7 @@ async fn key_loss_during_preflight_is_rechecked_for_start_and_catalog() {
 
 #[tokio::test]
 async fn failed_destination_preflight_never_tears_down_existing_source() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let fixture = Fixture::new();
     assert_eq!(
         fixture.action(Action::Start, None).await.outcome,
@@ -436,7 +436,7 @@ fn assert_failed_without_child(fixture: &Fixture) -> ManagedAgentRecord {
 
 #[tokio::test]
 async fn post_stop_key_loss_or_executable_loss_persists_failed_without_restoring_credentials() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     for revoke_key in [true, false] {
         let fixture = Fixture::new();
         let store_path = agents::storage::managed_agents_store_path(fixture.app.handle()).unwrap();
@@ -480,7 +480,7 @@ async fn post_stop_key_loss_or_executable_loss_persists_failed_without_restoring
 
 #[tokio::test]
 async fn post_stop_expiry_persists_truthful_failed_without_second_spawn() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let fixture = Fixture::new();
     // TERM is ignored only by this bounded synthetic process; ordinary Stop
     // takes its one-second grace then SIGKILL, crossing the captured deadline.

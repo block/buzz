@@ -67,7 +67,7 @@ impl Fixture {
         save(&mut self.record, &self.owner, relay, entry)
     }
     fn persist(&self) {
-        agents::save_managed_agents(self.app.handle(), &[self.record.clone()]).unwrap();
+        agents::save_managed_agents(self.app.handle(), std::slice::from_ref(&self.record)).unwrap();
     }
     fn finish_children(&self) -> Vec<(String, Option<RuntimeConfigurationRef>)> {
         let state = self.app.state::<crate::app_state::AppState>();
@@ -132,7 +132,7 @@ impl Drop for Fixture {
 
 #[tokio::test]
 async fn ordinary_default_start_cannot_launch_new_selection_after_preflight() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let mut fixture = Fixture::new();
     fixture.persist();
     let app = fixture.app.handle().clone();
@@ -168,7 +168,7 @@ async fn ordinary_default_start_cannot_launch_new_selection_after_preflight() {
 
 #[tokio::test]
 async fn restore_preflights_selected_provider_in_both_directions() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     for (default_provider, named_provider, expected) in [
         ("relay-mesh", "openai", None),
         ("openai", "relay-mesh", Some("selected-model")),
@@ -215,7 +215,7 @@ async fn restore_preflights_selected_provider_in_both_directions() {
 
 #[tokio::test]
 async fn restore_refuses_provider_preflight_failure_before_spawn() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let mut fixture = Fixture::new();
     fixture.named(ONE, "relay-mesh", "offline-model");
     fixture.persist();
@@ -242,7 +242,7 @@ async fn restore_refuses_provider_preflight_failure_before_spawn() {
 
 #[tokio::test]
 async fn bulk_restart_preflights_every_captured_community_and_revalidates_before_spawn() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     // The unchanged case proves a real lazy pair spawn and receipts. The other
     // cases edit while the first provider awaits, after BOTH plans were captured.
     for mutation in ["unchanged", "revision", "workspace", "selection"] {
@@ -340,7 +340,7 @@ async fn bulk_restart_preflights_every_captured_community_and_revalidates_before
 
 #[tokio::test]
 async fn restore_selection_fence_survives_suspension_in_both_directions() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     for starts_named in [false, true] {
         let mut fixture = Fixture::new();
         let named = fixture.named(ONE, "relay-mesh", "named-model");
@@ -407,7 +407,7 @@ async fn restore_selection_fence_survives_suspension_in_both_directions() {
 
 #[tokio::test]
 async fn ordinary_default_revalidates_effective_inputs_not_only_selection() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let mut fixture = Fixture::new();
     fixture.persist();
     let app = fixture.app.handle().clone();
@@ -466,7 +466,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn direct_restart_preflights_target_and_preserves_old_child_on_refusal() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     for relay in [ONE, TWO] {
         for mutation in [
             "unchanged",
@@ -565,7 +565,7 @@ async fn direct_restart_preflights_target_and_preserves_old_child_on_refusal() {
 
 #[tokio::test]
 async fn direct_start_and_reconcile_continuation_refuse_selection_change_and_stop() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     for explicit in [true, false] {
         for mutation in ["selection", "stop"] {
             let mut fixture = Fixture::new();
@@ -609,7 +609,7 @@ async fn direct_start_and_reconcile_continuation_refuse_selection_change_and_sto
 #[cfg(feature = "mesh-llm")]
 #[tokio::test]
 async fn recovery_uses_running_pair_snapshots_not_default_or_next_selection() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     for default_mesh in [false, true] {
         let mut fixture = Fixture::new();
         fixture.hold_children();
@@ -664,7 +664,7 @@ async fn recovery_uses_running_pair_snapshots_not_default_or_next_selection() {
 
 #[tokio::test]
 async fn reconcile_keeps_authorization_inputs_without_cross_pair_timestamp_failure() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let mut fixture = Fixture::new();
     fixture.hold_children();
     fixture.named(ONE, "relay-mesh", "mesh-one");
@@ -693,7 +693,7 @@ async fn reconcile_keeps_authorization_inputs_without_cross_pair_timestamp_failu
 
 #[tokio::test]
 async fn bulk_stop_during_preflight_cannot_be_resumed_by_automatic_start() {
-    let _guard = agents::lock_path_mutex();
+    let _guard = agents::lock_path_mutex_async().await;
     let mut fixture = Fixture::new();
     fixture.named(ONE, "relay-mesh", "mesh-one");
     fixture.named(TWO, "relay-mesh", "mesh-two");

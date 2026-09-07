@@ -333,8 +333,8 @@ pub fn build_managed_agent_summary<R: tauri::Runtime>(
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change
-            && !pair_runtime
-                .is_some_and(|runtime| runtime.spawn_config.runtime_configuration.is_some())
+            && pair_runtime
+                .is_none_or(|runtime| runtime.spawn_config.runtime_configuration.is_none())
             && app
                 .state::<crate::app_state::AppState>()
                 .signing_keys()
@@ -422,11 +422,12 @@ pub(crate) fn configure_runtime_cli(
 #[must_use]
 pub(crate) struct EffortApplied(());
 
-/// Apply effort env to an agent spawn command. Called by `spawn_agent_child`
-/// (production) and `effort_cmd_tests` (test seam). Inner-seam: removing
-/// `apply_spawn_effort_env` below turns the production-sequence tests RED.
-/// Outer-seam: the returned token is consumed by `spawn_with_effort_proof`;
-/// deleting this call leaves `effort` undefined at the spawn site.
+/// Apply effort env to an agent spawn command. Called by
+/// `spawn_agent_child_prepared` (production) and `effort_cmd_tests` (test
+/// seam). Inner-seam: removing `apply_spawn_effort_env` below turns the
+/// production-sequence tests RED. Outer-seam: the returned token is consumed
+/// by `spawn_with_effort_proof`; deleting this call leaves `effort` undefined
+/// at the spawn site.
 pub(crate) fn apply_effort_to_spawn_command(
     cmd: &mut std::process::Command,
     record: &crate::managed_agents::types::ManagedAgentRecord,
@@ -443,8 +444,9 @@ pub(crate) fn apply_effort_to_spawn_command(
 }
 
 /// Spawn the agent command, consuming the `EffortApplied` proof token.
-/// Deleting `apply_effort_to_spawn_command` from `spawn_agent_child` leaves
-/// `effort` undefined here — a compile error CI catches before any test runs.
+/// Deleting `apply_effort_to_spawn_command` from `spawn_agent_child_prepared`
+/// leaves `effort` undefined here — a compile error CI catches before any
+/// test runs.
 pub(crate) fn spawn_with_effort_proof(
     cmd: &mut std::process::Command,
     _effort: EffortApplied,
@@ -464,27 +466,10 @@ pub(crate) fn spawn_with_effort_proof(
 /// publishes the triggering message before this spawn and passes its send
 /// timestamp here so the harness's first REQ replays past that message no
 /// matter how long the spawn takes. buzz-acp clamps stale floors to ~15 min.
-pub fn spawn_agent_child<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    record: &ManagedAgentRecord,
-    relay_url: &str,
-    lazy: bool,
-    owner_hex: Option<&str>,
-    replay_floor_unix: Option<u64>,
-    resume: Option<&super::remote_stop::ResumeTicket>,
-) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
-    spawn_agent_child_prepared(
-        app,
-        record,
-        relay_url,
-        lazy,
-        owner_hex,
-        replay_floor_unix,
-        resume,
-        None,
-    )
-}
-
+///
+/// `prepared`: the captured, preflighted launch plan. Production callers pass
+/// a `PreparedLaunch`; tests may pass `None` to exercise the refusal paths
+/// that reject an un-preflighted spawn.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_agent_child_prepared<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -646,7 +631,7 @@ pub(crate) fn spawn_agent_child_prepared<R: tauri::Runtime>(
     // ── Readiness check: set setup-payload if agent is not ready ─────────────
     // `spawned_setup_mode` is stamped on `ManagedAgentProcess` below.
     let spawned_setup_mode =
-        apply_setup_payload_env(&mut command, record, &descriptor, runtime_meta);
+        apply_setup_payload_env(&mut command, record, descriptor, runtime_meta);
     // Emit BUZZ_ACP_IDLE_TIMEOUT only when explicitly set; the harness
     // DEFAULT_IDLE_TIMEOUT_SECS is the single source of truth. The deprecated
     // BUZZ_ACP_TURN_TIMEOUT pinned agents to a stale default (320s).
@@ -883,7 +868,7 @@ pub(crate) fn spawn_agent_child_prepared<R: tauri::Runtime>(
         .transpose()?;
     super::runtime_configurations::apply_required_model_env(&mut command, required_model)?;
     if let Some(model) = required_model {
-        if !runtime_meta.is_some_and(|runtime| runtime.id == "claude") {
+        if runtime_meta.is_none_or(|runtime| runtime.id != "claude") {
             command.env("BUZZ_ACP_MODEL", model);
         }
     }
@@ -935,12 +920,13 @@ pub(crate) fn spawn_agent_child_prepared<R: tauri::Runtime>(
     })
 }
 
-/// Spawn (or adopt) the runtime pair for `record` on the caller's bound
-/// workspace relay. `workspace_relay` can only be produced by
-/// `bind_expected_relay_scope`, so this spawn consumes — by construction — the
-/// exact workspace-relay read the caller's scope assertion passed on; it never
-/// re-reads the mutable override (see `relay::scope`). The key comes from
-/// [`bound_runtime_key`] — the seam the spawn-key regressions exercise.
+/// Test-only seam over [`start_managed_agent_process_prepared`] with no
+/// captured launch: the runtime-authority regressions in
+/// `runtime/authority_tests.rs` use it to prove a spawn without a preflighted
+/// plan is refused before any side effect. Production callers resolve a
+/// `PreparedLaunch` and go through `start_managed_agent_process_prepared`
+/// directly.
+#[cfg(test)]
 pub fn start_managed_agent_process<R: tauri::Runtime>(
     app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,

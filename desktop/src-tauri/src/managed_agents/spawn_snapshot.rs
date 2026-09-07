@@ -181,6 +181,10 @@ pub(crate) fn effective_effort(descriptor: &EffectiveHarnessDescriptor) -> Optio
 
 impl SpawnConfigSnapshot {
     /// Assemble the snapshot from values a spawn has already resolved.
+    /// Read by `mesh_llm::recovery` to collect the mesh consumer model ids of
+    /// live pairs; dead only in default-feature builds, where `mesh-llm` is
+    /// off and that consumer is compiled out.
+    #[cfg_attr(not(feature = "mesh-llm"), allow(dead_code))]
     pub(crate) fn relay_mesh_model_id(&self) -> Option<String> {
         super::resolved_relay_mesh_model_id(self.provider.as_deref(), self.model.as_deref())
     }

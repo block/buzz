@@ -88,9 +88,6 @@ impl PreparedLaunch {
         Ok(())
     }
 
-    pub(crate) fn record(&self) -> &ManagedAgentRecord {
-        &self.record
-    }
     pub(crate) fn configuration(&self) -> Option<RuntimeConfigurationRef> {
         selected(&self.record)
             .ok()
@@ -407,7 +404,7 @@ fn verify_owner(record: &ManagedAgentRecord, owner: &str) -> Result<(), String> 
         buzz_sdk_pkg::nip_oa::verify_auth_tag(tag, &agent).ok()
     });
     if record.backend != super::BackendKind::Local
-        || !verified.is_some_and(|key| key.to_hex() == owner)
+        || verified.is_none_or(|key| key.to_hex() != owner)
     {
         return Err("Agent ownership is unavailable in this scope".into());
     }
@@ -460,6 +457,17 @@ fn local_host<R: tauri::Runtime>(
         relay_url: community.into(),
         owner_keys: keys,
     };
+    // `managed_agents_base_dir` only creates `agents/`; the scoped
+    // `retention/` parent is normally ensured lazily by
+    // `active_retention_scope` during event retention, which a first
+    // lifecycle message can precede on a fresh install (and callers that
+    // bypass app startup, like tests, never trigger). Same on-demand parent
+    // ensure as `remote_stop::connection` so opening the scoped identity db
+    // is safe for every fresh-state caller.
+    if let Some(parent) = scope.db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create retention scope directory: {error}"))?;
+    }
     crate::commands::desktop_stop::local_id(
         &mut super::retention::open_retention_db(&scope.db_path)?,
         &scope,

@@ -218,6 +218,11 @@ pub(crate) enum LocalStartIntent {
     Automatic,
 }
 
+// The argument tuple is the launch-inputs ABI this seam forwards verbatim to
+// `start_local_agent_with_preflight_using` (which carries the same allow): the
+// capture → preflight → locked-revalidate → spawn inputs. Collapsing it into
+// a params struct would fork the shared `_using` boundary shape for a lint.
+#[allow(clippy::too_many_arguments)]
 async fn start_local_agent_with_preflight(
     app: &AppHandle,
     state: &AppState,

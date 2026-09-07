@@ -598,22 +598,6 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
     }
 }
 
-#[cfg(test)]
-mod profile_reconcile_tests {
-    use super::profile_reconcile_completed;
-    use crate::commands::ProfileReconcileOutcome;
-
-    #[test]
-    fn skipped_reconciliation_never_retires_pending_work() {
-        assert!(profile_reconcile_completed(
-            ProfileReconcileOutcome::Reconciled
-        ));
-        assert!(!profile_reconcile_completed(
-            ProfileReconcileOutcome::SkippedDisabled
-        ));
-    }
-}
-
 fn persist_restore_error<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &AppState,
@@ -629,4 +613,20 @@ fn persist_restore_error<R: tauri::Runtime>(
     record.updated_at = util::now_iso();
     record.last_error = Some(error);
     save_managed_agents(app, &records)
+}
+
+#[cfg(test)]
+mod profile_reconcile_tests {
+    use super::profile_reconcile_completed;
+    use crate::commands::ProfileReconcileOutcome;
+
+    #[test]
+    fn skipped_reconciliation_never_retires_pending_work() {
+        assert!(profile_reconcile_completed(
+            ProfileReconcileOutcome::Reconciled
+        ));
+        assert!(!profile_reconcile_completed(
+            ProfileReconcileOutcome::SkippedDisabled
+        ));
+    }
 }

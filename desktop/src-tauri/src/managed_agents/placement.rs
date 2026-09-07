@@ -202,10 +202,8 @@ pub(crate) fn receive(
             || (request.action == Action::Start
                 && desired(conn, &request.target.agent)?.map(|(_, id)| id)
                     != Some(event.id.to_hex()))))
-    {
-        (Outcome::Unknown, None)
-    } else if request.action != Action::Status
-        && nostr::Timestamp::now().as_secs() >= event.created_at.as_secs().saturating_add(30)
+        || (request.action != Action::Status
+            && nostr::Timestamp::now().as_secs() >= event.created_at.as_secs().saturating_add(30))
     {
         (Outcome::Unknown, None)
     } else {
