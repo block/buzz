@@ -82,11 +82,16 @@ export function DesktopLifecycleControl({
   const generation = useRef(0);
   useEffect(() => {
     active.current = true;
+    setAgent("");
+    setDestination("");
+    setRequest(null);
+    setStatus("");
+    setBusy(false);
     return () => {
       active.current = false;
       generation.current++;
     };
-  }, []);
+  }, [scope.owner, scope.community]);
   const run = async (action: "start" | "restart" | "move" | "retry") => {
     const token = ++generation.current;
     const valid = () => active.current && generation.current === token;
@@ -215,6 +220,22 @@ export function DesktopLifecycleControl({
         >
           Move to destination
         </Button>
+        {busy && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              generation.current++;
+              setBusy(false);
+              setRequest(null);
+              setStatus(
+                "Stopped waiting. Dispatched operations may still finish; no later launch will be requested by this control.",
+              );
+            }}
+          >
+            Cancel waiting
+          </Button>
+        )}
         {request && (
           <Button
             size="sm"
