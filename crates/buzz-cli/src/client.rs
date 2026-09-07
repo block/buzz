@@ -1348,20 +1348,67 @@ impl BuzzClient {
     }
 }
 
-/// Normalize a relay URL: ws:// → http://, wss:// → https://, strip trailing slash.
+/// Normalize a relay URL: ws:// → http:// and wss:// → https://.
 /// BUZZ_RELAY_URL may be ws/wss (copied from MCP config).
 pub fn normalize_relay_url(url: &str) -> String {
-    url.replace("wss://", "https://")
-        .replace("ws://", "http://")
-        .trim_end_matches('/')
-        .to_string()
+    let mut parsed = match url::Url::parse(url.trim()) {
+        Ok(parsed) => parsed,
+        Err(_) => return url.trim().to_string(),
+    };
+    let scheme = match parsed.scheme() {
+        "wss" => "https".to_owned(),
+        "ws" => "http".to_owned(),
+        scheme => scheme.to_owned(),
+    };
+    let _ = parsed.set_scheme(&scheme);
+    let had_root_path = parsed.path() == "/";
+    if had_root_path {
+        parsed.set_path("");
+    } else if parsed.query().is_none() && parsed.fragment().is_none() {
+        let path = parsed.path().trim_end_matches('/').to_owned();
+        parsed.set_path(&path);
+    }
+    serialize_relay_url(parsed, had_root_path)
 }
 
 /// Convert an HTTP(S) relay base URL back to a WebSocket URL for NIP-01 connections.
 fn to_ws_url(http_url: &str) -> String {
-    http_url
-        .replace("https://", "wss://")
-        .replace("http://", "ws://")
+    let mut parsed = match url::Url::parse(http_url.trim()) {
+        Ok(parsed) => parsed,
+        Err(_) => return http_url.trim().to_string(),
+    };
+    let scheme = match parsed.scheme() {
+        "https" => "wss".to_owned(),
+        "http" => "ws".to_owned(),
+        scheme => scheme.to_owned(),
+    };
+    let _ = parsed.set_scheme(&scheme);
+    let had_root_path = parsed.path() == "/";
+    if had_root_path {
+        parsed.set_path("");
+    } else if parsed.query().is_none() && parsed.fragment().is_none() {
+        let path = parsed.path().trim_end_matches('/').to_owned();
+        parsed.set_path(&path);
+    }
+    serialize_relay_url(parsed, had_root_path)
+}
+
+fn serialize_relay_url(parsed: url::Url, had_root_path: bool) -> String {
+    let mut serialized = parsed.to_string();
+    if !had_root_path {
+        return serialized;
+    }
+    let delimiter = serialized.find(['?', '#']);
+    match delimiter {
+        Some(index) if serialized.as_bytes().get(index.wrapping_sub(1)) == Some(&b'/') => {
+            serialized.remove(index - 1);
+        }
+        None if serialized.ends_with('/') => {
+            serialized.pop();
+        }
+        _ => {}
+    }
+    serialized
 }
 
 /// Normalize raw event JSON array into the canonical Nostr event shape.
@@ -2370,9 +2417,33 @@ mod retry_policy_tests {
 mod tests {
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        normalize_events, BuzzClient,
+        normalize_events, normalize_relay_url, to_ws_url, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn relay_url_scheme_conversion_preserves_query_bytes() {
+        assert_eq!(
+            normalize_relay_url("wss://relay.example/?next=/"),
+            "https://relay.example?next=/"
+        );
+        assert_eq!(
+            normalize_relay_url("wss://relay.example/?url=wss://other.example/"),
+            "https://relay.example?url=wss://other.example/"
+        );
+        assert_eq!(
+            to_ws_url("https://relay.example/?next=/foo/"),
+            "wss://relay.example?next=/foo/"
+        );
+        assert_eq!(
+            normalize_relay_url("wss://relay.example/nostr/"),
+            "https://relay.example/nostr"
+        );
+        assert_eq!(
+            normalize_relay_url("wss://relay.example/nostr/?next=/"),
+            "https://relay.example/nostr/?next=/"
+        );
+    }
 
     #[test]
     fn normalize_events_preserves_the_complete_signed_event_shape() {

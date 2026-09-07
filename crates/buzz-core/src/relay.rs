@@ -71,10 +71,28 @@ pub fn normalize_relay_url(raw: &str) -> Result<String, NormalizeRelayUrlError> 
         url.set_port(None)
             .map_err(|_| NormalizeRelayUrlError::InvalidScheme)?;
     }
-    if url.path() == "/" {
+    let had_root_path = url.path() == "/";
+    if had_root_path {
         url.set_path("");
     }
-    Ok(url.to_string().trim_end_matches('/').to_string())
+    let mut serialized = url.to_string();
+    if had_root_path {
+        remove_root_path_separator(&mut serialized);
+    }
+    Ok(serialized)
+}
+
+fn remove_root_path_separator(serialized: &mut String) {
+    let delimiter = serialized.find(['?', '#']);
+    match delimiter {
+        Some(index) if serialized.as_bytes().get(index.wrapping_sub(1)) == Some(&b'/') => {
+            serialized.remove(index - 1);
+        }
+        None if serialized.ends_with('/') => {
+            serialized.pop();
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +119,23 @@ mod tests {
             normalize_relay_url("ws://relay.example:8080/community/?x=1").unwrap(),
             "ws://relay.example:8080/community/?x=1"
         );
+    }
+
+    #[test]
+    fn preserves_queries_when_removing_root_path() {
+        for (input, expected) in [
+            ("wss://relay.example/?next=/", "wss://relay.example?next=/"),
+            (
+                "wss://relay.example/?next=/foo/",
+                "wss://relay.example?next=/foo/",
+            ),
+            (
+                "wss://relay.example/?url=wss://other.example/",
+                "wss://relay.example?url=wss://other.example/",
+            ),
+        ] {
+            assert_eq!(normalize_relay_url(input).unwrap(), expected);
+        }
     }
 
     #[test]
