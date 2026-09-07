@@ -60,7 +60,7 @@ test("the market board follows the header and avatar gutter", () => {
   );
   const className = html.match(/<div class="([^"]+)"/)?.[1] ?? "";
 
-  assert.match(className, /(?:^|\s)mx-1(?:\s|$)/);
+  assert.match(className, /(?:^|\s)mx-4(?:\s|$)/);
 });
 
 test("the contract card leaves horizontal alignment to the board", () => {

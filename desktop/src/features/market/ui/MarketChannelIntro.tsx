@@ -16,7 +16,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-const MARKET_BOARD_GUTTER_CLASS = "mx-1";
+const MARKET_BOARD_GUTTER_CLASS = "mx-4";
 
 /** Aligns the market board with the channel header and timeline avatars. */
 export function MarketBoardLayout({ children }: { children: React.ReactNode }) {
