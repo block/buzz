@@ -6,6 +6,7 @@ import {
   canSubmitWhereToRun,
   emptyWhereToRunDraft,
   providerConfigComplete,
+  providerManagesIdentity,
   resolveBackendIntent,
 } from "./whereToRunIntent.ts";
 
@@ -46,6 +47,21 @@ test("complete provider config allows submit", () => {
 
 test("local never gates submit", () => {
   assert.equal(canSubmitWhereToRun(emptyWhereToRunDraft), true);
+});
+
+test("provider identity custody requires register and attest together", () => {
+  assert.equal(
+    providerManagesIdentity({
+      ok: true,
+      capabilities: ["register", "attest"],
+    }),
+    true,
+  );
+  assert.equal(
+    providerManagesIdentity({ ok: true, capabilities: ["register"] }),
+    false,
+  );
+  assert.equal(providerManagesIdentity(null), false);
 });
 
 test("local draft resolves to null intent", () => {

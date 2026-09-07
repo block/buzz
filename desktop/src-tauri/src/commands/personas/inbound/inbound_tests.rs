@@ -168,6 +168,7 @@ fn local_agent() -> ManagedAgentRecord {
         name: "Local Agent".to_string(),
         persona_id: Some("persona-local".to_string()),
         private_key_nsec: "nsec1localsecret".to_string(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: Some("localauthtag".to_string()),
         relay_url: "wss://relay.local".to_string(),
         avatar_url: None,

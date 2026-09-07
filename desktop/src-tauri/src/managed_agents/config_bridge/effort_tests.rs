@@ -32,6 +32,7 @@ pub(super) fn record() -> ManagedAgentRecord {
         name: "Test Agent".to_string(),
         persona_id: None,
         private_key_nsec: "".to_string(),
+        key_custody: crate::managed_agents::types::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: "ws://localhost:3000".to_string(),
         avatar_url: None,

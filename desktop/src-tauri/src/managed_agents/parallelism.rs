@@ -69,6 +69,7 @@ mod tests {
             name: "r".to_string(),
             persona_id: None,
             private_key_nsec: String::new(),
+            key_custody: crate::managed_agents::AgentKeyCustody::Local,
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: None,

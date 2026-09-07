@@ -308,6 +308,18 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+18. **Remote key custody is explicit and capability-gated.** A provider must
+   advertise `register` and `attest` together before Desktop lets it create an
+   agent identity. Desktop signs NIP-OA over the returned pubkey, persists
+   `key_custody: provider`, and never receives or probes a local secret for that
+   agent. A provider advertising neither capability keeps the legacy
+   Desktop-custodied `deploy` path; advertising only one fails closed. Never
+   infer provider custody from an empty `private_key_nsec`: for local custody,
+   empty still means an unavailable or missing key and local spawn must refuse.
+   Provider-custodied records must never enter legacy `deploy` or policy
+   redeploy paths. Start must re-attest them idempotently so an interrupted
+   create-time handshake remains recoverable even when no error was persisted.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness

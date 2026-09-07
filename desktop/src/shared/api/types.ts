@@ -389,6 +389,7 @@ export type BackendProviderProbeResult = {
   name?: string;
   version?: string;
   description?: string;
+  capabilities?: string[];
   config_schema?: Record<string, unknown>;
 };
 

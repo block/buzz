@@ -27,6 +27,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         display_name: None,
         persona_id: None,
         private_key_nsec: String::new(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,

@@ -200,6 +200,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         slug: None,
         persona_id: Some("alice".to_string()),
         private_key_nsec: String::new(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,

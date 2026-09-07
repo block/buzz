@@ -10,6 +10,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         name: name.to_string(),
         persona_id: Some(persona_id.to_string()),
         private_key_nsec: String::new(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,

@@ -342,6 +342,56 @@ fn provider_info_requires_the_complete_flat_wire_shape() {
     assert!(validate_provider_info(&nested)
         .unwrap_err()
         .contains("unknown field provider"));
+
+    let mut capable = serde_json::json!({
+        "ok": true,
+        "name": "registry",
+        "version": "1.0.0",
+        "protocol_version": 1,
+        "description": "Registry provider",
+        "config_schema": {},
+        "capabilities": ["register", "attest"]
+    });
+    assert_eq!(
+        validate_provider_info(&capable).unwrap(),
+        vec!["register", "attest"]
+    );
+    capable["capabilities"] = serde_json::json!(["register", 1]);
+    assert!(validate_provider_info(&capable).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_register_and_attest_negotiate_capabilities() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = directory.path().join("provider");
+    write_test_provider(
+        &provider,
+        r#"read request
+case "$request" in
+  *\"op\":\"info\"*) printf '%s\n' '{"ok":true,"name":"registry","version":"1.0.0","protocol_version":1,"description":"registry provider","capabilities":["register","attest"],"config_schema":{}}' ;;
+  *\"op\":\"register\"*) printf '%s\n' '{"ok":true,"agent_id":"agent-1","pubkey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}' ;;
+  *\"op\":\"attest\"*) printf '%s\n' '{"ok":true}' ;;
+esac"#,
+    );
+
+    let registered = provider_register(
+        &provider,
+        &serde_json::json!({"name": "Pip"}),
+        &serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(registered.agent_id, "agent-1");
+    assert_eq!(
+        registered.pubkey,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
+    provider_attest(
+        &provider,
+        &serde_json::json!({"pubkey": registered.pubkey, "auth_tag": "tag"}),
+        &serde_json::json!({}),
+    )
+    .unwrap();
 }
 
 #[test]

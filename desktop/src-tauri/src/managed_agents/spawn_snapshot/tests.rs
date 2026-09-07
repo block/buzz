@@ -48,6 +48,7 @@ fn record() -> ManagedAgentRecord {
         name: "agent".into(),
         persona_id: None,
         private_key_nsec: "nsec1fake".into(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: "ws://localhost:3000".into(),
         avatar_url: None,

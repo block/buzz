@@ -252,6 +252,22 @@ fn spawn_allowed_when_private_key_present() {
 }
 
 #[test]
+fn provider_custodied_agent_skips_keyring_and_local_key_refusal() {
+    let store = FakeKeyStore::reachable();
+    let mut record = record_with_key("");
+    record.key_custody = crate::managed_agents::AgentKeyCustody::Provider;
+    let mut records = vec![record];
+
+    hydrate_keys_with(&store, &mut records);
+    persist_agent_keys_with(&store, &mut records);
+
+    assert!(records[0].private_key_nsec.is_empty());
+    assert!(super::spawn_key_refusal(&records[0]).is_none());
+    assert_eq!(*store.read_count.borrow(), 0);
+    assert_eq!(*store.write_count.borrow(), 0);
+}
+
+#[test]
 fn persist_agent_keys_issues_zero_writes_when_inline_keys_already_cleared() {
     // This is the dominant prompt-storm scenario: after the first successful
     // persist all inline copies are cleared, so subsequent saves (e.g. a

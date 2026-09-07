@@ -22,6 +22,7 @@ fn make_agent(
         name: "Test Agent".to_string(),
         persona_id: persona_id.map(str::to_string),
         private_key_nsec: "".to_string(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: "ws://localhost:3000".to_string(),
         avatar_url: None,

@@ -607,6 +607,7 @@ pub async fn confirm_agent_snapshot_import(
             slug: None,
             persona_id: Some(persona_id.clone()),
             private_key_nsec: private_key_nsec.clone(),
+            key_custody: crate::managed_agents::AgentKeyCustody::Local,
             auth_tag: auth_tag.clone(),
             relay_url: String::new(), // resolves to workspace relay at runtime
             avatar_url: effective_avatar.clone(),

@@ -41,6 +41,7 @@ pub(super) fn fixture(
         name: "n".into(),
         persona_id: None,
         private_key_nsec: "nsec1fake".into(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag,
         relay_url: "ws://localhost:3000".into(),
         avatar_url: None,

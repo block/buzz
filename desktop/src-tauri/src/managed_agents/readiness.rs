@@ -1491,13 +1491,13 @@ mod tests {
             "BUZZ_AGENT_MODEL".to_string(),
             "claude-opus-4-5".to_string(),
         );
-        // Minimal record: only the fields resolve_effective_agent_env reads.
         let record = crate::managed_agents::types::ManagedAgentRecord {
             description: None,
             pubkey: "test-pubkey".to_string(),
             name: "test-agent".to_string(),
             persona_id: None,
             private_key_nsec: String::new(),
+            key_custody: crate::managed_agents::AgentKeyCustody::Local,
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: None,

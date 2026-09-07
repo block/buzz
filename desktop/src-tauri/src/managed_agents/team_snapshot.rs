@@ -260,8 +260,9 @@ mod tests {
             display_name: Some(format!("{name} Display")),
             persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear
             private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear
-            auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear
-            relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear
+            key_custody: crate::managed_agents::AgentKeyCustody::Local,
+            auth_tag: Some("auth-tag-secret".to_string()), // MUST NOT appear
+            relay_url: "wss://relay.example.com".to_string(), // MUST NOT appear
             avatar_url: Some(format!("https://example.com/{name}.png")),
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear
             agent_command: "goose".to_string(),            // MUST NOT appear

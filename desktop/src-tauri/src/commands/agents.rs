@@ -376,6 +376,17 @@ pub async fn create_managed_agent(
         );
     }
 
+    // Negotiate identity custody before minting any key material. Existing
+    // deploy-only providers retain the legacy Desktop-custodied path.
+    let provider_uses_registration =
+        if let BackendKind::Provider { ref config, ref id } = input.backend {
+            validate_provider_config(config)?;
+            resolve_provider_binary(id)?;
+            provider_registration::uses_registration(id).await?
+        } else {
+            false
+        };
+
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
         let _store_guard = state
@@ -400,15 +411,20 @@ pub async fn create_managed_agent(
             let personas = load_personas(&app)?;
             ensure_persona_is_active(&personas, persona_id)?;
         }
-        let keys = Keys::generate();
-        let pubkey = keys.public_key().to_hex();
-        if records.iter().any(|record| record.pubkey == pubkey) {
-            return Err(format!("agent {pubkey} already exists"));
-        }
-        let private_key_nsec = keys
-            .secret_key()
-            .to_bech32()
-            .map_err(|error| format!("failed to encode private key: {error}"))?;
+        let (keys, private_key_nsec, pubkey) = if provider_uses_registration {
+            (None, String::new(), None)
+        } else {
+            let keys = Keys::generate();
+            let pubkey = keys.public_key().to_hex();
+            if records.iter().any(|record| record.pubkey == pubkey) {
+                return Err(format!("agent {pubkey} already exists"));
+            }
+            let private_key_nsec = keys
+                .secret_key()
+                .to_bech32()
+                .map_err(|error| format!("failed to encode private key: {error}"))?;
+            (Some(keys), private_key_nsec, Some(pubkey))
+        };
 
         // Store the relay override exactly as supplied (trimmed). An explicit
         // value pins the agent; empty stays empty and resolves to the active
@@ -423,14 +439,36 @@ pub async fn create_managed_agent(
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
 
-    // ── Pre-Phase 2: validate provider config BEFORE any side effects ────────
-    if let BackendKind::Provider { ref config, ref id } = input.backend {
-        validate_provider_config(config)?;
-        // Validate via discovered candidates — not raw resolve_command.
-        resolve_provider_binary(id)?;
-    }
-
     let relay_mesh = normalize_relay_mesh(input.relay_mesh.as_ref(), &input.backend)?;
+
+    // Provider-custodied identity: registration returns only the public key
+    // and registry id. Desktop never receives the agent secret.
+    let registration = if provider_uses_registration {
+        let BackendKind::Provider { ref id, ref config } = input.backend else {
+            return Err("registration selected without a provider backend".to_string());
+        };
+        Some(provider_registration::register(id, config, &name).await?)
+    } else {
+        None
+    };
+    let pubkey = registration
+        .as_ref()
+        .map(|value| value.pubkey.clone())
+        .or(pubkey)
+        .ok_or_else(|| "agent creation produced no pubkey".to_string())?;
+
+    if provider_uses_registration {
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if load_managed_agents(&app)?
+            .iter()
+            .any(|record| record.pubkey == pubkey)
+        {
+            return Err(format!("agent {pubkey} already exists"));
+        }
+    }
 
     // ── Phase 2: compute NIP-OA auth tag (sync) ──────────────────────────────
     // Agents authenticate via the auth tag in their kind:0 profile event.
@@ -440,7 +478,7 @@ pub async fn create_managed_agent(
         // Bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
         let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
             .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
-        let compat_agent = nostr::PublicKey::from_hex(&agent_keys.public_key().to_hex())
+        let compat_agent = nostr::PublicKey::from_hex(&pubkey)
             .map_err(|e| format!("failed to bridge agent pubkey: {e}"))?;
         let tag = buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
             .map_err(|e| format!("failed to compute NIP-OA auth tag: {e}"))?;
@@ -606,6 +644,11 @@ pub async fn create_managed_agent(
             persona_id: requested_persona_id.clone(),
             team_id,
             private_key_nsec: private_key_nsec.clone(),
+            key_custody: if provider_uses_registration {
+                crate::managed_agents::AgentKeyCustody::Provider
+            } else {
+                crate::managed_agents::AgentKeyCustody::Local
+            },
             auth_tag: auth_tag.clone(),
             relay_url: resolved_relay_url.clone(),
             avatar_url: resolved_avatar_url.clone(),
@@ -648,7 +691,7 @@ pub async fn create_managed_agent(
             auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: input.backend.clone(),
-            backend_agent_id: None,
+            backend_agent_id: registration.as_ref().map(|value| value.agent_id.clone()),
             provider_policy_pending: false,
             provider_binary_path,
             persona_team_dir: None,
@@ -747,20 +790,32 @@ pub async fn create_managed_agent(
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
     // Use the avatar persisted on the record so the published profile and any
     // later reconciliation agree on the same value.
-    let mut profile_sync_error = profile::publish_agent_profile_with_about(
-        &state,
-        &resolved_relay_url,
-        &agent_keys,
-        &name,
-        resolved_avatar_url.as_deref(),
-        profile_about.as_deref(),
-        auth_tag.as_deref(),
-    )
-    .await;
+    let mut profile_sync_error = if let Some(agent_keys) = &agent_keys {
+        profile::publish_agent_profile_with_about(
+            &state,
+            &resolved_relay_url,
+            agent_keys,
+            &name,
+            resolved_avatar_url.as_deref(),
+            profile_about.as_deref(),
+            auth_tag.as_deref(),
+        )
+        .await
+    } else {
+        None
+    };
     profile_sync_error =
         super::agent_models::flush_managed_agent_policy(&app, &state, profile_sync_error).await;
 
-    let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
+    let spawn_error = if provider_uses_registration {
+        let BackendKind::Provider { ref id, ref config } = input.backend else {
+            return Err("registration selected without a provider backend".to_string());
+        };
+        provider_registration::attest(&app, &state, &pubkey, id, config)
+            .await
+            .err()
+            .or(spawn_error)
+    } else if input.spawn_after_create && input.backend != BackendKind::Local {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
             let agent_json = {
                 let _g = state
@@ -857,6 +912,9 @@ pub async fn start_managed_agent(
     )?;
     enum StartTarget {
         Local,
+        ControllerManaged {
+            backend: BackendKind,
+        },
         Provider {
             backend: BackendKind,
             cached_binary_path: Option<String>,
@@ -866,7 +924,7 @@ pub async fn start_managed_agent(
 
     // Collect backend info under lock; async preflight/spawn happens below.
     // Also snapshot profile reconciliation data for the background task.
-    let (target, reconcile_data) = {
+    let (target, reconcile_data, reconcile_locally) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -903,6 +961,10 @@ pub async fn start_managed_agent(
 
         let target = if record.backend == BackendKind::Local {
             StartTarget::Local
+        } else if record.key_custody == crate::managed_agents::AgentKeyCustody::Provider {
+            StartTarget::ControllerManaged {
+                backend: record.backend.clone(),
+            }
         } else {
             StartTarget::Provider {
                 backend: record.backend.clone(),
@@ -911,7 +973,8 @@ pub async fn start_managed_agent(
             }
         };
 
-        (target, reconcile)
+        let reconcile_locally = record.key_custody == crate::managed_agents::AgentKeyCustody::Local;
+        (target, reconcile, reconcile_locally)
     };
 
     let result = match target {
@@ -927,6 +990,33 @@ pub async fn start_managed_agent(
             )
             .await
         }
+        StartTarget::ControllerManaged {
+            backend: BackendKind::Provider { id, config },
+        } => {
+            // Re-attest on every explicit start. The record is persisted before
+            // the create-time network call, so a process exit in that window
+            // leaves no reliable local success marker. Registration providers
+            // must therefore make attest idempotent.
+            provider_registration::attest(&app, &state, &pubkey, &id, &config).await?;
+
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let records = load_managed_agents(&app)?;
+            let runtimes = state
+                .managed_agent_processes
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let record = records
+                .iter()
+                .find(|record| record.pubkey == pubkey)
+                .ok_or_else(|| format!("agent {pubkey} not found"))?;
+            summarize_from_disk(&app, record, &runtimes)
+        }
+        StartTarget::ControllerManaged { backend } => Err(format!(
+            "agent {pubkey} has unsupported controller-managed backend kind: {backend:?}"
+        )),
         StartTarget::Provider {
             backend: BackendKind::Provider { id, config },
             cached_binary_path,
@@ -980,6 +1070,7 @@ pub async fn start_managed_agent(
     // profile sync at creation time failed silently. For legacy records (pre-PR-921)
     // with no persisted avatar, this also backfills the avatar from the relay.
     if result.is_ok()
+        && reconcile_locally
         && state
             .managed_agent_profile_reconcile_enabled()
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1159,6 +1250,7 @@ pub async fn delete_managed_agent(
 mod deploy;
 pub(super) mod provider_access;
 mod provider_deploy;
+mod provider_registration;
 pub(super) use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::{deploy_payload_json, DeployProjections};

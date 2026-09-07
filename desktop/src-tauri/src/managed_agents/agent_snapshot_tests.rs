@@ -18,8 +18,9 @@ fn minimal_record() -> ManagedAgentRecord {
         persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear in snapshot
         team_id: Some("SENTINEL_TEAM_ID".to_string()),       // MUST NOT appear in snapshot
         private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear in snapshot
-        auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear in snapshot
-        relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear in snapshot
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
+        auth_tag: Some("auth-tag-secret".to_string()), // MUST NOT appear in snapshot
+        relay_url: "wss://relay.example.com".to_string(), // MUST NOT appear in snapshot
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear in snapshot
         agent_command: "goose".to_string(),            // MUST NOT appear in snapshot

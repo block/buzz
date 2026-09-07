@@ -60,6 +60,15 @@ export function canSubmitWhereToRun(draft: WhereToRunDraft): boolean {
   return providerConfigComplete(draft);
 }
 
+export function providerManagesIdentity(
+  provider: BackendProviderProbeResult | null,
+): boolean {
+  return (
+    provider?.capabilities?.includes("register") === true &&
+    provider.capabilities.includes("attest")
+  );
+}
+
 export function resolveBackendIntent(
   draft: WhereToRunDraft,
 ): BackendIntent | null {

@@ -17,6 +17,7 @@ pub(super) fn needs_reconciliation_with_policy(
 ) -> bool {
     (owner_only_access || record.provider_policy_pending)
         && record.backend != BackendKind::Local
+        && record.key_custody == crate::managed_agents::AgentKeyCustody::Local
         && record.backend_agent_id.is_some()
 }
 

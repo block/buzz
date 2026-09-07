@@ -169,6 +169,7 @@ mod tests {
             name: "Test Agent".to_string(),
             persona_id: Some("persona-1".to_string()),
             private_key_nsec: "nsec1secretdonotpublish".to_string(),
+            key_custody: crate::managed_agents::AgentKeyCustody::Local,
             auth_tag: Some("authtagsecret".to_string()),
             relay_url: "wss://relay.example".to_string(),
             avatar_url: Some("https://example.com/a.png".to_string()),

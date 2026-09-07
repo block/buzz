@@ -569,6 +569,7 @@ pub async fn confirm_team_snapshot_import(
             slug: None,
             persona_id: Some(definition.id.clone()),
             private_key_nsec: private_key_nsec.clone(),
+            key_custody: crate::managed_agents::AgentKeyCustody::Local,
             auth_tag: auth_tag.clone(),
             relay_url: String::new(),
             avatar_url: effective_avatar_url.clone(),

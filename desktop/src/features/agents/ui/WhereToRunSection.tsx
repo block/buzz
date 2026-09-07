@@ -9,6 +9,7 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   applyProbeResult,
   emptyWhereToRunDraft,
+  providerManagesIdentity,
   type WhereToRunDraft,
 } from "./whereToRunIntent";
 
@@ -40,6 +41,7 @@ export function WhereToRunSection({
       backendProviders.find((provider) => provider.id === draft.runOn) ?? null,
     [backendProviders, draft.runOn],
   );
+  const providerKeepsAgentKey = providerManagesIdentity(draft.probedProvider);
 
   // Latest-state seam for probe resolution: an Effect Event always sees the
   // draft as it is *now*. Without this, the probe promise closes over the
@@ -115,8 +117,9 @@ export function WhereToRunSection({
               <span className="font-mono font-medium">
                 {selectedBackendProvider.binaryPath}
               </span>{" "}
-              will receive your agent&apos;s private key. Only use providers
-              from trusted sources.
+              {providerKeepsAgentKey
+                ? "will create and keep your agent’s private key. Buzz receives only the public key."
+                : "will receive your agent’s private key. Only use providers from trusted sources."}
             </p>
           </div>
           {probeError ? (

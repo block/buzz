@@ -205,7 +205,6 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 
-/// Minimal record for `record_agent_command` tests; only resolution inputs vary.
 fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
@@ -217,6 +216,7 @@ fn record_with(
         name: "r".to_string(),
         persona_id: persona_id.map(str::to_string),
         private_key_nsec: String::new(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,
