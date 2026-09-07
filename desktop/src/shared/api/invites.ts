@@ -13,6 +13,12 @@ import {
 // - POST /api/invites/claim  — claim a code, signed by the *joining* key.
 //   This one targets an arbitrary relay (the invite's relay, not necessarily
 //   the active community), so the claim helper takes an explicit ws URL.
+//
+// Canonical-origin signing law: the NIP-98 `u` tag is signed against the
+// origin the relay ADVERTISES in GET /info, while the HTTP request rides
+// the transport host the caller supplied — sign the identity, ride the
+// road (an alias host like relay2.skaists.dev serving the canonical
+// beehivenature.buzz identity otherwise fails invite auth).
 
 const NIP98_KIND = 27235;
 
@@ -75,14 +81,102 @@ async function nip98PostHeader(url: string, body: string): Promise<string> {
   return `Nostr ${btoa(JSON.stringify(authEvent))}`;
 }
 
+/**
+ * The canonical HTTP origin this relay advertises for itself, from GET
+ * `/info` on the TRANSPORT road.
+ *
+ * A deployment's identity can differ from the host a client rides
+ * (`relay2.skaists.dev` advertises `wss://beehivenature.buzz`): the relay
+ * verifies NIP-98 `u` tags against the canonical origin, so clients must
+ * SIGN the identity while RIDING the road.
+ *
+ * Fail-closed rules (review round 1):
+ * - An UNREADABLE /info document (invalid JSON, or a decoded non-object
+ *   root such as `null`/array) stops the request before signing or POST —
+ *   it proves nothing about what the relay advertises, and silently
+ *   signing the transport host instead is the alias-host auth bug itself.
+ *   Only a well-formed info OBJECT with no advertised origin means "the
+ *   road IS the identity" (plain relays keep working).
+ * - The advertisement must be a STRUCTURAL ws/wss ORIGIN — no userinfo,
+ *   query, fragment, or non-root path; port and IPv6 literals are valid.
+ *   Components beyond the origin would land inside the signed target.
+ * - The HTTP signing origin is CONSTRUCTED from the parsed/validated URL
+ *   (never by concatenating the raw advertisement string).
+ * - No DNS/network resolution is performed as validation.
+ */
+async function canonicalSigningBase(transportHttpBase: string): Promise<string> {
+  const infoUrl = `${transportHttpBase.replace(/\/+$/, "")}/info`;
+  const response = await fetch(infoUrl, {
+    signal: AbortSignal.timeout(INVITE_REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`relay /info HTTP ${response.status}`);
+  }
+  const text = await response.text();
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(text);
+  } catch {
+    throw new Error("relay /info returned a malformed document");
+  }
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
+    throw new Error("relay /info returned a malformed document");
+  }
+  const info = decoded as { push?: unknown };
+  let advertised: unknown;
+  if (info.push !== undefined) {
+    if (typeof info.push !== "object" || info.push === null || Array.isArray(info.push)) {
+      throw new Error("relay /info returned a malformed push descriptor");
+    }
+    advertised = (info.push as { origin?: unknown }).origin;
+  }
+  if (advertised === undefined) {
+    return transportHttpBase;
+  }
+  if (typeof advertised !== "string") {
+    throw new Error("relay /info advertises a malformed canonical origin");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(advertised);
+  } catch {
+    throw new Error("relay /info canonical origin failed URL verification");
+  }
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    throw new Error("relay /info canonical origin failed URL verification");
+  }
+  if (
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    throw new Error("relay /info canonical origin failed URL verification");
+  }
+  if (parsed.pathname !== "" && parsed.pathname !== "/") {
+    throw new Error("relay /info canonical origin failed URL verification");
+  }
+  if (parsed.hostname === "") {
+    throw new Error("relay /info canonical origin failed URL verification");
+  }
+  // Constructed from the PARSED url: scheme upgraded ws→http / wss→https,
+  // url.host keeps any port and IPv6 bracket literals.
+  const scheme = parsed.protocol === "wss:" ? "https" : "http";
+  return `${scheme}://${parsed.host}`;
+}
+
 async function invitePost<T>(
   httpBase: string,
   path: string,
   body: string,
 ): Promise<T> {
-  const url = `${httpBase.replace(/\/+$/, "")}${path}`;
-  const authorization = await nip98PostHeader(url, body);
-  const response = await fetch(url, {
+  const transportUrl = `${httpBase.replace(/\/+$/, "")}${path}`;
+  // Sign the canonical identity; request the transport road. With no
+  // advertised origin these are the same URL and behavior is unchanged.
+  const signingBase = await canonicalSigningBase(httpBase);
+  const signedUrl = `${signingBase.replace(/\/+$/, "")}${path}`;
+  const authorization = await nip98PostHeader(signedUrl, body);
+  const response = await fetch(transportUrl, {
     method: "POST",
     headers: {
       Authorization: authorization,
