@@ -17,7 +17,7 @@ export function MarketContractCard({ scenario }: { scenario: MarketScenario }) {
 
   return (
     <section
-      className="mx-5 mt-4 overflow-hidden rounded-2xl border bg-card"
+      className="mt-4 overflow-hidden rounded-2xl border bg-card"
       data-testid="market-contract-card"
     >
       <div className="grid sm:grid-cols-[11rem_minmax(0,1fr)]">
