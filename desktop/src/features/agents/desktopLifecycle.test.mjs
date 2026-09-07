@@ -480,6 +480,22 @@ for (const result of [
     );
   });
 }
+test("readiness expiring during source Stop cannot authorize a later Start", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const f = fixture(),
+    publish = f.relay.publishEvent;
+  f.relay.publishEvent = async (...args) => {
+    await publish(...args);
+    if (args[0].kind === 50180) t.mock.timers.tick(31_000);
+  };
+  await assert.rejects(
+    f.client().move("agent", "source", ["source"], () => {}, configuration),
+    /readiness expired/,
+  );
+  assert.equal(f.sent.filter((r) => r.kind === 50180).length, 1);
+  assert.equal(f.prepared.filter((r) => r.action === "start").length, 0);
+});
+
 test("configuration edits during Stop cannot substitute the target revision", async () => {
   const f = fixture(),
     target = { ...configuration },
