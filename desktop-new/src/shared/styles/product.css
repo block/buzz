@@ -47,32 +47,30 @@
 
   .destination-tabs button,
   .topbar-icon-button {
+    @apply glass-primary-interactive;
+
     height: 1.75rem;
     border: 0;
     border-radius: 0.5625rem;
-    background: var(--bg-chrome-glass);
     color: var(--text-secondary);
     font: inherit;
     cursor: pointer;
-    backdrop-filter: blur(var(--blur-md));
-    box-shadow:
-      inset 0 1px 0 var(--rim-lit),
-      inset 0 -1px 0 var(--rim-shade);
   }
 
   .destination-tabs button {
     padding: 0 0.75rem;
   }
 
+  /* The material carries the hover fill; this only carries the text colour,
+     which is not part of a surface material. */
   .destination-tabs button:hover,
   .topbar-icon-button:hover {
-    background: var(--bg-chrome-glass-hover);
     color: var(--text-primary);
   }
 
   .destination-tabs button[data-selected] {
-    background: var(--bg-inverse);
-    color: var(--text-on-inverse);
+    background: var(--neutral-11);
+    color: var(--neutral-1);
     box-shadow: var(--shadow-sm);
   }
 
@@ -101,12 +99,24 @@
   .buzz-dockview {
     --dv-background-color: transparent;
     --dv-tabs-and-actions-container-background-color: transparent;
+    /* Dockview's own theme sets this to a literal `white`, and `DockWorkspace`
+       passes `themeLight` in both colour schemes — so in dark mode the vendor
+       painted an opaque white sheet *behind* our glass, and the 52% dark fill
+       over it composited to flat grey. The panels' redundant second
+       fill had been hiding it: two stacked fills reached 0.77 alpha, opaque
+       enough that the white underneath barely showed. Removing the redundancy
+       revealed a bug that had been there since the dock landed.
+
+       Reset here rather than swapping the JS theme, because every dockview
+       surface this variable feeds is already overridden to transparent below —
+       the variable was the one leak. */
+    --dv-group-view-background-color: transparent;
     --dv-tab-active-background-color: var(--bg-chrome-selected);
     --dv-tab-active-color: var(--text-primary);
     --dv-tab-inactive-color: var(--text-secondary);
     --dv-separator-border: transparent;
-    --dv-drag-over-background-color: var(--bg-accent-tint);
-    --dv-drag-over-border-color: var(--border-accent);
+    --dv-drag-over-background-color: var(--purple-3);
+    --dv-drag-over-border-color: var(--purple-8);
     height: 100%;
   }
 
@@ -139,37 +149,45 @@
     box-shadow: var(--shadow-xs);
   }
 
+  /* Dockview arranges panels; Panel owns the surface treatment. */
   .buzz-dockview .dv-content-container {
     overflow: hidden;
-    border: 1px solid var(--border-tertiary);
-    border-radius: 1.5rem;
-    background: var(--bg-panel-glass);
-    box-shadow:
-      var(--shadow-sm),
-      inset 0 1px 0 var(--rim-lit),
-      inset 0 -1px 0 var(--rim-shade);
-    backdrop-filter: blur(var(--blur-md));
   }
 
   .buzz-dockview .dv-sash {
+    width: var(--space-2);
     background: transparent;
+    cursor: col-resize;
   }
 
   .buzz-dockview .dv-sash:hover {
-    background: var(--border-accent);
+    background: var(--border-primary);
   }
 
   .buzz-dockview:has(.dv-tab.dv-tab-dragging) {
     user-select: none;
   }
 
+  /* No background. These fill `.dv-content-container` edge to edge — measured at
+     610x551 inside 612x553, the two pixels being its border — and that container
+     is already primary glass.
+     
+     They each set the same `glass-2` fill with no blur of their own, so the two
+     identical translucent layers composited: 0.52 over 0.52 is **0.77**, landing
+     between glass-4 and glass-5. The panels read as nearly solid, which is why
+     the backdrop barely showed through a surface that was supposed to be the
+     most translucent one in the system. Nothing declared 0.77 and no token holds
+     it — it was the arithmetic of a redundant fill.
+     
+     A region that exactly covers a glass surface does not need its own. If one
+     of these later needs to sit apart from its container, it takes a whole
+     material rather than a bare fill. */
   .workspace-navigator,
   .session-view,
   .new-session-view,
   .empty-workspace-panel {
     height: 100%;
     min-width: 0;
-    background: var(--bg-panel-glass);
   }
 
   .workspace-navigator,
@@ -186,7 +204,7 @@
     min-height: 4rem;
     align-items: center;
     padding: 0 1.25rem;
-    border-bottom: 1px solid var(--border-tertiary);
+    border-bottom: 1px solid var(--border-primary);
   }
 
   .navigator-heading {
@@ -262,7 +280,7 @@
   .navigator-row:hover,
   .session-child-row:hover,
   .navigator-row-action:hover {
-    background: var(--bg-hover);
+    background: var(--neutral-4);
     color: var(--text-primary);
   }
 
@@ -307,8 +325,8 @@
   .session-thread-line {
     width: 0.625rem;
     height: 0.875rem;
-    border-bottom: 1px solid var(--border-secondary);
-    border-left: 1px solid var(--border-secondary);
+    border-bottom: 1px solid var(--border-primary);
+    border-left: 1px solid var(--border-primary);
     border-radius: 0 0 0 0.375rem;
   }
 
@@ -368,8 +386,8 @@
   }
 
   .message-avatar[data-agent] {
-    background: var(--bg-accent-tint);
-    color: var(--text-accent);
+    background: var(--purple-3);
+    color: var(--purple-12);
   }
 
   .message-meta {
@@ -399,7 +417,7 @@
     align-items: end;
     gap: 0.75rem;
     margin: auto;
-    border: 1px solid var(--border-secondary);
+    border: 1px solid var(--border-primary);
     border-radius: 1rem;
     padding: 0.625rem;
     background: var(--bg-float);
@@ -433,8 +451,8 @@
     height: 2.25rem;
     place-items: center;
     border-radius: 0.75rem;
-    background: var(--bg-inverse);
-    color: var(--text-on-inverse);
+    background: var(--neutral-11);
+    color: var(--neutral-1);
   }
 
   .quiet-button,
@@ -450,8 +468,8 @@
   }
 
   .primary-button {
-    background: var(--bg-inverse);
-    color: var(--text-on-inverse);
+    background: var(--neutral-11);
+    color: var(--neutral-1);
   }
 
   .new-session-center {
@@ -476,7 +494,7 @@
 
   button:focus-visible,
   textarea:focus-visible {
-    outline: 2px solid var(--border-accent);
+    outline: 2px solid var(--purple-8);
     outline-offset: 2px;
   }
 

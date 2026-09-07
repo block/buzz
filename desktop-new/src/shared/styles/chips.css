@@ -18,7 +18,7 @@
     border: 0;
     border-radius: var(--radius-chip);
     padding-inline: var(--space-chip-inset);
-    background: var(--bg-accent-tint);
+    background: var(--purple-3);
     /* Primary text, not accent text. The tint is doing the colour work, so the
        label stays the same weight as the sentence it sits in — a chip marks a
        reference, it does not shout. */
@@ -40,11 +40,11 @@
   }
 
   button.inline-chip:hover {
-    background: var(--bg-accent-tint-hover);
+    background: var(--purple-4);
   }
 
   .inline-chip:focus-visible {
-    outline: 2px solid var(--ring-focus);
+    outline: 2px solid var(--purple-8);
     outline-offset: 2px;
   }
 

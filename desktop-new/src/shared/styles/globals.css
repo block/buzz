@@ -17,23 +17,111 @@
 }
 
 /*
- * The glass rim. Two inset shadows rather than a gradient border, because CSS
- * borders accept only solid colours: border-image takes a gradient but ignores
- * border-radius, and the two-background background-clip trick needs an opaque
- * inner fill so it bleeds across a translucent surface. See DESIGN.md.
+ * ---------------------------------------------------------------------------
+ * Glass materials — PROPOSED, for review on /design/glass.
+ *
+ * A glass surface is four things at once: a translucent fill, a blur behind it,
+ * a directional rim, and (sometimes) an outer lift. Those used to be separate,
+ * so a consumer could take the fill and forget the rest — and every consumer
+ * did, differently. The four chrome surfaces meant to match each assembled their
+ * own material and disagreed about the outer shadow; four inner panels set a
+ * translucent fill with no blur *and* no need for one, since they exactly cover
+ * a surface that was already glass, so their fill composited 0.52 over 0.52 to
+ * 0.77 — a value no token holds and nobody chose. These bundle the material so
+ * it arrives whole or not at all.
+ *
+ * NAMED BY STACKING DEPTH, not by the component that uses it. An earlier cut
+ * named them chrome / panel / float and it was wrong twice over: `chrome` and
+ * `float` both landed on glass-3 (66% opaque in dark — two thirds solid, which
+ * is why chrome did not read as glass at all), and naming a material after a
+ * component invites a second material the first time a component wants a
+ * different depth. Depth is the axis that actually varies.
+ *
+ * The rule is DESIGN.md § Surface and depth: **elevation reads as less
+ * translucency, not as a lighter colour.** So the higher it sits, the more
+ * opaque it gets, and the shadow separates it from what it covers.
+ *
+ * `box-shadow` is composed here once because it has to be: `rim-glass` and
+ * `elevate-xs` both set `box-shadow`, so used together the second silently
+ * overwrites the first. A rim and a lift cannot compose as separate utilities.
  */
-@utility rim-glass {
+
+/* Sits directly on the backdrop: chrome, nav, a region in glass. The most
+   translucent, because the backdrop is the thing worth seeing through to. */
+@utility glass-primary {
+  background: var(--bg-glass-primary);
+  backdrop-filter: blur(var(--blur-md));
   box-shadow:
     inset 0 1px 0 var(--rim-lit),
     inset 0 -1px 0 var(--rim-shade);
 }
 
-@utility blur-chrome {
-  backdrop-filter: blur(var(--blur-md));
+/* Sits over something already glass: popovers, menus, a modal over a panel.
+   Less translucent so it separates, deeper blur so what it covers is not
+   legible through it, and a real shadow because it is genuinely above. */
+@utility glass-secondary {
+  background: var(--bg-glass-secondary);
+  backdrop-filter: blur(var(--blur-lg));
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 1px 0 var(--rim-lit),
+    inset 0 -1px 0 var(--rim-shade);
 }
 
-@utility blur-panel {
+/*
+ * Interactive glass: the material plus its hover, for a glass surface you can
+ * click. Separate utilities rather than a `:hover` inside the two above,
+ * because a glass *region* is not interactive and should not react to a cursor
+ * crossing it.
+ *
+ * A glass hover moves one step up the ramp and never changes blur —
+ * re-blurring a large surface every frame is expensive enough to feel. Opacity
+ * here is a step on a named ramp, not a fade applied to a colour.
+ */
+@utility glass-primary-interactive {
+  background: var(--bg-glass-primary);
+  backdrop-filter: blur(var(--blur-md));
+  box-shadow:
+    inset 0 1px 0 var(--rim-lit),
+    inset 0 -1px 0 var(--rim-shade);
+
+  &:hover {
+    background: var(--bg-glass-primary-hover);
+  }
+}
+
+@utility glass-secondary-interactive {
+  background: var(--bg-glass-secondary);
   backdrop-filter: blur(var(--blur-lg));
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 1px 0 var(--rim-lit),
+    inset 0 -1px 0 var(--rim-shade);
+
+  &:hover {
+    background: var(--bg-glass-secondary-hover);
+  }
+}
+
+/*
+ * `rim-glass`, `blur-panel`, `elevate-xs`, and `elevate-sm` were here and are
+ * gone: every one had zero readers once the glass materials absorbed them.
+ *
+ * `rim-glass` and `elevate-xs` are worth remembering as a pair, because they
+ * could not be composed. Both set `box-shadow`, so an element using the rim and
+ * a lift together silently kept whichever Tailwind emitted second — a rim and an
+ * elevation cannot be separate utilities. That is not a naming problem; it is why
+ * the materials compose `box-shadow` once, internally.
+ *
+ * The elevation *tokens* are alive and read directly as `var(--shadow-xs)` in
+ * five stylesheets. A one-declaration utility wrapping a token earns nothing.
+ *
+ * `blur-chrome` survives on two readers, both documentation: the /design pages
+ * need a blur without a fill so a swatch can show a ramp step against the real
+ * backdrop. Product code should reach for a material instead.
+ */
+@utility blur-chrome {
+  backdrop-filter: blur(var(--blur-md));
 }
 
 @utility texture-dots {
@@ -42,14 +130,6 @@
     transparent 1px
   );
   background-size: var(--texture-dots-size) var(--texture-dots-size);
-}
-
-@utility elevate-xs {
-  box-shadow: var(--shadow-xs);
-}
-
-@utility elevate-sm {
-  box-shadow: var(--shadow-sm);
 }
 
 /* Composition-input spike only. Remove with the spike route. */

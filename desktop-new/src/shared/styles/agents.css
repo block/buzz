@@ -35,8 +35,8 @@
     display: grid;
     place-items: center;
     border-radius: 50%;
-    background: var(--bg-accent-tint);
-    color: var(--text-accent);
+    background: var(--purple-3);
+    color: var(--purple-12);
   }
 
   .agent-avatar {
@@ -69,13 +69,16 @@
   }
 
   .agent-presence[data-running] {
-    background: var(--bg-success);
+    background: var(--green-9);
   }
 
+  /* No background, for the same reason as the panels in product.css:
+     this fills `.dv-content-container` (measured 610x718 inside 612x720, the two
+     pixels being its border) and that container is already primary glass. Its own
+     identical fill was compositing to 0.77 alpha rather than 0.52. */
   .agent-main-panel {
     height: 100%;
     overflow-y: auto;
-    background: var(--bg-panel-glass);
   }
 
   .agent-profile-header {
@@ -85,7 +88,7 @@
     align-items: center;
     gap: 1rem;
     padding: 1.25rem 1.5rem;
-    border-bottom: 1px solid var(--border-tertiary);
+    border-bottom: 1px solid var(--border-primary);
   }
 
   .agent-profile-title {
@@ -132,7 +135,7 @@
   .field-stack textarea,
   .field-stack select {
     width: 100%;
-    border: 1px solid var(--border-secondary);
+    border: 1px solid var(--border-primary);
     border-radius: 0.75rem;
     padding: 0.75rem;
     background: var(--bg-panel);
