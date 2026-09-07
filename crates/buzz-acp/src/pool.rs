@@ -150,7 +150,7 @@ impl SessionState {
             PromptSource::Channel(scope) => {
                 self.invalidate_scope(scope);
             }
-            PromptSource::Heartbeat => {
+            PromptSource::Heartbeat | PromptSource::Reminder => {
                 self.heartbeat_session = None;
                 self.heartbeat_turn_count = 0;
                 self.heartbeat_standing_context_sent = false;
@@ -362,10 +362,20 @@ pub struct PromptResult {
 /// (conversation or thread), not just the channel id, so completion and
 /// invalidation target the exact session. Use [`channel_id`](PromptSource::channel_id)
 /// where only the channel is needed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PromptSource {
     Channel(SessionScope),
     Heartbeat,
+    /// A due, author-owned NIP-ER reminder.
+    Reminder,
+}
+
+/// A private prompt that does not publish channel activity.
+pub struct PrivatePrompt {
+    /// Context delivered to the native agent.
+    pub text: String,
+    /// Whether this is a heartbeat or a due reminder.
+    pub source: PromptSource,
 }
 
 impl PromptSource {
@@ -373,7 +383,7 @@ impl PromptSource {
     pub fn channel_id(&self) -> Option<Uuid> {
         match self {
             Self::Channel(scope) => Some(scope.channel_id()),
-            Self::Heartbeat => None,
+            Self::Heartbeat | Self::Reminder => None,
         }
     }
 
@@ -386,7 +396,7 @@ impl PromptSource {
     pub fn scope(&self) -> Option<&SessionScope> {
         match self {
             Self::Channel(scope) => Some(scope),
-            Self::Heartbeat => None,
+            Self::Heartbeat | Self::Reminder => None,
         }
     }
 }
@@ -2120,7 +2130,7 @@ fn send_prompt_result(
 pub async fn run_prompt_task(
     mut agent: OwnedAgent,
     batch: Option<FlushBatch>,
-    prompt_text: Option<String>,
+    private_prompt: Option<PrivatePrompt>,
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
@@ -2149,6 +2159,7 @@ pub async fn run_prompt_task(
             "source": match &source {
                 PromptSource::Channel(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
+                PromptSource::Reminder => "reminder",
             },
             "triggeringEventIds": triggering_event_ids,
         }),
@@ -2355,7 +2366,7 @@ pub async fn run_prompt_task(
             .get(scope)
             .cloned()
             .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
-        PromptSource::Heartbeat => None,
+        PromptSource::Heartbeat | PromptSource::Reminder => None,
     };
 
     let (session_id, is_new_session) = match &source {
@@ -2429,7 +2440,7 @@ pub async fn run_prompt_task(
                 }
             }
         }
-        PromptSource::Heartbeat => {
+        PromptSource::Heartbeat | PromptSource::Reminder => {
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
@@ -2526,7 +2537,9 @@ pub async fn run_prompt_task(
             .deliveries
             .get(scope)
             .is_some_and(|delivery| delivery.standing_context_sent),
-        PromptSource::Heartbeat => agent.state.heartbeat_standing_context_sent,
+        PromptSource::Heartbeat | PromptSource::Reminder => {
+            agent.state.heartbeat_standing_context_sent
+        }
     };
 
     if is_new_session {
@@ -2830,7 +2843,7 @@ pub async fn run_prompt_task(
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
     let has_standing_context = match &source {
         PromptSource::Channel(_) => !standing.sections().is_empty(),
-        PromptSource::Heartbeat => ctx.base_prompt.is_some(),
+        PromptSource::Heartbeat | PromptSource::Reminder => ctx.base_prompt.is_some(),
     };
     let standing_context_included =
         !agent.has_system_prompt_support() && !standing_context_sent && has_standing_context;
@@ -3075,7 +3088,7 @@ pub async fn run_prompt_task(
                             *count += 1;
                             *count >= limit
                         }
-                        PromptSource::Heartbeat => {
+                        PromptSource::Heartbeat | PromptSource::Reminder => {
                             agent.state.heartbeat_turn_count += 1;
                             agent.state.heartbeat_turn_count >= limit
                         }
@@ -4552,6 +4565,7 @@ fn prompt_label(source: &PromptSource) -> String {
             scope.telemetry_label()
         ),
         PromptSource::Heartbeat => "heartbeat".to_string(),
+        PromptSource::Reminder => "reminder".to_string(),
     }
 }
 
@@ -6594,7 +6608,10 @@ done"#
             run_prompt_task(
                 agent,
                 None,
-                Some(format!("heartbeat-{turn}")),
+                Some(PrivatePrompt {
+                    text: format!("heartbeat-{turn}"),
+                    source: PromptSource::Heartbeat,
+                }),
                 Arc::clone(&ctx),
                 result_tx.clone(),
                 None,

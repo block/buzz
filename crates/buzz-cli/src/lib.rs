@@ -180,6 +180,9 @@ enum Cmd {
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
+    /// Schedule and manage your private follow-ups
+    #[command(subcommand)]
+    Reminders(commands::reminders::RemindersCmd),
     /// Create, configure, and manage channels
     #[command(subcommand)]
     Channels(ChannelsCmd),
@@ -2104,6 +2107,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
+        Cmd::Reminders(sub) => commands::reminders::dispatch(sub, &client).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
@@ -2270,6 +2274,7 @@ mod tests {
             "pr",
             "projects",
             "reactions",
+            "reminders",
             "repos",
             "social",
             "upload",
