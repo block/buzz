@@ -12,6 +12,7 @@ import {
 
 const probed = {
   ok: true,
+  capabilities: ["register", "attest"],
   config_schema: {
     properties: { region: { type: "string" }, size: { type: "integer" } },
     required: ["region"],
@@ -74,7 +75,24 @@ test("provider draft resolves with coerced config values", () => {
     type: "provider",
     id: "blox",
     config: { region: "us", size: 3 },
+    expectedKeyCustody: "provider",
   });
+});
+
+test("provider draft binds the observed legacy custody mode", () => {
+  assert.equal(
+    resolveBackendIntent(
+      providerDraft({ probedProvider: { ...probed, capabilities: [] } }),
+    ).expectedKeyCustody,
+    "local",
+  );
+});
+
+test("unprobed provider intent fails closed", () => {
+  assert.throws(
+    () => resolveBackendIntent(providerDraft({ probedProvider: null })),
+    /must be probed/,
+  );
 });
 
 // ── applyProbeResult: probe resolution must merge, not overwrite ─────────────

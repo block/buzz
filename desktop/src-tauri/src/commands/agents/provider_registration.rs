@@ -6,7 +6,8 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         find_managed_agent_mut, load_managed_agents, provider_attest, provider_capabilities,
-        provider_register, resolve_provider_binary, save_managed_agents, ProviderRegistration,
+        provider_register, resolve_provider_binary, save_managed_agents, AgentKeyCustody,
+        ProviderRegistration,
     },
     util::now_iso,
 };
@@ -28,6 +29,27 @@ pub(super) async fn uses_registration(provider_id: &str) -> Result<bool, String>
             "provider must advertise register and attest together to manage agent identity"
                 .to_string(),
         ),
+    }
+}
+
+/// Bind creation to the custody mode the user saw after the provider probe.
+/// A fresh negotiation may confirm that mode, but it must never silently
+/// switch paths after the UI has described which process receives the key.
+pub(super) fn require_expected_custody(
+    expected: AgentKeyCustody,
+    uses_registration: bool,
+) -> Result<(), String> {
+    let negotiated = if uses_registration {
+        AgentKeyCustody::Provider
+    } else {
+        AgentKeyCustody::Local
+    };
+    if negotiated == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "provider key custody changed after selection (expected {expected:?}, negotiated {negotiated:?}); select the provider again"
+        ))
     }
 }
 
@@ -89,4 +111,17 @@ pub(super) async fn attest(
     record.provider_attestation_pending = result.is_err();
     save_managed_agents(app, &records)?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custody_assertion_fails_closed_when_negotiation_changes() {
+        assert!(require_expected_custody(AgentKeyCustody::Provider, true).is_ok());
+        assert!(require_expected_custody(AgentKeyCustody::Local, false).is_ok());
+        assert!(require_expected_custody(AgentKeyCustody::Provider, false).is_err());
+        assert!(require_expected_custody(AgentKeyCustody::Local, true).is_err());
+    }
 }

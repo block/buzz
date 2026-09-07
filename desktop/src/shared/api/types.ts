@@ -426,6 +426,8 @@ export type CreateManagedAgentInput = {
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
+  /** Custody mode shown after probing; provider creation fails if it changed. */
+  expectedKeyCustody?: "local" | "provider";
   /** Omitted uses the linked persona default, then `"owner-only"`. */
   respondTo?: RespondToMode;
   /**

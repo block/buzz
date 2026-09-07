@@ -557,6 +557,20 @@ fn staged_provider_capabilities(binary: &Path) -> Result<Vec<String>, String> {
     provider_capabilities_for_executable(&staged)
 }
 
+/// Probe a provider through an immutable staged copy and return only a
+/// protocol-v1 response that has passed the same validation creation uses.
+/// The UI must never make custody claims from an unvalidated provider blob.
+pub fn probe_provider_info(binary: &Path) -> Result<serde_json::Value, String> {
+    let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
+    let request = serde_json::json!({
+        "op": "info",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+    });
+    let info = invoke_provider(&staged, &request, Duration::from_secs(10))?;
+    validate_provider_info(&info)?;
+    Ok(info)
+}
+
 fn provider_capabilities_for_executable(binary: &Path) -> Result<Vec<String>, String> {
     let request = serde_json::json!({
         "op": "info",

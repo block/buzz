@@ -394,6 +394,30 @@ esac"#,
     .unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn provider_probe_returns_only_validated_protocol_info() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = directory.path().join("provider");
+    write_test_provider(
+        &provider,
+        r#"read request
+printf '%s\n' '{"ok":true,"name":"registry","version":"1.0.0","protocol_version":1,"description":"registry provider","capabilities":["register","attest"],"config_schema":{}}'"#,
+    );
+
+    let info = probe_provider_info(&provider).unwrap();
+    assert_eq!(info["name"], "registry");
+
+    write_test_provider(
+        &provider,
+        r#"read request
+printf '%s\n' '{"ok":true,"capabilities":["register","attest"]}'"#,
+    );
+    assert!(probe_provider_info(&provider)
+        .unwrap_err()
+        .contains("protocol_version"));
+}
+
 #[test]
 fn validate_provider_config_rejects_secret_key() {
     let cfg = serde_json::json!({"api_key": "val"});

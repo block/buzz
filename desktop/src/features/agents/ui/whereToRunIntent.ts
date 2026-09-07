@@ -73,6 +73,9 @@ export function resolveBackendIntent(
   draft: WhereToRunDraft,
 ): BackendIntent | null {
   if (draft.runOn === "local") return null;
+  if (!draft.probedProvider) {
+    throw new Error("Provider must be probed before it can be selected");
+  }
   return {
     type: "provider",
     id: draft.runOn,
@@ -80,5 +83,8 @@ export function resolveBackendIntent(
       draft.providerConfig,
       draft.probedProvider?.config_schema,
     ),
+    expectedKeyCustody: providerManagesIdentity(draft.probedProvider)
+      ? "provider"
+      : "local",
   };
 }

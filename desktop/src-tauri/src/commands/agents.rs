@@ -382,8 +382,17 @@ pub async fn create_managed_agent(
         if let BackendKind::Provider { ref config, ref id } = input.backend {
             validate_provider_config(config)?;
             resolve_provider_binary(id)?;
-            provider_registration::uses_registration(id).await?
+            let uses_registration = provider_registration::uses_registration(id).await?;
+            let expected_custody = input.expected_key_custody.ok_or_else(|| {
+                "provider creation requires the key custody observed during provider selection"
+                    .to_string()
+            })?;
+            provider_registration::require_expected_custody(expected_custody, uses_registration)?;
+            uses_registration
         } else {
+            if input.expected_key_custody.is_some() {
+                return Err("expectedKeyCustody is only valid for provider backends".to_string());
+            }
             false
         };
 
@@ -441,6 +450,43 @@ pub async fn create_managed_agent(
 
     let relay_mesh = normalize_relay_mesh(input.relay_mesh.as_ref(), &input.backend)?;
 
+    // Complete every validation that does not depend on the provider-returned
+    // pubkey before registration. Registration is an external side effect; a
+    // bad owner key, missing team, unreadable persona store, or invalid
+    // definition default must not leave an identity that Desktop cannot save.
+    let owner_keys = state.signing_keys()?;
+    let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
+        .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
+    {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let personas = load_personas(&app)?;
+        if let Some(persona_id) = requested_persona_id.as_deref() {
+            ensure_persona_is_active(&personas, persona_id)?;
+        }
+        if let Some(team_id) = input
+            .team_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !load_teams(&app)?.iter().any(|team| team.id == team_id) {
+                return Err(format!("team {team_id} not found"));
+            }
+        }
+        let linked_persona = requested_persona_id
+            .as_deref()
+            .and_then(|id| personas.iter().find(|persona| persona.id == id));
+        crate::managed_agents::resolve_mint_behavioral_defaults(
+            input.respond_to,
+            respond_to_allowlist.clone(),
+            input.parallelism,
+            linked_persona,
+        )?;
+    }
+
     // Provider-custodied identity: registration returns only the public key
     // and registry id. Desktop never receives the agent secret.
     let registration = if provider_uses_registration {
@@ -474,10 +520,6 @@ pub async fn create_managed_agent(
     // Agents authenticate via the auth tag in their kind:0 profile event.
     // No tokens are minted. Fail closed: bad auth tag → don't create agent.
     let auth_tag = {
-        let owner_keys = state.signing_keys()?;
-        // Bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
-        let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
-            .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
         let compat_agent = nostr::PublicKey::from_hex(&pubkey)
             .map_err(|e| format!("failed to bridge agent pubkey: {e}"))?;
         let tag = buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
@@ -522,7 +564,7 @@ pub async fn create_managed_agent(
         };
 
         // Load personas once for harness/pack/avatar resolution below.
-        let personas = load_personas(&app).unwrap_or_default();
+        let personas = load_personas(&app)?;
 
         // Harness resolution: the persona's runtime is authoritative. A
         // persona-backed create stores an `agent_command_override` ONLY when the
@@ -602,12 +644,10 @@ pub async fn create_managed_agent(
         // (input.env_vars), and the live persona env is merged underneath at
         // read time (spawn / readiness / deploy) so persona credential edits
         // refresh on the next spawn like prompt/model/provider already do.
-        let linked_persona = requested_persona_id.as_deref().and_then(|pid| {
-            load_personas(&app)
-                .ok()?
-                .into_iter()
-                .find(|persona| persona.id == pid)
-        });
+        let linked_persona = requested_persona_id
+            .as_deref()
+            .and_then(|pid| personas.iter().find(|persona| persona.id == pid))
+            .cloned();
         let persona_snapshot = linked_persona
             .as_ref()
             .map(crate::managed_agents::persona_events::persona_snapshot);
