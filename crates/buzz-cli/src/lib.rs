@@ -389,7 +389,7 @@ pub enum MessagesCmd {
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
-        /// Also publish to the Nostr network
+        /// Also surface this threaded reply in the channel timeline
         #[arg(long, default_value_t = false)]
         broadcast: bool,
         /// Attach file(s) — uploads and includes as imeta tags
