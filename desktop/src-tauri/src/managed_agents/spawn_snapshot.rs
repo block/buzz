@@ -181,6 +181,10 @@ pub(crate) fn effective_effort(descriptor: &EffectiveHarnessDescriptor) -> Optio
 
 impl SpawnConfigSnapshot {
     /// Assemble the snapshot from values a spawn has already resolved.
+    pub(crate) fn relay_mesh_model_id(&self) -> Option<String> {
+        super::resolved_relay_mesh_model_id(self.provider.as_deref(), self.model.as_deref())
+    }
+
     pub(crate) fn from_inputs(inputs: SpawnConfigInputs<'_>) -> Self {
         let SpawnConfigInputs {
             record,

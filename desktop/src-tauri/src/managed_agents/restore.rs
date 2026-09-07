@@ -99,6 +99,53 @@ pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
 ) -> Result<(), String> {
+    restore_with(
+        app,
+        shutdown_started,
+        |model, _| async move {
+            #[cfg(feature = "mesh-llm")]
+            crate::commands::ensure_relay_mesh_for_record(app, model.as_deref(), false).await?;
+            #[cfg(not(feature = "mesh-llm"))]
+            let _ = model;
+            Ok(())
+        },
+        |tracked_pids| {
+            super::sweep_orphaned_agent_processes(app, tracked_pids);
+            super::sweep_system_agent_processes(&super::current_instance_id(app), tracked_pids);
+            super::reap_dead_instance_agents(&super::current_instance_id(app), tracked_pids);
+            super::sweep_untracked_bundle_harnesses(tracked_pids);
+        },
+        |pubkey, data| {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                if let Err(error) =
+                    crate::commands::reconcile_agent_profile(&state, &app, &pubkey, &data).await
+                {
+                    eprintln!(
+                        "buzz-desktop: profile reconciliation failed for agent {pubkey}: {error}"
+                    );
+                }
+            });
+        },
+    )
+    .await
+}
+
+// Same restore phases with only external preflight, system sweeps and relay
+// publication injectable. Tests run disk/admission/spawn/receipt code unchanged.
+pub(crate) async fn restore_with<R, F, Fut>(
+    app: &tauri::AppHandle<R>,
+    shutdown_started: &AtomicBool,
+    preflight: F,
+    sweep: impl Fn(&[u32]),
+    reconcile: impl Fn(String, crate::commands::ProfileReconcileData),
+) -> Result<(), String>
+where
+    R: tauri::Runtime,
+    F: Fn(Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -151,28 +198,7 @@ pub async fn restore_managed_agents_on_launch(
                     }),
             )
             .collect();
-        super::sweep_orphaned_agent_processes(app, &tracked_pids);
-
-        // System-wide sweep: enumerate all user processes and kill any known
-        // agent binaries not tracked by this session. Catches orphans whose
-        // PID files were already cleaned up (e.g. agent workers in their own
-        // process group whose parent harness exited).
-        super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
-
-        // Dead-instance reaping: find agents belonging to Buzz instances
-        // whose desktop process is no longer running and reap them.
-        super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
-
-        // Exact-path sweep: kill any buzz-acp process whose executable path
-        // matches this bundle's harness binary but is not in the tracked set.
-        // Complements the env-var sweep above — catches orphans that predate
-        // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
-        //
-        // TODO: the three sweeps above each walk the PID table independently.
-        // A future consolidation should collect a single shared process snapshot
-        // at the top of this block and thread it through all sweep functions,
-        // replacing the three separate kernel enumerations.
-        super::sweep_untracked_bundle_harnesses(&tracked_pids);
+        sweep(&tracked_pids);
 
         let candidates: Vec<String> = records
             .iter()
@@ -252,36 +278,31 @@ pub async fn restore_managed_agents_on_launch(
     // Capture the actual scoped selection before awaiting, never preflight Default
     // and recapture a different selected model at spawn.
     let launch_relay = crate::relay::relay_ws_url_with_override(&state);
+    // Capture the whole batch before any provider suspends.
+    let captured = agents_to_start
+        .into_iter()
+        .map(|record| {
+            let plan = super::runtime_configurations::capture_for_app(
+                app,
+                &record,
+                owner_hex.as_deref().unwrap_or(""),
+                &launch_relay,
+            );
+            (record, plan)
+        })
+        .collect::<Vec<_>>();
     let mut prepared_agents = Vec::new();
-    for record in agents_to_start {
-        let preparation = super::runtime_configurations::prepare_selected(
-            app,
-            &record,
-            owner_hex.as_deref(),
-            &launch_relay,
-        );
+    for (record, preparation) in captured {
         let result = async {
-            let plan = preparation?;
-            if let Some(plan) = &plan {
-                super::runtime_configurations::preflight_prepared(
-                    app,
-                    plan,
-                    owner_hex.as_deref().ok_or("Desktop owner unavailable")?,
-                    &launch_relay,
-                )
-                .await?;
-            } else {
-                #[cfg(feature = "mesh-llm")]
-                {
-                    let model = super::effective_config::resolve_effective_relay_mesh_model_id(
-                        &record,
-                        &load_personas(app)?,
-                        &super::load_global_agent_config(app)?,
-                    );
-                    crate::commands::ensure_relay_mesh_for_record(app, model.as_deref(), false)
-                        .await?;
-                }
-            }
+            let mut plan = preparation?;
+            super::runtime_configurations::preflight_with(
+                &mut plan,
+                owner_hex.as_deref().ok_or("Desktop owner unavailable")?,
+                &launch_relay,
+                false,
+                &preflight,
+            )
+            .await?;
             Ok::<_, String>(plan)
         }
         .await;
@@ -358,18 +379,22 @@ pub async fn restore_managed_agents_on_launch(
                                             current,
                                             owner_hex_ref,
                                             &relay_url,
-                                            prepared
-                                                .as_ref()
-                                                .and_then(|plan| plan.configuration())
-                                                .as_ref(),
+                                            prepared.configuration().as_ref(),
                                         )?;
-                                        if let Some(plan) = prepared {
-                                            plan.revalidate(
-                                                current,
-                                                &load_personas(app)?,
-                                                &super::load_global_agent_config(app)?,
-                                            )?;
-                                        }
+                                        prepared.check_continuation(current)?;
+                                        prepared.require_preflight()?;
+                                        prepared.revalidate(
+                                            current,
+                                            &load_personas(app)?,
+                                            &super::load_global_agent_config(app)?,
+                                        )?;
+                                        super::remote_stop::check_launch(
+                                            app,
+                                            &key,
+                                            &relay_url,
+                                            owner_hex_ref,
+                                            None,
+                                        )?;
                                         super::terminate_untracked_pair_runtime(app, &key)?;
                                         super::runtime::spawn_agent_child_with_broker(
                                             app,
@@ -380,7 +405,7 @@ pub async fn restore_managed_agents_on_launch(
                                             None,
                                             None,
                                             None,
-                                            prepared.as_ref(),
+                                            Some(prepared),
                                         )
                                     })();
                                     match result {
@@ -517,16 +542,7 @@ pub async fn restore_managed_agents_on_launch(
     // Spawn background tasks to ensure each restored agent's kind:0 profile is
     // published on the relay. Same pattern as the UI start path.
     for (pubkey, data) in reconcile_items {
-        let reconcile_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = reconcile_app.state::<AppState>();
-            if let Err(e) =
-                crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
-                    .await
-            {
-                eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
-            }
-        });
+        reconcile(pubkey, data);
     }
 
     Ok(())
@@ -599,9 +615,8 @@ mod profile_reconcile_tests {
     }
 }
 
-#[cfg(feature = "mesh-llm")]
-fn persist_restore_error(
-    app: &tauri::AppHandle,
+fn persist_restore_error<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     pubkey: &str,
     error: String,

@@ -41,6 +41,8 @@ pub(crate) struct PreparedLaunch {
     pub(super) record: ManagedAgentRecord,
     pub(super) descriptor: EffectiveHarnessDescriptor,
     pub(super) effective: super::effective_config::EffectiveAgentConfig,
+    legacy_default: bool,
+    preflight_complete: bool,
     host: String,
     scope: (String, String),
     // Catalog-only preparation has no app context and cannot be executed.
@@ -54,6 +56,22 @@ impl PreparedLaunch {
         }
         if Some(self.scope.0.as_str()) != owner || self.scope.1 != community {
             return Err("Prepared runtime launch belongs to another owner or community".into());
+        }
+        Ok(())
+    }
+
+    /// Preparation is not launch authority. Only the successful ordinary async
+    /// provider boundary can authorize these exact inputs for shared spawn.
+    pub(crate) fn require_preflight(&self) -> Result<(), String> {
+        if !self.preflight_complete {
+            return Err("Captured runtime launch has not completed provider preflight".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_continuation(&self, record: &ManagedAgentRecord) -> Result<(), String> {
+        if self.record.last_stopped_at != record.last_stopped_at {
+            return Err("Stop interrupted runtime preflight; retry Start".into());
         }
         Ok(())
     }
@@ -89,15 +107,19 @@ impl PreparedLaunch {
         if comparable != self.record {
             return Err("Agent changed during runtime preflight; retry Start".into());
         }
-        let current = prepare(
-            record,
-            self.configuration().as_ref(),
-            personas,
-            global,
-            &self.host,
-            &self.scope.0,
-            &self.scope.1,
-        )?;
+        let current = if self.legacy_default {
+            prepare_default(record, personas, global, &self.scope.0, &self.scope.1)?
+        } else {
+            prepare(
+                record,
+                self.configuration().as_ref(),
+                personas,
+                global,
+                &self.host,
+                &self.scope.0,
+                &self.scope.1,
+            )?
+        };
         if selected(&current.record)? != selected(&self.record)?
             || current.descriptor != self.descriptor
             || current.effective != self.effective
@@ -136,10 +158,62 @@ pub(crate) fn prepare(
         record: projected,
         descriptor,
         effective,
+        legacy_default: false,
+        preflight_complete: false,
         host: host.into(),
         scope: (owner.into(), community.into()),
         app_inputs: None,
     })
+}
+
+// Default preserves legacy readiness/setup-listener and unattested-record behavior,
+// but its effective inputs must still be immutable across async preflight.
+fn prepare_default(
+    record: &ManagedAgentRecord,
+    personas: &[super::AgentDefinition],
+    global: &super::GlobalAgentConfig,
+    owner: &str,
+    community: &str,
+) -> Result<PreparedLaunch, String> {
+    let mut record = record.clone();
+    record.runtime_configurations.launch = None;
+    Ok(PreparedLaunch {
+        descriptor: super::resolve_effective_harness_descriptor(&record, personas, global)?,
+        effective: super::effective_config::resolve_effective_config(&record, personas, global)
+            .require_resolved()?,
+        record,
+        legacy_default: true,
+        preflight_complete: false,
+        host: String::new(),
+        scope: (owner.into(), community.into()),
+        app_inputs: None,
+    })
+}
+
+/// Capture ordinary next-launch authority, including legacy Default. Never read
+/// selection again to choose a launch after preflight; only check it at admission.
+pub(crate) fn capture_for_app<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    record: &ManagedAgentRecord,
+    owner: &str,
+    community: &str,
+) -> Result<PreparedLaunch, String> {
+    use tauri::Manager;
+    if let Some(reference) = selected_reference(record, Some(owner), community)? {
+        return prepare_for_app(app, record, Some(&reference), owner, community);
+    }
+    let mut plan = prepare_default(
+        record,
+        &super::load_personas(app)?,
+        &super::load_global_agent_config(app)?,
+        owner,
+        community,
+    )?;
+    plan.app_inputs = Some((
+        super::spawn_snapshot::effective_team_instructions(record, &super::load_teams(app)?),
+        super::acp_session_policy(app.state::<crate::app_state::AppState>().inner()),
+    ));
+    Ok(plan)
 }
 
 /// Absent selection is the legacy Default configuration, with unchanged inheritance.
@@ -448,26 +522,6 @@ pub(crate) fn check_selection(
     Ok(())
 }
 
-/// Validate or resolve before any existing pair is reaped. The shared spawn checks again.
-pub(crate) fn prepare_selected<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    record: &ManagedAgentRecord,
-    owner: Option<&str>,
-    community: &str,
-) -> Result<Option<PreparedLaunch>, String> {
-    selected_reference(record, owner, community)?
-        .map(|reference| {
-            prepare_for_app(
-                app,
-                record,
-                Some(&reference),
-                owner.ok_or("Desktop owner unavailable")?,
-                community,
-            )
-        })
-        .transpose()
-}
-
 /// Scoped safe catalog for lifecycle consumers; never exposes the global configuration store.
 pub(crate) fn catalog_for_app<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -487,24 +541,23 @@ pub(crate) fn catalog_for_app<R: tauri::Runtime>(
     ))
 }
 
-/// Ordinary async mesh readiness, outside the transition lock. Caller revalidates
-/// owner/community after this await and the immutable plan under its admission lock.
-pub(crate) async fn preflight_prepared(
-    app: &tauri::AppHandle,
-    plan: &PreparedLaunch,
+/// Run the ordinary provider preflight against this captured plan. The callback
+/// is the existing async mesh boundary (fixture-controlled in orchestration tests).
+pub(crate) async fn preflight_with<F, Fut>(
+    plan: &mut PreparedLaunch,
     owner: &str,
     community: &str,
-) -> Result<(), String> {
+    allow_create: bool,
+    preflight: F,
+) -> Result<(), String>
+where
+    F: FnOnce(Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     plan.check_scope(Some(owner), community)?;
-    #[cfg(feature = "mesh-llm")]
-    crate::commands::ensure_relay_mesh_for_record(
-        app,
-        plan.effective.relay_mesh_model_id().as_deref(),
-        false,
-    )
-    .await?;
-    #[cfg(not(feature = "mesh-llm"))]
-    let _ = app;
+    plan.preflight_complete = false;
+    preflight(plan.effective.relay_mesh_model_id(), allow_create).await?;
+    plan.preflight_complete = true;
     Ok(())
 }
 

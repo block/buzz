@@ -44,17 +44,9 @@ impl EffectiveAgentConfig {
     /// a blank effective model falls back to "auto", mirroring
     /// `apply_relay_mesh_env`'s own rule.
     pub fn relay_mesh_model_id(&self) -> Option<String> {
-        if self.provider.value.as_deref().map(str::trim) != Some(RELAY_MESH_PROVIDER_ID) {
-            return None;
-        }
-        Some(
-            self.model
-                .value
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(RELAY_MESH_AUTO_MODEL_ID)
-                .to_string(),
+        super::resolved_relay_mesh_model_id(
+            self.provider.value.as_deref(),
+            self.model.value.as_deref(),
         )
     }
 }

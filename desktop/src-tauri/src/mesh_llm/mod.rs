@@ -26,8 +26,8 @@ pub use progress::install_progress_sink;
 mod recovery;
 pub use recovery::MeshRecoveryState;
 pub(crate) use recovery::{
-    rearm_relay_mesh_for_running_agents, recover_stale_mesh_runtime, MeshRecoveryUrgency,
-    MeshRuntimeRecovery,
+    rearm_relay_mesh_for_running_agents, recover_stale_mesh_runtime, running_mesh_consumers,
+    MeshRecoveryUrgency, MeshRuntimeRecovery,
 };
 
 mod usage;

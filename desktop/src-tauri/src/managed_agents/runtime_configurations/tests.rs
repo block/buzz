@@ -222,8 +222,8 @@ fn malformed_or_stale_reference_is_rejected_before_launch_resolution() {
 }
 
 #[cfg(unix)]
-#[test]
-fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() {
+#[tokio::test]
+async fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() {
     use std::os::unix::fs::PermissionsExt;
     use tauri::Manager;
     let _guard = agents::lock_path_mutex();
@@ -315,7 +315,7 @@ fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() {
     ] {
         record.env_vars.insert(key.into(), value.into());
     }
-    let plan = prepare_for_app(
+    let mut plan = prepare_for_app(
         app.handle(),
         &record,
         Some(&named.reference()),
@@ -323,6 +323,23 @@ fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() {
         community,
     )
     .unwrap();
+    assert!(plan.require_preflight().is_err());
+    let unpreflighted = agents::spawn_agent_child_with_broker(
+        app.handle(),
+        &record,
+        community,
+        true,
+        Some(&owner),
+        None,
+        None,
+        None,
+        Some(&plan),
+    )
+    .unwrap_err();
+    assert!(unpreflighted.contains("has not completed provider preflight"));
+    preflight_with(&mut plan, &owner, community, false, |_, _| async { Ok(()) })
+        .await
+        .unwrap();
     // Team content and session partitioning changed while preflight was awaiting.
     // This launch uses the prepared values; a later preparation sees the edits.
     teams[0].instructions = Some("next launch instructions".into());
@@ -481,3 +498,7 @@ fn ordinary_selection_fence_includes_default() {
         .unwrap();
     assert!(check_selection(&record, Some(&owner), "one", Some(&named.reference())).is_err());
 }
+
+#[cfg(unix)]
+#[path = "orchestration_tests.rs"]
+mod orchestration;

@@ -438,3 +438,13 @@ selection. Unavailable choices never remove independent Stop controls. Model IDs
 are explicit authored values; credentials are provisioned locally, never entered
 or copied by this editor. See `docs/named-runtime-configurations.md` for the native
 contract and the distinction between fixture checks and real execution evidence.
+
+All ordinary launch consumers (including Default, bulk restart, direct pairs and
+restore) capture configuration before async provider preflight. Shared native
+spawn requires that preflighted plan; it never reselects a configuration.
+Recovery reads the actual running pair snapshot, not next-launch selection.
+Pair Restart is one native preflight/locked Stop/spawn operation, never frontend
+Stop then Start. A refused preflight leaves the old process and turns intact;
+a successful Stop followed by failed launch returns an existing Failed status.
+The frontend clears only turn IDs captured before that native operation, so new
+replacement turns are safe even when its result arrives after they start.

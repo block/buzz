@@ -135,8 +135,8 @@ pub(crate) fn resolve_workspace_pair_key(
     ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
 }
 
-pub fn build_managed_agent_summary(
-    app: &AppHandle,
+pub fn build_managed_agent_summary<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     personas: &[crate::managed_agents::types::AgentDefinition],
@@ -516,7 +516,6 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     // command, so we recompute them from the effective value rather than the
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
-    let teams = super::load_teams(app).unwrap_or_default();
     // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
     // and for the env-var merge at spawn time.
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
@@ -532,46 +531,19 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     // inherits it — no caller can bypass this by reaching `spawn_agent_child`
     // directly. Checked before any side effect (log marker, log file, process
     // spawn) so a refused spawn leaves no trace.
-    let selected_ref =
-        super::runtime_configurations::selected_reference(record, owner_hex, relay_url)?;
-    let resolved;
-    let prepared = match prepared {
-        Some(plan) => {
-            plan.check_scope(owner_hex, relay_url)?;
-            plan.revalidate(record, &personas, &global)?;
-            Some(plan)
-        }
-        None if selected_ref.is_some() => {
-            resolved = super::runtime_configurations::prepare_for_app(
-                app,
-                record,
-                selected_ref.as_ref(),
-                owner_hex.ok_or("Desktop owner unavailable")?,
-                relay_url,
-            )?;
-            Some(&resolved)
-        }
-        None => None,
-    };
-    let record = prepared.map(|plan| &plan.record).unwrap_or(record);
-    let effective_cfg = match prepared {
-        Some(plan) => plan.effective.clone(),
-        None => super::effective_config::resolve_effective_config(record, &personas, &global)
-            .require_resolved()?,
-    };
-    let descriptor = match prepared {
-        Some(plan) => plan.descriptor.clone(),
-        None => super::resolve_effective_harness_descriptor(record, &personas, &global)?,
-    };
+    let plan = prepared.ok_or("Captured preflighted runtime launch required")?;
+    plan.require_preflight()?;
+    plan.check_scope(owner_hex, relay_url)?;
+    plan.revalidate(record, &personas, &global)?;
+    let record = &plan.record;
+    let effective_cfg = plan.effective.clone();
+    let descriptor = &plan.descriptor;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
-    let app_inputs = prepared
-        .map(|plan| {
-            plan.app_inputs
-                .as_ref()
-                .ok_or("Launch plan has no app inputs")
-        })
-        .transpose()?;
+    let (team_instructions, acp_session_policy) = plan
+        .app_inputs
+        .as_ref()
+        .ok_or("Launch plan has no app inputs")?;
     let required_mcp = if super::runtime_configurations::selected(record)?.is_some() {
         super::runtime_configurations::required_mcp_command(effective_command)?
     } else {
@@ -700,11 +672,7 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
             }
         }
     }
-    let team_instructions = match app_inputs {
-        Some((instructions, _)) => instructions.clone(),
-        None => super::spawn_snapshot::effective_team_instructions(record, &teams),
-    };
-    if let Some(instructions) = &team_instructions {
+    if let Some(instructions) = team_instructions {
         command.env("BUZZ_ACP_TEAM_INSTRUCTIONS", instructions);
     } else {
         command.env_remove("BUZZ_ACP_TEAM_INSTRUCTIONS");
@@ -835,15 +803,9 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
-    // Prepared launches bind session partitioning before async preflight; Default
-    // retains the existing launch-time experiment policy. Stamp exactly what we apply.
-    let acp_session_policy = match app_inputs {
-        Some((_, policy)) => {
-            super::session_policy::apply_acp_session_policy_env(&mut command, *policy);
-            *policy
-        }
-        None => super::apply_app_acp_session_policy_env(app, &mut command),
-    };
+    // Session partitioning is launch input; operational admission/logging policy
+    // remains live. Default and named both stamp exactly the captured policy.
+    super::session_policy::apply_acp_session_policy_env(&mut command, *acp_session_policy);
 
     crate::build_identity::apply_demo_config_home(&mut command)?;
     // Publish-first replay floor: written AFTER the `descriptor.env` loop, the
@@ -887,14 +849,14 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     let spawn_config = super::spawn_snapshot::SpawnConfigSnapshot::from_inputs(
         super::spawn_snapshot::SpawnConfigInputs {
             record,
-            descriptor: &descriptor,
+            descriptor,
             relay_url: &effective_relay_url,
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),
             provider: effective_provider.as_deref(),
             enforced_owner_only: super::owner_only_access_build(),
-            session_policy: acp_session_policy,
+            session_policy: *acp_session_policy,
         },
     );
 
@@ -1027,25 +989,16 @@ pub(crate) fn start_managed_agent_process_prepared<R: tauri::Runtime>(
     prepared: Option<&super::runtime_configurations::PreparedLaunch>,
 ) -> Result<(), String> {
     let key = bound_runtime_key(record, workspace_relay)?;
-    let resolved = if prepared.is_none() {
-        super::runtime_configurations::prepare_selected(
-            app,
-            record,
-            owner_hex,
-            workspace_relay.as_str(),
-        )?
-    } else {
-        None
-    };
-    let prepared = prepared.or(resolved.as_ref());
-    if let Some(plan) = prepared {
-        plan.check_scope(owner_hex, workspace_relay.as_str())?;
-        plan.revalidate(
-            record,
-            &super::load_personas(app)?,
-            &super::load_global_agent_config(app)?,
-        )?;
-    }
+    super::with_pair_runtime_receipt_authority(app, &key, || Ok(()))?;
+    let plan = prepared.ok_or("Captured preflighted runtime launch required")?;
+    plan.require_preflight()?;
+    plan.check_scope(owner_hex, workspace_relay.as_str())?;
+    plan.revalidate(
+        record,
+        &super::load_personas(app)?,
+        &super::load_global_agent_config(app)?,
+    )?;
+    super::remote_stop::check_launch(app, &key, workspace_relay.as_str(), owner_hex, resume)?;
     if let Some(runtime) = runtimes.get_mut(&key) {
         if runtime
             .child
@@ -1053,17 +1006,7 @@ pub(crate) fn start_managed_agent_process_prepared<R: tauri::Runtime>(
             .map_err(|error| format!("failed to inspect running process: {error}"))?
             .is_none()
         {
-            let requested = match prepared {
-                Some(plan) => {
-                    plan.check_scope(owner_hex, workspace_relay.as_str())?;
-                    plan.configuration()
-                }
-                None => super::runtime_configurations::selected_reference(
-                    record,
-                    owner_hex,
-                    workspace_relay.as_str(),
-                )?,
-            };
+            let requested = plan.configuration();
             if runtime.spawn_config.runtime_configuration != requested {
                 return Err("A different configuration is running; Stop before Start".into());
             }

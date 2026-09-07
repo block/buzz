@@ -699,6 +699,26 @@ export function clearActiveTurnsForAgent(agentPubkey: string): void {
   notifyListeners();
 }
 
+/** Capture only this generation's known turns before a native atomic restart.
+ * Clearing after restart cannot tombstone turns started by the replacement. */
+export function captureActiveTurnsForAgentClear(
+  agentPubkey: string,
+): () => void {
+  const key = normalizePubkey(agentPubkey);
+  const captured = [...(activeTurnsByAgent.get(key)?.keys() ?? [])];
+  return () => {
+    const turns = activeTurnsByAgent.get(key);
+    const agentClockNow = Date.now() - (clockOffsetByAgent.get(key) ?? 0);
+    for (const turnId of captured) {
+      recordTerminal(key, turnId, agentClockNow);
+      turns?.delete(turnId);
+    }
+    if (turns?.size === 0) activeTurnsByAgent.delete(key);
+    invalidateCache(key);
+    notifyListeners();
+  };
+}
+
 /**
  * Clears all live turn state (active turns, offsets, watermarks, tombstones).
  * Intentionally preserves `savedByCommunity` — community-switch snapshots

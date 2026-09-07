@@ -162,6 +162,12 @@ pub(crate) fn check_launch(
     resume: Option<&ResumeTicket>,
 ) -> Result<(), String> {
     let state = app.state::<crate::app_state::AppState>();
+    if state
+        .shutdown_started
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err("desktop shutdown has started".into());
+    }
     let current_owner = state.signing_keys()?.public_key().to_hex();
     if owner != Some(current_owner.as_str()) {
         return Err("Desktop launch owner changed".into());
