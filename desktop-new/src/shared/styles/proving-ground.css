@@ -283,7 +283,9 @@
     grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
   }
 
-  /* A region tile is a widget, which is what a card is legitimately for. */
+  /* A card carries no default fill. It sits on the panel and is grouped by a
+     hairline, so fill is free to mean one thing only: you are pointing at this.
+     Add `data-interactive` when a card is actually clickable. */
   .dash-region {
     display: flex;
     min-width: 0;
@@ -292,12 +294,21 @@
     border: 1px solid var(--border-tertiary);
     border-radius: var(--radius-control);
     padding: var(--space-4);
-    background: var(--bg-inset);
+  }
+
+  .dash-region[data-interactive] {
+    cursor: pointer;
+    transition: background-color var(--duration-state) var(--easing-state);
+  }
+
+  .dash-region[data-interactive]:hover {
+    background: var(--bg-hover);
   }
 
   @media (prefers-reduced-motion: reduce) {
     .dash-nav-item,
-    .dash-row[data-interactive] {
+    .dash-row[data-interactive],
+    .dash-region[data-interactive] {
       transition-duration: 0ms;
     }
   }
