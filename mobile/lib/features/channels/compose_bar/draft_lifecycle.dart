@@ -10,6 +10,7 @@ Future<void> _sendTextOnlyDraft({
   required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required ObjectRef<int> draftRevision,
   required int submittedDraftRevision,
+  required bool Function() ownsSource,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
   required Future<void> Function() addMentionedNonMembers,
@@ -23,7 +24,7 @@ Future<void> _sendTextOnlyDraft({
   int? clearedDraftRevision;
 
   void restoreClearedDraft() {
-    if (!context.mounted ||
+    if (!ownsSource() ||
         clearedDraftText == null ||
         clearedDraftMentions == null ||
         clearedDraftRevision == null ||
@@ -39,6 +40,7 @@ Future<void> _sendTextOnlyDraft({
 
   try {
     await addMentionedNonMembers();
+    if (!ownsSource()) return;
     // Clear before optimistic insertion so the outgoing row and draft never
     // appear simultaneously during the send transition. If the user edited
     // while membership changes were pending, preserve that newer draft.
@@ -86,12 +88,18 @@ void _useComposeDraftLifecycle({
   required _IOSAttachmentPopoverController iosAttachmentPopover,
   required VoidCallback onDraftIdentityChanged,
 }) {
+  // Fence old listeners before effects restore an incoming draft.
+  final owner = useMemoized(Object.new, [draftKey, draftIdentity]);
+  final currentOwner = useRef(owner)..value = owner;
   final lastDraftIdentity = useRef<String?>(null);
+  final lastDraftKey = useRef<String?>(null);
   useEffect(() {
     final identityChanged =
         lastDraftIdentity.value != null &&
-        lastDraftIdentity.value != draftIdentity;
+        (lastDraftIdentity.value != draftIdentity ||
+            lastDraftKey.value != draftKey);
     lastDraftIdentity.value = draftIdentity;
+    lastDraftKey.value = draftKey;
     final saved = ref.read(composeDraftsProvider.notifier).textFor(draftKey);
     if (identityChanged) {
       draftRevision.value += 1;
@@ -114,6 +122,7 @@ void _useComposeDraftLifecycle({
 
     var lastPersistedText = controller.text;
     void persistDraft() {
+      if (!identical(currentOwner.value, owner)) return;
       final text = controller.text;
       if (text == lastPersistedText) return;
       lastPersistedText = text;

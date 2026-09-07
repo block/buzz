@@ -475,7 +475,7 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
         role: role,
       );
       ensureCurrent();
-    } on _ComposeSendCancelled {
+    } on _ComposeAuthorizationCancelled {
       rethrow;
     } on StateError {
       rethrow;

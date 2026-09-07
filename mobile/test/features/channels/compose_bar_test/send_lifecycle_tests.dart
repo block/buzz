@@ -42,7 +42,6 @@ void sendLifecycleTests() {
       pending = true;
       container.invalidate(channelMembersProvider('channel-1'));
       await tester.pump();
-      // Invoke twice without a frame: an asynchronous latch is too late.
       final button = tester.widget<GestureDetector>(
         find
             .ancestor(
@@ -85,73 +84,102 @@ void sendLifecycleTests() {
       }
     });
   }
-  testWidgets('a revisited source cannot finish an old membership batch', (
-    tester,
-  ) async {
-    final signer = nostr.Keys.generate();
-    final gate = Completer<void>();
-    final events = <Map<String, dynamic>>[];
-    var sends = 0;
-    final service = _testUploadService(signer.nsec);
-    Widget build({String? thread}) => _buildComposeBar(
-      uploadService: service,
-      currentPubkey: signer.public,
-      relayAgents: [
-        _testAgent('b' * 64),
-        AgentDirectoryEntry(
-          pubkey: 'c' * 64,
-          displayName: 'Other Bot',
-          respondTo: 'anyone',
-          channelIds: const ['shared-channel'],
-        ),
-      ],
-      channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
-      threadHeadId: thread,
-      onSend: (_, _, {mediaTags = const []}) async {
-        sends++;
-      },
-    );
-    await tester.pumpWidget(build());
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(ComposeBar)),
-    );
-    final session = container.read(relaySessionProvider.notifier);
-    session.debugAttachSocketForTest(
-      _RecordingRelaySocket(
-        events,
-        session.debugHandleSocketMessageForTest,
-        beforeAcknowledged: (event) async {
-          if (event['kind'] == 9000) await gate.future;
+  for (final action in ['revisit', 'cancel', 'partial refusal']) {
+    testWidgets('$action cannot finish an old membership batch', (
+      tester,
+    ) async {
+      final signer = nostr.Keys.generate();
+      final gate = Completer<void>();
+      final events = <Map<String, dynamic>>[];
+      var sends = 0;
+      final service = _FakeVideoUploadService(
+        XFile.fromData(_pngBytes, name: 'clip.mp4', mimeType: 'video/mp4'),
+      );
+      Widget build({String? thread}) => _buildComposeBar(
+        uploadService: service,
+        currentPubkey: signer.public,
+        relayAgents: [
+          _testAgent('b' * 64),
+          AgentDirectoryEntry(
+            pubkey: 'c' * 64,
+            displayName: 'Other Bot',
+            respondTo: 'anyone',
+            channelIds: const ['shared-channel'],
+          ),
+        ],
+        channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+        threadHeadId: thread,
+        onSend: (_, _, {mediaTags = const []}) async {
+          sends++;
         },
-      ),
-    );
-    await _expandComposer(tester);
-    await tester.enterText(find.byType(TextField), '@hel');
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Helper Bot'));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '@Helper Bot @oth');
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Other Bot'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(LucideIcons.arrowUp));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('Invite'));
-    await tester.pump();
-    expect(events.where((e) => e['kind'] == 9000), hasLength(1));
-    await tester.pumpWidget(build(thread: 'other'));
-    await tester.pumpWidget(build());
-    gate.complete();
-    await tester.pumpAndSettle();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(sends, 0);
-    await tester.tap(find.text('@Helper Bot @Other Bot'));
-    await tester.pumpAndSettle();
-    expect(events.where((e) => e['kind'] == 9000), hasLength(1));
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      '@Helper Bot @Other Bot ',
-    );
-  });
+      );
+      await tester.pumpWidget(build());
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      session.debugAttachSocketForTest(
+        _RecordingRelaySocket(
+          events,
+          session.debugHandleSocketMessageForTest,
+          beforeAcknowledged: (event) async {
+            if (event['kind'] == 9000) await gate.future;
+          },
+          onEventAcknowledged: (event) {
+            if (action == 'partial refusal' && event['kind'] == 9000) {
+              session.debugAttachSocketForTest(
+                _RecordingRelaySocket(
+                  events,
+                  session.debugHandleSocketMessageForTest,
+                  rejectAdds: true,
+                ),
+              );
+            }
+          },
+        ),
+      );
+      if (action == 'cancel') {
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Video'));
+        await tester.pumpAndSettle();
+      }
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '@Helper Bot @oth');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Other Bot'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Invite'));
+      await tester.pump();
+      expect(events.where((e) => e['kind'] == 9000), hasLength(1));
+      if (action == 'cancel') {
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.byKey(const ValueKey('compose-upload-cancel')));
+      } else if (action == 'revisit') {
+        await tester.pumpWidget(build(thread: 'other'));
+        await tester.pumpWidget(build());
+      }
+      gate.complete();
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      expect(sends, 0);
+      await tester.tap(find.text('@Helper Bot @Other Bot'));
+      await tester.pumpAndSettle();
+      expect(
+        events.where((e) => e['kind'] == 9000),
+        hasLength(action == 'partial refusal' ? 2 : 1),
+      );
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '@Helper Bot @Other Bot ',
+      );
+    });
+  }
 }

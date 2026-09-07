@@ -479,13 +479,18 @@ class ComposeBar extends HookConsumerWidget {
       void Function()? checkPreparationCurrent;
       try {
         final submittedDraftRevision = draftRevision.value;
+        final submittedUploadGeneration = uploadGeneration.value;
         var authorizationRevision = submittedDraftRevision;
         final visit = authorizationVisit.value;
         final config = ref.read(relayConfigProvider);
         final readAuthorization = ref.read(agentAuthorizationReaderProvider);
-        bool isAuthorizationCurrent() =>
+        bool ownsSource() =>
             context.mounted &&
             visit == authorizationVisit.value &&
+            identical(config, ref.read(relayConfigProvider));
+        bool isAuthorizationCurrent() =>
+            ownsSource() &&
+            submittedUploadGeneration == uploadGeneration.value &&
             authorizationRevision == draftRevision.value &&
             identical(config, ref.read(relayConfigProvider));
         void ensureAuthorizationCurrent() {
@@ -493,7 +498,8 @@ class ComposeBar extends HookConsumerWidget {
           if (!identical(config, ref.read(relayConfigProvider))) {
             throw StateError('Community changed during authorization');
           }
-          if (visit != authorizationVisit.value ||
+          if (submittedUploadGeneration != uploadGeneration.value ||
+              visit != authorizationVisit.value ||
               authorizationRevision != draftRevision.value) {
             throw const _ComposeAuthorizationCancelled();
           }
@@ -586,6 +592,12 @@ class ComposeBar extends HookConsumerWidget {
             );
           }
           await authorize(keys);
+          if (queuedAttachments.isEmpty ||
+              (intendedAgentKeys.isNotEmpty ||
+                  scan.humans.isNotEmpty ||
+                  scan.agentPubkeys.isNotEmpty)) {
+            ensureAuthorizationCurrent();
+          }
         }
 
         if (queuedAttachments.isEmpty) {
@@ -596,6 +608,7 @@ class ComposeBar extends HookConsumerWidget {
             mentionMap: mentionMap,
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
+            ownsSource: ownsSource,
             focusNode: focusNode,
             clearComposer: clearComposer,
             addMentionedNonMembers: addMentionedNonMembers,
