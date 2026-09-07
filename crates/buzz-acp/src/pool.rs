@@ -7657,6 +7657,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "test".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            require_model: false,
         };
         agent.state.sessions.insert(scope, "sess".into());
         agent

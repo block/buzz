@@ -88,6 +88,10 @@ jobs:
         run: just desktop-tauri-check
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      - name: Desktop Tauri remote credential fixtures
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --no-default-features managed_agents::runtime_configurations::tests::remote_credentials -- --test-threads=1
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
       - name: Desktop Tauri tests
         run: just desktop-tauri-test
         env:
