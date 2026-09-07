@@ -42,12 +42,13 @@ fn save(
     community: &str,
     entry: RuntimeConfiguration,
 ) -> RuntimeConfiguration {
+    let host = entry.host.clone();
     record
         .runtime_configurations
         .replace(
             owner,
             community,
-            &entry.host,
+            &host,
             RuntimeConfigurations {
                 selected: Some(entry.id.clone()),
                 entries: vec![entry],
