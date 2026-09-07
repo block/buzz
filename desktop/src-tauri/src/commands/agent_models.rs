@@ -738,6 +738,7 @@ pub(super) fn normalize_agent_models(
                                 id: value.to_string(),
                                 name: o
                                     .get("displayName")
+                                    .or_else(|| o.get("name"))
                                     .and_then(|v| v.as_str())
                                     .map(str::to_string),
                                 description: None,
