@@ -5779,6 +5779,21 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     });
                 }
             }
+            // Forward ATLASSIAN_SA_TOKEN so shell tools under buzz-dev-mcp
+            // (bin/atlassian-sa.sh) see the managed agent's service-account
+            // identity. Desktop writes the var into the buzz-acp child via
+            // descriptor.env; buzz-agent then env_clear()s and restores only
+            // spec.env, so omitting it here drops the token at the MCP hop.
+            // Same contract as BUZZ_AUTH_TAG: present-and-nonempty is
+            // forwarded; unset/empty is omitted. Do not copy the parent env.
+            if let Ok(token) = std::env::var("ATLASSIAN_SA_TOKEN") {
+                if !token.is_empty() {
+                    env.push(EnvVar {
+                        name: "ATLASSIAN_SA_TOKEN".into(),
+                        value: token,
+                    });
+                }
+            }
             env
         },
     }]
@@ -8890,6 +8905,37 @@ mod build_mcp_servers_tests {
     /// Env-var-touching tests must run serially — env vars are process-global.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Restore a process env var even if the test panics. Required here
+    /// because the agent process running these tests may already hold a
+    /// real `ATLASSIAN_SA_TOKEN`; a bare `remove_var` would drop it.
+    struct EnvRestore {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
@@ -9040,6 +9086,71 @@ mod build_mcp_servers_tests {
                 .iter()
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "empty display name should not be forwarded"
+        );
+    }
+
+    #[test]
+    fn session_new_mcp_server_forwards_atlassian_sa_token() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _token = EnvRestore::set("ATLASSIAN_SA_TOKEN", "test-atlassian-sa-token");
+        let servers = build_mcp_servers(&test_config());
+
+        let entry = servers[0]
+            .env
+            .iter()
+            .find(|e| e.name == "ATLASSIAN_SA_TOKEN");
+        assert_eq!(
+            entry.map(|e| e.value.as_str()),
+            Some("test-atlassian-sa-token"),
+            "configured ATLASSIAN_SA_TOKEN must reach the MCP server EnvVar list"
+        );
+    }
+
+    #[test]
+    fn session_new_mcp_server_omits_unset_atlassian_sa_token() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _token = EnvRestore::unset("ATLASSIAN_SA_TOKEN");
+        let servers = build_mcp_servers(&test_config());
+
+        assert!(
+            !servers[0]
+                .env
+                .iter()
+                .any(|e| e.name == "ATLASSIAN_SA_TOKEN"),
+            "unset ATLASSIAN_SA_TOKEN must be absent, not empty-valued"
+        );
+    }
+
+    #[test]
+    fn session_new_mcp_server_skips_empty_atlassian_sa_token() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _token = EnvRestore::set("ATLASSIAN_SA_TOKEN", "");
+        let servers = build_mcp_servers(&test_config());
+
+        assert!(
+            !servers[0]
+                .env
+                .iter()
+                .any(|e| e.name == "ATLASSIAN_SA_TOKEN"),
+            "empty ATLASSIAN_SA_TOKEN should not be forwarded"
+        );
+    }
+
+    #[test]
+    fn session_new_mcp_server_does_not_forward_unlisted_parent_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _token = EnvRestore::set("ATLASSIAN_SA_TOKEN", "test-atlassian-sa-token");
+        let _unlisted = EnvRestore::set("UNRELATED_PARENT_SECRET", "must-not-leak");
+        let servers = build_mcp_servers(&test_config());
+        let names: Vec<&str> = servers[0].env.iter().map(|e| e.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"ATLASSIAN_SA_TOKEN"),
+            "allowlisted token must still be forwarded; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"UNRELATED_PARENT_SECRET"),
+            "build_mcp_servers must not copy the parent environment; got {names:?}"
         );
     }
 
