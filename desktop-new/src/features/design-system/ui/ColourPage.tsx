@@ -97,6 +97,12 @@ export function ColourPage() {
                   {hue.usedBy ? `drawn from by ${hue.usedBy}` : "unassigned"}
                 </span>
               </div>
+              {/* Each step carries what it is for, not just its number. The
+                  registry has always held this text and no page rendered it,
+                  which is how it drifted: it still described the generic scale
+                  the values came from — step 4 as "component hover" — long after
+                  this product had made step 4 its one border weight. Unrendered
+                  documentation cannot be checked by looking. */}
               <div className="flex gap-1">
                 {hue.steps.map((step) => (
                   <div
@@ -109,6 +115,9 @@ export function ColourPage() {
                     />
                     <span className="text-center text-body-sm text-tertiary">
                       {step.step}
+                    </span>
+                    <span className="text-center text-body-sm text-tertiary">
+                      {step.job}
                     </span>
                   </div>
                 ))}

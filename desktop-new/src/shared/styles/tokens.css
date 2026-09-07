@@ -263,23 +263,37 @@
    ============================================================ */
 
 :root {
-  /* --- Neutral. Twelve steps, each step a fixed job. --------
+  /* --- Neutral. Twelve steps. --------------------------------
      Keeps its numbering: unlike the coloured families these steps
-     really are a scale, and every step is in use. Step 1 stays
-     pure white rather than the palette's off-white, because the
-     app background is a deliberate choice, not a grey. */
-  --neutral-1: #ffffff; /* app background            */
-  --neutral-2: #f9f9f9; /* subtle background         */
-  --neutral-3: #f0f0f0; /* component background      */
-  --neutral-4: #e8e8e8; /* component hover           */
-  --neutral-5: #e0e0e0; /* component selected        */
-  --neutral-6: #d9d9d9; /* subtle border             */
-  --neutral-7: #cecece; /* border                    */
-  --neutral-8: #bbbbbb; /* border hover              */
-  --neutral-9: #8d8d8d; /* solid fill, tertiary text */
-  --neutral-10: #646464; /* secondary text           */
-  --neutral-11: #262626; /* dark fill                */
-  --neutral-12: #0a0a0a; /* high-contrast text       */
+     really are a scale. Step 1 stays pure white rather than the
+     palette's off-white, because the app background is a
+     deliberate choice, not a grey.
+
+     **The comments record what Buzz uses each step for, not what
+     Radix intended it for.** They said "component hover",
+     "subtle border", "border" — a generic scale's intentions,
+     transcribed with the values and then left alone while the
+     product decided otherwise. That is how the one border weight
+     came to sit on the step labelled "component hover" while the
+     two steps labelled for borders had no readers at all, and how
+     a designer reading this file would have been told the wrong
+     thing by the only documentation at hand.
+
+     Keep these current. A step whose comment disagrees with its
+     use is worse than no comment, because it reads as a decision
+     someone made. `pnpm census` lists the real readers. */
+  --neutral-1: #ffffff; /* bg-panel, bg-float, bg-chrome-selected  */
+  --neutral-2: #f9f9f9; /* unused in light; bg-inset in dark       */
+  --neutral-3: #f0f0f0; /* bg-inset; bg-panel in dark              */
+  --neutral-4: #e8e8e8; /* border-primary — the one border weight  */
+  --neutral-5: #e0e0e0; /* unused in light; float + selected, dark */
+  --neutral-6: #d9d9d9; /* the /design specimen frame edge only    */
+  --neutral-7: #cecece; /* no readers                              */
+  --neutral-8: #bbbbbb; /* text-disabled                           */
+  --neutral-9: #8d8d8d; /* text-tertiary                           */
+  --neutral-10: #646464; /* text-secondary                         */
+  --neutral-11: #262626; /* inverse fill, paired with neutral-1    */
+  --neutral-12: #0a0a0a; /* text-primary                           */
 
   /* --- Glass. A translucency ramp of fills. ---------------- */
   --glass-1: #ffffff5c; /* barely there   */

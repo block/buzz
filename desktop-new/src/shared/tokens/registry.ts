@@ -63,23 +63,36 @@ export interface RoleGroup {
    ============================================================ */
 
 /**
- * What each of the twelve steps is *for*. The same twelve jobs in every hue —
- * which is the whole point of a twelve-step scale, and what makes the
- * step-to-role mapping deterministic: a role picks a step number, not a colour.
- * Named from the neutral ramp because that is where every step is in use.
+ * What each of the twelve steps is *for*, as a starting point.
+ *
+ * The same twelve jobs in every hue is what makes a twelve-step scale useful and
+ * the step-to-role mapping deterministic: a role picks a step number, not a
+ * colour.
+ *
+ * **These are the scale's general intentions, not a record of Buzz's decisions,
+ * and the two have already diverged.** The list came with the values and said
+ * step 4 was "component hover" and step 6 "subtle border" — while in this product
+ * step 4 is the one border weight and step 6 has one reader on a documentation
+ * page. A generic label that contradicts the product is worse than none, because
+ * a designer reading `/design` takes it for a decision someone made.
+ *
+ * So: **the label answers "what is this step generally for", and the neutral
+ * ramp's own comments in `tokens.css` answer "what does Buzz actually do with
+ * it".** When a step's real use settles into something durable, move it here.
+ * `pnpm census` lists the real readers of every role.
  */
 const STEP_JOBS = [
-  "app background",
-  "subtle background",
-  "component background",
-  "component hover",
-  "component selected",
-  "subtle border",
+  "lightest surface",
+  "subtle surface",
+  "tinted surface",
+  "tinted surface, hovered",
+  "quiet border, or a selected surface",
   "border",
-  "border hover",
+  "stronger border",
+  "border hover, focus ring",
   "solid fill",
-  "secondary text",
-  "dark fill",
+  "solid fill, hovered",
+  "text on a tint, or an inverse fill",
   "high-contrast text",
 ];
 
