@@ -77,7 +77,7 @@ test("a stream message link keeps the channel destination", async () => {
   });
 });
 
-test("a comment with no resolvable root falls back to the channel", async () => {
+test("a comment with no resolvable root has no destination", async () => {
   const destination = await resolveMessageLinkDestination(
     CHANNEL,
     "comment-2",
@@ -85,11 +85,10 @@ test("a comment with no resolvable root falls back to the channel", async () => 
     fetcher({ id: "comment-2", kind: KIND_FORUM_COMMENT, tags: [] }),
   );
 
-  assert.equal(destination.kind, "channel");
-  assert.equal(destination.channelId, CHANNEL);
+  assert.equal(destination, null);
 });
 
-test("a failed lookup never makes the link unclickable", async () => {
+test("a failed lookup does not claim a channel destination", async () => {
   const destination = await resolveMessageLinkDestination(
     CHANNEL,
     "message-3",
@@ -99,10 +98,5 @@ test("a failed lookup never makes the link unclickable", async () => {
     },
   );
 
-  assert.deepEqual(destination, {
-    kind: "channel",
-    channelId: CHANNEL,
-    messageId: "message-3",
-    threadRootId: null,
-  });
+  assert.equal(destination, null);
 });

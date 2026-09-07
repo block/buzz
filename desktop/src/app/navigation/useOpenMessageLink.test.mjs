@@ -190,3 +190,128 @@ test("in-app hook lookup cannot navigate after community unmount", async () => {
   assert.equal(await result, false);
   assert.deepEqual(calls, []);
 });
+
+for (const message of ["relay unavailable", "event not found"]) {
+  test(`failed lookup (${message}) stays queued and retries the forum destination`, async () => {
+    fetchEvent = async () => {
+      throw new Error(message);
+    };
+    queue.push({ id: "pending", kind: "message", ...link });
+    const app = await mount(true);
+    try {
+      await settle();
+      assert.deepEqual(calls, []);
+      assert.deepEqual(accepted, []);
+      assert.equal(queue.length, 1);
+    } finally {
+      await app.unmount();
+    }
+    fetchEvent = async () => ({ kind: 45001, tags: [] });
+    const retry = await mount(true);
+    try {
+      await settle();
+      assert.deepEqual(calls, [
+        ["forum", "channel", "message", { replyId: undefined }],
+      ]);
+      assert.deepEqual(accepted, ["pending"]);
+    } finally {
+      await retry.unmount();
+    }
+  });
+}
+
+test("in-app failed lookup keeps its best-effort channel fallback", async () => {
+  fetchEvent = async () => {
+    throw new Error("relay unavailable");
+  };
+  const app = await mount();
+  try {
+    assert.equal(await app.open(link), true);
+    assert.deepEqual(calls, [
+      ["channel", "channel", { messageId: "message", threadRootId: null }],
+    ]);
+  } finally {
+    await app.unmount();
+  }
+});
+
+for (const olderFails of [false, true]) {
+  test(`latest activation wins when an older lookup ${olderFails ? "fails" : "succeeds"} late`, async () => {
+    const older = deferred();
+    fetchEvent = async ({ eventId }) => {
+      if (eventId === "message") {
+        await older.promise;
+        if (olderFails) throw new Error("old lookup failed");
+      }
+      return { kind: 45001, tags: [] };
+    };
+    const app = await mount();
+    try {
+      const first = app.open(link);
+      assert.equal(await app.open({ ...link, messageId: "newer" }), true);
+      older.resolve();
+      assert.equal(await first, false);
+      assert.deepEqual(calls, [
+        ["forum", "channel", "newer", { replyId: undefined }],
+      ]);
+    } finally {
+      await app.unmount();
+    }
+  });
+}
+
+test("a newer activation in another mounted renderer supersedes the old lookup", async () => {
+  const older = deferred();
+  fetchEvent = async ({ eventId }) => {
+    if (eventId === "message") await older.promise;
+    return { kind: 45001, tags: [] };
+  };
+  const firstRenderer = await mount();
+  const secondRenderer = await mount();
+  try {
+    const first = firstRenderer.open(link);
+    assert.equal(
+      await secondRenderer.open({ ...link, messageId: "newer" }),
+      true,
+    );
+    older.resolve();
+    assert.equal(await first, false);
+    assert.deepEqual(calls, [
+      ["forum", "channel", "newer", { replyId: undefined }],
+    ]);
+  } finally {
+    await firstRenderer.unmount();
+    await secondRenderer.unmount();
+  }
+});
+
+test("community reset invalidates a lookup even before hook cleanup", async () => {
+  const { resetMessageLinkRequests } = await import("./messageLinkRequests.ts");
+  const lookup = deferred();
+  fetchEvent = () => lookup.promise;
+  const app = await mount();
+  try {
+    const pending = app.open(link);
+    resetMessageLinkRequests();
+    lookup.resolve({ kind: 45001, tags: [] });
+    assert.equal(await pending, false);
+    assert.deepEqual(calls, []);
+    assert.equal(await app.open({ ...link, messageId: "new-community" }), true);
+  } finally {
+    await app.unmount();
+  }
+});
+
+test("a queued forum comment without a root is not acknowledged as a channel visit", async () => {
+  fetchEvent = async () => ({ kind: 45003, tags: [] });
+  queue.push({ id: "pending", kind: "message", ...link });
+  const app = await mount(true);
+  try {
+    await settle();
+    assert.deepEqual(calls, []);
+    assert.deepEqual(accepted, []);
+    assert.equal(queue.length, 1);
+  } finally {
+    await app.unmount();
+  }
+});

@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { beginMessageLinkRequest } from "@/app/navigation/messageLinkRequests";
 import { resolveMessageLinkDestination } from "@/app/navigation/resolveMessageLinkDestination";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
@@ -18,7 +19,8 @@ import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
  *
  * Returns whether navigation was accepted, so refused links remain queued.
  * Pending lookups cannot navigate after this hook unmounts or the caller's
- * lifecycle signal aborts.
+ * lifecycle signal aborts. Newer activations supersede older pending lookups,
+ * including those started by another mounted message renderer.
  */
 export function useOpenMessageLink() {
   const { goChannel, goForumPost } = useAppNavigation();
@@ -31,16 +33,32 @@ export function useOpenMessageLink() {
   }, []);
 
   return React.useCallback(
-    async (link: ParsedMessageLink, signal?: AbortSignal): Promise<boolean> => {
+    async (
+      link: ParsedMessageLink,
+      options?: {
+        signal?: AbortSignal;
+        /** Disable best-effort fallback when success acknowledges a durable link. */
+        allowChannelFallback?: boolean;
+      },
+    ): Promise<boolean> => {
+      const signal = options?.signal;
       const ownerSignal = lifecycle.current?.signal;
       const cancelled = () => ownerSignal?.aborted || signal?.aborted;
       if (cancelled()) return false;
+      const isCurrent = beginMessageLinkRequest();
       const destination = await resolveMessageLinkDestination(
         link.channelId,
         link.messageId,
         link.threadRootId,
       );
-      if (cancelled()) return false;
+      if (cancelled() || !isCurrent()) return false;
+      if (!destination) {
+        if (options?.allowChannelFallback === false) return false;
+        return goChannel(link.channelId, {
+          messageId: link.messageId,
+          threadRootId: link.threadRootId,
+        });
+      }
       if (destination.kind === "forum-post") {
         return goForumPost(destination.channelId, destination.postId, {
           replyId: destination.replyId,

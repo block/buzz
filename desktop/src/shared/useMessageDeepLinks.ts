@@ -41,7 +41,7 @@ export function useMessageDeepLinks(enabled = true) {
             messageId: payload.messageId,
             threadRootId: payload.threadRootId,
           },
-          signal,
+          { signal, allowChannelFallback: false },
         );
       },
     );

@@ -32,16 +32,15 @@ export type MessageLinkDestination =
  * kind, the way `resolveSearchHitDestination` does for search hits.
  *
  * A message link carries no kind of its own, so the event has to be fetched.
- * Every failure path falls back to the channel destination the caller would
- * have used anyway, so a link never becomes unclickable because the lookup
- * failed.
+ * Returns null on lookup failure so durable callers can keep the link queued.
+ * Interactive callers may choose a best-effort channel fallback.
  */
 export async function resolveMessageLinkDestination(
   channelId: string,
   messageId: string,
   threadRootId?: string | null,
   fetchEvent: typeof getEventById = getEventById,
-): Promise<MessageLinkDestination> {
+): Promise<MessageLinkDestination | null> {
   const channelDestination: MessageLinkDestination = {
     kind: "channel",
     channelId,
@@ -61,7 +60,7 @@ export async function resolveMessageLinkDestination(
       const postId = thread.rootId ?? thread.parentId ?? null;
 
       if (!postId) {
-        return channelDestination;
+        return null;
       }
 
       return {
@@ -79,6 +78,6 @@ export async function resolveMessageLinkDestination(
       messageId,
       error,
     );
-    return channelDestination;
+    return null;
   }
 }
