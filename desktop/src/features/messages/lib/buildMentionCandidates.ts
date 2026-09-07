@@ -79,18 +79,8 @@ export function buildMentionCandidates({
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
-  const ownedRelayPersonaIds = new Set<string>();
-  for (const agent of relayAgents ?? []) {
-    if (
-      agent.personaId &&
-      normalizedCurrentPubkey &&
-      agent.ownerPubkey &&
-      normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey
-    ) {
-      ownedRelayPersonaIds.add(agent.personaId);
-    }
-  }
   const candidatesByPubkey = new Map<string, MentionCandidate>();
+  const ownedRelayPersonaIds = new Set<string>();
   const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
     const pubkey = normalizePubkey(candidate.pubkey);
     if (isArchived(pubkey)) {
@@ -205,6 +195,14 @@ export function buildMentionCandidates({
       isAgent: true,
       isActiveAgent: agent.status === "online" || agent.status === "away",
     });
+    const relayCandidate = candidatesByPubkey.get(pubkey);
+    if (
+      ownedRelayPersonaId &&
+      relayCandidate?.isAgent === true &&
+      relayCandidate.personaId === ownedRelayPersonaId
+    ) {
+      ownedRelayPersonaIds.add(ownedRelayPersonaId);
+    }
   }
   for (const agent of managedAgents ?? []) {
     const pubkey = normalizePubkey(agent.pubkey);

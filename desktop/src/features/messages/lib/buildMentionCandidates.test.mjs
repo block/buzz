@@ -187,6 +187,43 @@ test("a foreign relay agent cannot suppress a colliding local persona", () => {
   );
 });
 
+for (const hiddenBy of ["archive", "eligibility"]) {
+  test(`a relay agent hidden by ${hiddenBy} does not suppress its persona`, () => {
+    const persona = {
+      id: "planner",
+      displayName: "Planner",
+      avatarUrl: null,
+      isActive: true,
+    };
+    const candidates = buildMentionCandidates(
+      input({
+        activePersonas: [persona],
+        currentPubkey: MEMBER_PUBKEY,
+        isArchived:
+          hiddenBy === "archive"
+            ? (pubkey) => pubkey === AGENT_PUBKEY
+            : () => false,
+        mentionableAgentPubkeys:
+          hiddenBy === "eligibility" ? new Set() : new Set([AGENT_PUBKEY]),
+        relayAgents: [
+          {
+            pubkey: AGENT_PUBKEY,
+            ownerPubkey: MEMBER_PUBKEY,
+            personaId: persona.id,
+            name: "Remote Planner",
+            status: "online",
+            channelIds: [],
+          },
+        ],
+      }),
+    );
+
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].kind, "persona");
+    assert.equal(candidates[0].personaId, persona.id);
+  });
+}
+
 test("global search results join only while global search is enabled", () => {
   const userSearchResults = [
     {
