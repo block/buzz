@@ -13,6 +13,12 @@ import {
 // - POST /api/invites/claim  — claim a code, signed by the *joining* key.
 //   This one targets an arbitrary relay (the invite's relay, not necessarily
 //   the active community), so the claim helper takes an explicit ws URL.
+//
+// Canonical-origin signing law: the NIP-98 `u` tag is signed against the
+// origin the relay ADVERTISES in GET /info, while the HTTP request rides
+// the transport host the caller supplied — sign the identity, ride the
+// road (an alias host like relay2.skaists.dev serving the canonical
+// beehivenature.buzz identity otherwise fails invite auth).
 
 const NIP98_KIND = 27235;
 
@@ -75,14 +81,71 @@ async function nip98PostHeader(url: string, body: string): Promise<string> {
   return `Nostr ${btoa(JSON.stringify(authEvent))}`;
 }
 
+/**
+ * The canonical HTTP origin this relay advertises for itself, from GET
+ * `/info` on the TRANSPORT road.
+ *
+ * A deployment's identity can differ from the host a client rides
+ * (`relay2.skaists.dev` advertises `wss://beehivenature.buzz`): the relay
+ * verifies NIP-98 `u` tags against the canonical origin, so clients must
+ * SIGN the identity while RIDING the road. When `/info` advertises no
+ * separate origin, the transport host IS the identity and signing stays
+ * on it — but a PRESENT-yet-malformed advertisement fails closed: never
+ * a silent fallback to the transport host (that exact fallback is the
+ * alias-host auth bug this fixes).
+ */
+async function canonicalSigningBase(transportHttpBase: string): Promise<string> {
+  const infoUrl = `${transportHttpBase.replace(/\/+$/, "")}/info`;
+  const response = await fetch(infoUrl, {
+    signal: AbortSignal.timeout(INVITE_REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`relay /info HTTP ${response.status}`);
+  }
+  const info = (await response.json().catch(() => null)) as {
+    push?: { origin?: unknown };
+  } | null;
+  const advertised = info?.push?.origin;
+  if (advertised === undefined) {
+    return transportHttpBase;
+  }
+  if (typeof advertised !== "string") {
+    throw new Error("relay /info advertises a malformed canonical origin");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(advertised);
+  } catch {
+    throw new Error("relay /info canonical origin failed URL verification");
+  }
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    throw new Error("relay /info canonical origin failed URL verification");
+  }
+  const hostname = parsed.hostname;
+  if (
+    !(
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname.includes(".")
+    )
+  ) {
+    throw new Error("relay /info canonical origin failed URL verification");
+  }
+  return relayHttpFromWs(advertised);
+}
+
 async function invitePost<T>(
   httpBase: string,
   path: string,
   body: string,
 ): Promise<T> {
-  const url = `${httpBase.replace(/\/+$/, "")}${path}`;
-  const authorization = await nip98PostHeader(url, body);
-  const response = await fetch(url, {
+  const transportUrl = `${httpBase.replace(/\/+$/, "")}${path}`;
+  // Sign the canonical identity; request the transport road. With no
+  // advertised origin these are the same URL and behavior is unchanged.
+  const signingBase = await canonicalSigningBase(httpBase);
+  const signedUrl = `${signingBase.replace(/\/+$/, "")}${path}`;
+  const authorization = await nip98PostHeader(signedUrl, body);
+  const response = await fetch(transportUrl, {
     method: "POST",
     headers: {
       Authorization: authorization,

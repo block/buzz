@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getJoinPolicy, mintInvite } from "./invites.ts";
+import { claimInvite, getJoinPolicy, mintInvite } from "./invites.ts";
 
 function withFetch(response, run) {
   const originalFetch = globalThis.fetch;
@@ -121,7 +121,10 @@ test("mintInvite serializes bounded max_uses in the request body", async () => {
   try {
     const originalFetch = globalThis.fetch;
     let capturedBody;
-    globalThis.fetch = async (_url, init) => {
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith("/info")) {
+        return new Response(JSON.stringify({}), { status: 200 });
+      }
       capturedBody = JSON.parse(init.body);
       return new Response(
         JSON.stringify({
@@ -155,7 +158,10 @@ test("mintInvite omits max_uses when null (unlimited)", async () => {
   try {
     const originalFetch = globalThis.fetch;
     let capturedBody;
-    globalThis.fetch = async (_url, init) => {
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith("/info")) {
+        return new Response(JSON.stringify({}), { status: 200 });
+      }
       capturedBody = JSON.parse(init.body);
       return new Response(
         JSON.stringify({
@@ -186,7 +192,10 @@ test("mintInvite omits max_uses when not provided (unlimited default)", async ()
   try {
     const originalFetch = globalThis.fetch;
     let capturedBody;
-    globalThis.fetch = async (_url, init) => {
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith("/info")) {
+        return new Response(JSON.stringify({}), { status: 200 });
+      }
       capturedBody = JSON.parse(init.body);
       return new Response(
         JSON.stringify({
@@ -207,5 +216,107 @@ test("mintInvite omits max_uses when not provided (unlimited default)", async ()
     }
   } finally {
     teardownTauriStubs();
+  }
+});
+
+// --- canonical-origin signing (alias-host auth fix) ---
+
+function setupClaimFetch(infoBody, claimResult = { status: "joined" }) {
+  const calls = { urls: [], claimInit: null };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.urls.push(String(url));
+    if (String(url).endsWith("/info")) {
+      return new Response(JSON.stringify(infoBody), { status: 200 });
+    }
+    calls.claimInit = init;
+    return new Response(
+      JSON.stringify({
+        status: claimResult.status,
+        community_id: "cid",
+        host: "beehivenature.buzz",
+        role: "member",
+      }),
+    );
+  };
+  return {
+    calls,
+    restore() {
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
+
+function signedUTag(calls) {
+  const signCall = calls.invokeArgs.find((c) => c.command === "sign_event");
+  assert.ok(signCall, "sign_event was invoked");
+  return signCall.args.tags.find((t) => t[0] === "u")?.[1];
+}
+
+test("claimInvite signs the canonical origin from /info while requesting the transport host", async () => {
+  // relay2.skaists.dev advertises beehivenature.buzz — the alias-host case
+  const tauri = setupTauriStubs("https://unused-active-relay.example");
+  const fetchMock = setupClaimFetch({
+    push: { origin: "wss://beehivenature.buzz" },
+  });
+  try {
+    const result = await claimInvite("wss://relay2.skaists.dev", "v2.code");
+    assert.equal(result.status, "joined");
+    assert.equal(result.host, "beehivenature.buzz");
+    // the road: /info and the claim POST both rode the transport host
+    assert.deepEqual(fetchMock.calls.urls, [
+      "https://relay2.skaists.dev/info",
+      "https://relay2.skaists.dev/api/invites/claim",
+    ]);
+    // the identity: the u tag is signed against the CANONICAL origin
+    assert.equal(
+      signedUTag(tauri),
+      "https://beehivenature.buzz/api/invites/claim",
+    );
+  } finally {
+    fetchMock.restore();
+    teardownTauriStubs();
+  }
+});
+
+test("claimInvite keeps signing the transport host when /info advertises no canonical origin", async () => {
+  // plain relay: no push.origin — the road IS the identity
+  const tauri = setupTauriStubs("https://unused-active-relay.example");
+  const fetchMock = setupClaimFetch({ name: "Buzz Relay" });
+  try {
+    await claimInvite("wss://relay.example", "v2.code");
+    assert.equal(
+      signedUTag(tauri),
+      "https://relay.example/api/invites/claim",
+    );
+  } finally {
+    fetchMock.restore();
+    teardownTauriStubs();
+  }
+});
+
+test("claimInvite fails closed on a malformed canonical advertisement", async () => {
+  for (const bad of [
+    { push: { origin: "not a url" } },
+    { push: { origin: "ftp://beehivenature.buzz" } },
+    { push: { origin: "wss://localhost9" } },
+    { push: { origin: 42 } },
+  ]) {
+    const tauri = setupTauriStubs("https://unused-active-relay.example");
+    const fetchMock = setupClaimFetch(bad);
+    try {
+      await assert.rejects(
+        claimInvite("wss://relay2.skaists.dev", "v2.code"),
+        /canonical origin|URL verification|malformed/,
+      );
+      // nothing was claimed — no POST left the client
+      assert.equal(
+        fetchMock.calls.urls.filter((u) => u.endsWith("/claim")).length,
+        0,
+      );
+    } finally {
+      fetchMock.restore();
+      teardownTauriStubs();
+    }
   }
 });
