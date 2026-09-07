@@ -56,7 +56,7 @@ fn sort_teams_empty_is_noop() {
 }
 
 #[test]
-fn merge_teams_adds_missing_built_ins() {
+fn merge_teams_does_not_add_missing_built_ins() {
     let synthetic = BuiltInTeam {
         id: "builtin-team:test",
         name: "Test Team",
@@ -67,10 +67,8 @@ fn merge_teams_adds_missing_built_ins() {
     let (records, changed) =
         merge_teams_impl(&[synthetic], &[], Vec::new(), "2026-05-07T00:00:00Z");
 
-    assert!(changed);
-    assert_eq!(records.len(), 1);
-    assert!(records.iter().all(|r| r.is_builtin));
-    assert_eq!(records[0].id, "builtin-team:test");
+    assert!(!changed);
+    assert!(records.is_empty());
 }
 
 #[test]
@@ -111,7 +109,7 @@ fn merge_teams_preserves_unrelated_user_teams() {
         merge_teams_impl(&[synthetic], &[], vec![user_team], "2026-05-07T00:00:00Z");
 
     assert!(records.iter().any(|t| t.id == "user-uuid"));
-    assert!(records.iter().any(|t| t.id == "builtin-team:test"));
+    assert!(!records.iter().any(|t| t.id == "builtin-team:test"));
 }
 
 #[test]
@@ -155,12 +153,11 @@ fn merge_teams_repromotes_existing_builtin_marked_as_custom() {
 }
 
 #[test]
-fn validate_team_deletion_rejects_built_ins() {
+fn validate_team_deletion_allows_built_ins() {
     let mut built_in = team("builtin-team:fizz", "Fizz");
     built_in.is_builtin = true;
 
-    let err = validate_team_deletion(&built_in).unwrap_err();
-    assert_eq!(err, "Built-in teams cannot be deleted.");
+    assert!(validate_team_deletion(&built_in, &[]).is_ok());
 }
 
 // ── agents_referencing_team ─────────────────────────────────────────────
@@ -331,10 +328,17 @@ fn migration_customized_fizz_is_demoted_to_user_team() {
 }
 
 #[test]
-fn welcome_team_is_seeded_and_idempotent() {
-    let (records, changed) = merge_teams(Vec::new(), "2026-07-01T00:00:00Z");
+fn welcome_team_is_optional_and_empty_store_stays_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("teams.json");
+    assert!(load_teams_readonly(&path).unwrap().is_empty());
+    std::fs::write(&path, b"[]").unwrap();
+    assert!(load_teams_readonly(&path).unwrap().is_empty());
+}
 
-    assert!(changed);
+#[test]
+fn welcome_team_template_is_preserved_and_idempotent() {
+    let records = super::built_in_team_records(super::BUILT_IN_TEAMS, "2026-07-01T00:00:00Z");
     assert_eq!(records.len(), 1);
     let welcome = &records[0];
     assert_eq!(welcome.id, "builtin-team:welcome");
@@ -364,7 +368,7 @@ fn welcome_team_is_seeded_and_idempotent() {
 
 #[test]
 fn welcome_team_seed_does_not_overwrite_customization() {
-    let (mut records, _) = merge_teams(Vec::new(), "2026-07-01T00:00:00Z");
+    let mut records = super::built_in_team_records(super::BUILT_IN_TEAMS, "2026-07-01T00:00:00Z");
     let welcome = records
         .iter_mut()
         .find(|team| team.id == "builtin-team:welcome")
@@ -401,9 +405,8 @@ fn load_teams_readonly_absent_file_performs_no_write() {
 
     let records = load_teams_readonly(&path).unwrap();
 
-    // Returns the merged built-in list without persisting it.
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].id, "builtin-team:welcome");
+    // A fresh store has no selected teams, and reads do not opt in.
+    assert!(records.is_empty());
 
     // The file must still NOT exist — no write-on-load side effect.
     assert!(

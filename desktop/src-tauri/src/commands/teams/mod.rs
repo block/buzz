@@ -512,6 +512,21 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+// Keep the authoritative delete and its publication policy at one testable seam.
+fn delete_team_and_retain(
+    team: &TeamRecord,
+    delete: impl FnOnce() -> Result<Vec<String>, String>,
+    retain: impl FnOnce(&str),
+) -> Result<Vec<String>, String> {
+    let cascaded = delete()?;
+    // Built-in teams are device-local templates, not owner-published records.
+    // Removing one must not delete another device's customized copy.
+    if !team.is_builtin {
+        retain(&team.id);
+    }
+    Ok(cascaded)
+}
+
 #[tauri::command]
 pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
@@ -521,16 +536,18 @@ pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        let cascaded_persona_d_tags = delete_team_with_cascade(&app, &id)?;
-        // delete_team_with_cascade rejects built-in teams via validate_team_deletion,
-        // so reaching here means this team was owner-published — tombstone it. The
-        // d_tag is the team id, captured before the record left the store.
-        tombstone_team_pending(&app, &state, &id);
-        // The catalog projection is a separate coordinate with its own
-        // retained head, so the 30176 tombstone above does not retract it.
-        // Without this, deleting a shared team would leave a live catalog
-        // entry the owner can no longer see or unshare.
-        pending::tombstone_team_catalog_pending(&app, &state, &id);
+        let team = load_teams(&app)?
+            .into_iter()
+            .find(|team| team.id == id)
+            .ok_or_else(|| format!("team {id} not found"))?;
+        let cascaded_persona_d_tags = delete_team_and_retain(
+            &team,
+            || delete_team_with_cascade(&app, &id),
+            |id| {
+                tombstone_team_pending(&app, &state, id);
+                pending::tombstone_team_catalog_pending(&app, &state, id);
+            },
+        )?;
         // Tombstone the cascaded personas too, so their orphaned kind:30175 heads
         // don't linger on the relay (F4). Each d-tag was captured pre-removal.
         for persona_d_tag in &cascaded_persona_d_tags {

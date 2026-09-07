@@ -109,6 +109,7 @@ type MockPersonaSeed = {
 
 type MockTeamSeed = {
   id?: string;
+  isBuiltin?: boolean;
   name: string;
   description?: string | null;
   personaIds: string[];

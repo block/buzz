@@ -146,6 +146,37 @@ export function AgentsView() {
           <PageHeader
             action={
               <>
+                <DropdownMenu modal={false}>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={isActionPending}
+                    >
+                      Starter templates
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {(personas.personasQuery.data ?? [])
+                      .filter((persona) => persona.isBuiltIn)
+                      .map((persona) => (
+                        <DropdownMenuItem
+                          key={persona.id}
+                          disabled={persona.isActive || isActionPending}
+                          onClick={() => {
+                            void personas.handleSetActive(
+                              persona,
+                              true,
+                              "library",
+                            );
+                          }}
+                        >
+                          {persona.isActive ? "Added" : "Add"}{" "}
+                          {persona.displayName}
+                        </DropdownMenuItem>
+                      ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
                   <Button
                     data-testid="agent-defaults-button"
