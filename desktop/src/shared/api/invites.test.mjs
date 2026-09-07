@@ -290,10 +290,7 @@ test("claimInvite keeps signing the transport host when /info advertises no cano
   const fetchMock = setupClaimFetch({ name: "Buzz Relay" });
   try {
     await claimInvite("wss://relay.example", "v2.code");
-    assert.equal(
-      signedUTag(tauri),
-      "https://relay.example/api/invites/claim",
-    );
+    assert.equal(signedUTag(tauri), "https://relay.example/api/invites/claim");
   } finally {
     fetchMock.restore();
     teardownTauriStubs();
@@ -370,7 +367,11 @@ test("claimInvite fails closed when /info decodes to a non-object root", async (
 });
 
 test("claimInvite fails closed when the push descriptor is the wrong shape", async () => {
-  for (const bad of [{ push: "not-an-object" }, { push: [1, 2] }, { push: null }]) {
+  for (const bad of [
+    { push: "not-an-object" },
+    { push: [1, 2] },
+    { push: null },
+  ]) {
     const tauri = setupTauriStubs("https://unused-active-relay.example");
     const fetchMock = setupClaimFetch(bad);
     try {

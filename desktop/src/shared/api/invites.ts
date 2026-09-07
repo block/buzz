@@ -104,7 +104,9 @@ async function nip98PostHeader(url: string, body: string): Promise<string> {
  *   (never by concatenating the raw advertisement string).
  * - No DNS/network resolution is performed as validation.
  */
-async function canonicalSigningBase(transportHttpBase: string): Promise<string> {
+async function canonicalSigningBase(
+  transportHttpBase: string,
+): Promise<string> {
   const infoUrl = `${transportHttpBase.replace(/\/+$/, "")}/info`;
   const response = await fetch(infoUrl, {
     signal: AbortSignal.timeout(INVITE_REQUEST_TIMEOUT_MS),
@@ -119,13 +121,21 @@ async function canonicalSigningBase(transportHttpBase: string): Promise<string> 
   } catch {
     throw new Error("relay /info returned a malformed document");
   }
-  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
+  if (
+    typeof decoded !== "object" ||
+    decoded === null ||
+    Array.isArray(decoded)
+  ) {
     throw new Error("relay /info returned a malformed document");
   }
   const info = decoded as { push?: unknown };
   let advertised: unknown;
   if (info.push !== undefined) {
-    if (typeof info.push !== "object" || info.push === null || Array.isArray(info.push)) {
+    if (
+      typeof info.push !== "object" ||
+      info.push === null ||
+      Array.isArray(info.push)
+    ) {
       throw new Error("relay /info returned a malformed push descriptor");
     }
     advertised = (info.push as { origin?: unknown }).origin;
