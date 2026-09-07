@@ -13,6 +13,20 @@ export function isMarketProtocolMessage(
   return parseMarketEnvelope(message.body) !== null;
 }
 
+const MARKET_PRODUCT_IMAGE_LABEL = "Product image for this offer";
+
+function isRedundantMarketImageMessage(
+  message: Pick<TimelineMessage, "body" | "parentId">,
+  projection: MarketProjection,
+): boolean {
+  const imageUrl = projection.contract.listing.imageUrl;
+  if (!imageUrl || message.parentId != null) return false;
+  return (
+    message.body.trim() ===
+    `${MARKET_PRODUCT_IMAGE_LABEL}\n![image](${imageUrl})`
+  );
+}
+
 export function marketTimelineAnchor(
   messages: TimelineMessage[],
   isChannelCreated: (message: TimelineMessage) => boolean,
@@ -42,7 +56,11 @@ export function selectMarketTimelineMessages(
   projection: MarketProjection | null,
 ): TimelineMessage[] {
   if (!projection) return messages;
-  return messages.filter((message) => !isMarketProtocolMessage(message));
+  return messages.filter(
+    (message) =>
+      !isMarketProtocolMessage(message) &&
+      !isRedundantMarketImageMessage(message, projection),
+  );
 }
 
 export function useMarketTimelineMessages(messages: TimelineMessage[]) {

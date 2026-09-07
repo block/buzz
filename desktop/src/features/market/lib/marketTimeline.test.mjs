@@ -104,18 +104,38 @@ test("market timeline hides protocol events but leaves negotiation in its bid th
     bid.id,
     bid.id,
   );
-  const ordinary = message("5".repeat(64), "General market note");
+  const imageUrl = "https://relay.example/media/product.png";
+  const productImage = message(
+    "5".repeat(64),
+    `Product image for this offer\n![image](${imageUrl})`,
+  );
+  const imageReply = message(
+    "6".repeat(64),
+    `Product image for this offer\n![image](${imageUrl})`,
+    bid.id,
+    bid.id,
+  );
+  const ordinary = message("7".repeat(64), "General market note");
   const projection = {
     listingEventId: contract.id,
+    contract: { listing: { imageUrl } },
     bids: [{ eventId: bid.id }],
   };
 
   assert.deepEqual(
     selectMarketTimelineMessages(
-      [contract, bid, negotiation, nestedProtocol, ordinary],
+      [
+        contract,
+        bid,
+        negotiation,
+        nestedProtocol,
+        productImage,
+        imageReply,
+        ordinary,
+      ],
       projection,
     ).map(({ id }) => id),
-    [negotiation.id, ordinary.id],
+    [negotiation.id, imageReply.id, ordinary.id],
   );
   assert.equal(selectMarketTimelineMessages([contract, bid], null).length, 2);
 });

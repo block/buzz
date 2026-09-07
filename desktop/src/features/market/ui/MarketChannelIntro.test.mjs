@@ -70,6 +70,11 @@ test("the contract card leaves horizontal alignment to the board", () => {
     }),
   );
   const sectionClass = html.match(/<section class="([^"]+)"/)?.[1] ?? "";
+  const imageFrameClass =
+    html.match(/<div class="([^"]*rounded-xl[^"]*)"/)?.[1] ?? "";
 
   assert.doesNotMatch(sectionClass, /(?:^|\s)m[lrxy]-/);
+  assert.match(imageFrameClass, /(?:^|\s)m-4(?:\s|$)/);
+  assert.match(imageFrameClass, /(?:^|\s)overflow-hidden(?:\s|$)/);
+  assert.doesNotMatch(html, /OFFER · FIXED · FINITE/i);
 });
