@@ -735,6 +735,12 @@ impl UsageTracker {
                 // Already poisoned: stays poisoned regardless of this notification.
                 poisoned @ Some(None) => poisoned,
             };
+            let (context_used_tokens, context_limit_tokens) =
+                if payload.used > 0 && payload.context_limit > 0 {
+                    (Some(payload.used), Some(payload.context_limit))
+                } else {
+                    (None, None)
+                };
             self.pending = Some(TurnUsage {
                 session_id: session_id.to_string(),
                 turn_seq,
@@ -752,8 +758,8 @@ impl UsageTracker {
                 cumulative_cache_read_tokens: current_cached_input,
                 cumulative_cache_write_tokens: current_cache_write,
                 model: payload.model.clone(),
-                context_used_tokens: (payload.used > 0).then_some(payload.used),
-                context_limit_tokens: (payload.context_limit > 0).then_some(payload.context_limit),
+                context_used_tokens,
+                context_limit_tokens,
                 // The folded identity is written in take() — use a placeholder
                 // here and replace it before returning the record.
                 pricing_identity: None,
@@ -1020,7 +1026,7 @@ mod tests {
     // ── Context-window snapshot threading ───────────────────────────────────
 
     #[test]
-    fn context_snapshot_is_last_write_wins_and_zero_means_unknown() {
+    fn context_snapshot_is_last_write_wins_and_invalid_pair_means_unknown() {
         let mut tracker = UsageTracker::default();
         tracker.seed_zero_baseline("sess-context");
         tracker.begin_turn("sess-context");
@@ -1036,7 +1042,7 @@ mod tests {
         tracker.record("sess-context", &final_snapshot);
 
         let usage = tracker.take().expect("turn usage");
-        assert_eq!(usage.context_used_tokens, Some(210_000));
+        assert_eq!(usage.context_used_tokens, None);
         assert_eq!(usage.context_limit_tokens, None);
     }
 

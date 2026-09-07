@@ -218,7 +218,12 @@ export function ChannelScreenHeader({
               pubkey={activeDmParticipant?.pubkey}
               size="dm"
             />
-            <AgentStatusForPubkey pubkey={activeDmParticipant?.pubkey} />
+            {activeDmParticipant?.isAgent ? (
+              <AgentStatusForPubkey
+                channelId={activeChannel.id}
+                pubkey={activeDmParticipant.pubkey}
+              />
+            ) : null}
           </>
         ) : null
       }

@@ -56,6 +56,33 @@ void main() {
     },
   );
 
+  testWidgets('shows unavailable without drawing a false progress ring', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildIndicator(
+        AgentUsageRelayState(
+          connection: AgentUsageConnectionState.open,
+          snapshotsByAgent: {
+            _agentPubkey: AgentUsageSnapshot(
+              harness: 'goose',
+              lastEventAt: DateTime.now(),
+            ),
+          },
+        ),
+      ),
+    );
+
+    final semantics = find.bySemanticsLabel('Agent usage: unavailable');
+    expect(semantics, findsOneWidget);
+    final paints = find.descendant(
+      of: semantics,
+      matching: find.byType(CustomPaint),
+    );
+    expect(paints, findsOneWidget);
+    expect(tester.widget<CustomPaint>(paints).painter, isNull);
+  });
+
   testWidgets('shows the usage percentage when a fresh snapshot exists', (
     tester,
   ) async {
@@ -150,6 +177,47 @@ void main() {
 
     expect(
       find.bySemanticsLabel('Agent usage: 50%, data may be out of date'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('keeps many provider windows reachable by scrolling', (
+    tester,
+  ) async {
+    final windows = List.generate(
+      30,
+      (index) => AgentUsageWindow(
+        label: 'Provider window $index with a deliberately long label',
+        usedPercent: index.toDouble(),
+      ),
+    );
+    await tester.pumpWidget(
+      buildIndicator(
+        AgentUsageRelayState(
+          connection: AgentUsageConnectionState.open,
+          snapshotsByAgent: {
+            _agentPubkey: AgentUsageSnapshot(
+              harness: 'goose',
+              lastEventAt: DateTime.now(),
+              accountUsageWindows: windows,
+            ),
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.bySemanticsLabel('Agent usage: 29% used'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(SingleChildScrollView), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Provider window 29 with a deliberately long label'),
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
+    expect(
+      find.text('Provider window 29 with a deliberately long label'),
       findsOneWidget,
     );
   });

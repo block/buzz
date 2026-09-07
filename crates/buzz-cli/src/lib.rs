@@ -2276,6 +2276,7 @@ mod tests {
             "media",
             "mem",
             "messages",
+            "metrics",
             "moderation",
             "notes",
             "pack",
@@ -2374,6 +2375,7 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(names(&cmd, "metrics"), vec!["publish"]);
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),

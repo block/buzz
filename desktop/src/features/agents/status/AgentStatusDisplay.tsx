@@ -56,6 +56,12 @@ function MetricBar({
   percent: number;
   detail?: string | null;
 }) {
+  const toneClass =
+    percent >= 90
+      ? "[&>div]:bg-destructive"
+      : percent >= 70
+        ? "[&>div]:bg-amber-500"
+        : "[&>div]:bg-muted-foreground";
   return (
     <div className="space-y-1">
       <div className="flex min-w-0 items-baseline justify-between gap-2 text-xs">
@@ -66,7 +72,7 @@ function MetricBar({
       </div>
       <Progress
         aria-label={`${label}: ${formatPercent(percent)}`}
-        className="h-1 bg-foreground/10"
+        className={cn("h-1 bg-foreground/10", toneClass)}
         value={percent}
       />
       {detail ? (
@@ -131,6 +137,12 @@ export function AgentStatusIndicator({
   status: AgentStatusViewModel;
 }) {
   const percent = primaryPercent(status);
+  const toneClass =
+    status.state === "error" || (percent !== null && percent >= 90)
+      ? "text-destructive"
+      : status.state === "stale" || (percent !== null && percent >= 70)
+        ? "text-amber-600 dark:text-amber-400"
+        : "text-muted-foreground";
   const label =
     percent === null
       ? `${status.label} usage unavailable`
@@ -140,12 +152,8 @@ export function AgentStatusIndicator({
     <span
       aria-label={label}
       className={cn(
-        "relative inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold leading-none tabular-nums",
-        status.state === "stale"
-          ? "text-amber-600 dark:text-amber-400"
-          : status.state === "error"
-            ? "text-destructive"
-            : "text-muted-foreground",
+        "relative inline-flex size-8 shrink-0 items-center justify-center rounded-full text-3xs font-semibold leading-none tabular-nums",
+        toneClass,
         className,
       )}
       role="img"
@@ -195,7 +203,10 @@ export function AgentStatusDetails({
   const usageWindowOccurrences = new Map<string, number>();
 
   return (
-    <div className="w-64 space-y-3" data-testid="agent-status-details">
+    <div
+      className="max-h-[min(70vh,32rem)] w-64 space-y-3 overflow-y-auto overscroll-contain pr-1"
+      data-testid="agent-status-details"
+    >
       <header className="flex min-w-0 items-center justify-between gap-2">
         <span className="truncate text-sm font-semibold">{status.label}</span>
         {status.state === "stale" ? (
@@ -208,7 +219,7 @@ export function AgentStatusDetails({
         <>
           {status.contextPercent !== null ? (
             <MetricBar
-              detail={`${formatTokenCount(status.contextUsedTokens)} / ${formatTokenCount(status.contextLimitTokens)} tokens`}
+              detail={`${formatTokenCount(status.contextUsedTokens)} / ${formatTokenCount(status.contextLimitTokens)} tokens${formatDataAge(status.contextAgeSeconds) ? ` · ${formatDataAge(status.contextAgeSeconds)}` : ""}`}
               label="Context"
               percent={status.contextPercent}
             />
@@ -217,6 +228,12 @@ export function AgentStatusDetails({
               Context unavailable
             </div>
           )}
+          {status.usageWindows.length > 0 ? (
+            <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span>Provider limits</span>
+              <span>{formatDataAge(status.usageWindowsAgeSeconds)}</span>
+            </div>
+          ) : null}
           {status.usageWindows.map((window) => {
             const occurrence = usageWindowOccurrences.get(window.label) ?? 0;
             usageWindowOccurrences.set(window.label, occurrence + 1);
@@ -307,8 +324,20 @@ export function PermanentAgentStatusSidebarPanel() {
   return <AgentStatusSidebarPanel statuses={statuses} />;
 }
 
-export function AgentStatusForPubkey({ pubkey }: { pubkey?: string }) {
-  const statuses = usePermanentAgentStatuses();
+export function AgentStatusForPubkey({
+  channelId,
+  pubkey,
+  threadRootId,
+}: {
+  channelId?: string;
+  pubkey?: string;
+  threadRootId?: string;
+}) {
+  const statuses = usePermanentAgentStatuses({
+    agentPubkey: pubkey ?? null,
+    channelId,
+    threadRootId,
+  });
   const normalizedPubkey = pubkey?.trim().toLowerCase();
   const status = normalizedPubkey
     ? statuses.find(

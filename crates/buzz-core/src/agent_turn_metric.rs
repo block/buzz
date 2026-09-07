@@ -6,6 +6,7 @@
 //!
 //! See `docs/nips/NIP-AM.md` for the full specification.
 
+use chrono::DateTime;
 use nostr::{Event, Keys, PublicKey};
 use serde::{Deserialize, Serialize};
 
@@ -199,12 +200,43 @@ fn default_delta_reliable() -> bool {
 }
 
 impl AgentTurnMetricPayload {
-    /// Validate numeric constraints from NIP-AM §Numeric validity.
+    /// Validate the NIP-AM payload contract before encryption or after decryption.
     ///
-    /// Returns `Err` when any `cost_usd` field (in `turn` or `cumulative`) is
-    /// present but negative or non-finite (NaN or infinity). Token counts are
-    /// typed as `Option<u64>` and therefore cannot be negative by construction.
+    /// Returns `Err` when required fields, structural relationships, bounded
+    /// strings/windows, RFC 3339 times, pricing identity, context pairs, or
+    /// numeric values violate NIP-AM. Token counts are `Option<u64>` and cannot
+    /// be negative by construction.
     pub fn validate(&self) -> Result<(), ObserverPayloadError> {
+        const MAX_HARNESS_LEN: usize = 128;
+        const MAX_IDENTIFIER_LEN: usize = 256;
+        const MAX_USAGE_WINDOWS: usize = 64;
+        const MAX_WINDOW_LABEL_LEN: usize = 128;
+
+        fn invalid(message: impl Into<String>) -> ObserverPayloadError {
+            ObserverPayloadError::InvalidPayload(message.into())
+        }
+
+        fn check_optional_text(
+            value: Option<&str>,
+            field: &str,
+            max_len: usize,
+        ) -> Result<(), ObserverPayloadError> {
+            if let Some(value) = value {
+                if value.trim().is_empty() || value.len() > max_len {
+                    return Err(invalid(format!(
+                        "{field} must be non-empty and at most {max_len} bytes"
+                    )));
+                }
+            }
+            Ok(())
+        }
+
+        fn check_rfc3339(value: &str, field: &str) -> Result<(), ObserverPayloadError> {
+            DateTime::parse_from_rfc3339(value)
+                .map(|_| ())
+                .map_err(|_| invalid(format!("{field} must be RFC 3339")))
+        }
+
         fn check_cost(cost: Option<f64>, field: &str) -> Result<(), ObserverPayloadError> {
             if let Some(c) = cost {
                 if !c.is_finite() || c < 0.0 {
@@ -215,19 +247,114 @@ impl AgentTurnMetricPayload {
             }
             Ok(())
         }
+
+        fn counts_have_observation(counts: &TokenCounts) -> bool {
+            counts.input_tokens.is_some()
+                || counts.output_tokens.is_some()
+                || counts.total_tokens.is_some()
+                || counts.cost_usd.is_some()
+                || counts.cache_read_tokens.is_some()
+                || counts.cache_write_tokens.is_some()
+        }
+
+        if self.harness.trim().is_empty() || self.harness.len() > MAX_HARNESS_LEN {
+            return Err(invalid(format!(
+                "harness must be non-empty and at most {MAX_HARNESS_LEN} bytes"
+            )));
+        }
+        check_rfc3339(&self.timestamp, "timestamp")?;
+        check_optional_text(self.model.as_deref(), "model", MAX_IDENTIFIER_LEN)?;
+        check_optional_text(self.channel_id.as_deref(), "channelId", MAX_IDENTIFIER_LEN)?;
+        check_optional_text(self.session_id.as_deref(), "sessionId", MAX_IDENTIFIER_LEN)?;
+        check_optional_text(self.turn_id.as_deref(), "turnId", MAX_IDENTIFIER_LEN)?;
+
+        if let Some(thread_root_id) = self.thread_root_id.as_deref() {
+            if self.channel_id.is_none()
+                || thread_root_id.len() != 64
+                || !thread_root_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(invalid(
+                    "threadRootId requires channelId and must be 64 lowercase hex characters",
+                ));
+            }
+        }
+
+        if self.cumulative.is_some() && (self.session_id.is_none() || self.turn_seq.is_none()) {
+            return Err(invalid(
+                "sessionId and turnSeq are required when cumulative is present",
+            ));
+        }
+
+        match (self.context_used_tokens, self.context_limit_tokens) {
+            (None, None) => {}
+            (Some(used), Some(limit)) if used > 0 && limit > 0 => {}
+            _ => {
+                return Err(invalid(
+                    "contextUsedTokens and contextLimitTokens must be a complete positive pair",
+                ));
+            }
+        }
+
         if let Some(t) = &self.turn {
             check_cost(t.cost_usd, "turn.costUsd")?;
         }
         if let Some(c) = &self.cumulative {
             check_cost(c.cost_usd, "cumulative.costUsd")?;
         }
+        if self.account_usage_windows.len() > MAX_USAGE_WINDOWS {
+            return Err(invalid(format!(
+                "accountUsageWindows must contain at most {MAX_USAGE_WINDOWS} entries"
+            )));
+        }
         for window in &self.account_usage_windows {
+            if window.label.trim().is_empty() || window.label.len() > MAX_WINDOW_LABEL_LEN {
+                return Err(invalid(format!(
+                    "accountUsageWindows.label must be non-empty and at most {MAX_WINDOW_LABEL_LEN} bytes"
+                )));
+            }
             if !window.used_percent.is_finite() || window.used_percent < 0.0 {
                 return Err(ObserverPayloadError::InvalidPayload(format!(
                     "accountUsageWindows.usedPercent must be finite and non-negative (got {})",
                     window.used_percent
                 )));
             }
+            if let Some(reset_at) = window.reset_at.as_deref() {
+                check_rfc3339(reset_at, "accountUsageWindows.resetAt")?;
+            }
+        }
+
+        if let Some(pricing) = &self.pricing_identity {
+            if !matches!(
+                pricing.authority.as_str(),
+                "api.anthropic.com" | "api.openai.com" | "openrouter.ai"
+            ) {
+                return Err(invalid("pricingIdentity.authority is not registered"));
+            }
+            check_optional_text(
+                Some(&pricing.model),
+                "pricingIdentity.model",
+                MAX_IDENTIFIER_LEN,
+            )?;
+            check_optional_text(
+                pricing.cache_class.as_deref(),
+                "pricingIdentity.cacheClass",
+                MAX_IDENTIFIER_LEN,
+            )?;
+        }
+
+        let has_observation = self.turn.as_ref().is_some_and(counts_have_observation)
+            || self
+                .cumulative
+                .as_ref()
+                .is_some_and(counts_have_observation)
+            || self.context_used_tokens.is_some()
+            || !self.account_usage_windows.is_empty();
+        if !has_observation {
+            return Err(invalid(
+                "agent turn metric must contain observed usage, context, or account windows",
+            ));
         }
         Ok(())
     }
@@ -236,9 +363,8 @@ impl AgentTurnMetricPayload {
 /// Encrypt an [`AgentTurnMetricPayload`] into a NIP-44 v2 ciphertext string
 /// using the agent's key pair and the owner's public key.
 ///
-/// Returns `Err(ObserverPayloadError::InvalidPayload)` if any `cost_usd` field
-/// is negative or non-finite (NaN/inf), in accordance with NIP-AM §Numeric
-/// validity.
+/// Returns `Err(ObserverPayloadError::InvalidPayload)` when the payload fails
+/// the complete NIP-AM validation contract.
 ///
 /// This is the content field of a `kind:44200` event.
 pub fn encrypt_agent_turn_metric(
@@ -255,15 +381,61 @@ pub fn encrypt_agent_turn_metric(
 /// `recipient_keys` is the owner's key pair.
 ///
 /// Returns `Err(ObserverPayloadError::InvalidPayload)` if the decrypted payload
-/// fails numeric validation (e.g. negative or non-finite `costUsd`), mirroring
-/// the fail-closed contract of [`encrypt_agent_turn_metric`].
+/// fails the complete validation contract, mirroring the fail-closed behavior
+/// of [`encrypt_agent_turn_metric`].
 pub fn decrypt_agent_turn_metric(
     recipient_keys: &Keys,
     event: &Event,
 ) -> Result<AgentTurnMetricPayload, ObserverPayloadError> {
+    validate_agent_turn_metric_envelope(recipient_keys, event)?;
     let payload: AgentTurnMetricPayload = decrypt_observer_payload(recipient_keys, event)?;
     payload.validate()?;
     Ok(payload)
+}
+
+/// Validate the signed NIP-AM event envelope before attempting decryption.
+pub fn validate_agent_turn_metric_envelope(
+    recipient_keys: &Keys,
+    event: &Event,
+) -> Result<(), ObserverPayloadError> {
+    let invalid = |message: &str| ObserverPayloadError::InvalidPayload(message.to_string());
+    if event.kind.as_u16() != 44_200 {
+        return Err(invalid("event kind must be 44200"));
+    }
+    if !event.verify_id() || !event.verify_signature() {
+        return Err(invalid("event id and signature must be valid"));
+    }
+
+    let mut owner_tag: Option<&str> = None;
+    let mut agent_tag: Option<&str> = None;
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        let Some(name) = parts.first().map(String::as_str) else {
+            continue;
+        };
+        match name {
+            "h" => return Err(invalid("h tags are forbidden")),
+            "p" if parts.len() != 2 || owner_tag.replace(parts[1].as_str()).is_some() => {
+                return Err(invalid("exactly one two-element p tag is required"));
+            }
+            "p" => {}
+            "agent" if parts.len() != 2 || agent_tag.replace(parts[1].as_str()).is_some() => {
+                return Err(invalid("exactly one two-element agent tag is required"));
+            }
+            "agent" => {}
+            _ => {}
+        }
+    }
+
+    let owner_tag = owner_tag.ok_or_else(|| invalid("exactly one p tag is required"))?;
+    let agent_tag = agent_tag.ok_or_else(|| invalid("exactly one agent tag is required"))?;
+    if owner_tag != recipient_keys.public_key().to_hex() {
+        return Err(invalid("p tag must identify the decrypting owner"));
+    }
+    if agent_tag != event.pubkey.to_hex() {
+        return Err(invalid("agent tag must equal the event pubkey"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -327,6 +499,53 @@ mod tests {
         let decoded = decrypt_agent_turn_metric(&owner_keys, &event).expect("decrypt");
 
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn decrypt_rejects_noncanonical_nip_am_envelopes() {
+        let agent_keys = Keys::generate();
+        let other_agent = Keys::generate();
+        let owner_keys = Keys::generate();
+        let wrong_owner = Keys::generate();
+        let payload = sample_payload();
+        let ciphertext = encrypt_agent_turn_metric(&agent_keys, &owner_keys.public_key(), &payload)
+            .expect("encrypt");
+        let owner = owner_keys.public_key().to_hex();
+        let agent = agent_keys.public_key().to_hex();
+        let other_agent = other_agent.public_key().to_hex();
+        let wrong_owner = wrong_owner.public_key().to_hex();
+        let tag = |parts: &[&str]| Tag::parse(parts.iter().copied()).expect("tag");
+        let cases = vec![
+            vec![tag(&["p", &owner])],
+            vec![tag(&["agent", &agent])],
+            vec![
+                tag(&["p", &owner]),
+                tag(&["p", &owner]),
+                tag(&["agent", &agent]),
+            ],
+            vec![
+                tag(&["p", &owner]),
+                tag(&["agent", &agent]),
+                tag(&["agent", &agent]),
+            ],
+            vec![tag(&["p", &owner, "extra"]), tag(&["agent", &agent])],
+            vec![tag(&["p", &owner]), tag(&["agent", &agent, "extra"])],
+            vec![tag(&["p", &wrong_owner]), tag(&["agent", &agent])],
+            vec![tag(&["p", &owner]), tag(&["agent", &other_agent])],
+            vec![
+                tag(&["p", &owner]),
+                tag(&["agent", &agent]),
+                tag(&["h", "channel"]),
+            ],
+        ];
+
+        for tags in cases {
+            let event = EventBuilder::new(Kind::Custom(44200), ciphertext.clone())
+                .tags(tags)
+                .sign_with_keys(&agent_keys)
+                .expect("sign");
+            assert!(decrypt_agent_turn_metric(&owner_keys, &event).is_err());
+        }
     }
 
     #[test]
@@ -613,6 +832,101 @@ mod tests {
             matches!(result, Err(ObserverPayloadError::InvalidPayload(_))),
             "encrypt must reject payload with negative costUsd"
         );
+    }
+
+    #[test]
+    fn validate_enforces_structural_nip_am_contract() {
+        let mut cases = Vec::new();
+
+        let mut payload = sample_payload();
+        payload.harness = " ".to_string();
+        cases.push(("empty harness", payload));
+
+        let mut payload = sample_payload();
+        payload.timestamp = "not-a-time".to_string();
+        cases.push(("invalid timestamp", payload));
+
+        let mut payload = sample_payload();
+        payload.session_id = None;
+        cases.push(("cumulative without session", payload));
+
+        let mut payload = sample_payload();
+        payload.context_used_tokens = Some(10);
+        payload.context_limit_tokens = None;
+        cases.push(("one-sided context", payload));
+
+        let mut payload = sample_payload();
+        payload.context_used_tokens = Some(0);
+        payload.context_limit_tokens = Some(100);
+        cases.push(("zero context", payload));
+
+        let mut payload = sample_payload();
+        payload.channel_id = None;
+        payload.thread_root_id = Some("a".repeat(64));
+        cases.push(("thread without channel", payload));
+
+        let mut payload = sample_payload();
+        payload.account_usage_windows = vec![AccountUsageWindow {
+            label: "Session".to_string(),
+            used_percent: 10.0,
+            reset_at: Some("tomorrow".to_string()),
+        }];
+        cases.push(("invalid reset time", payload));
+
+        let mut payload = sample_payload();
+        payload.account_usage_windows = vec![AccountUsageWindow {
+            label: " ".to_string(),
+            used_percent: 10.0,
+            reset_at: None,
+        }];
+        cases.push(("empty window label", payload));
+
+        let mut payload = sample_payload();
+        payload.account_usage_windows = (0..65)
+            .map(|index| AccountUsageWindow {
+                label: format!("Window {index}"),
+                used_percent: 10.0,
+                reset_at: None,
+            })
+            .collect();
+        cases.push(("too many windows", payload));
+
+        let mut payload = sample_payload();
+        payload.pricing_identity = Some(PricingIdentity {
+            authority: "example.com".to_string(),
+            model: "model".to_string(),
+            cache_class: None,
+        });
+        cases.push(("unregistered pricing authority", payload));
+
+        let mut payload = sample_payload();
+        payload.turn = None;
+        payload.cumulative = None;
+        payload.session_id = None;
+        payload.turn_seq = None;
+        payload.context_used_tokens = None;
+        payload.context_limit_tokens = None;
+        payload.account_usage_windows.clear();
+        cases.push(("informationless snapshot", payload));
+
+        for (label, payload) in cases {
+            assert!(payload.validate().is_err(), "{label} must be rejected");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_quota_only_snapshot() {
+        let mut payload = sample_payload();
+        payload.turn = None;
+        payload.cumulative = None;
+        payload.session_id = None;
+        payload.turn_seq = None;
+        payload.account_usage_windows = vec![AccountUsageWindow {
+            label: "Weekly".to_string(),
+            used_percent: 42.0,
+            reset_at: Some("2026-07-02T01:00:00Z".to_string()),
+        }];
+        assert!(payload.validate().is_ok());
     }
 
     #[test]

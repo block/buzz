@@ -112,7 +112,9 @@ export type LatestAgentMetricSnapshot = {
   contextUsedTokens: string | null;
   /** Decimal `u64` string; use `BigInt(...)`, never `Number(...)`. */
   contextLimitTokens: string | null;
+  contextTimestamp?: string | null;
   accountUsageWindows: AgentAccountUsageWindow[];
+  accountUsageWindowsTimestamp?: string | null;
   timestamp: string;
   model: string | null;
   harness: string;
@@ -121,6 +123,10 @@ export type LatestAgentMetricSnapshot = {
 export type LatestAgentMetricSnapshotsRequest = {
   /** Omit for all agents. An explicit empty array returns no snapshots. */
   agentPubkeys?: string[];
+  /** Exact channel scope for context fields; provider windows remain global. */
+  channelId?: string;
+  /** Exact thread root. Requires `channelId`; omit for the channel root. */
+  threadRootId?: string;
 };
 
 // ── Wire-shape types (raw Tauri responses) ───────────────────────────────────

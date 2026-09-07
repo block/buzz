@@ -239,6 +239,7 @@ class _MemberTile extends ConsumerWidget {
           ? AgentUsageIndicator(
               agentPubkey: member.pubkey,
               agentLabel: label,
+              channelId: channelId,
               child: avatar,
             )
           : avatar,
@@ -248,7 +249,10 @@ class _MemberTile extends ConsumerWidget {
           Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
           if (isAgent) ...[
             const SizedBox(width: Grid.half),
-            AgentUsagePercentText(agentPubkey: member.pubkey),
+            AgentUsagePercentText(
+              agentPubkey: member.pubkey,
+              channelId: channelId,
+            ),
           ],
         ],
       ),

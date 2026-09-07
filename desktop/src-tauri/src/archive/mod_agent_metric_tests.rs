@@ -426,11 +426,44 @@ fn insert_metric_snapshot_fixture(
     context_used_tokens: Option<u64>,
     include_usage_windows: bool,
 ) {
+    insert_scoped_metric_snapshot_fixture(
+        conn,
+        identity,
+        relay,
+        agent,
+        id,
+        timestamp,
+        None,
+        None,
+        context_used_tokens,
+        include_usage_windows,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_scoped_metric_snapshot_fixture(
+    conn: &Connection,
+    identity: &str,
+    relay: &str,
+    agent: &str,
+    id: &str,
+    timestamp: &str,
+    channel_id: Option<&str>,
+    thread_root_id: Option<&str>,
+    context_used_tokens: Option<u64>,
+    include_usage_windows: bool,
+) {
     let mut payload = serde_json::json!({
         "harness": format!("harness-{id}"),
         "model": format!("model-{id}"),
         "timestamp": timestamp,
     });
+    if let Some(channel_id) = channel_id {
+        payload["channelId"] = serde_json::json!(channel_id);
+    }
+    if let Some(thread_root_id) = thread_root_id {
+        payload["threadRootId"] = serde_json::json!(thread_root_id);
+    }
     if let Some(used) = context_used_tokens {
         payload["contextUsedTokens"] = serde_json::json!(used);
         payload["contextLimitTokens"] = serde_json::json!(200_000);
@@ -443,10 +476,8 @@ fn insert_metric_snapshot_fixture(
         }]);
     }
     let raw_json = serde_json::to_string(&payload).unwrap();
-    store::upsert_archived_event(
-        conn, identity, relay, id, 44200, agent, 100, &raw_json, 200,
-    )
-    .unwrap();
+    store::upsert_archived_event(conn, identity, relay, id, 44200, agent, 100, &raw_json, 200)
+        .unwrap();
     store::upsert_event_scope(conn, identity, relay, id, "owner_p", identity, 200).unwrap();
     let row = metric_store::AgentMetricIndexRow::from_payload(&raw_json, id, agent, 100, 200);
     metric_store::insert_metric_index_row(conn, identity, relay, &row).unwrap();
@@ -505,7 +536,7 @@ fn test_latest_agent_metric_snapshots_returns_newest_valid_payload_per_agent() {
         &conn,
         identity,
         relay,
-        &agent_usage::LatestAgentMetricSnapshotsRequest { agent_pubkeys: None },
+        &agent_usage::LatestAgentMetricSnapshotsRequest::default(),
     )
     .unwrap();
 
@@ -582,6 +613,7 @@ fn test_latest_agent_metric_snapshots_filters_agents_and_keeps_owner_scope() {
         relay,
         &agent_usage::LatestAgentMetricSnapshotsRequest {
             agent_pubkeys: Some(vec![target.to_uppercase()]),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -596,8 +628,124 @@ fn test_latest_agent_metric_snapshots_rejects_invalid_agent_filter() {
     let conn = in_memory();
     let request = agent_usage::LatestAgentMetricSnapshotsRequest {
         agent_pubkeys: Some(vec!["not-a-pubkey".to_string()]),
+        ..Default::default()
     };
 
     let error = latest_agent_metric_snapshots(&conn, "identity", "relay", &request).unwrap_err();
     assert!(error.contains("64 hex"));
+}
+
+#[test]
+fn test_latest_agent_metric_snapshots_rejects_more_than_64_agents() {
+    let conn = in_memory();
+    let request = agent_usage::LatestAgentMetricSnapshotsRequest {
+        agent_pubkeys: Some((0..65).map(|i| format!("{i:064x}")).collect()),
+        ..Default::default()
+    };
+
+    let error = latest_agent_metric_snapshots(&conn, "identity", "relay", &request).unwrap_err();
+    assert!(error.contains("at most 64"));
+}
+
+#[test]
+fn test_latest_agent_metric_snapshots_scopes_context_but_keeps_global_windows() {
+    let conn = in_memory();
+    let identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let relay = "wss://relay.example";
+    let agent = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let channel_a = "channel-a";
+    let channel_b = "channel-b";
+    let thread = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    insert_scoped_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        agent,
+        "channel-a-root",
+        "2026-07-01T01:00:00Z",
+        Some(channel_a),
+        None,
+        Some(10_000),
+        false,
+    );
+    insert_scoped_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        agent,
+        "channel-a-thread",
+        "2026-07-01T02:00:00Z",
+        Some(channel_a),
+        Some(thread),
+        Some(20_000),
+        false,
+    );
+    insert_scoped_metric_snapshot_fixture(
+        &conn,
+        identity,
+        relay,
+        agent,
+        "channel-b-newer",
+        "2026-07-01T03:00:00Z",
+        Some(channel_b),
+        None,
+        Some(90_000),
+        true,
+    );
+
+    let root = latest_agent_metric_snapshots(
+        &conn,
+        identity,
+        relay,
+        &agent_usage::LatestAgentMetricSnapshotsRequest {
+            agent_pubkeys: Some(vec![agent.to_string()]),
+            channel_id: Some(channel_a.to_string()),
+            thread_root_id: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(root[0].context_used_tokens.as_deref(), Some("10000"));
+    assert_eq!(
+        root[0].context_timestamp.as_deref(),
+        Some("2026-07-01T01:00:00Z")
+    );
+    assert_eq!(root[0].account_usage_windows.len(), 1);
+    assert_eq!(
+        root[0].account_usage_windows_timestamp.as_deref(),
+        Some("2026-07-01T03:00:00Z")
+    );
+
+    let scoped_thread = latest_agent_metric_snapshots(
+        &conn,
+        identity,
+        relay,
+        &agent_usage::LatestAgentMetricSnapshotsRequest {
+            agent_pubkeys: Some(vec![agent.to_string()]),
+            channel_id: Some(channel_a.to_string()),
+            thread_root_id: Some(thread.to_string()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        scoped_thread[0].context_used_tokens.as_deref(),
+        Some("20000")
+    );
+    assert_eq!(
+        scoped_thread[0].context_timestamp.as_deref(),
+        Some("2026-07-01T02:00:00Z")
+    );
+}
+
+#[test]
+fn test_latest_agent_metric_snapshots_rejects_thread_without_channel() {
+    let request = agent_usage::LatestAgentMetricSnapshotsRequest {
+        agent_pubkeys: None,
+        channel_id: None,
+        thread_root_id: Some(
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
+        ),
+    };
+    let error = agent_usage::validate_snapshot_request(&request).unwrap_err();
+    assert!(error.contains("threadRootId requires channelId"));
 }

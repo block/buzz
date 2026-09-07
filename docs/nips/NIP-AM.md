@@ -147,13 +147,21 @@ nullable, except as constrained below: `pricingIdentity` is optional but not
 nullable (omit it entirely rather than set it to null). Consumers MUST ignore
 unknown fields (forward compatibility).
 
+`harness` MUST be non-empty and at most 128 UTF-8 bytes. Optional model,
+channel, session, turn, pricing-model, pricing-cache-class identifiers MUST be
+non-empty when present and at most 256 UTF-8 bytes. `threadRootId`, when
+present, requires `channelId` and MUST be exactly 64 lowercase hexadecimal
+characters.
+
 `contextUsedTokens` and `contextLimitTokens` describe the input-side context
-of the final successful provider request in the turn. Publishers omit either
-field when its value is unknown or zero. `contextUsedTokens` MAY exceed the
+of the final successful provider request in the turn. Publishers MUST report
+both as a pair of positive integers, or omit both when either value is unknown
+or zero. `contextUsedTokens` MAY exceed the
 limit; consumers clamp progress bars but retain the reported values.
 `accountUsageWindows` is a last-write-wins display snapshot scoped to the
 publishing agent account. Each `usedPercent` MUST be finite and non-negative;
-`resetAt`, when present, is RFC 3339. Labels are provider-facing text.
+`resetAt`, when present, is RFC 3339. A payload contains at most 64 windows;
+each provider-facing label MUST be non-empty and at most 128 UTF-8 bytes.
 
 ### Ordering and delta recomputation
 
@@ -260,7 +268,12 @@ partial events from both paths are expected to be merged by consumers per
 agent. The newest valid context pair (`contextUsedTokens` together with
 `contextLimitTokens`) remains available when a newer quota-only event omits it;
 the newest non-empty `accountUsageWindows` array replaces the older array.
-Consumers MUST NOT merge snapshots across different agent pubkeys.
+Context pairs are scoped by the exact (`channelId`, `threadRootId`) tuple:
+channel- or thread-specific UI MUST NOT display a context pair from another
+scope. `accountUsageWindows` remains agent-account scoped and MAY be combined
+with an exact scoped context pair. An omitted `threadRootId` identifies the
+channel root and MUST NOT match a thread-scoped pair. Consumers MUST NOT merge
+snapshots across different agent pubkeys.
 
 ## Relay Behavior
 
@@ -302,6 +315,14 @@ parse. Clients SHOULD deduplicate by event id. For within-session ordering,
 clients MUST use `(sessionId, turnSeq)` from the decrypted payload as
 described above; `created_at` is suitable only for coarse time-window
 queries.
+
+Clients MUST bound retained agent and scope state and SHOULD accept metrics
+only for agents known through authenticated local configuration or channel
+membership. A bounded initial subscription is not sufficient for field-wise
+snapshot reconstruction: clients SHOULD page owner- and author-scoped history
+backward until the requested context/quota fields are found or the archive is
+exhausted, with implementation-defined work limits to resist malicious relay
+histories.
 
 ## Relationship to Other NIPs
 

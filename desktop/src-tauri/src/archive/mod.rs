@@ -746,7 +746,7 @@ fn latest_agent_metric_snapshots(
 ) -> Result<Vec<agent_usage::LatestAgentMetricSnapshot>, String> {
     use buzz_core_pkg::agent_turn_metric::AgentTurnMetricPayload;
 
-    let agent_pubkeys = agent_usage::validate_snapshot_request(request)?;
+    let (agent_pubkeys, context_scope) = agent_usage::validate_snapshot_request(request)?;
     metric_store::backfill_agent_metric_index(conn, identity_pk, relay_url)?;
     metric_store::repair_orphaned_metric_index_rows(conn, identity_pk, relay_url)?;
 
@@ -759,7 +759,8 @@ fn latest_agent_metric_snapshots(
     let mut snapshot_indexes = std::collections::HashMap::<String, usize>::new();
     let mut snapshots = Vec::new();
     for candidate in candidates {
-        let Ok(payload) = serde_json::from_str::<AgentTurnMetricPayload>(&candidate.raw_json) else {
+        let Ok(payload) = serde_json::from_str::<AgentTurnMetricPayload>(&candidate.raw_json)
+        else {
             continue;
         };
         if payload.validate().is_err()
@@ -767,11 +768,16 @@ fn latest_agent_metric_snapshots(
         {
             continue;
         }
+        let context_matches = context_scope
+            .as_ref()
+            .is_none_or(|scope| scope.matches(&payload));
+        let payload_timestamp = payload.timestamp.clone();
 
         if let Some(&index) = snapshot_indexes.get(&candidate.agent_pubkey) {
             let snapshot = &mut snapshots[index];
             if snapshot.context_used_tokens.is_none()
                 && snapshot.context_limit_tokens.is_none()
+                && context_matches
                 && payload.context_used_tokens.is_some()
                 && payload.context_limit_tokens.is_some()
             {
@@ -779,20 +785,26 @@ fn latest_agent_metric_snapshots(
                     payload.context_used_tokens.map(|value| value.to_string());
                 snapshot.context_limit_tokens =
                     payload.context_limit_tokens.map(|value| value.to_string());
+                snapshot.context_timestamp = Some(payload_timestamp.clone());
             }
             if snapshot.account_usage_windows.is_empty()
                 && !payload.account_usage_windows.is_empty()
             {
                 snapshot.account_usage_windows = payload.account_usage_windows;
+                snapshot.account_usage_windows_timestamp = Some(payload_timestamp);
             }
             continue;
         }
 
         let mut snapshot =
             agent_usage::latest_snapshot_from_payload(candidate.agent_pubkey.clone(), payload);
-        if snapshot.context_used_tokens.is_none() || snapshot.context_limit_tokens.is_none() {
+        if !context_matches
+            || snapshot.context_used_tokens.is_none()
+            || snapshot.context_limit_tokens.is_none()
+        {
             snapshot.context_used_tokens = None;
             snapshot.context_limit_tokens = None;
+            snapshot.context_timestamp = None;
         }
         snapshot_indexes.insert(candidate.agent_pubkey, snapshots.len());
         snapshots.push(snapshot);

@@ -9,7 +9,10 @@ import {
   AgentStatusSidebarPanel,
 } from "./AgentStatusDisplay.tsx";
 import { deriveConfiguredAgentStatuses } from "./agentStatusModel.ts";
-import { decodeLatestAgentMetricSnapshot } from "./useAgentStatusAdapter.ts";
+import {
+  decodeLatestAgentMetricSnapshot,
+  selectAgentStatusPubkeys,
+} from "./useAgentStatusAdapter.ts";
 
 const NOW_SECONDS = 1_789_000_000;
 const AGENT_ALPHA_PUBKEY = "a".repeat(64);
@@ -23,17 +26,41 @@ const agents = [
 function snapshot(overrides = {}) {
   return {
     agentPubkey: AGENT_ALPHA_PUBKEY,
-    model: "opus-4.1",
-    harness: "claude-code",
+    model: "model-alpha",
+    harness: "runtime-alpha",
     contextUsedTokens: 75_000n,
     contextLimitTokens: 100_000n,
+    contextTimestamp: null,
     accountUsageWindows: [],
+    accountUsageWindowsTimestamp: null,
     timestamp: NOW_SECONDS - 120,
     ...overrides,
   };
 }
 
 describe("configured agent status model", () => {
+  it("keeps an explicitly requested DM agent when no snapshot exists", () => {
+    assert.deepEqual(selectAgentStatusPubkeys([], AGENT_ALPHA_PUBKEY), [
+      AGENT_ALPHA_PUBKEY,
+    ]);
+  });
+  it("limits the sidebar to configured agents and excludes unknown publishers", () => {
+    const configured = Array.from({ length: 70 }, (_, index) =>
+      index.toString(16).padStart(64, "0"),
+    );
+    const unknownSnapshot = snapshot({ agentPubkey: "f".repeat(64) });
+
+    const selected = selectAgentStatusPubkeys(
+      [unknownSnapshot],
+      undefined,
+      configured,
+    );
+
+    assert.equal(selected.length, 64);
+    assert.deepEqual(selected, configured.slice(0, 64));
+    assert.equal(selected.includes(unknownSnapshot.agentPubkey), false);
+  });
+
   it("decodes RFC3339 windows and preserves u64 token precision", () => {
     const decoded = decodeLatestAgentMetricSnapshot({
       agentPubkey: AGENT_ALPHA_PUBKEY,
@@ -41,6 +68,7 @@ describe("configured agent status model", () => {
       harness: "hermes-agent",
       contextUsedTokens: "18446744073709551615",
       contextLimitTokens: "18446744073709551615",
+      contextTimestamp: "2026-09-05T10:59:00Z",
       accountUsageWindows: [
         {
           label: "Session",
@@ -48,12 +76,15 @@ describe("configured agent status model", () => {
           resetAt: "2026-09-05T12:00:00Z",
         },
       ],
+      accountUsageWindowsTimestamp: "2026-09-05T10:58:00Z",
       timestamp: "2026-09-05T11:00:00Z",
     });
 
     assert.equal(decoded.contextUsedTokens, 18_446_744_073_709_551_615n);
     assert.equal(decoded.contextLimitTokens, 18_446_744_073_709_551_615n);
     assert.equal(decoded.accountUsageWindows[0].resetAt, 1_788_609_600);
+    assert.equal(decoded.contextTimestamp, 1_788_605_940);
+    assert.equal(decoded.accountUsageWindowsTimestamp, 1_788_605_880);
     assert.equal(decoded.timestamp, 1_788_606_000);
   });
 
@@ -97,6 +128,36 @@ describe("configured agent status model", () => {
       status.usageWindows.map(({ usedPercent }) => usedPercent),
       [0, 100],
     );
+  });
+
+  it("uses the dominant metric field timestamp for staleness", () => {
+    const [staleContext, freshAllowance] = deriveConfiguredAgentStatuses({
+      agents,
+      nowSeconds: NOW_SECONDS,
+      snapshots: [
+        snapshot({
+          contextUsedTokens: 90_000n,
+          contextTimestamp: NOW_SECONDS - 901,
+          accountUsageWindows: [{ label: "Session", usedPercent: 20 }],
+          accountUsageWindowsTimestamp: NOW_SECONDS - 10,
+          timestamp: NOW_SECONDS - 10,
+        }),
+        snapshot({
+          agentPubkey: AGENT_BETA_PUBKEY,
+          contextUsedTokens: 10_000n,
+          contextTimestamp: NOW_SECONDS - 901,
+          accountUsageWindows: [{ label: "Session", usedPercent: 80 }],
+          accountUsageWindowsTimestamp: NOW_SECONDS - 10,
+          timestamp: NOW_SECONDS - 10,
+        }),
+      ],
+      staleAfterSeconds: 900,
+    });
+
+    assert.equal(staleContext.state, "stale");
+    assert.equal(staleContext.ageSeconds, 901);
+    assert.equal(freshAllowance.state, "ready");
+    assert.equal(freshAllowance.ageSeconds, 10);
   });
 
   it("keeps source errors distinct from missing and unconfigured data", () => {
@@ -196,5 +257,35 @@ describe("agent status surfaces", () => {
 
     assert.match(markup, /aria-label="Agent Alpha usage unavailable"/);
     assert.doesNotMatch(markup, /0%/);
+  });
+
+  it("uses warning colors only at the 70 and 90 percent thresholds", () => {
+    const [warning] = deriveConfiguredAgentStatuses({
+      agents: [agents[0]],
+      nowSeconds: NOW_SECONDS,
+      snapshots: [snapshot({ contextUsedTokens: 70_000n })],
+    });
+    const [critical] = deriveConfiguredAgentStatuses({
+      agents: [agents[0]],
+      nowSeconds: NOW_SECONDS,
+      snapshots: [snapshot({ contextUsedTokens: 90_000n })],
+    });
+
+    assert.match(
+      renderToStaticMarkup(AgentStatusIndicator({ status: warning })),
+      /text-amber-600/,
+    );
+    assert.match(
+      renderToStaticMarkup(AgentStatusIndicator({ status: critical })),
+      /text-destructive/,
+    );
+  });
+
+  it("keeps long metric lists inside a scrollable detail viewport", () => {
+    const markup = renderToStaticMarkup(
+      AgentStatusDetails({ status: statuses[0], nowSeconds: NOW_SECONDS }),
+    );
+    assert.match(markup, /max-h-/);
+    assert.match(markup, /overflow-y-auto/);
   });
 });

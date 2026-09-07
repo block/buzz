@@ -11,7 +11,9 @@ export type AgentMetricSnapshot = {
   harness: string | null;
   contextUsedTokens: bigint | null;
   contextLimitTokens: bigint | null;
+  contextTimestamp: number | null;
   accountUsageWindows: readonly AgentUsageWindowSnapshot[];
+  accountUsageWindowsTimestamp: number | null;
   /** NIP-01 Unix timestamp in seconds. */
   timestamp: number;
 };
@@ -40,7 +42,9 @@ export type AgentStatusViewModel = {
   contextUsedTokens: bigint | null;
   contextLimitTokens: bigint | null;
   contextPercent: number | null;
+  contextAgeSeconds: number | null;
   usageWindows: readonly AgentUsageWindowSnapshot[];
+  usageWindowsAgeSeconds: number | null;
   timestamp: number | null;
   ageSeconds: number | null;
   errorMessage: string | null;

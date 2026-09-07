@@ -3,15 +3,14 @@ import 'package:buzz/shared/agent_usage/agent_usage_models.dart';
 
 void main() {
   group('AgentTurnMetricPayload.fromJson', () {
-    test('parses a minimal payload with only required fields', () {
-      final payload = AgentTurnMetricPayload.fromJson({
-        'harness': 'goose',
-        'timestamp': '2026-07-01T20:11:03.213Z',
-      });
-      expect(payload.harness, 'goose');
-      expect(payload.model, isNull);
-      expect(payload.contextUsedTokens, isNull);
-      expect(payload.accountUsageWindows, isEmpty);
+    test('rejects a payload with no observation', () {
+      expect(
+        () => AgentTurnMetricPayload.fromJson({
+          'harness': 'goose',
+          'timestamp': '2026-07-01T20:11:03.213Z',
+        }),
+        throwsFormatException,
+      );
     });
 
     test('throws when harness is missing', () {
@@ -41,9 +40,23 @@ void main() {
       final payload = AgentTurnMetricPayload.fromJson({
         'harness': 'goose',
         'timestamp': '2026-07-01T20:11:03Z',
+        'turn': {'inputTokens': 1},
         'somethingFromTheFuture': {'nested': true},
       });
       expect(payload.harness, 'goose');
+    });
+
+    test('counts string limits in UTF-8 bytes', () {
+      expect(
+        () => AgentTurnMetricPayload.fromJson({
+          'harness': 'goose',
+          'timestamp': '2026-07-01T20:11:03Z',
+          'accountUsageWindows': [
+            {'label': List.filled(65, 'é').join(), 'usedPercent': 10},
+          ],
+        }),
+        throwsFormatException,
+      );
     });
 
     test('parses context window snapshot and account usage windows', () {
@@ -95,11 +108,7 @@ void main() {
         'not-an-array',
         ['not-an-object'],
         [
-          {
-            'label': 'Session',
-            'usedPercent': 12,
-            'resetAt': 'not-rfc3339',
-          },
+          {'label': 'Session', 'usedPercent': 12, 'resetAt': 'not-rfc3339'},
         ],
       ]) {
         expect(
@@ -144,6 +153,8 @@ void main() {
       final payload = AgentTurnMetricPayload.fromJson({
         'harness': 'goose',
         'timestamp': '2026-07-01T20:11:03Z',
+        'sessionId': 'session-1',
+        'turnSeq': 1,
         'cumulative': {
           'inputTokens': 45210,
           'outputTokens': 9876,
@@ -153,6 +164,41 @@ void main() {
       });
       expect(payload.cumulative?.totalTokens, 55086);
       expect(payload.cumulative?.costUsd, 0.41);
+    });
+
+    test('accepts nullable legacy counts without inventing values', () {
+      final payload = AgentTurnMetricPayload.fromJson({
+        'harness': 'goose',
+        'timestamp': '2026-07-01T20:11:03Z',
+        'sessionId': 'session-1',
+        'turnSeq': 1,
+        'cumulative': {'inputTokens': null, 'totalTokens': 0, 'costUsd': null},
+        'contextUsedTokens': null,
+        'contextLimitTokens': null,
+      });
+
+      expect(payload.cumulative?.inputTokens, isNull);
+      expect(payload.cumulative?.totalTokens, 0);
+      expect(payload.cumulative?.costUsd, isNull);
+      expect(payload.contextUsedTokens, isNull);
+      expect(payload.contextLimitTokens, isNull);
+    });
+
+    test('rejects incomplete or zero context pairs', () {
+      for (final context in [
+        {'contextUsedTokens': 1},
+        {'contextUsedTokens': 0, 'contextLimitTokens': 100},
+        {'contextUsedTokens': 1, 'contextLimitTokens': 0},
+      ]) {
+        expect(
+          () => AgentTurnMetricPayload.fromJson({
+            'harness': 'goose',
+            'timestamp': '2026-07-01T20:11:03Z',
+            ...context,
+          }),
+          throwsFormatException,
+        );
+      }
     });
   });
 
@@ -285,13 +331,43 @@ void main() {
     test('model persists once reported even if a later event omits it', () {
       final first = mergeAgentUsageSnapshot(
         null,
-        payloadAt('2026-07-01T10:00:00Z', model: 'claude-sonnet-4-5'),
+        payloadAt('2026-07-01T10:00:00Z', model: 'model-alpha'),
       );
       final second = mergeAgentUsageSnapshot(
         first,
         payloadAt('2026-07-01T10:05:00Z'),
       );
-      expect(second.model, 'claude-sonnet-4-5');
+      expect(second.model, 'model-alpha');
+    });
+
+    test('equal timestamps use the event id as a deterministic tiebreaker', () {
+      final timestamp = payloadAt(
+        '2026-07-01T10:00:00Z',
+        contextUsedTokens: 20,
+        contextLimitTokens: 100,
+      );
+      final lower = payloadAt(
+        '2026-07-01T10:00:00Z',
+        contextUsedTokens: 10,
+        contextLimitTokens: 100,
+      );
+      final higherId = List.filled(64, 'b').join();
+      final lowerId = List.filled(64, 'a').join();
+      final highThenLow = mergeAgentUsageSnapshot(
+        mergeAgentUsageSnapshot(null, timestamp, eventId: higherId),
+        lower,
+        eventId: lowerId,
+      );
+      final lowThenHigh = mergeAgentUsageSnapshot(
+        mergeAgentUsageSnapshot(null, lower, eventId: lowerId),
+        timestamp,
+        eventId: higherId,
+      );
+
+      expect(highThenLow.contextUsedTokens, 20);
+      expect(lowThenHigh.contextUsedTokens, 20);
+      expect(highThenLow.contextSnapshotEventId, higherId);
+      expect(lowThenHigh.contextSnapshotEventId, higherId);
     });
   });
 
@@ -313,28 +389,44 @@ void main() {
       },
     );
 
-    test(
-      'fresh when the snapshot is recent, regardless of subscription health',
-      () {
-        final snapshot = AgentUsageSnapshot(
-          harness: 'goose',
-          lastEventAt: DateTime.parse('2026-07-01T10:00:00Z'),
-        );
-        expect(
-          agentUsageStatusFor(
-            snapshot,
-            subscriptionErrored: true,
-            now: DateTime.parse('2026-07-01T10:05:00Z'),
-          ),
-          AgentUsageStatus.fresh,
-        );
-      },
-    );
+    test('unavailable when a snapshot has no context or account quota', () {
+      final snapshot = AgentUsageSnapshot(
+        harness: 'goose',
+        lastEventAt: DateTime.parse('2026-07-01T10:00:00Z'),
+      );
+      expect(
+        agentUsageStatusFor(
+          snapshot,
+          subscriptionErrored: true,
+          now: DateTime.parse('2026-07-01T10:05:00Z'),
+        ),
+        AgentUsageStatus.unavailable,
+      );
+    });
+
+    test('fresh when usable quota data is recent', () {
+      final snapshot = AgentUsageSnapshot(
+        harness: 'goose',
+        lastEventAt: DateTime.parse('2026-07-01T10:00:00Z'),
+        contextUsedTokens: 10,
+        contextLimitTokens: 100,
+      );
+      expect(
+        agentUsageStatusFor(
+          snapshot,
+          subscriptionErrored: true,
+          now: DateTime.parse('2026-07-01T10:05:00Z'),
+        ),
+        AgentUsageStatus.fresh,
+      );
+    });
 
     test('stale once the snapshot exceeds the freshness window', () {
       final snapshot = AgentUsageSnapshot(
         harness: 'goose',
         lastEventAt: DateTime.parse('2026-07-01T00:00:00Z'),
+        contextUsedTokens: 10,
+        contextLimitTokens: 100,
       );
       expect(
         agentUsageStatusFor(
@@ -350,6 +442,8 @@ void main() {
       final snapshot = AgentUsageSnapshot(
         harness: 'goose',
         lastEventAt: DateTime.parse('2026-07-01T10:00:00Z'),
+        contextUsedTokens: 10,
+        contextLimitTokens: 100,
       );
       expect(
         agentUsageStatusFor(
@@ -366,6 +460,44 @@ void main() {
           now: DateTime.parse('2026-07-01T10:45:01Z'),
         ),
         AgentUsageStatus.stale,
+      );
+    });
+    test('uses the dominant metric field timestamp for freshness', () {
+      final now = DateTime.parse('2026-07-01T11:00:00Z');
+      final staleContext = AgentUsageSnapshot(
+        harness: 'goose',
+        lastEventAt: now.subtract(const Duration(minutes: 1)),
+        contextUsedTokens: 90,
+        contextLimitTokens: 100,
+        contextSnapshotAt: now.subtract(const Duration(minutes: 46)),
+        accountUsageWindows: const [
+          AgentUsageWindow(label: 'Session', usedPercent: 20),
+        ],
+        accountUsageWindowsAt: now.subtract(const Duration(minutes: 1)),
+      );
+      final freshAllowance = AgentUsageSnapshot(
+        harness: 'goose',
+        lastEventAt: now.subtract(const Duration(minutes: 1)),
+        contextUsedTokens: 10,
+        contextLimitTokens: 100,
+        contextSnapshotAt: now.subtract(const Duration(minutes: 46)),
+        accountUsageWindows: const [
+          AgentUsageWindow(label: 'Session', usedPercent: 80),
+        ],
+        accountUsageWindowsAt: now.subtract(const Duration(minutes: 1)),
+      );
+
+      expect(
+        agentUsageStatusFor(staleContext, subscriptionErrored: false, now: now),
+        AgentUsageStatus.stale,
+      );
+      expect(
+        agentUsageStatusFor(
+          freshAllowance,
+          subscriptionErrored: false,
+          now: now,
+        ),
+        AgentUsageStatus.fresh,
       );
     });
   });

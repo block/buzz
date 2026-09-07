@@ -1,12 +1,17 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
 /// How stale [AgentUsageSnapshot.lastEventAt] must be before the compact
 /// indicator stops presenting cached data as current.
 const staleAfter = Duration(minutes: 45);
 
+int _utf8Length(String value) => utf8.encode(value).length;
+
 int? _optionalTokenCount(Map<String, dynamic> json, String field) {
   if (!json.containsKey(field)) return null;
   final value = json[field];
+  if (value == null) return null;
   if (value is! int || value < 0) {
     throw FormatException('$field must be a non-negative integer');
   }
@@ -16,6 +21,7 @@ int? _optionalTokenCount(Map<String, dynamic> json, String field) {
 double? _optionalCost(Map<String, dynamic> json, String field) {
   if (!json.containsKey(field)) return null;
   final value = json[field];
+  if (value == null) return null;
   if (value is! num) {
     throw FormatException('$field must be a non-negative finite number');
   }
@@ -27,8 +33,7 @@ double? _optionalCost(Map<String, dynamic> json, String field) {
 }
 
 DateTime _parseRfc3339(Object? value, String field) {
-  if (value is! String ||
-      !RegExp(r'(?:Z|[+-]\d{2}:\d{2})$').hasMatch(value)) {
+  if (value is! String || !RegExp(r'(?:Z|[+-]\d{2}:\d{2})$').hasMatch(value)) {
     throw FormatException('$field must be RFC 3339');
   }
   final parsed = DateTime.tryParse(value);
@@ -70,6 +75,14 @@ class AgentTokenCounts {
       cacheWriteTokens: _optionalTokenCount(json, 'cacheWriteTokens'),
     );
   }
+
+  bool get hasObservation =>
+      inputTokens != null ||
+      outputTokens != null ||
+      totalTokens != null ||
+      costUsd != null ||
+      cacheReadTokens != null ||
+      cacheWriteTokens != null;
 }
 
 /// A provider-account quota window (`accountUsageWindows` entry), e.g.
@@ -90,7 +103,7 @@ class AgentUsageWindow {
   /// `usedPercent`, matching the NIP-AM validity contract.
   factory AgentUsageWindow.fromJson(Map<String, dynamic> json) {
     final label = json['label'] as String?;
-    if (label == null || label.isEmpty) {
+    if (label == null || label.trim().isEmpty || _utf8Length(label) > 128) {
       throw const FormatException('accountUsageWindows entry missing label');
     }
     final usedPercentRaw = json['usedPercent'];
@@ -120,6 +133,8 @@ class AgentUsageWindow {
 class AgentTurnMetricPayload {
   final String harness;
   final String? model;
+  final String? channelId;
+  final String? threadRootId;
   final DateTime timestamp;
   final AgentTokenCounts? cumulative;
   final int? contextUsedTokens;
@@ -129,6 +144,8 @@ class AgentTurnMetricPayload {
   const AgentTurnMetricPayload({
     required this.harness,
     this.model,
+    this.channelId,
+    this.threadRootId,
     required this.timestamp,
     this.cumulative,
     this.contextUsedTokens,
@@ -142,13 +159,46 @@ class AgentTurnMetricPayload {
   /// "ignore events that fail to decrypt or parse").
   factory AgentTurnMetricPayload.fromJson(Map<String, dynamic> json) {
     final harness = json['harness'] as String?;
-    if (harness == null || harness.isEmpty) {
+    if (harness == null ||
+        harness.trim().isEmpty ||
+        _utf8Length(harness) > 128) {
       throw const FormatException('agent turn metric missing harness');
     }
     final timestamp = _parseRfc3339(json['timestamp'], 'timestamp');
 
+    final model = json['model'] as String?;
+    final channelId = json['channelId'] as String?;
+    final threadRootId = json['threadRootId'] as String?;
+    for (final field in [
+      ('model', model),
+      ('channelId', channelId),
+      ('sessionId', json['sessionId'] as String?),
+      ('turnId', json['turnId'] as String?),
+    ]) {
+      final value = field.$2;
+      if (value != null && (value.trim().isEmpty || _utf8Length(value) > 256)) {
+        throw FormatException(
+          '${field.$1} must be non-empty and at most 256 bytes',
+        );
+      }
+    }
+    if (threadRootId != null &&
+        (channelId == null ||
+            !RegExp(r'^[0-9a-f]{64}$').hasMatch(threadRootId))) {
+      throw const FormatException(
+        'threadRootId requires channelId and 64 lowercase hex characters',
+      );
+    }
+
     final contextUsedTokens = _optionalTokenCount(json, 'contextUsedTokens');
     final contextLimitTokens = _optionalTokenCount(json, 'contextLimitTokens');
+    if ((contextUsedTokens == null) != (contextLimitTokens == null) ||
+        (contextUsedTokens != null &&
+            (contextUsedTokens == 0 || contextLimitTokens == 0))) {
+      throw const FormatException(
+        'contextUsedTokens and contextLimitTokens must be a complete positive pair',
+      );
+    }
 
     final windowsRaw = json['accountUsageWindows'];
     if (windowsRaw != null && windowsRaw is! List) {
@@ -163,19 +213,82 @@ class AgentTurnMetricPayload {
       }
       windows.add(AgentUsageWindow.fromJson(entry));
     }
+    if (windows.length > 64) {
+      throw const FormatException(
+        'accountUsageWindows must contain at most 64 entries',
+      );
+    }
+
+    final turnRaw = json['turn'];
+    if (turnRaw != null && turnRaw is! Map<String, dynamic>) {
+      throw const FormatException('turn must be an object');
+    }
+    final turn = turnRaw is Map<String, dynamic>
+        ? AgentTokenCounts.fromJson(turnRaw)
+        : null;
 
     final cumulativeRaw = json['cumulative'];
     if (cumulativeRaw != null && cumulativeRaw is! Map<String, dynamic>) {
       throw const FormatException('cumulative must be an object');
     }
+    final cumulative = cumulativeRaw is Map<String, dynamic>
+        ? AgentTokenCounts.fromJson(cumulativeRaw)
+        : null;
+    if (cumulative != null) {
+      final sessionId = json['sessionId'];
+      final turnSeq = json['turnSeq'];
+      if (sessionId is! String ||
+          sessionId.trim().isEmpty ||
+          turnSeq is! int ||
+          turnSeq < 0) {
+        throw const FormatException(
+          'sessionId and turnSeq are required with cumulative',
+        );
+      }
+    }
+
+    final pricingRaw = json['pricingIdentity'];
+    if (pricingRaw != null) {
+      if (pricingRaw is! Map<String, dynamic>) {
+        throw const FormatException('pricingIdentity must be an object');
+      }
+      final authority = pricingRaw['authority'];
+      final pricingModel = pricingRaw['model'];
+      const authorities = {
+        'api.anthropic.com',
+        'api.openai.com',
+        'openrouter.ai',
+      };
+      if (authority is! String ||
+          !authorities.contains(authority) ||
+          pricingModel is! String ||
+          pricingModel.trim().isEmpty ||
+          _utf8Length(pricingModel) > 256) {
+        throw const FormatException('invalid pricingIdentity');
+      }
+      final cacheClass = pricingRaw['cacheClass'];
+      if (cacheClass != null &&
+          (cacheClass is! String ||
+              cacheClass.trim().isEmpty ||
+              _utf8Length(cacheClass) > 256)) {
+        throw const FormatException('invalid pricingIdentity.cacheClass');
+      }
+    }
+
+    if (turn?.hasObservation != true &&
+        cumulative?.hasObservation != true &&
+        contextUsedTokens == null &&
+        windows.isEmpty) {
+      throw const FormatException('agent turn metric contains no observation');
+    }
 
     return AgentTurnMetricPayload(
       harness: harness,
-      model: json['model'] as String?,
+      model: model,
+      channelId: channelId,
+      threadRootId: threadRootId,
       timestamp: timestamp,
-      cumulative: cumulativeRaw is Map<String, dynamic>
-          ? AgentTokenCounts.fromJson(cumulativeRaw)
-          : null,
+      cumulative: cumulative,
       contextUsedTokens: contextUsedTokens,
       contextLimitTokens: contextLimitTokens,
       accountUsageWindows: List.unmodifiable(windows),
@@ -193,28 +306,36 @@ class AgentUsageSnapshot {
   final String harness;
   final String? model;
   final DateTime lastEventAt;
+  final String lastEventId;
 
   final int? contextUsedTokens;
   final int? contextLimitTokens;
   final DateTime? contextSnapshotAt;
+  final String? contextSnapshotEventId;
 
   final List<AgentUsageWindow> accountUsageWindows;
   final DateTime? accountUsageWindowsAt;
+  final String? accountUsageWindowsEventId;
 
   final AgentTokenCounts? cumulative;
   final DateTime? cumulativeAt;
+  final String? cumulativeEventId;
 
   const AgentUsageSnapshot({
     required this.harness,
     this.model,
     required this.lastEventAt,
+    this.lastEventId = '',
     this.contextUsedTokens,
     this.contextLimitTokens,
     this.contextSnapshotAt,
+    this.contextSnapshotEventId,
     this.accountUsageWindows = const [],
     this.accountUsageWindowsAt,
+    this.accountUsageWindowsEventId,
     this.cumulative,
     this.cumulativeAt,
+    this.cumulativeEventId,
   });
 
   /// Fraction (0.0–1.0) of context window consumed, clamped for display.
@@ -240,38 +361,57 @@ class AgentUsageSnapshot {
 /// stale event clobber newer data.
 AgentUsageSnapshot mergeAgentUsageSnapshot(
   AgentUsageSnapshot? previous,
-  AgentTurnMetricPayload payload,
-) {
-  final lastEventAt =
-      previous == null || payload.timestamp.isAfter(previous.lastEventAt)
-      ? payload.timestamp
-      : previous.lastEventAt;
+  AgentTurnMetricPayload payload, {
+  String eventId = '',
+}) {
+  final useAsLatest = _isNewerObservation(
+    payload.timestamp,
+    eventId,
+    previous?.lastEventAt,
+    previous?.lastEventId,
+  );
+  final lastEventAt = useAsLatest ? payload.timestamp : previous!.lastEventAt;
+  final lastEventId = useAsLatest ? eventId : previous!.lastEventId;
 
   final useContext =
       payload.contextUsedTokens != null &&
       payload.contextLimitTokens != null &&
-      (previous?.contextSnapshotAt == null ||
-          !payload.timestamp.isBefore(previous!.contextSnapshotAt!));
+      _isNewerObservation(
+        payload.timestamp,
+        eventId,
+        previous?.contextSnapshotAt,
+        previous?.contextSnapshotEventId,
+      );
 
   final useWindows =
       payload.accountUsageWindows.isNotEmpty &&
-      (previous?.accountUsageWindowsAt == null ||
-          !payload.timestamp.isBefore(previous!.accountUsageWindowsAt!));
+      _isNewerObservation(
+        payload.timestamp,
+        eventId,
+        previous?.accountUsageWindowsAt,
+        previous?.accountUsageWindowsEventId,
+      );
 
   final useCumulative =
       payload.cumulative != null &&
-      (previous?.cumulativeAt == null ||
-          !payload.timestamp.isBefore(previous!.cumulativeAt!));
+      _isNewerObservation(
+        payload.timestamp,
+        eventId,
+        previous?.cumulativeAt,
+        previous?.cumulativeEventId,
+      );
 
   // harness/model are descriptive of the publishing agent process; take them
   // from whichever event is currently newest overall.
-  final useDescriptive =
-      previous == null || !payload.timestamp.isBefore(previous.lastEventAt);
+  final useDescriptive = useAsLatest;
 
   return AgentUsageSnapshot(
-    harness: useDescriptive ? payload.harness : previous.harness,
-    model: useDescriptive ? (payload.model ?? previous?.model) : previous.model,
+    harness: useDescriptive ? payload.harness : previous!.harness,
+    model: useDescriptive
+        ? (payload.model ?? previous?.model)
+        : previous!.model,
     lastEventAt: lastEventAt,
+    lastEventId: lastEventId,
     contextUsedTokens: useContext
         ? payload.contextUsedTokens
         : previous?.contextUsedTokens,
@@ -281,21 +421,43 @@ AgentUsageSnapshot mergeAgentUsageSnapshot(
     contextSnapshotAt: useContext
         ? payload.timestamp
         : previous?.contextSnapshotAt,
+    contextSnapshotEventId: useContext
+        ? eventId
+        : previous?.contextSnapshotEventId,
     accountUsageWindows: useWindows
         ? payload.accountUsageWindows
         : (previous?.accountUsageWindows ?? const []),
     accountUsageWindowsAt: useWindows
         ? payload.timestamp
         : previous?.accountUsageWindowsAt,
+    accountUsageWindowsEventId: useWindows
+        ? eventId
+        : previous?.accountUsageWindowsEventId,
     cumulative: useCumulative ? payload.cumulative : previous?.cumulative,
     cumulativeAt: useCumulative ? payload.timestamp : previous?.cumulativeAt,
+    cumulativeEventId: useCumulative ? eventId : previous?.cumulativeEventId,
   );
+}
+
+bool _isNewerObservation(
+  DateTime candidateAt,
+  String candidateEventId,
+  DateTime? currentAt,
+  String? currentEventId,
+) {
+  if (currentAt == null) return true;
+  final timeOrder = candidateAt.compareTo(currentAt);
+  if (timeOrder != 0) return timeOrder > 0;
+  return candidateEventId.compareTo(currentEventId ?? '') > 0;
 }
 
 /// Display status for the compact usage indicator.
 enum AgentUsageStatus {
   /// No usage event has ever been observed for this agent yet.
   unknown,
+
+  /// An event exists, but it contains no context or account-quota observation.
+  unavailable,
 
   /// A usage snapshot exists and is recent.
   fresh,
@@ -308,6 +470,29 @@ enum AgentUsageStatus {
   error,
 }
 
+({double fraction, DateTime timestamp})? _primaryUsageMetric(
+  AgentUsageSnapshot snapshot,
+) {
+  final known = <({double fraction, DateTime timestamp})>[
+    ...snapshot.accountUsageWindows.map(
+      (window) => (
+        fraction: (window.usedPercent / 100).clamp(0.0, 1.0).toDouble(),
+        timestamp: snapshot.accountUsageWindowsAt ?? snapshot.lastEventAt,
+      ),
+    ),
+    if (snapshot.contextUsedFraction != null)
+      (
+        fraction: snapshot.contextUsedFraction!,
+        timestamp: snapshot.contextSnapshotAt ?? snapshot.lastEventAt,
+      ),
+  ];
+  if (known.isEmpty) return null;
+  return known.reduce(
+    (highest, candidate) =>
+        candidate.fraction > highest.fraction ? candidate : highest,
+  );
+}
+
 AgentUsageStatus agentUsageStatusFor(
   AgentUsageSnapshot? snapshot, {
   required bool subscriptionErrored,
@@ -318,8 +503,13 @@ AgentUsageStatus agentUsageStatusFor(
         ? AgentUsageStatus.error
         : AgentUsageStatus.unknown;
   }
+  if (_primaryUsageMetric(snapshot) == null) {
+    return AgentUsageStatus.unavailable;
+  }
   final effectiveNow = now ?? DateTime.now();
-  if (effectiveNow.difference(snapshot.lastEventAt) > staleAfter) {
+  final statusTimestamp =
+      _primaryUsageMetric(snapshot)?.timestamp ?? snapshot.lastEventAt;
+  if (effectiveNow.difference(statusTimestamp) > staleAfter) {
     return AgentUsageStatus.stale;
   }
   return AgentUsageStatus.fresh;
@@ -330,10 +520,5 @@ AgentUsageStatus agentUsageStatusFor(
 /// when the publisher did not report either.
 double? primaryUsageFraction(AgentUsageSnapshot? snapshot) {
   if (snapshot == null) return null;
-  final known = <double>[
-    ...snapshot.accountUsageWindows.map((window) => window.usedPercent / 100),
-    if (snapshot.contextUsedFraction != null) snapshot.contextUsedFraction!,
-  ];
-  if (known.isEmpty) return null;
-  return known.reduce((a, b) => a > b ? a : b).clamp(0.0, 1.0);
+  return _primaryUsageMetric(snapshot)?.fraction;
 }

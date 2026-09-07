@@ -1,12 +1,17 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 
+import {
+  useManagedAgentsQuery,
+  useRelayAgentsQuery,
+} from "@/features/agents/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import {
   getLatestAgentMetricSnapshots,
   onAgentMetricsChanged,
   type LatestAgentMetricSnapshot,
+  type LatestAgentMetricSnapshotsRequest,
 } from "@/shared/api/tauriArchive";
 import { deriveConfiguredAgentStatuses } from "./agentStatusModel";
 import type { AgentMetricSnapshot, AgentStatusViewModel } from "./types";
@@ -37,11 +42,17 @@ export function decodeLatestAgentMetricSnapshot(
     harness: snapshot.harness,
     contextUsedTokens: parseTokenCount(snapshot.contextUsedTokens),
     contextLimitTokens: parseTokenCount(snapshot.contextLimitTokens),
+    contextTimestamp: snapshot.contextTimestamp
+      ? parseRfc3339Seconds(snapshot.contextTimestamp)
+      : null,
     accountUsageWindows: snapshot.accountUsageWindows.map((window) => ({
       label: window.label,
       usedPercent: window.usedPercent,
       resetAt: window.resetAt ? parseRfc3339Seconds(window.resetAt) : null,
     })),
+    accountUsageWindowsTimestamp: snapshot.accountUsageWindowsTimestamp
+      ? parseRfc3339Seconds(snapshot.accountUsageWindowsTimestamp)
+      : null,
     timestamp,
   };
 }
@@ -64,15 +75,78 @@ export function useAgentStatusAdapter(
   );
 }
 
-/** Owner-scoped live query for every agent that has published metrics. */
-export function usePermanentAgentStatuses(): AgentStatusViewModel[] {
+export function selectAgentStatusPubkeys(
+  snapshots: readonly AgentMetricSnapshot[],
+  requestedPubkey?: string | null,
+  configuredPubkeys?: readonly string[],
+): string[] {
+  const requested = requestedPubkey?.trim().toLowerCase();
+  if (requested && /^[0-9a-f]{64}$/.test(requested)) return [requested];
+  if (requestedPubkey === null) return [];
+  const candidates =
+    configuredPubkeys ?? snapshots.map((snapshot) => snapshot.agentPubkey);
+  return Array.from(
+    new Set(
+      candidates
+        .map((pubkey) => pubkey.trim().toLowerCase())
+        .filter((pubkey) => /^[0-9a-f]{64}$/.test(pubkey)),
+    ),
+  ).slice(0, 64);
+}
+
+/** Owner-scoped live query, optionally with exact context-channel scope. */
+export function usePermanentAgentStatuses(
+  options: {
+    agentPubkey?: string | null;
+    channelId?: string;
+    threadRootId?: string;
+  } = {},
+): AgentStatusViewModel[] {
+  const { agentPubkey, channelId, threadRootId } = options;
+  const managedAgents = useManagedAgentsQuery().data;
+  const relayAgents = useRelayAgentsQuery().data;
+  const configuredAgentNames = React.useMemo(
+    () =>
+      new Map(
+        [...(managedAgents ?? []), ...(relayAgents ?? [])].map((agent) => [
+          agent.pubkey.trim().toLowerCase(),
+          agent.name,
+        ]),
+      ),
+    [managedAgents, relayAgents],
+  );
+  const configuredPubkeys = React.useMemo(
+    () => Array.from(configuredAgentNames.keys()),
+    [configuredAgentNames],
+  );
+  const targetPubkeys = React.useMemo(
+    () => selectAgentStatusPubkeys([], agentPubkey, configuredPubkeys),
+    [agentPubkey, configuredPubkeys],
+  );
+  const normalizedRequest = React.useMemo<LatestAgentMetricSnapshotsRequest>(
+    () => ({
+      agentPubkeys: targetPubkeys,
+      channelId,
+      threadRootId,
+    }),
+    [channelId, targetPubkeys, threadRootId],
+  );
   const query = useQuery({
-    queryKey: ["latest-agent-metric-snapshots"],
+    queryKey: [
+      "latest-agent-metric-snapshots",
+      targetPubkeys,
+      channelId ?? null,
+      threadRootId ?? null,
+    ],
     queryFn: async () =>
-      (await getLatestAgentMetricSnapshots()).flatMap((snapshot) => {
-        const decoded = decodeLatestAgentMetricSnapshot(snapshot);
-        return decoded ? [decoded] : [];
-      }),
+      targetPubkeys.length === 0
+        ? []
+        : (await getLatestAgentMetricSnapshots(normalizedRequest)).flatMap(
+            (snapshot) => {
+              const decoded = decodeLatestAgentMetricSnapshot(snapshot);
+              return decoded ? [decoded] : [];
+            },
+          ),
     refetchInterval: 5 * 60 * 1_000,
   });
 
@@ -88,23 +162,25 @@ export function usePermanentAgentStatuses(): AgentStatusViewModel[] {
     : null;
   const snapshots = query.data ?? [];
   const pubkeys = React.useMemo(
-    () => snapshots.map((snapshot) => snapshot.agentPubkey),
-    [snapshots],
+    () => selectAgentStatusPubkeys(snapshots, agentPubkey, configuredPubkeys),
+    [agentPubkey, configuredPubkeys, snapshots],
   );
   const profiles = useUsersBatchQuery(pubkeys, {
     enabled: pubkeys.length > 0,
   }).data?.profiles;
   const agents = React.useMemo(
     () =>
-      snapshots.map((snapshot) => ({
-        id: snapshot.agentPubkey,
-        label: resolveUserLabel({
-          pubkey: snapshot.agentPubkey,
-          profiles,
-        }),
-        agentPubkey: snapshot.agentPubkey,
+      pubkeys.map((pubkey) => ({
+        id: pubkey,
+        label:
+          configuredAgentNames.get(pubkey) ??
+          resolveUserLabel({
+            pubkey,
+            profiles,
+          }),
+        agentPubkey: pubkey,
       })),
-    [profiles, snapshots],
+    [configuredAgentNames, profiles, pubkeys],
   );
 
   return useAgentStatusAdapter(agents, snapshots, query.isLoading, error);

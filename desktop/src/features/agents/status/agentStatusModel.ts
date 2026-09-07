@@ -50,7 +50,9 @@ export function deriveConfiguredAgentStatuses({
       contextUsedTokens: null,
       contextLimitTokens: null,
       contextPercent: null,
+      contextAgeSeconds: null,
       usageWindows: [],
+      usageWindowsAgeSeconds: null,
       timestamp: null,
       ageSeconds: null,
       errorMessage: null,
@@ -69,7 +71,6 @@ export function deriveConfiguredAgentStatuses({
       };
     }
 
-    const ageSeconds = Math.max(0, nowSeconds - snapshot.timestamp);
     const hasContext =
       snapshot.contextUsedTokens !== null &&
       snapshot.contextLimitTokens !== null &&
@@ -82,6 +83,41 @@ export function deriveConfiguredAgentStatuses({
           ) / 100,
         )
       : null;
+    const usageWindows = snapshot.accountUsageWindows.map((window) => ({
+      ...window,
+      usedPercent: clampPercent(window.usedPercent),
+    }));
+    const contextTimestamp = snapshot.contextTimestamp ?? snapshot.timestamp;
+    const usageWindowsTimestamp =
+      snapshot.accountUsageWindowsTimestamp ?? snapshot.timestamp;
+    const contextAgeSeconds =
+      contextPercent === null
+        ? null
+        : Math.max(0, nowSeconds - contextTimestamp);
+    const usageWindowsAgeSeconds =
+      usageWindows.length === 0
+        ? null
+        : Math.max(0, nowSeconds - usageWindowsTimestamp);
+    const primaryCandidates = [
+      ...(contextPercent === null
+        ? []
+        : [{ percent: contextPercent, timestamp: contextTimestamp }]),
+      ...usageWindows.map((window) => ({
+        percent: window.usedPercent,
+        timestamp: usageWindowsTimestamp,
+      })),
+    ];
+    const primaryMetric = primaryCandidates.reduce<
+      { percent: number; timestamp: number } | undefined
+    >(
+      (highest, candidate) =>
+        !highest || candidate.percent > highest.percent ? candidate : highest,
+      undefined,
+    );
+    const ageSeconds = Math.max(
+      0,
+      nowSeconds - (primaryMetric?.timestamp ?? snapshot.timestamp),
+    );
 
     return {
       ...base,
@@ -91,10 +127,9 @@ export function deriveConfiguredAgentStatuses({
       contextUsedTokens: snapshot.contextUsedTokens,
       contextLimitTokens: snapshot.contextLimitTokens,
       contextPercent,
-      usageWindows: snapshot.accountUsageWindows.map((window) => ({
-        ...window,
-        usedPercent: clampPercent(window.usedPercent),
-      })),
+      contextAgeSeconds,
+      usageWindows,
+      usageWindowsAgeSeconds,
       timestamp: snapshot.timestamp,
       ageSeconds,
     };

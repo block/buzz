@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../theme/theme.dart';
@@ -17,9 +18,11 @@ import 'agent_usage_subscription.dart';
 /// Renders nothing extra (just the plain [child]) when no usage data has
 /// ever been observed and the subscription is otherwise healthy — an agent
 /// that hasn't reported usage yet is not an error state.
-class AgentUsageIndicator extends ConsumerWidget {
+class AgentUsageIndicator extends HookConsumerWidget {
   final String agentPubkey;
   final String agentLabel;
+  final String? channelId;
+  final String? threadRootId;
   final Widget child;
 
   /// Diameter of [child] (e.g. an avatar). The ring is drawn just outside it.
@@ -29,15 +32,32 @@ class AgentUsageIndicator extends ConsumerWidget {
     super.key,
     required this.agentPubkey,
     required this.agentLabel,
+    this.channelId,
+    this.threadRootId,
     required this.child,
     this.childDiameter = 40,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final normalizedAgent = agentPubkey.toLowerCase();
+    useEffect(() {
+      unawaited(
+        ref
+            .read(agentUsageRelayProvider.notifier)
+            .ensureAgentHistory(
+              agentPubkey: agentPubkey,
+              channelId: channelId,
+              threadRootId: threadRootId,
+            ),
+      );
+      return null;
+    }, [agentPubkey, channelId, threadRootId]);
     final relayState = ref.watch(agentUsageRelayProvider);
-    final snapshot = relayState.snapshotsByAgent[normalizedAgent];
+    final snapshot = relayState.snapshotFor(
+      agentPubkey: agentPubkey,
+      channelId: channelId,
+      threadRootId: threadRootId,
+    );
     final subscriptionErrored =
         relayState.connection == AgentUsageConnectionState.error;
     final status = agentUsageStatusFor(
@@ -65,7 +85,9 @@ class AgentUsageIndicator extends ConsumerWidget {
             width: ringDiameter,
             height: ringDiameter,
             child: CustomPaint(
-              painter: status == AgentUsageStatus.unknown
+              painter:
+                  status == AgentUsageStatus.unknown ||
+                      status == AgentUsageStatus.unavailable
                   ? null
                   : _UsageRingPainter(
                       fraction: fraction,
@@ -103,6 +125,8 @@ class AgentUsageIndicator extends ConsumerWidget {
     switch (status) {
       case AgentUsageStatus.unknown:
         return 'Agent usage: no data yet';
+      case AgentUsageStatus.unavailable:
+        return 'Agent usage: unavailable';
       case AgentUsageStatus.error:
         return 'Agent usage: unavailable';
       case AgentUsageStatus.stale:
@@ -122,13 +146,24 @@ class AgentUsageIndicator extends ConsumerWidget {
 /// than inventing a zero.
 class AgentUsagePercentText extends ConsumerWidget {
   final String agentPubkey;
+  final String? channelId;
+  final String? threadRootId;
 
-  const AgentUsagePercentText({super.key, required this.agentPubkey});
+  const AgentUsagePercentText({
+    super.key,
+    required this.agentPubkey,
+    this.channelId,
+    this.threadRootId,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final relayState = ref.watch(agentUsageRelayProvider);
-    final snapshot = relayState.snapshotsByAgent[agentPubkey.toLowerCase()];
+    final snapshot = relayState.snapshotFor(
+      agentPubkey: agentPubkey,
+      channelId: channelId,
+      threadRootId: threadRootId,
+    );
     final fraction = primaryUsageFraction(snapshot);
     if (fraction == null) return const SizedBox.shrink();
 

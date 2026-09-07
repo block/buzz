@@ -23,7 +23,9 @@ Future<void> showAgentUsageDetailSheet({
           Grid.gutter,
           Grid.sm,
         ),
-        child: _AgentUsageDetailBody(snapshot: snapshot, status: status),
+        child: SingleChildScrollView(
+          child: _AgentUsageDetailBody(snapshot: snapshot, status: status),
+        ),
       ),
     ),
   );
@@ -154,12 +156,24 @@ class _UsageRow extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(label, style: context.textTheme.bodyMedium),
-              Text(
-                valueText,
-                style: context.textTheme.bodyMedium?.copyWith(color: color),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.textTheme.bodyMedium,
+                ),
+              ),
+              const SizedBox(width: Grid.xxs),
+              Flexible(
+                child: Text(
+                  valueText,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.end,
+                  style: context.textTheme.bodyMedium?.copyWith(color: color),
+                ),
               ),
             ],
           ),
