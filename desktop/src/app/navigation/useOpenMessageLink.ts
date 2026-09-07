@@ -16,33 +16,41 @@ import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
  * Shared by the in-app markdown handler and the deep-link listener so both
  * route identically.
  *
- * Returns the navigation promise. The deep-link listener acks a pending link by
- * resolving `true`, and that ack drops the link from the durable queue, so it
- * has to await the navigation it claims to have performed — the channel-only
- * listener beside it already awaits `goChannel`. Click handlers that have
- * nothing to wait for can discard it.
+ * Returns whether navigation was accepted, so refused links remain queued.
+ * Pending lookups cannot navigate after this hook unmounts or the caller's
+ * lifecycle signal aborts.
  */
 export function useOpenMessageLink() {
   const { goChannel, goForumPost } = useAppNavigation();
 
+  const lifecycle = React.useRef<AbortController | null>(null);
+  React.useEffect(() => {
+    const controller = new AbortController();
+    lifecycle.current = controller;
+    return () => controller.abort();
+  }, []);
+
   return React.useCallback(
-    (link: ParsedMessageLink): Promise<void> =>
-      resolveMessageLinkDestination(
+    async (link: ParsedMessageLink, signal?: AbortSignal): Promise<boolean> => {
+      const ownerSignal = lifecycle.current?.signal;
+      const cancelled = () => ownerSignal?.aborted || signal?.aborted;
+      if (cancelled()) return false;
+      const destination = await resolveMessageLinkDestination(
         link.channelId,
         link.messageId,
         link.threadRootId,
-      ).then(async (destination) => {
-        if (destination.kind === "forum-post") {
-          await goForumPost(destination.channelId, destination.postId, {
-            replyId: destination.replyId,
-          });
-          return;
-        }
-        await goChannel(destination.channelId, {
-          messageId: destination.messageId,
-          threadRootId: destination.threadRootId,
+      );
+      if (cancelled()) return false;
+      if (destination.kind === "forum-post") {
+        return goForumPost(destination.channelId, destination.postId, {
+          replyId: destination.replyId,
         });
-      }),
+      }
+      return goChannel(destination.channelId, {
+        messageId: destination.messageId,
+        threadRootId: destination.threadRootId,
+      });
+    },
     [goChannel, goForumPost],
   );
 }

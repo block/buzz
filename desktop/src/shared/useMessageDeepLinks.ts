@@ -26,28 +26,27 @@ export function useMessageDeepLinks(enabled = true) {
   React.useEffect(() => {
     if (!enabled) return;
 
-    let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
     const unlistenPromise = listenForNavigationDeepLinks(
       async (payload) => {
-        if (cancelled) return false;
-        await goChannel(payload.channelId);
-        return true;
+        if (signal.aborted) return false;
+        return goChannel(payload.channelId);
       },
       async (payload) => {
-        if (cancelled) return false;
-        // Resolving `true` acks the link and drops it from the durable pending
-        // queue, so the navigation has to have landed first — same contract the
-        // channel listener above keeps by awaiting `goChannel`.
-        await openMessageLink({
-          channelId: payload.channelId,
-          messageId: payload.messageId,
-          threadRootId: payload.threadRootId,
-        });
-        return true;
+        if (signal.aborted) return false;
+        return openMessageLink(
+          {
+            channelId: payload.channelId,
+            messageId: payload.messageId,
+            threadRootId: payload.threadRootId,
+          },
+          signal,
+        );
       },
     );
     return () => {
-      cancelled = true;
+      controller.abort();
       void unlistenPromise.then((unlisten) => unlisten());
     };
   }, [enabled, goChannel, openMessageLink]);
