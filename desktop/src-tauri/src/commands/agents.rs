@@ -300,16 +300,15 @@ async fn start_local_agent_with_preflight(
     if record.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
+    if requested.is_none() {
+        crate::managed_agents::runtime_configurations::check_selection(
+            record,
+            Some(&launch_owner),
+            launch_relay.as_str(),
+            configuration.as_ref(),
+        )?;
+    }
     if let Some(plan) = &prepared {
-        if requested.is_none()
-            && crate::managed_agents::runtime_configurations::selected_reference(
-                record,
-                Some(&launch_owner),
-                launch_relay.as_str(),
-            )? != configuration
-        {
-            return Err("Selected configuration changed during preflight".into());
-        }
         plan.revalidate(
             record,
             &load_personas(app)?,

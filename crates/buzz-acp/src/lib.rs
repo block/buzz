@@ -2496,6 +2496,10 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let (startup_model, require_model) = startup_model_selection(
+        config.model.as_deref(),
+        std::env::var("BUZZ_ACP_REQUIRED_MODEL"),
+    )?;
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -3100,7 +3104,8 @@ async fn tokio_main() -> Result<()> {
                         acp,
                         state: SessionState::default(),
                         model_capabilities: None,
-                        desired_model: config.model.clone(),
+                        desired_model: startup_model.clone(),
+                        require_model,
                         model_overridden: false,
                         desired_model_request_id: None,
                         desired_model_pending_ack: false,
@@ -5442,10 +5447,29 @@ impl PoolStartup {
     }
 }
 
+// Named launches carry the target, not a boolean claiming it was selected.
+// This is independent of BUZZ_ACP_MODEL: Claude A1 deliberately removes that
+// switch hint and selects through ANTHROPIC_MODEL at launch. Session creation
+// must still verify the required target from the adapter's actual response.
+fn startup_model_selection(
+    legacy_model: Option<&str>,
+    required_model: Result<String, std::env::VarError>,
+) -> Result<(Option<String>, bool)> {
+    match required_model {
+        Ok(model) if !model.trim().is_empty() => Ok((Some(model), true)),
+        Err(std::env::VarError::NotPresent) => Ok((legacy_model.map(str::to_owned), false)),
+        _ => anyhow::bail!("BUZZ_ACP_REQUIRED_MODEL must be a non-empty UTF-8 model ID"),
+    }
+}
+
 async fn initialize_agent_pool(
     startup: &PoolStartup,
     mut shutdown: Option<watch::Receiver<()>>,
 ) -> Result<AgentPool> {
+    let (desired_model, require_model) = startup_model_selection(
+        startup.model.as_deref(),
+        std::env::var("BUZZ_ACP_REQUIRED_MODEL"),
+    )?;
     // One agent failing to start must not kill the whole pool.
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
@@ -5502,7 +5526,8 @@ async fn initialize_agent_pool(
                             acp,
                             state: SessionState::default(),
                             model_capabilities: None,
-                            desired_model: startup.model.clone(),
+                            desired_model: desired_model.clone(),
+                            require_model,
                             model_overridden: false,
                             desired_model_request_id: None,
                             desired_model_pending_ack: false,
@@ -9358,6 +9383,7 @@ mod error_outcome_emission_tests {
             state: Default::default(),
             model_capabilities: None,
             desired_model: None,
+            require_model: false,
             model_overridden: false,
             desired_model_request_id: None,
             desired_model_pending_ack: false,
@@ -11246,5 +11272,31 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod startup_model_selection_tests {
+    use super::startup_model_selection;
+    use std::env::VarError;
+
+    #[test]
+    fn required_target_is_independent_of_legacy_switch_hint() {
+        for legacy in [None, Some("legacy")] {
+            assert_eq!(
+                startup_model_selection(legacy, Ok("chosen".into())).unwrap(),
+                (Some("chosen".into()), true),
+            );
+            assert_eq!(
+                startup_model_selection(legacy, Err(VarError::NotPresent)).unwrap(),
+                (legacy.map(str::to_owned), false),
+            );
+        }
+        for value in ["", "   "] {
+            assert!(startup_model_selection(Some("legacy"), Ok(value.into())).is_err());
+        }
+        assert!(
+            startup_model_selection(None, Err(VarError::NotUnicode("invalid".into()))).is_err()
+        );
     }
 }

@@ -43,10 +43,15 @@ pub(crate) struct PreparedLaunch {
     pub(super) effective: super::effective_config::EffectiveAgentConfig,
     host: String,
     scope: (String, String),
+    // Catalog-only preparation has no app context and cannot be executed.
+    pub(super) app_inputs: Option<(Option<String>, super::AcpSessionPolicy)>,
 }
 
 impl PreparedLaunch {
     pub(crate) fn check_scope(&self, owner: Option<&str>, community: &str) -> Result<(), String> {
+        if self.app_inputs.is_none() {
+            return Err("Launch plan has no app inputs".into());
+        }
         if Some(self.scope.0.as_str()) != owner || self.scope.1 != community {
             return Err("Prepared runtime launch belongs to another owner or community".into());
         }
@@ -133,6 +138,7 @@ pub(crate) fn prepare(
         effective,
         host: host.into(),
         scope: (owner.into(), community.into()),
+        app_inputs: None,
     })
 }
 
@@ -279,6 +285,9 @@ pub(crate) fn preflight(
     if super::resolve_command(&descriptor.command).is_none() {
         return Err("Selected runtime is unavailable on this Desktop".into());
     }
+    if config.is_some() {
+        required_mcp_command(&descriptor.command)?;
+    }
     if config
         .and_then(|c| c.workspace.as_ref())
         .is_some_and(|path| !std::path::Path::new(path).is_dir())
@@ -321,8 +330,9 @@ pub(crate) fn prepare_for_app<R: tauri::Runtime>(
     owner: &str,
     community: &str,
 ) -> Result<PreparedLaunch, String> {
+    use tauri::Manager;
     let host = local_host(app, owner, community)?;
-    prepare(
+    let mut plan = prepare(
         record,
         reference,
         &super::load_personas(app)?,
@@ -330,7 +340,12 @@ pub(crate) fn prepare_for_app<R: tauri::Runtime>(
         &host,
         owner,
         community,
-    )
+    )?;
+    plan.app_inputs = Some((
+        super::spawn_snapshot::effective_team_instructions(record, &super::load_teams(app)?),
+        super::acp_session_policy(app.state::<crate::app_state::AppState>().inner()),
+    ));
+    Ok(plan)
 }
 
 fn local_host<R: tauri::Runtime>(
@@ -420,6 +435,19 @@ pub(crate) fn catalog(
         .collect()
 }
 
+/// Fence ordinary next-launch selection, including Default, across preflight.
+pub(crate) fn check_selection(
+    record: &ManagedAgentRecord,
+    owner: Option<&str>,
+    community: &str,
+    expected: Option<&RuntimeConfigurationRef>,
+) -> Result<(), String> {
+    if selected_reference(record, owner, community)?.as_ref() != expected {
+        return Err("Selected configuration changed during preflight".into());
+    }
+    Ok(())
+}
+
 /// Validate or resolve before any existing pair is reaped. The shared spawn checks again.
 pub(crate) fn prepare_selected<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -477,6 +505,36 @@ pub(crate) async fn preflight_prepared(
     .await?;
     #[cfg(not(feature = "mesh-llm"))]
     let _ = app;
+    Ok(())
+}
+
+/// Named runtime selection includes its catalog-declared MCP tool server. Unlike
+/// Default's optional inherited capability, an unavailable declared tool is an error.
+pub(crate) fn required_mcp_command(command: &str) -> Result<Option<std::path::PathBuf>, String> {
+    super::known_acp_runtime(command)
+        .and_then(|runtime| runtime.mcp_command)
+        .map(|command| {
+            super::resolve_command(command)
+                .filter(|path| super::discovery::is_executable_file(path))
+                .ok_or_else(|| "Selected runtime's required MCP tool is unavailable".to_string())
+        })
+        .transpose()
+}
+
+/// Final authority after all inherited/harness/mesh environment writes. This is
+/// an ACP verification target, not an assertion that the model is ready.
+pub(crate) fn apply_required_model_env(
+    command: &mut std::process::Command,
+    required: Option<&str>,
+) -> Result<(), String> {
+    command.env_remove("BUZZ_ACP_REQUIRE_MODEL");
+    command.env_remove("BUZZ_ACP_REQUIRED_MODEL");
+    if let Some(model) = required {
+        if model.trim().is_empty() {
+            return Err("Named launch has no resolved model".into());
+        }
+        command.env("BUZZ_ACP_REQUIRED_MODEL", model);
+    }
     Ok(())
 }
 

@@ -1,8 +1,7 @@
 use super::{
     bestie_assignment::recover_pending_assignment_cleanup, find_managed_agent_mut,
     kill_stale_tracked_processes, load_managed_agents, load_personas, managed_agents_base_dir,
-    save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
-    ManagedAgentProcess,
+    save_managed_agents, sync_managed_agent_processes, BackendKind, ManagedAgentProcess,
 };
 use crate::app_state::AppState;
 use crate::util;
@@ -250,38 +249,53 @@ pub async fn restore_managed_agents_on_launch(
         .ok()
         .map(|k| k.public_key().to_hex());
 
-    #[cfg(feature = "mesh-llm")]
-    let agents_to_start = {
-        // Preflight against the same resolution spawn uses — `resolve_effective_config`
-        // (definition → global fallback). A linked instance's own `provider`/`model`/
-        // `relay_mesh` bytes never contribute. See `start_local_agent_with_preflight`
-        // in `commands/agents.rs` for the identical rationale on the interactive path.
-        let personas = load_personas(app).unwrap_or_default();
-        let global = super::load_global_agent_config(app).unwrap_or_default();
-        let mut mesh_preflight_failures = std::collections::HashSet::new();
-        for record in &agents_to_start {
-            let mesh_model_id = super::effective_config::resolve_effective_relay_mesh_model_id(
-                record, &personas, &global,
-            );
-            if mesh_model_id.is_none() {
-                continue;
+    // Capture the actual scoped selection before awaiting, never preflight Default
+    // and recapture a different selected model at spawn.
+    let launch_relay = crate::relay::relay_ws_url_with_override(&state);
+    let mut prepared_agents = Vec::new();
+    for record in agents_to_start {
+        let preparation = super::runtime_configurations::prepare_selected(
+            app,
+            &record,
+            owner_hex.as_deref(),
+            &launch_relay,
+        );
+        let result = async {
+            let plan = preparation?;
+            if let Some(plan) = &plan {
+                super::runtime_configurations::preflight_prepared(
+                    app,
+                    plan,
+                    owner_hex.as_deref().ok_or("Desktop owner unavailable")?,
+                    &launch_relay,
+                )
+                .await?;
+            } else {
+                #[cfg(feature = "mesh-llm")]
+                {
+                    let model = super::effective_config::resolve_effective_relay_mesh_model_id(
+                        &record,
+                        &load_personas(app)?,
+                        &super::load_global_agent_config(app)?,
+                    );
+                    crate::commands::ensure_relay_mesh_for_record(app, model.as_deref(), false)
+                        .await?;
+                }
             }
-            // Auto-start after relaunch: re-resolve a live bootstrap target and
-            // dial it. Skip (with an actionable error) only when no live target
-            // serves this model right now.
-            if let Err(error) =
-                crate::commands::ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false)
-                    .await
-            {
-                persist_restore_error(app, &state, &record.pubkey, error)?;
-                mesh_preflight_failures.insert(record.pubkey.clone());
-            }
+            Ok::<_, String>(plan)
         }
-        agents_to_start
-            .into_iter()
-            .filter(|record| !mesh_preflight_failures.contains(&record.pubkey))
-            .collect::<Vec<_>>()
-    };
+        .await;
+        match result {
+            Ok(plan) => prepared_agents.push((record, plan)),
+            Err(error) => persist_restore_error(app, &state, &record.pubkey, error)?,
+        }
+    }
+    let agents_to_start = prepared_agents;
+    if crate::relay::relay_ws_url_with_override(&state) != launch_relay
+        || state.signing_keys()?.public_key().to_hex() != owner_hex.as_deref().unwrap_or("")
+    {
+        return Err("Desktop scope changed during restore preflight".into());
+    }
     if agents_to_start.is_empty() {
         return Ok(());
     }
@@ -301,17 +315,13 @@ pub async fn restore_managed_agents_on_launch(
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
+        let state = &state;
         let handles: Vec<_> = agents_to_start
             .iter()
             .filter(|_| !shutdown_started.load(Ordering::SeqCst))
-            .map(|record| {
+            .map(|(record, prepared)| {
+                let relay_url = launch_relay.clone();
                 let handle = scope.spawn(move || {
-                    let workspace_relay =
-                        crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
-                    let relay_url = crate::relay::effective_agent_relay_url(
-                        &record.relay_url,
-                        &workspace_relay,
-                    );
                     let outcome =
                         match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
                         {
@@ -334,24 +344,46 @@ pub async fn restore_managed_agents_on_launch(
                                 if already_live {
                                     SpawnOutcome::Skipped
                                 } else {
-                                    match super::terminate_untracked_pair_runtime(app, &key)
-                                        .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
-                                            spawn_agent_child(
-                                                app,
-                                                record,
-                                                &relay_url,
-                                                true,
-                                                owner_hex_ref,
-                                                None,
-                                                None,
-                                            )
-                                        }) {
+                                    let result = (|| {
+                                        let _store = state
+                                            .managed_agents_store_lock
+                                            .lock()
+                                            .map_err(|error| error.to_string())?;
+                                        let records = load_managed_agents(app)?;
+                                        let current = records
+                                            .iter()
+                                            .find(|r| r.pubkey == record.pubkey)
+                                            .ok_or("Agent removed during restore preflight")?;
+                                        super::runtime_configurations::check_selection(
+                                            current,
+                                            owner_hex_ref,
+                                            &relay_url,
+                                            prepared
+                                                .as_ref()
+                                                .and_then(|plan| plan.configuration())
+                                                .as_ref(),
+                                        )?;
+                                        if let Some(plan) = prepared {
+                                            plan.revalidate(
+                                                current,
+                                                &load_personas(app)?,
+                                                &super::load_global_agent_config(app)?,
+                                            )?;
+                                        }
+                                        super::terminate_untracked_pair_runtime(app, &key)?;
+                                        super::runtime::spawn_agent_child_with_broker(
+                                            app,
+                                            current,
+                                            &relay_url,
+                                            true,
+                                            owner_hex_ref,
+                                            None,
+                                            None,
+                                            None,
+                                            prepared.as_ref(),
+                                        )
+                                    })();
+                                    match result {
                                         Ok(process) => {
                                             SpawnOutcome::Spawned(key, relay_url, Box::new(process))
                                         }

@@ -565,6 +565,18 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     };
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
+    let app_inputs = prepared
+        .map(|plan| {
+            plan.app_inputs
+                .as_ref()
+                .ok_or("Launch plan has no app inputs")
+        })
+        .transpose()?;
+    let required_mcp = if super::runtime_configurations::selected(record)?.is_some() {
+        super::runtime_configurations::required_mcp_command(effective_command)?
+    } else {
+        None
+    };
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -688,7 +700,10 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
             }
         }
     }
-    let team_instructions = super::spawn_snapshot::effective_team_instructions(record, &teams);
+    let team_instructions = match app_inputs {
+        Some((instructions, _)) => instructions.clone(),
+        None => super::spawn_snapshot::effective_team_instructions(record, &teams),
+    };
     if let Some(instructions) = &team_instructions {
         command.env("BUZZ_ACP_TEAM_INSTRUCTIONS", instructions);
     } else {
@@ -820,8 +835,15 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
-    // Resolve once and stamp the same value onto the snapshot below.
-    let acp_session_policy = super::apply_app_acp_session_policy_env(app, &mut command);
+    // Prepared launches bind session partitioning before async preflight; Default
+    // retains the existing launch-time experiment policy. Stamp exactly what we apply.
+    let acp_session_policy = match app_inputs {
+        Some((_, policy)) => {
+            super::session_policy::apply_acp_session_policy_env(&mut command, *policy);
+            *policy
+        }
+        None => super::apply_app_acp_session_policy_env(app, &mut command),
+    };
 
     crate::build_identity::apply_demo_config_home(&mut command)?;
     // Publish-first replay floor: written AFTER the `descriptor.env` loop, the
@@ -903,12 +925,26 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
         )?;
     }
     // Applied last so inherited environment cannot weaken explicit model selection.
-    command.env_remove("BUZZ_ACP_REQUIRE_MODEL");
-    if let Some(config) = super::runtime_configurations::selected(record)? {
-        command.env("BUZZ_ACP_REQUIRE_MODEL", "true");
-        if let Some(workspace) = &config.workspace {
-            command.current_dir(workspace);
+    let configuration = super::runtime_configurations::selected(record)?;
+    let required_model = configuration
+        .map(|_| {
+            acp_model
+                .as_deref()
+                .ok_or("Named launch has no resolved model")
+        })
+        .transpose()?;
+    super::runtime_configurations::apply_required_model_env(&mut command, required_model)?;
+    if let Some(model) = required_model {
+        if !runtime_meta.is_some_and(|runtime| runtime.id == "claude") {
+            command.env("BUZZ_ACP_MODEL", model);
         }
+    }
+    if let Some(mcp) = required_mcp {
+        // A saved environment cannot replace or disable a declared named tool.
+        command.env("BUZZ_ACP_MCP_COMMAND", mcp);
+    }
+    if let Some(workspace) = configuration.and_then(|config| config.workspace.as_ref()) {
+        command.current_dir(workspace);
     }
     let child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
         format!(
