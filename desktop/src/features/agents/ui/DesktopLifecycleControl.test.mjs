@@ -10,7 +10,34 @@ import {
 import { toast } from "sonner";
 import { relayClient } from "../../../shared/api/relayClient.ts";
 
-test("mounted Start exposes unavailable provisioning and exact retry; Restart resolves source", async () => {
+function probeResult(request) {
+  if (request.action !== "catalog" && request.action !== "preflight")
+    return null;
+  const id = request.cursor ? "other" : "config";
+  return {
+    outcome: "ready",
+    observation: {
+      valid_until: Math.floor(Date.now() / 1000) + 30,
+      catalog:
+        request.action === "catalog"
+          ? {
+              entry: {
+                configuration: { id, revision: "revision-1" },
+                name: id === "config" ? "Everyday" : "Alternative",
+                host: request.desktop,
+                runtime: "fixture-harness",
+                model: id === "config" ? "Model A" : "Model B",
+                provider: null,
+                eligible: true,
+              },
+              next: request.cursor ? null : "config",
+            }
+          : null,
+    },
+  };
+}
+
+test("mounted picker expires without refresh, reports actual ref, and preserves exact retry", async (t) => {
   const dom = new JSDOM("<div id='root'></div>", {
     url: "https://desktop.test",
   });
@@ -58,9 +85,20 @@ test("mounted Start exposes unavailable provisioning and exact retry; Restart re
         return request;
       }
       if (command === "read_desktop_lifecycle_results")
-        return args.request.action === "status"
-          ? "running"
-          : "provisioning_unavailable";
+        return (
+          probeResult(args.request) ?? {
+            outcome:
+              args.request.action === "status"
+                ? "running"
+                : "provisioning_unavailable",
+            observation: {
+              running_configuration: {
+                id: "actual-config",
+                revision: "actual-revision",
+              },
+            },
+          }
+        );
       if (command === "read_desktop_stop_results") return stop;
       throw Error(command);
     },
@@ -101,32 +139,66 @@ test("mounted Start exposes unavailable provisioning and exact retry; Restart re
     );
     assert.doesNotMatch(document.body.textContent, /Foreign agent/);
     await select("Agent to place", "agent");
-    await select("Destination Desktop", "destination");
+    await select("Runtime configuration", "destination:config:revision-1");
+    assert.match(document.body.textContent, /Model A/);
+    assert.match(document.body.textContent, /Model B/);
+    assert.match(
+      document.querySelector('[aria-label="Actual running configuration"]')
+        .textContent,
+      /actual-config, revision actual-revision/,
+    );
+    assert.doesNotMatch(
+      document.querySelector('[aria-label="Actual running configuration"]')
+        .textContent,
+      /revision-1/,
+    );
     await click("Start on destination");
     assert.match(
       document.body.textContent,
       /keyless launch provisioning is unavailable/,
     );
-    assert.equal(prepared[0].desktop, "destination");
-    await click("Retry same request");
-    assert.equal(prepared.length, 1);
-    assert.equal(sent[0], sent[1]);
-    await click("Restart on current Desktop");
-    const restart = prepared.at(-1);
     assert.equal(
-      restart.desktop,
-      "source",
-      "destination picker must not redirect Restart",
+      prepared.find((r) => r.action === "start").desktop,
+      "destination",
     );
-    assert.equal(restart.action, "restart");
-    assert.equal(restart.observed, prepared.at(-2).id);
-    await click("Move to destination");
+    await click("Retry same request");
+    assert.equal(prepared.filter((r) => r.action === "start").length, 1);
+    const starts = sent.filter((r) => r.action === "start");
+    assert.equal(starts[0], starts[1]);
+    await select("Runtime configuration", "source:other:revision-1");
+    await click("Switch runtime configuration");
     assert.match(document.body.textContent, /destination was not started/);
     const count = prepared.length;
     stop = "stopped";
     await React.act(async () => {});
     assert.equal(prepared.length, count, "late Stop cannot resume failed Move");
     assert.doesNotMatch(document.body.textContent, /Retry same request/);
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    await click("Refresh configurations");
+    await select("Runtime configuration", "source:config:revision-1");
+    await React.act(async () => t.mock.timers.tick(31_000));
+    assert.equal(
+      document.querySelector('[aria-label="Runtime configuration"]').options
+        .length,
+      1,
+    );
+    assert.equal(
+      [...document.querySelectorAll("button")].find(
+        (b) => b.textContent === "Start on destination",
+      ).disabled,
+      true,
+    );
+    assert.equal(
+      [...document.querySelectorAll("button")].find(
+        (b) => b.textContent === "Switch runtime configuration",
+      ).disabled,
+      true,
+    );
+    assert.equal(
+      prepared.filter((r) => r.action === "start").length,
+      1,
+      "expiry never dispatches Start",
+    );
   } finally {
     await React.act(async () => root.unmount());
     client.clear();
@@ -301,7 +373,8 @@ for (const interruption of ["cancel", "account", "community", "unmount"]) {
           prepared.push(request);
           return request;
         }
-        if (command === "read_desktop_lifecycle_results") return "running";
+        if (command === "read_desktop_lifecycle_results")
+          return probeResult(args.request) ?? { outcome: "running" };
         if (command === "read_desktop_stop_results")
           return new Promise((resolve) => {
             confirmStop = resolve;
@@ -345,8 +418,8 @@ for (const interruption of ["cancel", "account", "community", "unmount"]) {
     try {
       await React.act(async () => render(scope));
       await select("Agent to place", "agent");
-      await select("Destination Desktop", "target");
-      await click("Move to destination");
+      await select("Runtime configuration", "target:config:revision-1");
+      await click("Switch runtime configuration");
       assert.equal(typeof confirmStop, "function");
       if (interruption === "cancel") await click("Cancel waiting");
       else if (interruption === "unmount")

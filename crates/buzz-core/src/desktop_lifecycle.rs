@@ -18,6 +18,10 @@ pub enum Action {
     Restart,
     /// Read actual local process status; never starts or stops anything.
     Status,
+    /// Read a bounded page of destination-local configuration summaries.
+    Catalog,
+    /// Check exact launch prerequisites without changing placement or processes.
+    Preflight,
 }
 
 /// Immutable request; retries retain its exact signed bytes.
@@ -30,6 +34,12 @@ pub struct Request {
     pub action: Action,
     /// Restart's fresh successful Status request ID. None for other actions.
     pub observed: Option<String>,
+    /// Explicit next-launch revision. Missing legacy refs never authorize new launch.
+    #[serde(default)]
+    pub configuration: Option<RuntimeConfigurationRef>,
+    /// Exclusive catalog cursor; never a launch target or placement intent.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// No credentials, paths, PIDs or raw runtime errors on the wire.
@@ -46,6 +56,34 @@ pub enum Outcome {
     Failed,
     /// Superseded, interrupted, evicted or uncertain; never success.
     Unknown,
+    /// Fresh, positive read-only catalog/preflight response; not launch authority.
+    Ready,
+    /// Exact configuration is absent, stale, or not currently launchable.
+    Ineligible,
+    /// A process exists, but it did not launch the requested configuration.
+    DifferentConfiguration,
+}
+
+/// One summary per response keeps encrypted payloads below the existing 4096-byte bound.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogPage {
+    /// None is an authoritative empty final page, not an unavailable host.
+    pub entry: Option<RuntimeConfigurationSummary>,
+    /// Exclusive configuration ID cursor when more entries remain.
+    pub next: Option<String>,
+}
+
+/// Safe, short-lived observation. No launch plan, credentials or local paths.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    /// Unix seconds; bounded by the original request's timestamp plus 30 seconds.
+    pub valid_until: u64,
+    /// Launch-time identity, never inferred from the current selection.
+    pub running_configuration: Option<RuntimeConfigurationRef>,
+    /// Catalog data appears only on Catalog results.
+    pub catalog: Option<CatalogPage>,
 }
 
 /// Signed Desktop outcome, not agent-signed termination proof.
@@ -58,6 +96,9 @@ pub struct ResultMessage {
     pub id: String,
     /// Local Desktop result.
     pub outcome: Outcome,
+    /// Optional for legacy results, which cannot establish configuration readiness.
+    #[serde(default)]
+    pub observation: Option<Observation>,
 }
 
 /// Public envelope gate before persistence; content remains owner encrypted.
@@ -82,9 +123,23 @@ impl Request {
     /// Validate target, action and correlation without inventing credentials.
     pub fn validate(&self, community: &str) -> Result<(), String> {
         self.target.validate(community)?;
+        if let Some(reference) = &self.configuration {
+            reference.validate()?;
+        }
+        if self
+            .cursor
+            .as_ref()
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+            || (self.action != Action::Catalog && self.cursor.is_some())
+            || (matches!(self.action, Action::Catalog | Action::Status)
+                && self.configuration.is_some())
+            || (self.action == Action::Preflight && self.configuration.is_none())
+        {
+            return Err("Invalid lifecycle configuration target".into());
+        }
         match (self.action, &self.observed) {
             (Action::Restart, Some(id)) if hex(id, 64) => Ok(()),
-            (Action::Start | Action::Status, None) => Ok(()),
+            (Action::Start | Action::Status | Action::Catalog | Action::Preflight, None) => Ok(()),
             _ => Err("invalid Desktop lifecycle observation".into()),
         }
     }
@@ -109,6 +164,73 @@ impl Request {
     }
 }
 impl ResultMessage {
+    fn validate_observation(&self, stamp: u64) -> Result<(), String> {
+        let fail = || "Invalid lifecycle observation".to_string();
+        if self.outcome == Outcome::Ready
+            && (!matches!(self.request.action, Action::Catalog | Action::Preflight)
+                || self.observation.is_none())
+        {
+            return Err(fail());
+        }
+        if let Some(observation) = &self.observation {
+            if observation.valid_until <= stamp
+                || observation.valid_until > stamp.saturating_add(30)
+            {
+                return Err(fail());
+            }
+            if let Some(reference) = &observation.running_configuration {
+                reference.validate()?;
+                if !matches!(
+                    self.outcome,
+                    Outcome::Running | Outcome::DifferentConfiguration
+                ) {
+                    return Err(fail());
+                }
+            }
+            if let Some(page) = &observation.catalog {
+                if self.request.action != Action::Catalog || self.outcome != Outcome::Ready {
+                    return Err(fail());
+                }
+                if let Some(entry) = &page.entry {
+                    entry.validate(&self.request.target.desktop)?;
+                    if self
+                        .request
+                        .cursor
+                        .as_ref()
+                        .is_some_and(|cursor| &entry.configuration.id <= cursor)
+                    {
+                        return Err(fail());
+                    }
+                }
+                if page.next.as_ref().is_some_and(|next| {
+                    page.entry.as_ref().map(|e| &e.configuration.id) != Some(next)
+                }) {
+                    return Err(fail());
+                }
+            } else if self.request.action == Action::Catalog && self.outcome == Outcome::Ready {
+                return Err(fail());
+            }
+        }
+        if self.outcome == Outcome::Running
+            && self.request.configuration.is_some()
+            && self
+                .observation
+                .as_ref()
+                .and_then(|o| o.running_configuration.as_ref())
+                != self.request.configuration.as_ref()
+        {
+            return Err(fail());
+        }
+        if matches!(self.request.action, Action::Catalog | Action::Preflight)
+            && matches!(
+                self.outcome,
+                Outcome::Running | Outcome::Stopped | Outcome::DifferentConfiguration
+            )
+        {
+            return Err(fail());
+        }
+        Ok(())
+    }
     /// Sign the actual Desktop result. It is immutable for this request.
     pub fn sign(&self, keys: &Keys) -> Result<Event, String> {
         self.request.validate(&self.request.target.community)?;
@@ -134,6 +256,7 @@ impl ResultMessage {
     ) -> Result<Self, String> {
         let original = Request::read(request, keys, community)?;
         let value: Self = read(event, keys, KIND_DESKTOP_LIFECYCLE_RESULT)?;
+        value.validate_observation(request.created_at.as_secs())?;
         if value.request != original
             || value.id != request.id.to_hex()
             || event.tags.identifier() != Some(original.target.desktop.as_str())
@@ -144,6 +267,9 @@ impl ResultMessage {
         Ok(value)
     }
 }
+
+#[cfg(test)]
+mod protocol_tests;
 
 #[cfg(test)]
 mod tests {
@@ -160,6 +286,8 @@ mod tests {
             },
             action: Action::Start,
             observed: None,
+            configuration: None,
+            cursor: None,
         };
         let event = request.sign(&keys).unwrap();
         assert_eq!(
@@ -176,6 +304,7 @@ mod tests {
             request: request.clone(),
             id: event.id.to_hex(),
             outcome: Outcome::ProvisioningUnavailable,
+            observation: None,
         }
         .sign(&keys)
         .unwrap();

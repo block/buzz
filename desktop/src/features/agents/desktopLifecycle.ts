@@ -17,14 +17,51 @@ import {
 
 export const DESKTOP_LIFECYCLE = 50182;
 export const DESKTOP_LIFECYCLE_RESULT = 50183;
-export type LifecycleAction = "start" | "restart" | "status";
+export type LifecycleAction =
+  | "start"
+  | "restart"
+  | "status"
+  | "catalog"
+  | "preflight";
+/** Wire projection of buzz-core's canonical reference; never launch settings. */
+export type RuntimeConfigurationRef = { id: string; revision: string };
+export type RuntimeConfigurationSummary = {
+  configuration: RuntimeConfigurationRef;
+  name: string;
+  host: string;
+  runtime: string;
+  model: string;
+  provider: string | null;
+  eligible: boolean;
+};
+export type ConfigurationChoice = RuntimeConfigurationSummary & {
+  validUntil: number;
+};
+export type LifecycleResult = {
+  outcome: LifecycleOutcome;
+  observation?: {
+    valid_until: number;
+    running_configuration: RuntimeConfigurationRef | null;
+    catalog: {
+      entry: RuntimeConfigurationSummary | null;
+      next: string | null;
+    } | null;
+  } | null;
+};
 export type LifecycleOutcome =
   | "running"
   | "stopped"
   | "provisioning_unavailable"
   | "failed"
-  | "unknown";
-export type CurrentHost = { desktop: string; observation: string };
+  | "unknown"
+  | "ready"
+  | "ineligible"
+  | "different_configuration";
+export type CurrentHost = {
+  desktop: string;
+  observation: string;
+  configuration: RuntimeConfigurationRef | null;
+};
 
 /** Captures identity and connection generation across every asynchronous step. */
 export function lifecycleClient(
@@ -48,6 +85,8 @@ export function lifecycleClient(
     agent: string,
     action: LifecycleAction,
     observed: string | null = null,
+    configuration: RuntimeConfigurationRef | null = null,
+    cursor: string | null = null,
   ) => {
     check();
     const request = await ipc<RelayEvent>("prepare_desktop_lifecycle", {
@@ -56,6 +95,8 @@ export function lifecycleClient(
       agent,
       action,
       observed,
+      configuration,
+      cursor,
     });
     check();
     return request;
@@ -69,17 +110,17 @@ export function lifecycleClient(
       limit: 16,
     });
     check();
-    const outcome = await ipc<LifecycleOutcome>(
+    const outcome = await ipc<LifecycleResult | null>(
       "read_desktop_lifecycle_results",
       { ...scope, request, events },
     );
     check();
-    return outcome;
+    return outcome ?? { outcome: "unknown" as const };
   };
-  const send = async (
+  const sendResult = async (
     request: RelayEvent,
     attempts = 15,
-  ): Promise<LifecycleOutcome> => {
+  ): Promise<LifecycleResult> => {
     check();
     try {
       await relay.publishEvent(
@@ -95,10 +136,96 @@ export function lifecycleClient(
       check();
       const outcome = await read(request);
       check();
-      if (outcome !== "unknown") return outcome;
+      if (outcome.outcome !== "unknown") return outcome;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    return "unknown";
+    return { outcome: "unknown" };
+  };
+  const send = async (request: RelayEvent, attempts = 15) =>
+    (await sendResult(request, attempts)).outcome;
+  const fresh = (result: LifecycleResult) => {
+    check();
+    if (
+      !result.observation ||
+      result.observation.valid_until <= Date.now() / 1000
+    )
+      throw new Error(
+        "Configuration readiness expired or is unknown; check again.",
+      );
+  };
+  const preflight = async (
+    desktop: string,
+    agent: string,
+    configuration: RuntimeConfigurationRef,
+  ) => {
+    const request = await prepare(desktop, agent, "preflight", null, {
+      ...configuration,
+    });
+    const result = await sendResult(request, 3);
+    if (result.outcome !== "ready")
+      throw new Error(
+        "Target configuration is not eligible. No source Stop was requested.",
+      );
+    fresh(result);
+    return result;
+  };
+  const catalog = async (agent: string, desktops: string[]) => {
+    const hosts = [...new Set(desktops)];
+    if (hosts.length > 32) throw new Error("Too many destination Desktops");
+    return (
+      await Promise.all(
+        hosts.map(async (host) => {
+          const entries: ConfigurationChoice[] = [];
+          let cursor: string | null = null;
+          const seen = new Set<string>();
+          for (let page = 0; page < 32; page++) {
+            const request = await prepare(
+              host,
+              agent,
+              "catalog",
+              null,
+              null,
+              cursor,
+            );
+            const result = await sendResult(request, 3);
+            check();
+            if (result.outcome !== "ready") return [];
+            fresh(result);
+            const data = result.observation?.catalog;
+            if (!data || !result.observation) return [];
+            if (
+              data.entry &&
+              (data.entry.host !== host ||
+                (cursor !== null && data.entry.configuration.id <= cursor))
+            )
+              throw new Error(
+                "Configuration catalog scope or ordering changed",
+              );
+            if (data.next && data.next !== data.entry?.configuration.id)
+              throw new Error(
+                "Configuration catalog cursor does not match its entry",
+              );
+            if (data.entry?.eligible)
+              entries.push({
+                ...data.entry,
+                validUntil: result.observation.valid_until,
+              });
+            if (!data.next) {
+              if (
+                entries.some((entry) => entry.validUntil <= Date.now() / 1000)
+              )
+                throw new Error("Configuration catalog expired; check again");
+              return entries;
+            }
+            if (seen.has(data.next))
+              throw new Error("Configuration catalog cursor did not advance");
+            seen.add(data.next);
+            cursor = data.next;
+          }
+          throw new Error("Configuration catalog is incomplete; check again");
+        }),
+      )
+    ).flat();
   };
   const sync = async () => {
     let until: number | undefined;
@@ -145,6 +272,23 @@ export function lifecycleClient(
       "Placement history is incomplete; no launch was dispatched",
     );
   };
+  const inspect = async (agent: string, desktops: string[]) => {
+    const hosts = [...new Set(desktops)];
+    if (hosts.length > 32) throw new Error("Too many destination Desktops");
+    return Promise.all(
+      hosts.map(async (desktop) => {
+        const request = await prepare(desktop, agent, "status");
+        const result = await sendResult(request, 3);
+        check();
+        return {
+          desktop,
+          observation: request.id,
+          outcome: result.outcome,
+          configuration: result.observation?.running_configuration ?? null,
+        };
+      }),
+    );
+  };
   const current = async (
     agent: string,
     desktops: string[],
@@ -160,16 +304,7 @@ export function lifecycleClient(
     const candidates = desired ? [desired[0]] : [...new Set(desktops)];
     if (!candidates.length || candidates.length > 32)
       throw new Error("Current Desktop is unknown");
-    const observations = await Promise.all(
-      candidates.map(async (desktop) => {
-        const request = await prepare(desktop, agent, "status");
-        return {
-          desktop,
-          observation: request.id,
-          outcome: await send(request, 3),
-        };
-      }),
-    );
+    const observations = await inspect(agent, candidates);
     check();
     const running = observations.filter((o) => o.outcome === "running");
     if (
@@ -183,14 +318,16 @@ export function lifecycleClient(
       );
     return running[0];
   };
-  const start = async (desktop: string, agent: string) => {
+  const start = async (
+    desktop: string,
+    agent: string,
+    configuration: RuntimeConfigurationRef,
+  ) => {
+    const reference = { ...configuration };
+    const readiness = await preflight(desktop, agent, reference);
     await sync();
-    return prepare(desktop, agent, "start");
-  };
-  const restart = async (agent: string, desktops: string[]) => {
-    const host = await current(agent, desktops);
-    check();
-    return prepare(host.desktop, agent, "restart", host.observation);
+    fresh(readiness);
+    return prepare(desktop, agent, "start", null, reference);
   };
   /** Failed/unconfirmed Move is terminal in this invocation. No saved future
    * Start, background callback, reopen replay or retry of a failed Move. */
@@ -199,16 +336,18 @@ export function lifecycleClient(
     destination: string,
     desktops: string[],
     onStage: (stage: string) => void,
+    configuration: RuntimeConfigurationRef,
   ): Promise<LifecycleOutcome> => {
+    const reference = { ...configuration };
+    const readiness = await preflight(destination, agent, reference);
     const host = await current(agent, desktops);
     check();
-    if (host.desktop === destination)
-      throw new Error("Agent is already on the selected Desktop");
     const before = await ipc<[string, string] | null>(
       "read_desktop_placement",
       { ...scope, agent },
     );
     check();
+    fresh(readiness);
     const stop = await prepareStop(
       scope,
       host.desktop,
@@ -254,11 +393,24 @@ export function lifecycleClient(
         "Placement changed during Move; destination was not started",
       );
     onStage("Source Stop confirmed. Requesting destination Start.");
-    const request = await prepare(destination, agent, "start");
+    fresh(readiness);
+    const request = await prepare(destination, agent, "start", null, reference);
     check();
     return send(request);
   };
-  return { check, prepare, read, send, sync, current, start, restart, move };
+  return {
+    check,
+    prepare,
+    read,
+    send,
+    sync,
+    current,
+    inspect,
+    start,
+    move,
+    catalog,
+    preflight,
+  };
 }
 
 /** Subscribe first, then project history; live commands wait for complete

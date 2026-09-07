@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { lifecycleClient, receiveLifecycle } from "./desktopLifecycle.ts";
 const scope = { owner: "owner", community: "wss://one.example" };
+const configuration = { id: "config", revision: "revision-1" };
+const ready = () => ({
+  outcome: "ready",
+  observation: { valid_until: Math.floor(Date.now() / 1000) + 30 },
+});
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 function fixture() {
   let epoch = 0,
@@ -36,7 +41,12 @@ function fixture() {
       return request;
     }
     if (command === "read_desktop_lifecycle_results")
-      return args.request.action === "status" ? "running" : lifecycleOutcome;
+      return args.request.action === "preflight"
+        ? ready()
+        : {
+            outcome:
+              args.request.action === "status" ? "running" : lifecycleOutcome,
+          };
     if (command === "read_desktop_stop_results") return stopOutcome;
     if (command === "receive_desktop_lifecycle")
       return { id: "result", kind: 50183 };
@@ -103,15 +113,18 @@ function fixture() {
 test("lost ACK/result permits explicit exact-byte retry, not a fresh Start", async () => {
   const f = fixture(),
     client = f.client();
-  const request = await client.start("destination", "agent");
+  const request = await client.start("destination", "agent", configuration);
   f.loseAck();
   f.outcome("unknown");
   assert.equal(await client.send(request, 0), "unknown");
   f.outcome("running");
   assert.equal(await client.send(request, 1), "running");
-  assert.equal(f.prepared.length, 1);
-  assert.deepEqual(f.sent, [request, request]);
-  assert.equal(f.sent[0], f.sent[1]);
+  assert.equal(f.prepared.filter((r) => r.action === "start").length, 1);
+  assert.deepEqual(
+    f.sent.filter((r) => r.action === "start"),
+    [request, request],
+  );
+  assert.equal(f.sent.at(-2), f.sent.at(-1));
   assert.equal(
     f.calls.filter(([c]) => c === "receive_desktop_lifecycle").length,
     0,
@@ -128,7 +141,7 @@ for (const interruption of ["changeScope", "disconnect", "unmount"]) {
       if (args[0].kind === 50180) f[interruption]();
     };
     await assert.rejects(
-      client.move("agent", "destination", ["source"], () => {}),
+      client.move("agent", "destination", ["source"], () => {}, configuration),
       /scope changed/,
     );
     assert.equal(f.prepared.filter((r) => r.action === "start").length, 0);
@@ -139,7 +152,9 @@ test("failed Stop is final even if a successful outcome appears later", async ()
   const f = fixture();
   f.stop("failed");
   await assert.rejects(
-    f.client().move("agent", "destination", ["source"], () => {}),
+    f
+      .client()
+      .move("agent", "destination", ["source"], () => {}, configuration),
     /will not continue later/,
   );
   f.stop("stopped");
@@ -157,7 +172,9 @@ test("unconfirmed Stop exhausts polling without storing any future Start", async
   };
   try {
     await assert.rejects(
-      f.client().move("agent", "destination", ["source"], () => {}),
+      f
+        .client()
+        .move("agent", "destination", ["source"], () => {}, configuration),
       /Could not confirm source Stop/,
     );
     assert.equal(f.prepared.filter((r) => r.action === "start").length, 0);
@@ -169,12 +186,14 @@ test("unconfirmed Stop exhausts polling without storing any future Start", async
 test("Move dispatches Start only after Stop success and unchanged placement", async () => {
   const f = fixture();
   assert.equal(
-    await f.client().move("agent", "destination", ["source"], () => {}),
+    await f
+      .client()
+      .move("agent", "destination", ["source"], () => {}, configuration),
     "running",
   );
   assert.deepEqual(
     f.sent.map((r) => r.action ?? "stop"),
-    ["status", "stop", "start"],
+    ["preflight", "status", "stop", "start"],
   );
   assert.equal(f.sent.at(-1).desktop, "destination");
   const stopRead = f.calls.findIndex(
@@ -194,18 +213,27 @@ test("another Desktop's new placement supersedes an in-flight Move", async () =>
     if (args[0].kind === 50180) f.place(["third", "new-selection"]);
   };
   await assert.rejects(
-    f.client().move("agent", "destination", ["source"], () => {}),
+    f
+      .client()
+      .move("agent", "destination", ["source"], () => {}, configuration),
     /Placement changed/,
   );
   assert.equal(f.prepared.filter((r) => r.action === "start").length, 0);
 });
 
-test("Restart resolves current host and binds its Status observation, not destination", async () => {
+test("same-host different configuration switches through preflight, Stop, then exact revision Start", async () => {
   const f = fixture();
-  const request = await f.client().restart("agent", ["source", "other"]);
-  assert.equal(request.desktop, "source");
-  assert.equal(request.observed, f.prepared[0].id);
-  assert.equal(request.action, "restart");
+  assert.equal(
+    await f
+      .client()
+      .move("agent", "source", ["source"], () => {}, configuration),
+    "running",
+  );
+  assert.deepEqual(
+    f.sent.map((r) => r.action ?? "stop"),
+    ["preflight", "status", "stop", "start"],
+  );
+  assert.deepEqual(f.sent.at(-1).configuration, configuration);
 });
 
 test("receiver projects history without executing it and invalidates live work on disconnect", async () => {
@@ -380,4 +408,162 @@ test("readiness timeout is distinct, late EOSE recovers, CLOSED retires old call
   );
   assert.match(f.errors.at(-1), /subscription closed/);
   close();
+});
+
+for (const interruption of ["changeScope", "disconnect", "unmount"]) {
+  test(`${interruption} during preflight forbids Stop and Start even after a late ready result`, async () => {
+    const f = fixture();
+    const ipc = async (command, args) => {
+      const result = await f.ipc(command, args);
+      if (
+        command === "read_desktop_lifecycle_results" &&
+        args.request.action === "preflight"
+      )
+        f[interruption]();
+      return result;
+    };
+    const client = lifecycleClient(scope, () => true, ipc, f.relay);
+    // Unmount is represented by the same captured validity callback as the mounted control.
+    if (interruption === "unmount") {
+      let active = true;
+      const unmountIpc = async (command, args) => {
+        const result = await f.ipc(command, args);
+        if (command === "read_desktop_lifecycle_results") active = false;
+        return result;
+      };
+      await assert.rejects(
+        lifecycleClient(scope, () => active, unmountIpc, f.relay).move(
+          "agent",
+          "source",
+          ["source"],
+          () => {},
+          configuration,
+        ),
+      );
+    } else
+      await assert.rejects(
+        client.move("agent", "source", ["source"], () => {}, configuration),
+      );
+    assert.equal(
+      f.prepared.filter((r) => r.kind === 50180 || r.action === "start").length,
+      0,
+    );
+  });
+}
+for (const result of [
+  { outcome: "ineligible" },
+  { outcome: "ready" },
+  { outcome: "ready", observation: { valid_until: 1 } },
+]) {
+  test(`failed/missing/expired preflight ${JSON.stringify(result)} has no placement or Stop effects`, async () => {
+    const f = fixture();
+    const ipc = (command, args) =>
+      command === "read_desktop_lifecycle_results"
+        ? result
+        : f.ipc(command, args);
+    await assert.rejects(
+      lifecycleClient(scope, () => true, ipc, f.relay).move(
+        "agent",
+        "source",
+        ["source"],
+        () => {},
+        configuration,
+      ),
+    );
+    assert.deepEqual(
+      f.sent.map((r) => r.action),
+      ["preflight"],
+    );
+    assert.equal(
+      f.calls.filter(([c]) => c === "observe_desktop_placement").length,
+      0,
+    );
+  });
+}
+test("configuration edits during Stop cannot substitute the target revision", async () => {
+  const f = fixture(),
+    target = { ...configuration },
+    publish = f.relay.publishEvent;
+  f.relay.publishEvent = async (...args) => {
+    await publish(...args);
+    if (args[0].kind === 50180) {
+      target.revision = "edited";
+      f.outcome("ineligible");
+    }
+  };
+  assert.equal(
+    await f.client().move("agent", "source", ["source"], () => {}, target),
+    "ineligible",
+  );
+  assert.deepEqual(f.sent.at(-1).configuration, configuration);
+});
+
+for (const invalid of ["scope", "cursor", "loop", "incomplete", "expired"]) {
+  test(`catalog rejects ${invalid} without publishing placement`, async () => {
+    const f = fixture();
+    let page = 0;
+    const ipc = (command, args) => {
+      if (command !== "read_desktop_lifecycle_results")
+        return f.ipc(command, args);
+      const id = String(++page).padStart(3, "0");
+      return {
+        outcome: "ready",
+        observation: {
+          valid_until: invalid === "expired" ? 1 : Date.now() / 1000 + 30,
+          catalog: {
+            entry: {
+              configuration: {
+                id: invalid === "loop" ? "001" : id,
+                revision: "r",
+              },
+              host: invalid === "scope" ? "foreign" : "destination",
+              eligible: true,
+            },
+            next: invalid === "cursor" ? "wrong" : id,
+          },
+        },
+      };
+    };
+    await assert.rejects(
+      lifecycleClient(scope, () => true, ipc, f.relay).catalog("agent", [
+        "destination",
+      ]),
+    );
+    assert.ok(page <= 32);
+    assert.equal(
+      f.calls.filter(([c]) => c === "observe_desktop_placement").length,
+      0,
+    );
+    assert.ok(f.sent.every((r) => r.action === "catalog"));
+  });
+}
+test("catalog includes only positive readiness and exact expiry, never inventory", async () => {
+  const f = fixture();
+  const validUntil = Math.floor(Date.now() / 1000) + 30;
+  const ipc = (command, args) =>
+    command !== "read_desktop_lifecycle_results"
+      ? f.ipc(command, args)
+      : {
+          outcome: "ready",
+          observation: {
+            valid_until: validUntil,
+            catalog: {
+              entry: {
+                configuration,
+                host: args.request.desktop,
+                eligible: args.request.desktop === "ready",
+              },
+              next: null,
+            },
+          },
+        };
+  const choices = await lifecycleClient(
+    scope,
+    () => true,
+    ipc,
+    f.relay,
+  ).catalog("agent", ["ready", "unknown"]);
+  assert.deepEqual(choices, [
+    { configuration, host: "ready", eligible: true, validUntil },
+  ]);
 });

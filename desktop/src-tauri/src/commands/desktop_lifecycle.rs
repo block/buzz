@@ -8,12 +8,14 @@ use crate::{
     managed_agents::{self, broker_launch, placement, retention::open_retention_db},
 };
 use buzz_core_pkg::{
-    desktop_lifecycle::{Action, Outcome, Request, ResultMessage},
+    desktop_lifecycle::{Action, Outcome, Request, ResultMessage, RuntimeConfigurationRef},
     desktop_stop::StopTarget,
 };
 use nostr::{Event, JsonUtil};
 use rusqlite::{params, OptionalExtension};
 use tauri::{AppHandle, Manager};
+
+mod configurations;
 
 #[tauri::command]
 pub fn prepare_desktop_lifecycle(
@@ -24,6 +26,8 @@ pub fn prepare_desktop_lifecycle(
     agent: String,
     action: Action,
     observed: Option<String>,
+    configuration: Option<RuntimeConfigurationRef>,
+    cursor: Option<String>,
 ) -> Result<Event, String> {
     let state = app.state::<AppState>();
     let scope = scope(&app, &state, &owner, &community)?;
@@ -36,6 +40,8 @@ pub fn prepare_desktop_lifecycle(
         },
         action,
         observed,
+        configuration,
+        cursor,
     }
     .sign(&scope.owner_keys)?;
     let conn = open_retention_db(&scope.db_path)?;
@@ -67,7 +73,17 @@ pub async fn observe_desktop_placement(
         let mut conn = open_retention_db(&scope.db_path)?;
         let desktop = local_id(&mut conn, &scope)?;
         let mut agents = std::collections::BTreeSet::new();
+        let mut projection = events.is_empty();
         for event in events {
+            if event.kind.as_u16() as u32 == buzz_core_pkg::kind::KIND_DESKTOP_LIFECYCLE
+                && matches!(
+                    Request::read(&event, &scope.owner_keys, &community)?.action,
+                    Action::Catalog | Action::Preflight
+                )
+            {
+                continue;
+            }
+            projection = true;
             agents.insert(placement::observe(
                 &conn,
                 &event,
@@ -75,7 +91,7 @@ pub async fn observe_desktop_placement(
                 &community,
             )?);
         }
-        if !reconcile {
+        if !reconcile || !projection {
             return Ok(());
         }
         placement::schema(&conn)?;
@@ -220,6 +236,44 @@ pub async fn receive_desktop_lifecycle(
     community: String,
     event: Event,
 ) -> Result<Option<Event>, String> {
+    // Authenticate and fence the destination before reading any configuration or
+    // doing ordinary async preflight. Never hold the transition lock across await.
+    let request = {
+        let state = app.state::<AppState>();
+        let scope = scope(&app, &state, &owner, &community)?;
+        let request = Request::read(&event, &scope.owner_keys, &community)?;
+        let mut conn = open_retention_db(&scope.db_path)?;
+        if local_id(&mut conn, &scope)? != request.target.desktop {
+            return Ok(None);
+        }
+        if let Some(saved) = placement::saved(&conn, &event.id.to_hex())? {
+            ResultMessage::read(&saved, &scope.owner_keys, &event, &community)?;
+            return Ok(Some(saved));
+        }
+        request
+    };
+    let owned = owned_local(
+        &app,
+        &app.state::<AppState>(),
+        &owner,
+        &request.target.agent,
+    )?;
+    let fresh = nostr::Timestamp::now().as_secs() < event.created_at.as_secs().saturating_add(30);
+    let prepared = if owned
+        && fresh
+        && matches!(
+            request.action,
+            Action::Start | Action::Restart | Action::Preflight
+        ) {
+        configurations::prepare(&app, &owner, &request).await
+    } else {
+        Err(Outcome::Ineligible)
+    };
+    let catalog = if owned && fresh && request.action == Action::Catalog {
+        configurations::catalog(&app, &owner, &request).await
+    } else {
+        Err("Catalog is unavailable".into())
+    };
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _transition = state
@@ -239,11 +293,39 @@ pub async fn receive_desktop_lifecycle(
             &desktop,
             owned,
             |conn, request| {
-                if request.action == Action::Status {
-                    status(&app, conn, &state, &event, request)
-                } else {
-                    execute(&app, &state, conn, &owner, request)
-                }
+                let (outcome, page) = match request.action {
+                    Action::Status => (status(&app, conn, &state, &event, request)?, None),
+                    Action::Catalog => match catalog {
+                        Ok(page) => (Outcome::Ready, Some(page)),
+                        Err(_) => (Outcome::Ineligible, None),
+                    },
+                    Action::Preflight => (
+                        match prepared.as_ref() {
+                            Ok(plan)
+                                if configurations::revalidate(&app, &owner, request, plan)
+                                    .is_ok() =>
+                            {
+                                Outcome::Ready
+                            }
+                            _ => Outcome::Ineligible,
+                        },
+                        None,
+                    ),
+                    _ => (
+                        execute(&app, &state, conn, &owner, request, prepared.as_ref())?,
+                        None,
+                    ),
+                };
+                let running =
+                    if matches!(outcome, Outcome::Running | Outcome::DifferentConfiguration) {
+                        configurations::running(&state, request)?
+                    } else {
+                        None
+                    };
+                Ok((
+                    outcome,
+                    Some(configurations::observation(&event, running, page)),
+                ))
             },
         )
     })
@@ -257,26 +339,34 @@ fn execute(
     conn: &rusqlite::Connection,
     owner: &str,
     request: &Request,
+    prepared: Result<&managed_agents::runtime_configurations::PreparedLaunch, &Outcome>,
 ) -> Result<Outcome, String> {
     let target = &request.target;
+    if request.configuration.is_none() {
+        // Old requests remain readable for placement history, never implicit launches.
+        return Ok(Outcome::Ineligible);
+    }
     if request.action == Action::Restart && !current_observation(app, conn, state, request)? {
         return Ok(Outcome::Unknown);
     }
     if request.action == Action::Start
         && generation(app, state, &target.agent, &target.community)?.is_some()
     {
-        return Ok(Outcome::Running);
+        return Ok(
+            if configurations::running(state, request)? == request.configuration {
+                Outcome::Running
+            } else {
+                Outcome::DifferentConfiguration
+            },
+        );
     }
-    let record = {
-        let _store = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        managed_agents::load_managed_agents(app)?
-            .into_iter()
-            .find(|r| r.pubkey == target.agent)
-            .ok_or("Agent is not provisioned on this Desktop")?
+    let plan = match prepared {
+        Ok(plan) => plan,
+        Err(outcome) => return Ok(*outcome),
     };
+    if configurations::revalidate(app, owner, request, plan).is_err() {
+        return Ok(Outcome::Ineligible);
+    }
     // Provision before destructive Restart Stop. No supported session: leave the
     // existing child running and return the precise non-secret missing capability.
     let broker = match broker_launch::provision(
@@ -285,7 +375,7 @@ fn execute(
             community: &target.community,
             agent: &target.agent,
         },
-        &record,
+        plan.record(),
     ) {
         Ok(b) => b,
         Err(outcome) => return Ok(outcome),
@@ -304,13 +394,14 @@ fn execute(
     if placement::blocked(conn, &target.agent, &target.desktop)? {
         return Ok(Outcome::Unknown);
     }
-    match managed_agents::start_pair_locked(
+    match managed_agents::start_pair_prepared_locked(
         target.agent.clone(),
         target.community.clone(),
         true,
         None,
         true,
         Some(&broker),
+        Some(plan),
         app.clone(),
     ) {
         Ok(_) => Ok(Outcome::Running),
@@ -325,18 +416,18 @@ pub fn read_desktop_lifecycle_results(
     community: String,
     request: Event,
     events: Vec<Event>,
-) -> Result<Outcome, String> {
+) -> Result<Option<ResultMessage>, String> {
     let state = app.state::<AppState>();
     let scope = scope(&app, &state, &owner, &community)?;
     Request::read(&request, &scope.owner_keys, &community)?;
     if events.len() > 16 {
         return Err("Too many lifecycle results".into());
     }
-    let mut outcome = Outcome::Unknown;
+    let mut outcome = None;
     for event in events {
         let result = ResultMessage::read(&event, &scope.owner_keys, &request, &community)?;
         if result.outcome != Outcome::Unknown {
-            outcome = result.outcome;
+            outcome = Some(result);
         }
     }
     Ok(outcome)

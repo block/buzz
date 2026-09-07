@@ -13,6 +13,8 @@ fn event(keys: &Keys, host: &str, start: bool, stamp: u64) -> Event {
             target,
             action: Action::Start,
             observed: None,
+            configuration: None,
+            cursor: None,
         }
         .sign(keys)
         .unwrap()
@@ -104,6 +106,7 @@ fn consumption_survives_restart_and_result_eviction() {
             request: request.clone(),
             id: event.id.to_hex(),
             outcome: Outcome::Unknown,
+            observation: None,
         }
         .sign(&keys)
         .unwrap();
@@ -126,6 +129,8 @@ fn receiver_consumes_before_effect_and_never_repeats_restart() {
     let restart = Request {
         action: Action::Restart,
         observed: Some("f".repeat(64)),
+        configuration: None,
+        cursor: None,
         ..start_request
     }
     .sign(&keys)
@@ -144,7 +149,7 @@ fn receiver_consumes_before_effect_and_never_repeats_restart() {
                 "effect must see durable consumption"
             );
             effects += 1;
-            Ok(Outcome::Running)
+            Ok((Outcome::Running, None))
         },
     )
     .unwrap()
@@ -251,7 +256,7 @@ fn receiver_rejects_wrong_owner_route_and_superseded_start() {
 fn receiver_failure_is_saved_without_reinvoking_launch() {
     let keys = Keys::generate();
     let mut conn = Connection::open_in_memory().unwrap();
-    let start = event(&keys, "a", true, 1);
+    let start = event(&keys, "a", true, Timestamp::now().as_secs());
     let result = receive(
         &mut conn,
         &start,
@@ -281,4 +286,79 @@ fn receiver_failure_is_saved_without_reinvoking_launch() {
     .unwrap()
     .unwrap();
     assert_eq!(retry, result);
+}
+
+#[test]
+fn probes_never_write_placement_or_admission_and_retries_are_exact() {
+    let keys = Keys::generate();
+    for action in [Action::Catalog, Action::Preflight] {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let reference = buzz_core_pkg::desktop_lifecycle::RuntimeConfigurationRef {
+            id: uuid::Uuid::new_v4().to_string(),
+            revision: uuid::Uuid::new_v4().to_string(),
+        };
+        let mut request =
+            Request::read(&event(&keys, "a", true, 1), &keys, "wss://one.example").unwrap();
+        request.action = action;
+        request.configuration = (action == Action::Preflight).then_some(reference);
+        let event = request.sign(&keys).unwrap();
+        let result = receive(
+            &mut conn,
+            &event,
+            &keys,
+            "wss://one.example",
+            &"a".repeat(32),
+            true,
+            |conn, _| {
+                for table in ["desktop_placement", "desktop_lifecycle_admission"] {
+                    assert_eq!(
+                        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                            .get::<_, i64>(0))
+                            .unwrap(),
+                        0
+                    );
+                }
+                Ok((Outcome::Ineligible, None))
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let retry = receive(
+            &mut conn,
+            &event,
+            &keys,
+            "wss://one.example",
+            &"a".repeat(32),
+            true,
+            |_, _| panic!("repeat probe"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, retry);
+        assert_eq!(latest_start(&conn, &request.target.agent).unwrap(), None);
+    }
+}
+
+#[test]
+fn expired_start_cannot_complete_a_delayed_preflight() {
+    let keys = Keys::generate();
+    let mut conn = Connection::open_in_memory().unwrap();
+    let event = event(&keys, "a", true, Timestamp::now().as_secs() - 31);
+    let result = receive(
+        &mut conn,
+        &event,
+        &keys,
+        "wss://one.example",
+        &"a".repeat(32),
+        true,
+        |_, _| panic!("expired effect"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ResultMessage::read(&result, &keys, &event, "wss://one.example")
+            .unwrap()
+            .outcome,
+        Outcome::Unknown
+    );
 }

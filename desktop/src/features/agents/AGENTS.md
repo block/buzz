@@ -448,3 +448,30 @@ Stop then Start. A refused preflight leaves the old process and turns intact;
 a successful Stop followed by failed launch returns an existing Failed status.
 The frontend clears only turn IDs captured before that native operation, so new
 replacement turns are safe even when its result arrives after they start.
+
+## Runtime configuration lifecycle consumer
+
+Known Desktops discovers named choices through owner-private, community+agent+host
+scoped Catalog responses, never host inventory or another community's configuration
+store. One bounded summary per encrypted response, at most 32 pages per host;
+unknown, incomplete and expired readiness cannot offer Start. Mounted options
+expire without a manual refresh. This never removes ordinary existing Stop.
+
+Start binds the exact configuration ID **and revision**, not the destination's
+current selection. Switch (including same-host switching) checks the target first,
+confirms source Stop, then requests a fresh Start of that exact revision. Preflight
+and Catalog cannot write placement intent or stop a process. The native consumer
+uses ordinary asynchronous preflight outside the transition lock, revalidates the
+immutable plan inside it, and delegates to the shared prepared launcher under the
+existing admission/Stop fences. No second spawn path or launch authority is allowed.
+Missing/edited targets fail rather than substitute another configuration. Remote
+keyless provisioning remains its existing independent fail-closed gate; a known
+provisioning failure must exclude Switch before source Stop.
+
+Running identity comes only from the actual live process snapshot, never the next
+selection. A different or unknown running configuration cannot satisfy an explicit
+Start. Exact retries preserve signed bytes and saved results. Cancel, scope changes,
+and disconnected/retired receivers cannot resume a later destination Start.
+Regression seams: desktopLifecycle.test.mjs, mounted DesktopLifecycleControl.test.mjs,
+core desktop_lifecycle/protocol_tests.rs and native placement/tests.rs. Mock IPC
+passing is not evidence of a native successful launch or two-Desktop switching.

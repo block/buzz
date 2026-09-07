@@ -1,6 +1,6 @@
 //! Compact intent, separate from one-shot execution. No history replay.
 use buzz_core_pkg::{
-    desktop_lifecycle::{Action, Outcome, Request, ResultMessage},
+    desktop_lifecycle::{Action, Observation, Outcome, Request, ResultMessage},
     desktop_stop::StopTarget,
     kind::KIND_DESKTOP_STOP,
 };
@@ -103,6 +103,8 @@ pub(crate) fn admit(conn: &Connection, event: &Event, request: &Request) -> Resu
         Action::Start => "start",
         Action::Restart => "restart",
         Action::Status => "status",
+        Action::Catalog => "catalog",
+        Action::Preflight => "preflight",
     };
     let changed = conn.execute("INSERT INTO desktop_lifecycle_admission VALUES (?1,?2,?3,?4,?5)
         ON CONFLICT(agent,host,action) DO UPDATE SET stamp=excluded.stamp,id=excluded.id
@@ -177,7 +179,7 @@ pub(crate) fn receive(
     community: &str,
     desktop: &str,
     owned: bool,
-    effect: impl FnOnce(&Connection, &Request) -> Result<Outcome, String>,
+    effect: impl FnOnce(&Connection, &Request) -> Result<(Outcome, Option<Observation>), String>,
 ) -> Result<Option<Event>, String> {
     let request = Request::read(event, keys, community)?;
     observe(conn, event, keys, community)?;
@@ -188,28 +190,39 @@ pub(crate) fn receive(
         ResultMessage::read(&saved, keys, event, community)?;
         return Ok(Some(saved));
     }
-    let outcome = if !owned {
-        Outcome::Failed
-    } else if !admit(conn, event, &request)?
-        || (request.action != Action::Status
-            && (blocked(conn, &request.target.agent, desktop)?
-                || (request.action == Action::Restart && stale_restart(conn, event, &request)?)
-                || (request.action == Action::Start
-                    && desired(conn, &request.target.agent)?.map(|(_, id)| id)
-                        != Some(event.id.to_hex()))))
+    let probe = matches!(request.action, Action::Catalog | Action::Preflight);
+    let (outcome, observation) = if !owned {
+        (Outcome::Failed, None)
+    } else if (!probe && !admit(conn, event, &request)?)
+        || (!matches!(
+            request.action,
+            Action::Status | Action::Catalog | Action::Preflight
+        ) && (blocked(conn, &request.target.agent, desktop)?
+            || (request.action == Action::Restart && stale_restart(conn, event, &request)?)
+            || (request.action == Action::Start
+                && desired(conn, &request.target.agent)?.map(|(_, id)| id)
+                    != Some(event.id.to_hex()))))
     {
-        Outcome::Unknown
+        (Outcome::Unknown, None)
+    } else if request.action != Action::Status
+        && nostr::Timestamp::now().as_secs() >= event.created_at.as_secs().saturating_add(30)
+    {
+        (Outcome::Unknown, None)
     } else {
-        effect(conn, &request).unwrap_or(if request.action == Action::Status {
-            Outcome::Unknown
-        } else {
-            Outcome::Failed
-        })
+        effect(conn, &request).unwrap_or((
+            if request.action == Action::Status {
+                Outcome::Unknown
+            } else {
+                Outcome::Failed
+            },
+            None,
+        ))
     };
     let result = ResultMessage {
         request,
         id: event.id.to_hex(),
         outcome,
+        observation,
     }
     .sign(keys)?;
     save(conn, &event.id.to_hex(), &result)?;

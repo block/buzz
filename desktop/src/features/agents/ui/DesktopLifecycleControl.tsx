@@ -3,7 +3,11 @@ import { toast } from "sonner";
 import { Button } from "@/shared/ui/button";
 import type { RelayEvent } from "@/shared/api/types";
 import type { DesktopRow, DesktopScope } from "../desktopList";
-import { lifecycleClient, type LifecycleOutcome } from "../desktopLifecycle";
+import {
+  lifecycleClient,
+  type LifecycleOutcome,
+  type ConfigurationChoice,
+} from "../desktopLifecycle";
 import { ownLifecycleReceiver } from "../desktopLifecycleReceiver";
 import { useRelayAgentsQuery } from "../hooks";
 
@@ -58,13 +62,17 @@ function message(outcome: LifecycleOutcome) {
       return "Destination keyless launch provisioning is unavailable. No new process was started.";
     case "stopped":
       return "Desktop reports the agent stopped.";
+    case "ineligible":
+      return "The exact configuration is missing, changed, or unavailable. No successful launch was confirmed.";
+    case "different_configuration":
+      return "A different or unknown configuration is running. Use Switch runtime configuration.";
     case "failed":
       return "Desktop rejected or failed the operation. No successful launch was confirmed.";
     default:
       return "Operation unconfirmed. A dispatched effect may still finish; no automatic retry will run.";
   }
 }
-/** Start/Move choose destination; Restart has no host picker and resolves actual current state. */
+/** Launch choices come from owner-private destination readiness, never host inventory. */
 export function DesktopLifecycleControl({
   scope,
   desktops,
@@ -75,13 +83,16 @@ export function DesktopLifecycleControl({
   const agents = useRelayAgentsQuery();
   const [agent, setAgent] = useState("");
   const [destination, setDestination] = useState("");
+  const [catalog, setCatalog] = useState<ConfigurationChoice[]>([]);
+  const [actual, setActual] = useState("Running configuration is unknown.");
+  const [refresh, setRefresh] = useState(0);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [request, setRequest] = useState<RelayEvent | null>(null);
   const active = useRef(true);
   const generation = useRef(0);
   useEffect(() => {
-    active.current = true;
+    active.current = Boolean(scope.owner && scope.community);
     setAgent("");
     setDestination("");
     setRequest(null);
@@ -92,22 +103,102 @@ export function DesktopLifecycleControl({
       generation.current++;
     };
   }, [scope.owner, scope.community]);
-  const run = async (action: "start" | "restart" | "move" | "retry") => {
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refresh explicitly requests a new read without changing its scope.
+  useEffect(() => {
+    setCatalog([]);
+    setDestination("");
+    setActual("Running configuration is unknown.");
+    if (!agent) return;
+    const token = ++generation.current;
+    const valid = () => active.current && generation.current === token;
+    const client = lifecycleClient(
+      { owner: scope.owner, community: scope.community },
+      valid,
+    );
+    setBusy(true);
+    setStatus("Checking destination configurations…");
+    void client
+      .inspect(
+        agent,
+        desktops.map((d) => d.id),
+      )
+      .then((states) => {
+        client.check();
+        setActual(
+          states
+            .map(
+              (state) =>
+                `${desktops.find((d) => d.id === state.desktop)?.name ?? "Desktop"}: ${state.outcome === "running" ? (state.configuration ? `running configuration ${state.configuration.id}, revision ${state.configuration.revision}` : "running configuration unknown") : state.outcome === "stopped" ? "stopped" : "running state unknown"}`,
+            )
+            .join(" · "),
+        );
+      })
+      .catch(() => {
+        if (valid()) setActual("Running configuration is unknown.");
+      });
+    void client
+      .catalog(
+        agent,
+        desktops.map((d) => d.id),
+      )
+      .then((entries) => {
+        client.check();
+        setCatalog(entries);
+        setStatus(
+          entries.length
+            ? "Choose a configuration for the next Start. This does not change an existing process."
+            : "No eligible configurations reported. Existing Stop controls remain available.",
+        );
+      })
+      .catch(() => {
+        if (valid())
+          setStatus(
+            "Configuration discovery is unavailable; no launch choices are offered.",
+          );
+      })
+      .finally(() => {
+        if (valid()) setBusy(false);
+      });
+    return () => {
+      generation.current++;
+    };
+  }, [agent, scope.owner, scope.community, desktops, refresh]);
+  useEffect(() => {
+    if (!catalog.length) return;
+    const expires = Math.min(...catalog.map((entry) => entry.validUntil));
+    const timer = setTimeout(
+      () => {
+        setCatalog((entries) =>
+          entries.filter((entry) => entry.validUntil > Date.now() / 1000),
+        );
+      },
+      Math.max(0, expires * 1000 - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [catalog]);
+  const selected = catalog.find(
+    (entry) =>
+      `${entry.host}:${entry.configuration.id}:${entry.configuration.revision}` ===
+      destination,
+  );
+  const run = async (action: "start" | "move" | "retry") => {
     const token = ++generation.current;
     const valid = () => active.current && generation.current === token;
     const client = lifecycleClient(scope, valid);
     setBusy(true);
     setStatus("Checking authenticated Desktop state…");
+    setActual("Running configuration is unknown; refresh after the operation.");
     if (action !== "retry") setRequest(null);
     try {
       if (action === "move") {
         const outcome = await client.move(
           agent,
-          destination,
+          selected?.host ?? "",
           desktops.map((d) => d.id),
           (stage) => {
             if (valid()) setStatus(stage);
           },
+          selected?.configuration ?? { id: "", revision: "" },
         );
         client.check();
         setStatus(message(outcome));
@@ -115,12 +206,9 @@ export function DesktopLifecycleControl({
         const next =
           action === "retry"
             ? request
-            : action === "start"
-              ? await client.start(destination, agent)
-              : await client.restart(
-                  agent,
-                  desktops.map((d) => d.id),
-                );
+            : selected
+              ? await client.start(selected.host, agent, selected.configuration)
+              : null;
         if (!next) throw new Error("No request to retry");
         client.check();
         setRequest(next);
@@ -147,7 +235,7 @@ export function DesktopLifecycleControl({
       aria-label="Agent placement controls"
       className="space-y-2 rounded border p-3"
     >
-      <h3 className="text-sm font-medium">Start, restart, or move an agent</h3>
+      <h3 className="text-sm font-medium">Switch runtime configuration</h3>
       <label className="block text-xs">
         Agent
         <select
@@ -170,18 +258,25 @@ export function DesktopLifecycleControl({
             ))}
         </select>
       </label>
+      <p
+        role="status"
+        aria-label="Actual running configuration"
+        className="text-xs"
+      >
+        {actual}
+      </p>
       <Button
         size="sm"
         variant="outline"
         disabled={!agent || busy}
-        onClick={() => void run("restart")}
+        onClick={() => setRefresh((n) => n + 1)}
       >
-        Restart on current Desktop
+        Refresh configurations
       </Button>
       <label className="block text-xs">
-        Destination for Start or Move
+        Next Start configuration
         <select
-          aria-label="Destination Desktop"
+          aria-label="Runtime configuration"
           value={destination}
           disabled={busy}
           onChange={(e) => {
@@ -190,24 +285,31 @@ export function DesktopLifecycleControl({
           }}
           className="ml-2 rounded border bg-background p-1"
         >
-          <option value="">Choose a Desktop</option>
-          {desktops.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name}
-            </option>
-          ))}
+          <option value="">Choose an eligible configuration</option>
+          {catalog.map((entry) => {
+            const key = `${entry.host}:${entry.configuration.id}:${entry.configuration.revision}`;
+            return (
+              <option key={key} value={key}>
+                {entry.name} ·{" "}
+                {desktops.find((d) => d.id === entry.host)?.name ?? "Desktop"} ·{" "}
+                {entry.runtime} · {entry.model}
+                {entry.provider ? ` (${entry.provider})` : ""}
+              </option>
+            );
+          })}
         </select>
       </label>
       <p className="text-xs text-muted-foreground">
         Start may overlap with an agent still running elsewhere until that
-        Desktop reconnects. Move starts the destination only after source Stop
-        is confirmed. Nothing transfers files, configuration, or keys.
+        Desktop reconnects. Switch checks the target, confirms Stop, then starts
+        fresh—even on the same Desktop. No files, settings, sessions, or keys
+        transfer.
       </p>
       <div className="flex gap-2">
         <Button
           size="sm"
           variant="outline"
-          disabled={!agent || !destination || busy}
+          disabled={!agent || !selected || busy}
           onClick={() => void run("start")}
         >
           Start on destination
@@ -215,10 +317,10 @@ export function DesktopLifecycleControl({
         <Button
           size="sm"
           variant="outline"
-          disabled={!agent || !destination || busy}
+          disabled={!agent || !selected || busy}
           onClick={() => void run("move")}
         >
-          Move to destination
+          Switch runtime configuration
         </Button>
         {busy && (
           <Button

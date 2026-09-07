@@ -149,6 +149,8 @@ async fn assert_private_desktop(kind: u32) {
             },
             action: buzz_core::desktop_lifecycle::Action::Start,
             observed: None,
+            configuration: None,
+            cursor: None,
         };
         let event = request.sign(&owner).unwrap();
         if kind == KIND_DESKTOP_LIFECYCLE {
@@ -158,6 +160,7 @@ async fn assert_private_desktop(kind: u32) {
                 request,
                 id: event.id.to_hex(),
                 outcome: buzz_core::desktop_lifecycle::Outcome::Running,
+                observation: None,
             }
             .sign(&owner)
             .unwrap()
@@ -388,6 +391,8 @@ async fn assert_retry(kind: u32) {
             target,
             action: buzz_core::desktop_lifecycle::Action::Start,
             observed: None,
+            configuration: None,
+            cursor: None,
         }
         .sign(&owner)
         .unwrap()
