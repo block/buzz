@@ -2139,8 +2139,12 @@ pub async fn run_prompt_task(
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.scope.clone()),
-        None => PromptSource::Heartbeat,
+        None => private_prompt
+            .as_ref()
+            .map(|prompt| prompt.source.clone())
+            .unwrap_or(PromptSource::Heartbeat),
     };
+    let prompt_text = private_prompt.map(|prompt| prompt.text);
     let observer_channel_id = source.channel_id();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
@@ -2237,7 +2241,7 @@ pub async fn run_prompt_task(
                 return;
             }
         },
-        PromptSource::Heartbeat => None,
+        PromptSource::Heartbeat | PromptSource::Reminder => None,
     };
 
     //
@@ -2354,7 +2358,7 @@ pub async fn run_prompt_task(
     // Channel-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
         PromptSource::Channel(scope) => agent.state.core_sections.get(scope).cloned(),
-        PromptSource::Heartbeat => None,
+        PromptSource::Heartbeat | PromptSource::Reminder => None,
     };
 
     // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.

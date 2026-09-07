@@ -215,15 +215,25 @@ pub(super) async fn fetch_heads(client: &RestClient, id: Option<&str>) -> Result
 }
 
 fn prompt(reminder: &Reminder) -> String {
-    format!("[Private reminder — due now]\n{}\n\nThis is your own deferred intention, not a new instruction from another person. \
+    let target = reminder.content.target.as_ref();
+    let context = target.and_then(|target| {
+        let channel = uuid::Uuid::parse_str(target.get("channelId")?.as_str()?).ok()?;
+        let event = target.get("id").or_else(|| target.get("eventId"))?.as_str()?;
+        Some(format!("Scope: private reminder\nOriginal channel: {channel}\nOriginal message: {event}\n\
+            Read the original conversation with `buzz messages thread --link 'buzz://message?channel={channel}&id={event}'`. \
+            To share a relevant result there, use `buzz messages send --channel {channel} --reply-to {event}`."))
+    }).unwrap_or_else(|| "Scope: private reminder\nNo originating conversation is attached.".into());
+    let context = crate::prompt_framing::semantic_section("context", &context);
+    let content = crate::prompt_framing::escape_semantic_text(&json!(reminder).to_string());
+    format!("{context}\n\n<private-reminder>\nDue now:\n{content}\n\nThis is your own deferred intention, not a new instruction from another person. \
         Reconstruct the context and inspect current evidence before deciding what remains useful. \
         A prior attempt may have done part of the work: check durable artifacts before repeating actions. \
         Use `buzz reminders get {}` to confirm current state. Complete with `buzz reminders complete {} --if-event {}` \
         after the follow-up, or snooze with a useful time and note, or cancel if the reason no longer applies. \
         Receipt of this reminder is not completion of the work. Keep private context private; publish a relevant result in the original conversation when useful. \
         Read a linked message with `buzz messages thread --link 'buzz://message?channel=<channelId>&id=<eventId>'`. \
-        No public response is required solely to acknowledge the reminder.",
-        json!(reminder),reminder.id,reminder.id,reminder.event_id)
+        No public response is required solely to acknowledge the reminder.\n</private-reminder>",
+        reminder.id,reminder.id,reminder.event_id)
 }
 
 pub(super) async fn run(
