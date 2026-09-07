@@ -515,7 +515,16 @@ pub(crate) fn spawn_agent_child_prepared<R: tauri::Runtime>(
     // Keep projected settings immutable, but deliver only the current credential
     // that just passed revalidation, never the captured plan's copy.
     let mut launch_record = plan.record.clone();
-    launch_record.private_key_nsec = record.private_key_nsec.clone();
+    launch_record.private_key_nsec = if plan.configuration().is_some() {
+        let current = super::storage::load_managed_agents_for_launch(app)?
+            .into_iter()
+            .find(|saved| saved.pubkey == record.pubkey)
+            .ok_or("Agent removed before launch")?;
+        plan.revalidate(&current, &personas, &global)?;
+        current.private_key_nsec
+    } else {
+        record.private_key_nsec.clone()
+    };
     let record = &launch_record;
     let effective_cfg = plan.effective.clone();
     let descriptor = &plan.descriptor;

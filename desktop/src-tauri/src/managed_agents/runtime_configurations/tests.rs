@@ -413,6 +413,10 @@ async fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() 
     std::fs::set_permissions(&mcp_path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let relay = crate::relay::bind_expected_relay_scope(None, community.into()).unwrap();
     let mut runtimes = std::collections::HashMap::new();
+    let path = agents::storage::managed_agents_store_path(app.handle()).unwrap();
+    agents::storage::atomic_write_json_restricted(
+        &path, &serde_json::to_vec(&[record.clone()]).unwrap(),
+    ).unwrap();
     agents::start_managed_agent_process_prepared(
         app.handle(),
         &mut record,

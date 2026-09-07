@@ -80,7 +80,7 @@ after async preflight. It is advisory and expires, never launch authority.
 
 Execution repeats those checks under the shared admission lock before destructive
 Restart and after teardown, so a revoked key cannot be recovered from a captured
-plan. Named launch success/failure saves only lifecycle metadata into a fresh raw
+plan. Lifecycle success/failure, Stop, and cleanup save only metadata into a fresh raw
 store; it never persists captured/hydrated credentials or migrates keys. Ownership
 and generation reads likewise do not hydrate or migrate keys. The request deadline
 also survives through Stop into shared spawn. Failure after Stop is Failed, not
@@ -101,5 +101,6 @@ receiver and shared launch with synthetic identities and bounded child processes
 including actual Stop-time credential/executable loss and post-Stop expiry. Run it
 on Unix with `cargo test --manifest-path desktop/src-tauri/Cargo.toml
 --no-default-features managed_agents::runtime_configurations::tests::remote_credentials
--- --test-threads=1` (seven tests; default system-keyring builds exclude the fixture).
+-- --test-threads=1` (13 tests, including the credential-persistence child module; default system-keyring
+builds exclude the fixture).
 These fixture suites do not constitute real-model or two-Desktop acceptance.

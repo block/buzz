@@ -72,7 +72,7 @@ impl KeyStore for FakeKeyStore {
             KeyringProbe::Unreachable
         }
     }
-    fn load(&self, name: &str) -> Result<Option<String>, String> {
+    fn load_fresh_readonly(&self, name: &str) -> Result<Option<String>, String> {
         // An unreachable backend errors on read (outage), distinct from a
         // reachable backend returning `Ok(None)` for an absent entry.
         if !self.reachable {

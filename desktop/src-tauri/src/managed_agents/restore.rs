@@ -532,7 +532,7 @@ where
             })
             .collect();
 
-    save_managed_agents(app, &records)?;
+    super::storage::save_runtime_metadata_batch(app, &records)?;
     drop(runtimes);
     drop(_store_guard);
     drop(restore_transition);
@@ -612,7 +612,7 @@ fn persist_restore_error<R: tauri::Runtime>(
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     record.updated_at = util::now_iso();
     record.last_error = Some(error);
-    save_managed_agents(app, &records)
+    super::storage::save_runtime_metadata(app, record)
 }
 
 #[cfg(test)]

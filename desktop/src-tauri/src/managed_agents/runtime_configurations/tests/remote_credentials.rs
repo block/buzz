@@ -89,7 +89,14 @@ impl Fixture {
         fixture
     }
     fn persist(&self) {
-        agents::save_managed_agents(self.app.handle(), &[self.record.clone()]).unwrap();
+        agents::storage::save_managed_agents_with_new_keys(self.app.handle(), &[self.record.clone()]).unwrap();
+    }
+    // Simulate an independent destination credential writer, not a metadata edit.
+    fn write_raw(&self, record: &ManagedAgentRecord) {
+        let path = agents::storage::managed_agents_store_path(self.app.handle()).unwrap();
+        agents::storage::atomic_write_json_restricted(
+            &path, &serde_json::to_vec(&[record]).unwrap(),
+        ).unwrap();
     }
     fn target(&self) -> StopTarget {
         StopTarget {
@@ -300,7 +307,7 @@ async fn unavailable_identity_or_runtime_excludes_catalog_and_refuses_start() {
                 std::fs::remove_file(&fixture.record.acp_command).unwrap();
             }
         }
-        fixture.persist();
+        fixture.write_raw(&fixture.record);
         let catalog = fixture.action(Action::Catalog, None).await;
         assert_eq!(catalog.outcome, Outcome::Ready);
         assert!(
@@ -333,7 +340,7 @@ async fn revoked_key_keeps_existing_process_visible_and_restart_refuses_without_
     fixture.launched("fixture-model|fixture-model");
     let pid = fixture.running().unwrap().0;
     fixture.record.private_key_nsec.clear();
-    fixture.persist();
+    fixture.write_raw(&fixture.record);
     let status = fixture.action(Action::Status, None).await;
     assert_eq!(status.outcome, Outcome::Running);
     assert_eq!(
@@ -357,7 +364,7 @@ async fn key_loss_during_preflight_is_rechecked_for_start_and_catalog() {
             .receive(fixture.request(action, None), |_, _| {
                 let mut revoked = fixture.record.clone();
                 revoked.private_key_nsec.clear();
-                agents::save_managed_agents(fixture.app.handle(), &[revoked]).unwrap();
+                fixture.write_raw(&revoked);
                 async { Ok(()) }
             })
             .await;
@@ -531,3 +538,6 @@ async fn post_stop_expiry_persists_truthful_failed_without_second_spawn() {
     let saved = assert_failed_without_child(&fixture);
     assert_eq!(saved.private_key_nsec, fixture.record.private_key_nsec);
 }
+
+#[path = "credential_persistence.rs"]
+mod credential_persistence;

@@ -343,7 +343,7 @@ fn record_field_updates_persist_effort_to_disk() {
             "last_stopped_at": null, "last_exit_code": null, "last_error": null
         }))
         .unwrap();
-    save_managed_agents(app.handle(), &[seed]).unwrap();
+    crate::managed_agents::storage::save_managed_agents_with_new_keys(app.handle(), &[seed]).unwrap();
 
     // Drive the production seam: load → apply_record_field_updates →
     // stamp_record_updated_at → save. This is the exact sequence that

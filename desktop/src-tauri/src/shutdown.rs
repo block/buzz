@@ -2,7 +2,7 @@ use tauri::Manager;
 
 use crate::app_state::AppState;
 use crate::managed_agents::{
-    self, kill_stale_tracked_processes, load_managed_agents, save_managed_agents,
+    self, kill_stale_tracked_processes, load_managed_agents, storage::save_runtime_metadata_batch,
     sync_managed_agent_processes, BackendKind,
 };
 use crate::{prevent_sleep, util};
@@ -263,7 +263,7 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
     managed_agents::reap_dead_instance_agents(&managed_agents::current_instance_id(app), &[]);
 
     if changed {
-        save_managed_agents(app, &records)?;
+        save_runtime_metadata_batch(app, &records)?;
     }
 
     Ok(())

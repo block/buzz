@@ -67,7 +67,11 @@ impl Fixture {
         save(&mut self.record, &self.owner, relay, entry)
     }
     fn persist(&self) {
-        agents::save_managed_agents(self.app.handle(), std::slice::from_ref(&self.record)).unwrap();
+        agents::storage::save_managed_agents_with_new_keys(
+            self.app.handle(),
+            std::slice::from_ref(&self.record),
+        )
+        .unwrap();
     }
     fn finish_children(&self) -> Vec<(String, Option<RuntimeConfigurationRef>)> {
         let state = self.app.state::<crate::app_state::AppState>();

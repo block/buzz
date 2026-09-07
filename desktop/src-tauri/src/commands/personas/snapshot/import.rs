@@ -18,7 +18,7 @@ use crate::{
             decrypt_envelope, parse_chunk_payload, resolve_unlock_secret, ChunkPayload,
             LOCKED_CARD_REFUSAL,
         },
-        load_managed_agents, load_personas, save_managed_agents, save_personas, AgentDefinition,
+        load_managed_agents, load_personas, storage::save_managed_agents_with_new_keys, save_personas, AgentDefinition,
         ManagedAgentRecord, RespondTo,
     },
     relay::{effective_agent_relay_url, relay_ws_url_with_override},
@@ -667,7 +667,7 @@ pub async fn confirm_agent_snapshot_import(
         };
 
         records.push(record.clone());
-        save_managed_agents(&app, &records)?;
+        save_managed_agents_with_new_keys(&app, &records)?;
 
         // Enqueue the kind:30177 managed-agent event via retention.
         // (Uses the same pattern as agents.rs::retain_managed_agent_pending

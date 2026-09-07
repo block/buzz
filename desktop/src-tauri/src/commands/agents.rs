@@ -377,7 +377,7 @@ where
         resume.as_ref(),
         Some(&prepared),
     )?;
-    save_managed_agents(app, &records)?;
+    crate::managed_agents::storage::save_runtime_metadata_batch(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
         retain_managed_agent_pending(app, state, saved_record);
     }
@@ -421,7 +421,7 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
         let (sync_changed, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         if sync_changed {
-            save_managed_agents(&app, &records)?;
+            crate::managed_agents::storage::save_runtime_metadata_batch(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
@@ -505,7 +505,7 @@ pub async fn create_managed_agent(
         let (sync_changed, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         if sync_changed {
-            save_managed_agents(&app, &records)?;
+            crate::managed_agents::storage::save_runtime_metadata_batch(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
@@ -576,7 +576,7 @@ pub async fn create_managed_agent(
         let (sync_changed, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         if sync_changed {
-            save_managed_agents(&app, &records)?;
+            crate::managed_agents::storage::save_runtime_metadata_batch(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
@@ -806,7 +806,7 @@ pub async fn create_managed_agent(
 
         records.push(record);
 
-        save_managed_agents(&app, &records)?;
+        crate::managed_agents::storage::save_managed_agents_with_new_keys(&app, &records)?;
 
         let record = records
             .iter()
@@ -854,7 +854,7 @@ pub async fn create_managed_agent(
                 let record = find_managed_agent_mut(&mut records, &pubkey)?;
                 record.updated_at = now_iso();
                 record.last_error = Some(error.clone());
-                save_managed_agents(&app, &records)?;
+                crate::managed_agents::storage::save_runtime_metadata_batch(&app, &records)?;
                 spawn_error = Some(error);
                 let record = records
                     .iter()
@@ -1006,7 +1006,7 @@ pub async fn start_managed_agent(
         let (sync_changed, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         if sync_changed {
-            save_managed_agents(&app, &records)?;
+            crate::managed_agents::storage::save_runtime_metadata_batch(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
@@ -1155,7 +1155,7 @@ pub async fn stop_managed_agent(
         let (sync_changed, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         if sync_changed {
-            save_managed_agents(&app, &records)?;
+            crate::managed_agents::storage::save_runtime_metadata_batch(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
@@ -1174,7 +1174,7 @@ pub async fn stop_managed_agent(
             // the config-restart flows still drain every pair.
             stop_managed_agent_workspace_pair(&app, record, &mut runtimes)?;
         }
-        save_managed_agents(&app, &records)?;
+        crate::managed_agents::storage::save_runtime_metadata_batch(&app, &records)?;
         let record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
@@ -1233,7 +1233,7 @@ pub async fn delete_managed_agent(
                 &current_instance_id(&app),
             );
             if sync_changed {
-                save_managed_agents(&app, &records)?;
+                crate::managed_agents::storage::save_runtime_metadata_batch(&app, &records)?;
             }
             for pubkey in &exited_pubkeys {
                 state.clear_agent_session_caches(pubkey);

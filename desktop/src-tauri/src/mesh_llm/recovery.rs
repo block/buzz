@@ -413,7 +413,7 @@ fn persist_mesh_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result
     let record = crate::managed_agents::find_managed_agent_mut(&mut records, pubkey)?;
     record.last_error = Some(error.to_string());
     record.updated_at = crate::util::now_iso();
-    crate::managed_agents::save_managed_agents(app, &records)
+    crate::managed_agents::storage::save_runtime_metadata(app, record)
 }
 
 fn clear_mesh_last_error_if_set(app: &AppHandle, pubkey: &str) -> Result<(), String> {
@@ -433,7 +433,7 @@ fn clear_mesh_last_error_if_set(app: &AppHandle, pubkey: &str) -> Result<(), Str
     }
     record.last_error = None;
     record.updated_at = crate::util::now_iso();
-    crate::managed_agents::save_managed_agents(app, &records)
+    crate::managed_agents::storage::save_runtime_metadata(app, record)
 }
 
 #[cfg(test)]
