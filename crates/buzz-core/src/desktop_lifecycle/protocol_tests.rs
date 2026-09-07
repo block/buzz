@@ -90,9 +90,20 @@ fn encrypted_catalog_scope_cursor_expiry_and_payload_bound() {
                     .clone()
             }
         }
-        assert!(invalid
-            .validate_observation(event.created_at.as_secs())
-            .is_err());
+        let original = invalid.request.sign(&keys).unwrap();
+        let original = nostr::EventBuilder::new(original.kind, original.content)
+            .tags(original.tags)
+            .custom_created_at(event.created_at)
+            .sign_with_keys(&keys)
+            .unwrap();
+        invalid.id = original.id.to_hex();
+        assert!(ResultMessage::read(
+            &invalid.sign(&keys).unwrap(),
+            &keys,
+            &original,
+            &request.target.community,
+        )
+        .is_err());
     }
 }
 #[test]
@@ -119,16 +130,26 @@ fn exact_ref_is_bound_and_unknown_running_never_satisfies_start() {
     )
     .is_err());
     request.action = Action::Start;
+    let start = request.sign(&keys).unwrap();
+    result.id = start.id.to_hex();
     result.request = request;
     result.outcome = Outcome::Running;
-    assert!(result
-        .validate_observation(event.created_at.as_secs())
-        .is_err());
+    assert!(ResultMessage::read(
+        &result.sign(&keys).unwrap(),
+        &keys,
+        &start,
+        &result.request.target.community
+    )
+    .is_err());
     result.observation.as_mut().unwrap().running_configuration =
         result.request.configuration.clone();
-    assert!(result
-        .validate_observation(event.created_at.as_secs())
-        .is_ok());
+    assert!(ResultMessage::read(
+        &result.sign(&keys).unwrap(),
+        &keys,
+        &start,
+        &result.request.target.community
+    )
+    .is_ok());
     result.request.cursor = Some(reference().id);
     assert!(result.request.sign(&keys).is_err());
     result.request.cursor = None;
