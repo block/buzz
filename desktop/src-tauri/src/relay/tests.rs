@@ -45,7 +45,7 @@ fn overlong_digit_string_returns_none() {
 //
 // Verify that an oversized relay hint is capped in the returned message
 // string, not just inside `activate_rate_limit()`. This guarantees every
-// consumer — including the TS gate via `applyTauriRateLimitIfNeeded` —
+// consumer of the returned error —
 // receives the capped value rather than the raw untrusted relay value.
 
 #[tokio::test]
