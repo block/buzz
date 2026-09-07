@@ -57,6 +57,8 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "crates/**"
+      # sqlx::migrate! embeds these files in the relay binary.
+      - "migrations/**"
       - "web/**"
       - "package.json"
       - "pnpm-lock.yaml"
