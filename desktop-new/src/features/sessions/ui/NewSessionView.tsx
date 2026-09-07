@@ -69,7 +69,7 @@ export function NewSessionView({
               {pending.content}
             </span>
             {error ? (
-              <span className="text-body-sm text-danger">{error}</span>
+              <span className="text-body-sm text-red-12">{error}</span>
             ) : null}
           </div>
         ) : null}

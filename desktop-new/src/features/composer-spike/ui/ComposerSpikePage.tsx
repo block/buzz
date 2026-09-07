@@ -138,7 +138,7 @@ export function ComposerSpikePage() {
         </button>
       </div>
 
-      <div className="rounded-md border border-secondary bg-panel p-3">
+      <div className="rounded-md border border-primary bg-panel p-3">
         <EditorContent editor={editor} />
       </div>
     </div>
