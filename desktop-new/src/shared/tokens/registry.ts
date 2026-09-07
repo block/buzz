@@ -457,22 +457,6 @@ export const ROLE_GROUPS: RoleGroup[] = [
       },
     ],
   },
-  {
-    id: "categorical",
-    name: "Categorical tints",
-    description:
-      "The one documented exception to naming colours after their job: telling two projects apart genuinely is a choice about appearance, and pretending otherwise would push people back to raw values.",
-    roles: (["blue", "purple", "orange", "green", "red", "cyan"] as const).map(
-      (hue) => ({
-        token: `bg-tint-${hue}`,
-        variable: `--tint-${hue}`,
-        pointsAt: "a literal, by design",
-        use: `A categorical ${hue} tint for distinguishing one thing from another.`,
-        status: "core" as TokenStatus,
-        exception: "Named by appearance because the choice is appearance.",
-      }),
-    ),
-  },
 ];
 
 /* ============================================================
@@ -492,17 +476,6 @@ export const VOCABULARY: Array<{ group: string; words: string[] }> = [
   { group: "identity", words: ["accent", "inverse"] },
   { group: "status", words: ["success", "warning", "danger", "info"] },
   { group: "paired", words: ["on-accent", "on-inverse"] },
-  {
-    group: "categorical",
-    words: [
-      "tint-blue",
-      "tint-purple",
-      "tint-orange",
-      "tint-green",
-      "tint-red",
-      "tint-cyan",
-    ],
-  },
 ];
 
 export const GRAMMAR = "<property>-<role>[-<modifier>][-<material>][-<state>]";
@@ -869,9 +842,5 @@ export const EXCEPTIONS = [
   {
     name: "gradient-1, texture-dots",
     why: "Not colours in the ramp sense.",
-  },
-  {
-    name: "the categorical tints",
-    why: "Named by appearance because the choice is appearance.",
   },
 ];

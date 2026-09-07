@@ -1,0 +1,304 @@
+@layer components {
+  /**
+   * Proving-ground dashboard.
+   *
+   * A fictional product built only from role tokens, to find out whether the
+   * system holds up on a real page rather than on a specimen page. Specimen
+   * pages are honest but sympathetic — they show one component at a time, on a
+   * generous backdrop, at a size the designer chose. A dashboard puts forty
+   * decisions next to each other and is where a missing role shows up.
+   */
+
+  .dash-shell {
+    display: grid;
+    min-height: 100vh;
+    grid-template-columns: var(--size-navigator) minmax(0, 1fr);
+    background: var(--bg-app);
+  }
+
+  /* Narrow: the navigator becomes a top strip rather than a drawer. There is no
+     drawer machinery here yet, and a horizontal strip is honest about that. */
+  @media (max-width: 60rem) {
+    .dash-shell {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .dash-nav {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    padding: var(--space-panel-inset);
+    border-right: 1px solid var(--border-tertiary);
+  }
+
+  @media (max-width: 60rem) {
+    .dash-nav {
+      flex-direction: row;
+      align-items: center;
+      gap: var(--space-4);
+      overflow-x: auto;
+      border-right: 0;
+      border-bottom: 1px solid var(--border-tertiary);
+      padding-block: var(--space-3);
+    }
+  }
+
+  .dash-nav-group {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  @media (max-width: 60rem) {
+    .dash-nav-group {
+      flex-direction: row;
+      align-items: center;
+      gap: var(--space-1);
+    }
+
+    /* The section labels are useful in a column and noise in a strip. */
+    .dash-nav-label {
+      display: none;
+    }
+  }
+
+  .dash-nav-label {
+    padding-inline: var(--space-2);
+    padding-block: var(--space-1);
+    color: var(--text-tertiary);
+  }
+
+  .dash-nav-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-row-gap);
+    border: 0;
+    border-radius: var(--radius-row);
+    padding: var(--space-2) var(--space-2);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    text-align: start;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color var(--duration-state) var(--easing-state),
+      color var(--duration-state) var(--easing-state);
+  }
+
+  .dash-nav-item:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  /* Selected is a tint plus coloured text — the tint arrangement. Weight is
+     never used to say "selected"; that is reserved for structure. */
+  .dash-nav-item[aria-current="page"] {
+    background: var(--bg-accent-tint);
+    color: var(--text-accent);
+  }
+
+  .dash-nav-item:focus-visible {
+    outline: 2px solid var(--ring-focus);
+    outline-offset: 2px;
+  }
+
+  .dash-nav-count {
+    margin-inline-start: auto;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  @media (max-width: 60rem) {
+    .dash-nav-count {
+      margin-inline-start: var(--space-1);
+    }
+  }
+
+  .dash-main {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-6);
+    padding: var(--space-panel-inset);
+  }
+
+  .dash-topbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
+
+  .dash-metric-grid {
+    display: grid;
+    gap: var(--space-4);
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  }
+
+  .dash-metric {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .dash-columns {
+    display: grid;
+    gap: var(--space-6);
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    align-items: start;
+  }
+
+  @media (max-width: 72rem) {
+    .dash-columns {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .dash-panel {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border-tertiary);
+    border-radius: var(--radius-panel);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-xs);
+  }
+
+  .dash-panel-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-5) var(--space-panel-inset);
+  }
+
+  .dash-panel-body[data-padded] {
+    padding: 0 var(--space-panel-inset) var(--space-panel-inset);
+  }
+
+  /* Dense rows, edge to edge, separated by a line rather than by cards. */
+  .dash-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-panel-inset);
+    border-top: 1px solid var(--border-tertiary);
+  }
+
+  .dash-row[data-interactive] {
+    cursor: pointer;
+    transition: background-color var(--duration-state) var(--easing-state);
+  }
+
+  .dash-row[data-interactive]:hover {
+    background: var(--bg-hover);
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    border-radius: var(--radius-pill);
+    padding: 0.125rem var(--space-2);
+    white-space: nowrap;
+  }
+
+  .status-pill[data-tone="success"] {
+    background: var(--bg-success-tint);
+    color: var(--text-success);
+  }
+
+  .status-pill[data-tone="warning"] {
+    background: var(--bg-warning-tint);
+    color: var(--text-warning);
+  }
+
+  .status-pill[data-tone="danger"] {
+    background: var(--bg-danger-tint);
+    color: var(--text-danger);
+  }
+
+  .status-pill[data-tone="info"] {
+    background: var(--bg-info-tint);
+    color: var(--text-info);
+  }
+
+  .status-pill[data-tone="accent"] {
+    background: var(--bg-accent-tint);
+    color: var(--text-accent);
+  }
+
+  /* Paused is not a status colour: nothing is wrong, so a colour would teach
+     people to distrust the coloured ones. */
+  .status-pill[data-tone="neutral"] {
+    background: var(--bg-inset);
+    color: var(--text-secondary);
+  }
+
+  .dash-sparkline {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 2rem;
+    min-width: 4rem;
+    flex: 1 1 auto;
+  }
+
+  .dash-sparkline-bar {
+    flex: 1 1 0;
+    min-width: 2px;
+    border-radius: 1px;
+    background: currentColor;
+  }
+
+  .dash-sparkline[data-tone="success"] {
+    color: var(--bg-success);
+  }
+
+  .dash-sparkline[data-tone="warning"] {
+    color: var(--bg-warning);
+  }
+
+  .dash-sparkline[data-tone="danger"] {
+    color: var(--bg-danger);
+  }
+
+  .dash-sparkline[data-tone="accent"] {
+    color: var(--bg-accent);
+  }
+
+  .dash-sparkline[data-tone="neutral"] {
+    color: var(--border-secondary);
+  }
+
+  .dash-region-grid {
+    display: grid;
+    gap: var(--space-4);
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  }
+
+  /* A region tile is a widget, which is what a card is legitimately for. */
+  .dash-region {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-3);
+    border: 1px solid var(--border-tertiary);
+    border-radius: var(--radius-control);
+    padding: var(--space-4);
+    background: var(--bg-inset);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .dash-nav-item,
+    .dash-row[data-interactive] {
+      transition-duration: 0ms;
+    }
+  }
+}

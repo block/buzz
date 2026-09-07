@@ -231,12 +231,6 @@ function auditLayers() {
   ];
   const FAMILIES = ["accent", "danger", "success", "warning", "info"];
   const JOBS = ["tint", "tint-hover", "border", "fill", "text"];
-  const CATEGORICAL = [
-    ["--tint-purple", "--accent-tint"],
-    ["--tint-red", "--danger-tint"],
-    ["--tint-green", "--success-tint"],
-    ["--tint-blue", "--info-tint"],
-  ];
 
   // 1. Every palette step exists in both modes and holds a literal.
   for (const hue of HUES) {
@@ -280,16 +274,30 @@ function auditLayers() {
     }
   }
 
-  // 3. Two tokens doing one job resolve to one step. Matching values drift.
-  for (const [a, b] of CATEGORICAL) {
-    const left = read(modes.light, a);
-    const right = read(modes.light, b);
-    if (left && right && left !== right) {
-      failures.push({
-        at: rel,
-        found: `${a}: ${left}  vs  ${b}: ${right}`,
-        why: "Same job, different step. Point both at one palette step — this exact pair drifted between modes before the palette existed.",
-      });
+  // 3. No two family steps resolve to the same palette step.
+  //
+  // The generalised form of the bug that motivated this layer. Two tokens that
+  // hold the same value are either one job with two names — which drifts the
+  // moment someone edits one — or two jobs that will become indistinguishable
+  // on screen. Either way it wants a person to look. This catches it for any
+  // future family without naming pairs, which the previous version did and
+  // which went silently vacuous when those tokens were deleted.
+  const seen = new Map();
+  for (const family of FAMILIES) {
+    for (const job of JOBS) {
+      const name = `--${family}-${job}`;
+      const value = read(modes.light, name);
+      if (!value) continue;
+      const existing = seen.get(value);
+      if (existing) {
+        failures.push({
+          at: rel,
+          found: `${existing} and ${name} both resolve to ${value}`,
+          why: "Two family steps on one palette step. Either it is one job with two names, or two jobs that will look identical. Give the second its own step.",
+        });
+      } else {
+        seen.set(value, name);
+      }
     }
   }
 

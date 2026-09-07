@@ -10,8 +10,9 @@
  *
  * The palette exists because the layer above it was 114 hand-picked hex values.
  * Nothing enforced that two tokens doing the same job agreed, and they drifted:
- * `accent-2` and `tint-purple` were the same purple in light mode and two
- * different purples in dark. Picking a step from a ramp cannot drift that way.
+ * an accent tint and a categorical purple were the same purple in light mode
+ * and two different purples in dark. Picking a step from a ramp cannot drift
+ * that way.
  *
  * It also exists because a hue's dark steps are not its light steps dimmed.
  * Tailwind's purple gets *more* saturated as it darkens (950 is 87% saturation),
@@ -357,19 +358,6 @@
   --glass-4: #ffffffc7; /* glass hovered  */
   --glass-5: #ffffffe0; /* nearly solid   */
 
-  /* --- Categorical. Named by appearance, deliberately: the
-     choice IS appearance — telling two projects apart.
-     Every one is the same step as a family tint, from the same
-     palette. Before the palette existed these were hand-picked
-     alongside the families and drifted: tint-purple and the
-     accent tint matched in light mode and disagreed in dark. */
-  --tint-blue: var(--palette-blue-3);
-  --tint-purple: var(--palette-purple-3);
-  --tint-orange: var(--palette-orange-3);
-  --tint-green: var(--palette-green-3);
-  --tint-red: var(--palette-red-3);
-  --tint-cyan: var(--palette-cyan-3);
-
   /* --- Gradients. Numbered background treatments. ---------- */
   --gradient-1:
     radial-gradient(at 85% 88%, #eef2d4 0%, transparent 62%),
@@ -443,8 +431,8 @@
   /* Every coloured family is absent here on purpose. A family points at a
      palette step, and `.dark` already redefines the whole palette — so
      `--accent-tint` resolves to the dark purple ramp with nothing restated.
-     This block used to hold 50 hand-picked values, which is where
-     `tint-purple` and the accent tint drifted apart. */
+     This block used to hold 50 hand-picked values, which is where the accent
+     tint and a hand-picked categorical purple drifted apart. */
 
   --glass-1: #1c1c1c5c;
   --glass-2: #1c1c1c85;
@@ -685,13 +673,6 @@
   --color-chrome-selected: var(--bg-chrome-selected);
   --color-panel-glass: var(--bg-panel-glass);
   --color-float-glass: var(--bg-float-glass);
-
-  --color-tint-blue: var(--tint-blue);
-  --color-tint-purple: var(--tint-purple);
-  --color-tint-orange: var(--tint-orange);
-  --color-tint-green: var(--tint-green);
-  --color-tint-red: var(--tint-red);
-  --color-tint-cyan: var(--tint-cyan);
 
   --spacing-workspace-inset: var(--space-workspace-inset);
   --spacing-panel-gap: var(--space-panel-gap);

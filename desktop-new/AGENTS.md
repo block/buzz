@@ -92,8 +92,9 @@ Four layers, and only the role layer is used when building a screen:
 
 The palette was added after the families accumulated 114 hand-picked hex values
 with nothing enforcing that two tokens doing the same job agreed — and they
-drifted: `accent-2` and `tint-purple` were the same purple in light mode and two
-different purples in dark. Referencing a step cannot drift that way, and
+drifted: an accent tint and a categorical purple were the same purple in light
+mode and two different purples in dark. Referencing a step cannot drift that way,
+and
 `src/shared/tokens/palette.test.ts` asserts it.
 
 Family steps are **named for their job, not numbered**. `--accent-2` invited
