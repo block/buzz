@@ -16,7 +16,8 @@
     "test": "vitest run src",
     "test:e2e": "playwright test",
     "tauri:dev": "node ../desktop/scripts/tauri-command.mjs dev --config ../desktop-new/tauri.conf.json --config ../desktop/src-tauri/tauri.dev.conf.json",
-    "check:color": "node scripts/check-color.mjs"
+    "check:color": "node scripts/check-color.mjs",
+    "census": "node scripts/token-consumers.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",
@@ -37,6 +38,7 @@
     "@playwright/test": "^1.60.0",
     "@tailwindcss/postcss": "^4.3.0",
     "@tanstack/router-plugin": "^1.167.12",
+    "@types/node": "25.6.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.0",

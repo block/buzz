@@ -22,8 +22,8 @@
  * shadow values that bake alpha into a literal.
  *
  * It also audits the layering itself: that the palette is the only place a
- * literal lives, that a family step references a palette step rather than
- * holding its own value, and that two tokens doing the same job resolve to the
+ * literal lives, that an identity role references a palette step rather than
+ * holding its own value, and that two roles doing the same job resolve to the
  * same step rather than merely to the same value today. That last one is not
  * hypothetical — `accent-2` and `tint-purple` were the same purple in light mode
  * and two different purples in dark, and nothing caught it because both were
@@ -87,13 +87,42 @@ const CSS_MIXERS = [
   { pattern: /\bhsla?\([^)]*[,/]\s*0?\.\d+\s*\)/g, what: "hsl() with alpha" },
 ];
 
+/** Every hue in the palette. `neutral` is a hue like any other. */
+const PALETTE_HUES = [
+  "neutral",
+  "purple",
+  "red",
+  "green",
+  "amber",
+  "blue",
+  "cyan",
+  "orange",
+];
+
 /**
- * A component may not name a palette or family token directly. Only the role
- * layer is public — the palette is where values live and families are the jobs
- * a hue does, but a screen is built from what a thing *is*.
+ * **Palette steps are public now. Only glass is private.**
+ *
+ * This rule used to reject `var(--neutral-4)` in a component, on the reasoning
+ * that a screen should say what a thing *is* rather than which colour it takes.
+ * That reasoning was imported from Tailwind, where `neutral-800` is a single
+ * literal and naming it really does break dark mode.
+ *
+ * It does not hold here. **Every step in this palette is authored per mode**, so
+ * `neutral-4` is one value in light and another in dark and a component naming it
+ * behaves correctly in both. Once that is true, a role whose light and dark
+ * values are the same step is a name in front of a number — and a name in front
+ * of a number hides the decision rather than recording it. Nineteen roles were
+ * exactly that.
+ *
+ * Glass stays private for a different reason, which has nothing to do with
+ * naming: a glass fill without its blur, rim, and lift is not glass. It is
+ * reachable only through the `glass-primary` / `glass-secondary` utilities, which
+ * carry the whole material. That is enforced below.
+ *
+ * Hues are enumerated rather than matched as `[a-z]+` because a palette step and
+ * a non-colour token are the same shape: `--neutral-4` and `--space-4`.
  */
-const PRIVATE_TOKEN =
-  /var\(\s*--(palette-[a-z]+-\d+|(?:accent|danger|success|warning|info)-(?:tint|tint-hover|border|fill|text)|neutral-\d+|glass-\d+)\s*\)/g;
+const PRIVATE_TOKEN = /var\(\s*--glass-\d+\s*\)/g;
 
 /**
  * Files exempt from the private-token rule, with the reason.
@@ -104,6 +133,10 @@ const PRIVATE_TOKEN =
  */
 const PRIVATE_TOKEN_ALLOWED = new Map([
   ["shared/styles/tokens.css", "Defines the layers it references."],
+  [
+    "shared/styles/globals.css",
+    "The glass materials live here; pairing each fill with its blur and rim is their job.",
+  ],
   [
     "shared/tokens/registry.ts",
     "Documents the ramps; the token names are its content.",
@@ -179,7 +212,7 @@ function check(file) {
         failures.push({
           at,
           found: match[0],
-          why: "Palette and family tokens are private. Build screens from role tokens.",
+          why: "A glass fill on its own is not glass. Use the `glass-primary` or `glass-secondary` utility, which carries the blur, rim, and lift with it.",
         });
       }
     }
@@ -219,23 +252,43 @@ function auditLayers() {
   const read = (block, name) =>
     new RegExp(`^\\s*${name}:\\s*([^;]+);`, "m").exec(block)?.[1].trim();
 
-  const HUES = [
-    "gray",
-    "purple",
-    "red",
-    "green",
-    "amber",
-    "blue",
-    "cyan",
-    "orange",
+  const HUES = PALETTE_HUES;
+  // Backdrop scenes are intentionally mode-specific at the palette layer, but
+  // their semantic gradient slot must be complete and paired. A slot with a
+  // missing counterpart would silently turn an appearance preference into an
+  // invalid state on a mode change, so verify the production CSS seam here.
+  const BACKDROP_PAIRS = [
+    ["--gradient-1", "--gradient-sky-field", "--gradient-night-garden"],
+    ["--gradient-2", "--gradient-peach-field", "--gradient-signal-flare"],
+    ["--gradient-3", "--gradient-blue-hour", "--gradient-electric-dusk"],
+    ["--gradient-4", "--gradient-orchid-field", "--gradient-ultraviolet"],
   ];
-  const FAMILIES = ["accent", "danger", "success", "warning", "info"];
-  const JOBS = ["tint", "tint-hover", "border", "fill", "text"];
+  for (const [slot, lightScene, darkScene] of BACKDROP_PAIRS) {
+    for (const [mode, scene] of [
+      ["light", lightScene],
+      ["dark", darkScene],
+    ]) {
+      if (!read(modes[mode], scene)) {
+        failures.push({
+          at: `${rel} (${mode})`,
+          found: scene,
+          why: "Missing named backdrop treatment for this semantic gradient slot.",
+        });
+      }
+      if (read(modes[mode], slot) !== `var(${scene})`) {
+        failures.push({
+          at: `${rel} (${mode})`,
+          found: `${slot}: ${read(modes[mode], slot) ?? "missing"}`,
+          why: `Must pair this slot with ${scene} in ${mode} mode.`,
+        });
+      }
+    }
+  }
 
   // 1. Every palette step exists in both modes and holds a literal.
   for (const hue of HUES) {
     for (let step = 1; step <= 12; step += 1) {
-      const name = `--palette-${hue}-${step}`;
+      const name = `--${hue}-${step}`;
       for (const [mode, block] of Object.entries(modes)) {
         const value = read(block, name);
         if (!value) {
@@ -255,63 +308,55 @@ function auditLayers() {
     }
   }
 
-  // 2. A family step references the palette; it never holds a value.
-  for (const family of FAMILIES) {
-    for (const job of JOBS) {
-      const name = `--${family}-${job}`;
-      for (const [mode, block] of Object.entries(modes)) {
-        const value = read(block, name);
-        // Absent in dark is correct: it inherits through the palette.
-        if (!value) continue;
-        if (!/^var\(--palette-[a-z]+-\d+\)$/.test(value)) {
-          failures.push({
-            at: `${rel} (${mode})`,
-            found: `${name}: ${value}`,
-            why: "A family step must reference a palette step, not hold a value.",
-          });
-        }
-      }
-    }
-  }
-
-  // 3. No two family steps resolve to the same palette step.
+  // 2. THE ROLES THAT REMAIN MUST BE MODE-ASYMMETRIC.
   //
-  // The generalised form of the bug that motivated this layer. Two tokens that
-  // hold the same value are either one job with two names — which drifts the
-  // moment someone edits one — or two jobs that will become indistinguishable
-  // on screen. Either way it wants a person to look. This catches it for any
-  // future family without naming pairs, which the previous version did and
-  // which went silently vacuous when those tokens were deleted.
-  const seen = new Map();
-  for (const family of FAMILIES) {
-    for (const job of JOBS) {
-      const name = `--${family}-${job}`;
-      const value = read(modes.light, name);
-      if (!value) continue;
-      const existing = seen.get(value);
-      if (existing) {
-        failures.push({
-          at: rel,
-          found: `${existing} and ${name} both resolve to ${value}`,
-          why: "Two family steps on one palette step. Either it is one job with two names, or two jobs that will look identical. Give the second its own step.",
-        });
-      } else {
-        seen.set(value, name);
-      }
-    }
-  }
+  // This replaces four checks that audited the identity families — that each
+  // referenced a palette step, that none was missing, that no two shared a step,
+  // that dark never restated one. All four are gone because their subject is:
+  // nineteen roles were deleted once palette steps became reachable as classes,
+  // and the ones left are the four surfaces plus emphasis.
+  //
+  // The invariant now worth enforcing is the TEST FOR WHETHER A ROLE IS EARNED.
+  // A surface role exists precisely because light and dark take *different* ramp
+  // steps, so no single class can express it. If someone adds a surface role
+  // whose two modes agree, the name is doing nothing and a class would say it —
+  // that is the mistake this catches, in the same shape it already happened.
+  //
+  // The emphasis roles are deliberately exempt: they are the same step in both
+  // modes and stay because the *name* enforces a rule a ramp cannot state, which
+  // is that there are three levels of text and one border weight.
+  const NAME_ENFORCES_A_RULE = new Set([
+    "--text-primary",
+    "--text-secondary",
+    "--text-tertiary",
+    "--text-disabled",
+    "--border-primary",
+    "--text-on-accent",
+  ]);
 
-  // 4. Dark restates the palette, never the families.
-  for (const family of FAMILIES) {
-    for (const job of JOBS) {
-      if (read(modes.dark, `--${family}-${job}`)) {
-        failures.push({
-          at: `${rel} (dark)`,
-          found: `--${family}-${job}`,
-          why: "Restated in dark. A family inherits through the palette, which dark already redefines; restating it reopens the drift surface.",
-        });
-      }
-    }
+  const roleNames = [
+    ...new Set(
+      [...modes.light.matchAll(/^\s*(--(?:bg|text|border)-[a-z0-9-]+):/gm)].map(
+        (m) => m[1],
+      ),
+    ),
+  ];
+
+  for (const name of roleNames) {
+    if (NAME_ENFORCES_A_RULE.has(name)) continue;
+    // Glass materials are a bundled treatment, not a surface step, and `bg-app`
+    // swaps a whole gradient rather than a step.
+    if (name.includes("glass") || name === "--bg-app") continue;
+
+    const light = read(modes.light, name);
+    const dark = read(modes.dark, name);
+    if (dark && dark !== light) continue; // earns its name
+
+    failures.push({
+      at: rel,
+      found: `${name}: ${light}`,
+      why: `Same value in both modes, so this name is in front of a number. Write ${light?.replace(/var\(--(.+)\)/, "$1") ?? "the step"} where it is used, or add it to NAME_ENFORCES_A_RULE with the rule it enforces.`,
+    });
   }
 }
 
@@ -335,6 +380,6 @@ for (const { at, found, why } of failures) {
   console.error(`        ${why}\n`);
 }
 console.error(
-  "Add the step to the palette in tokens.css, or add a documented override\nin scripts/check-color.mjs with a reason. See DESIGN.md § Colour.",
+  "Add the step to the palette in tokens.css, or add a documented override\nin scripts/check-color.mjs with a reason. See DESIGN.md § Colour discipline.",
 );
 process.exit(1);

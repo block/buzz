@@ -34,6 +34,11 @@ const TARGET_META = 45;
  *
  * An exception must name a role and say why, so the list stays short and
  * arguable rather than becoming a place to hide failures.
+ *
+ * A key is either a role — exempt on every surface — or `role on surface`,
+ * exempt for that one pairing. Prefer the narrow form: a role-wide exemption
+ * for a shortfall on one surface also silences a genuine failure on the next
+ * surface that role reaches, which is the failure mode this list must not have.
  */
 const EXCEPTIONS = new Map([
   [
@@ -45,38 +50,67 @@ const EXCEPTIONS = new Map([
 /** Roles measured at the meta target rather than the body target. */
 const META_ROLES = new Set(["--text-tertiary"]);
 
-/** Neutral surfaces any text role may sit on. */
-const SURFACES = ["--bg-panel", "--bg-float", "--bg-inset", "--bg-hover"];
+/**
+ * Neutral surfaces any text may sit on.
+ *
+ * `--bg-hover` was a role and is now written as `--neutral-4`, so it is named by
+ * its step here. It still belongs in this list: a row under the cursor is a
+ * surface text sits on, whatever it is called.
+ */
+const SURFACES = ["--bg-panel", "--bg-float", "--bg-inset", "--neutral-4"];
 
-/** Text roles that must be readable on every neutral surface. */
+/**
+ * Text that must be readable on every neutral surface.
+ *
+ * **The palette steps in this list are the point, not an oversight.** Once a
+ * screen may write `text-red-12` directly, the guard has to measure the step a
+ * screen actually uses — otherwise it audits names nobody types. `--text-error`
+ * and `--text-accent` used to be here; deleting the roles without moving their
+ * steps into this list would have left the guard passing while measuring
+ * nothing, which is precisely the failure that shipped error text at Lc 34.
+ *
+ * A step joins this list when a screen starts using it for text. `red-12` is
+ * here because three error messages use it; `red-11` is not, because nothing
+ * does — and it is the step that fails, at 59.7 on a dark panel.
+ */
 const TEXT_ROLES = [
   "--text-primary",
   "--text-secondary",
   "--text-tertiary",
   "--text-disabled",
-  "--text-accent",
-  "--text-danger",
-  "--text-success",
-  "--text-warning",
-  "--text-info",
-];
-
-/** Paired text and the one fill it is defined against. */
-const PAIRS = [
-  ["--text-on-accent", "--bg-accent"],
-  ["--text-on-inverse", "--bg-inverse"],
-  ["--text-on-danger", "--bg-danger"],
-  ["--text-on-success", "--bg-success"],
-  ["--text-on-warning", "--bg-warning"],
-  ["--text-on-info", "--bg-info"],
+  "--purple-12", // accent text: links, active nav, chip labels
+  "--red-12", // error text: failed session start, rejected form
 ];
 
 /**
- * The families with a tint surface. DESIGN.md: "tint carries a meaning and takes
- * coloured text", so each family's `text-*` must be readable on both its tint
- * and that tint's hover — the hover state is the harder one and was the gap.
+ * Paired text and the fills it is defined against — including each fill's hover.
+ *
+ * The hover was the gap. A solid button had no `bg-*-hover`, so hovering one
+ * fell through to the neutral `bg-hover` and painted white paired text on light
+ * grey — Lc 13, invisible, and this guard could not see it because it only
+ * measured the resting fill. A paired text colour is only correct if it clears
+ * every fill it can actually sit on, and hover is one of them.
  */
-const TINT_FAMILIES = ["accent", "danger", "success", "warning", "info"];
+const PAIRS = [
+  ["--text-on-accent", "--purple-9"],
+  ["--text-on-accent", "--purple-10"],
+  // `bg-neutral-11` with `text-neutral-1` — the inverse pair, written as steps
+  // now that the roles are gone. Still measured as a pair, because the text
+  // follows the fill: move the fill and this has to be re-measured.
+  ["--neutral-1", "--neutral-11"],
+];
+
+/**
+ * Tint surfaces and the coloured text that sits on them, as steps.
+ *
+ * DESIGN.md: "tint carries a meaning and takes coloured text". The accent tint
+ * and its hover are both real surfaces — a chip at rest and a chip under the
+ * cursor — and the hover is the harder one, which is where the gap was.
+ */
+const TINT_PAIRS = [
+  ["--purple-12", "--purple-3"],
+  ["--purple-12", "--purple-4"],
+];
 
 const css = readFileSync(TOKENS, "utf8");
 
@@ -118,6 +152,12 @@ function resolve(map, name, depth = 0) {
 const modes = declarationsByMode();
 const failures = [];
 const skipped = [];
+/**
+ * Pairing-scoped exceptions this run actually needed. An exception nobody hits
+ * is either fixed or wrong, and either way should not sit in the list
+ * unchallenged — same reasoning as the type guard's stale-override report.
+ */
+const claimedExceptions = new Set();
 
 for (const [mode, map] of Object.entries(modes)) {
   const check = (textRole, surfaceRole) => {
@@ -132,7 +172,12 @@ for (const [mode, map] of Object.entries(modes)) {
     const lc = Math.abs(apcaContrast(text, surface));
     const target = META_ROLES.has(textRole) ? TARGET_META : TARGET_BODY;
     if (lc >= target) return;
+    // Role-wide first, then the narrow `role on surface` form.
     if (EXCEPTIONS.has(textRole)) return;
+    if (EXCEPTIONS.has(`${textRole} on ${surfaceRole}`)) {
+      claimedExceptions.add(`${textRole} on ${surfaceRole}`);
+      return;
+    }
     failures.push({
       mode,
       textRole,
@@ -149,10 +194,7 @@ for (const [mode, map] of Object.entries(modes)) {
     for (const surface of SURFACES) check(role, surface);
   }
   for (const [role, fill] of PAIRS) check(role, fill);
-  for (const family of TINT_FAMILIES) {
-    check(`--text-${family}`, `--bg-${family}-tint`);
-    check(`--text-${family}`, `--bg-${family}-tint-hover`);
-  }
+  for (const [text, tint] of TINT_PAIRS) check(text, tint);
 }
 
 // Guard the maths itself: if these drift, every verdict above is wrong.
@@ -197,4 +239,12 @@ if (failures.length > 0) {
 console.log("✓ Contrast: every text role clears its APCA target in both modes");
 for (const [role, why] of EXCEPTIONS) {
   console.log(`  (exception) ${role} — ${why.split(";")[0]}`);
+}
+
+const stale = [...EXCEPTIONS.keys()].filter(
+  (key) => key.includes(" on ") && !claimedExceptions.has(key),
+);
+if (stale.length > 0) {
+  console.log("\nℹ Pairing exceptions no longer needed — delete them:");
+  for (const key of stale) console.log(`  ${key}`);
 }

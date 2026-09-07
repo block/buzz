@@ -3,10 +3,10 @@
  *
  * Four layers, and only the role layer is ever used when building a screen:
  *
- *   LAYER 0  palette      --palette-purple-3   every hue, twelve steps, both modes
- *   LAYER 1  families     --accent-tint        the five jobs a hue does
- *   LAYER 2  roles        --bg-panel           what a thing IS in the interface
- *   LAYER 3  components   bg-panel             Tailwind utilities
+ *   LAYER 0  palette      --purple-3, --gradient-sky-field   raw visual values
+ *   LAYER 1  semantics    --accent-tint, --gradient-1        stable selections
+ *   LAYER 2  roles        --bg-panel                          what a thing IS
+ *   LAYER 3  components   bg-panel                            Tailwind utilities
  *
  * The palette exists because the layer above it was 114 hand-picked hex values.
  * Nothing enforced that two tokens doing the same job agreed, and they drifted:
@@ -32,7 +32,10 @@
  *     shade. Reach for a different step. `scripts/check-color.mjs` enforces this.
  *   - Transparency for genuine see-through — glass — is a separate axis, and
  *     lives baked into its own values.
- *   - Every token holds a light and a dark value under the same name.
+ *   - Roles and semantic selections hold a light and a dark value under the
+ *     same name. A named palette treatment is deliberately mode-specific when
+ *     its paired dark scene is a different visual idea; `sky-field` does not
+ *     pretend it is `night-garden` after dark mode switches on.
  *
  * Palette values are Radix Colors (MIT), transcribed rather than depended on.
  * Radix is not on Block's Tech Radar; this is a values-only copy, no package.
@@ -51,230 +54,206 @@
 
 :root {
   /* gray */
-  --palette-gray-1: #fcfcfc; /* app background */
-  --palette-gray-2: #f9f9f9; /* subtle background */
-  --palette-gray-3: #f0f0f0; /* component background */
-  --palette-gray-4: #e8e8e8; /* component hover */
-  --palette-gray-5: #e0e0e0; /* component selected */
-  --palette-gray-6: #d9d9d9; /* subtle border */
-  --palette-gray-7: #cecece; /* border */
-  --palette-gray-8: #bbbbbb; /* border hover */
-  --palette-gray-9: #8d8d8d; /* solid fill */
-  --palette-gray-10: #838383; /* solid fill hover */
-  --palette-gray-11: #646464; /* low-contrast text */
-  --palette-gray-12: #202020; /* high-contrast text */
 
   /* purple */
-  --palette-purple-1: #fefcfe;
-  --palette-purple-2: #fbf7fe;
-  --palette-purple-3: #f7edfe;
-  --palette-purple-4: #f2e2fc;
-  --palette-purple-5: #ead5f9;
-  --palette-purple-6: #e0c4f4;
-  --palette-purple-7: #d1afec;
-  --palette-purple-8: #be93e4;
-  --palette-purple-9: #8e4ec6;
-  --palette-purple-10: #8347b9;
-  --palette-purple-11: #8145b5;
-  --palette-purple-12: #402060;
+  --purple-1: #fefcfe;
+  --purple-2: #fbf7fe;
+  --purple-3: #f7edfe;
+  --purple-4: #f2e2fc;
+  --purple-5: #ead5f9;
+  --purple-6: #e0c4f4;
+  --purple-7: #d1afec;
+  --purple-8: #be93e4;
+  --purple-9: #8e4ec6;
+  --purple-10: #8347b9;
+  --purple-11: #8145b5;
+  --purple-12: #402060;
 
   /* red */
-  --palette-red-1: #fffcfc;
-  --palette-red-2: #fff7f7;
-  --palette-red-3: #feebec;
-  --palette-red-4: #ffdbdc;
-  --palette-red-5: #ffcdce;
-  --palette-red-6: #fdbdbe;
-  --palette-red-7: #f4a9aa;
-  --palette-red-8: #eb8e90;
-  --palette-red-9: #e5484d;
-  --palette-red-10: #dc3e42;
-  --palette-red-11: #ce2c31;
-  --palette-red-12: #641723;
+  --red-1: #fffcfc;
+  --red-2: #fff7f7;
+  --red-3: #feebec;
+  --red-4: #ffdbdc;
+  --red-5: #ffcdce;
+  --red-6: #fdbdbe;
+  --red-7: #f4a9aa;
+  --red-8: #eb8e90;
+  --red-9: #e5484d;
+  --red-10: #dc3e42;
+  --red-11: #ce2c31;
+  --red-12: #641723;
 
   /* green */
-  --palette-green-1: #fbfefc;
-  --palette-green-2: #f4fbf6;
-  --palette-green-3: #e6f6eb;
-  --palette-green-4: #d6f1df;
-  --palette-green-5: #c4e8d1;
-  --palette-green-6: #adddc0;
-  --palette-green-7: #8eceaa;
-  --palette-green-8: #5bb98b;
-  --palette-green-9: #30a46c;
-  --palette-green-10: #2b9a66;
-  --palette-green-11: #218358;
-  --palette-green-12: #193b2d;
+  --green-1: #fbfefc;
+  --green-2: #f4fbf6;
+  --green-3: #e6f6eb;
+  --green-4: #d6f1df;
+  --green-5: #c4e8d1;
+  --green-6: #adddc0;
+  --green-7: #8eceaa;
+  --green-8: #5bb98b;
+  --green-9: #30a46c;
+  --green-10: #2b9a66;
+  --green-11: #218358;
+  --green-12: #193b2d;
 
   /* amber */
-  --palette-amber-1: #fefdfb;
-  --palette-amber-2: #fefbe9;
-  --palette-amber-3: #fff7c2;
-  --palette-amber-4: #ffee9c;
-  --palette-amber-5: #fbe577;
-  --palette-amber-6: #f3d673;
-  --palette-amber-7: #e9c162;
-  --palette-amber-8: #e2a336;
-  --palette-amber-9: #ffc53d;
-  --palette-amber-10: #ffba18;
-  --palette-amber-11: #ab6400;
-  --palette-amber-12: #4f3422;
+  --amber-1: #fefdfb;
+  --amber-2: #fefbe9;
+  --amber-3: #fff7c2;
+  --amber-4: #ffee9c;
+  --amber-5: #fbe577;
+  --amber-6: #f3d673;
+  --amber-7: #e9c162;
+  --amber-8: #e2a336;
+  --amber-9: #ffc53d;
+  --amber-10: #ffba18;
+  --amber-11: #ab6400;
+  --amber-12: #4f3422;
 
   /* blue */
-  --palette-blue-1: #fbfdff;
-  --palette-blue-2: #f4faff;
-  --palette-blue-3: #e6f4fe;
-  --palette-blue-4: #d5efff;
-  --palette-blue-5: #c2e5ff;
-  --palette-blue-6: #acd8fc;
-  --palette-blue-7: #8ec8f6;
-  --palette-blue-8: #5eb1ef;
-  --palette-blue-9: #0090ff;
-  --palette-blue-10: #0588f0;
-  --palette-blue-11: #0d74ce;
-  --palette-blue-12: #113264;
+  --blue-1: #fbfdff;
+  --blue-2: #f4faff;
+  --blue-3: #e6f4fe;
+  --blue-4: #d5efff;
+  --blue-5: #c2e5ff;
+  --blue-6: #acd8fc;
+  --blue-7: #8ec8f6;
+  --blue-8: #5eb1ef;
+  --blue-9: #0090ff;
+  --blue-10: #0588f0;
+  --blue-11: #0d74ce;
+  --blue-12: #113264;
 
   /* cyan */
-  --palette-cyan-1: #fafdfe;
-  --palette-cyan-2: #f2fafb;
-  --palette-cyan-3: #def7f9;
-  --palette-cyan-4: #caf1f6;
-  --palette-cyan-5: #b5e9f0;
-  --palette-cyan-6: #9ddde7;
-  --palette-cyan-7: #7dcedc;
-  --palette-cyan-8: #3db9cf;
-  --palette-cyan-9: #00a2c7;
-  --palette-cyan-10: #0797b9;
-  --palette-cyan-11: #107d98;
-  --palette-cyan-12: #0d3c48;
+  --cyan-1: #fafdfe;
+  --cyan-2: #f2fafb;
+  --cyan-3: #def7f9;
+  --cyan-4: #caf1f6;
+  --cyan-5: #b5e9f0;
+  --cyan-6: #9ddde7;
+  --cyan-7: #7dcedc;
+  --cyan-8: #3db9cf;
+  --cyan-9: #00a2c7;
+  --cyan-10: #0797b9;
+  --cyan-11: #107d98;
+  --cyan-12: #0d3c48;
 
   /* orange */
-  --palette-orange-1: #fefcfb;
-  --palette-orange-2: #fff7ed;
-  --palette-orange-3: #ffefd6;
-  --palette-orange-4: #ffdfb5;
-  --palette-orange-5: #ffd19a;
-  --palette-orange-6: #ffc182;
-  --palette-orange-7: #f5ae73;
-  --palette-orange-8: #ec9455;
-  --palette-orange-9: #f76b15;
-  --palette-orange-10: #ef5f00;
-  --palette-orange-11: #cc4e00;
-  --palette-orange-12: #582d1d;
+  --orange-1: #fefcfb;
+  --orange-2: #fff7ed;
+  --orange-3: #ffefd6;
+  --orange-4: #ffdfb5;
+  --orange-5: #ffd19a;
+  --orange-6: #ffc182;
+  --orange-7: #f5ae73;
+  --orange-8: #ec9455;
+  --orange-9: #f76b15;
+  --orange-10: #ef5f00;
+  --orange-11: #cc4e00;
+  --orange-12: #582d1d;
 }
 
 .dark {
   /* gray */
-  --palette-gray-1: #111111; /* app background */
-  --palette-gray-2: #191919; /* subtle background */
-  --palette-gray-3: #222222; /* component background */
-  --palette-gray-4: #2a2a2a; /* component hover */
-  --palette-gray-5: #313131; /* component selected */
-  --palette-gray-6: #3a3a3a; /* subtle border */
-  --palette-gray-7: #484848; /* border */
-  --palette-gray-8: #606060; /* border hover */
-  --palette-gray-9: #6e6e6e; /* solid fill */
-  --palette-gray-10: #7b7b7b; /* solid fill hover */
-  --palette-gray-11: #b4b4b4; /* low-contrast text */
-  --palette-gray-12: #eeeeee; /* high-contrast text */
 
   /* purple */
-  --palette-purple-1: #18111b;
-  --palette-purple-2: #1e1523;
-  --palette-purple-3: #301c3b;
-  --palette-purple-4: #3d224e;
-  --palette-purple-5: #48295c;
-  --palette-purple-6: #54346b;
-  --palette-purple-7: #664282;
-  --palette-purple-8: #8457aa;
-  --palette-purple-9: #8e4ec6;
-  --palette-purple-10: #9a5cd0;
-  --palette-purple-11: #d19dff;
-  --palette-purple-12: #ecd9fa;
+  --purple-1: #18111b;
+  --purple-2: #1e1523;
+  --purple-3: #301c3b;
+  --purple-4: #3d224e;
+  --purple-5: #48295c;
+  --purple-6: #54346b;
+  --purple-7: #664282;
+  --purple-8: #8457aa;
+  --purple-9: #8e4ec6;
+  --purple-10: #9a5cd0;
+  --purple-11: #d19dff;
+  --purple-12: #ecd9fa;
 
   /* red */
-  --palette-red-1: #191111;
-  --palette-red-2: #201314;
-  --palette-red-3: #3b1219;
-  --palette-red-4: #500f1c;
-  --palette-red-5: #611623;
-  --palette-red-6: #72232d;
-  --palette-red-7: #8c333a;
-  --palette-red-8: #b0484f;
-  --palette-red-9: #e5484d;
-  --palette-red-10: #ec5d5e;
-  --palette-red-11: #ff9592;
-  --palette-red-12: #ffd1d9;
+  --red-1: #191111;
+  --red-2: #201314;
+  --red-3: #3b1219;
+  --red-4: #500f1c;
+  --red-5: #611623;
+  --red-6: #72232d;
+  --red-7: #8c333a;
+  --red-8: #b0484f;
+  --red-9: #e5484d;
+  --red-10: #ec5d5e;
+  --red-11: #ff9592;
+  --red-12: #ffd1d9;
 
   /* green */
-  --palette-green-1: #0e1512;
-  --palette-green-2: #121b17;
-  --palette-green-3: #132d21;
-  --palette-green-4: #113b29;
-  --palette-green-5: #174933;
-  --palette-green-6: #20573e;
-  --palette-green-7: #28714f;
-  --palette-green-8: #2f7c57;
-  --palette-green-9: #30a46c;
-  --palette-green-10: #33b074;
-  --palette-green-11: #3dd68c;
-  --palette-green-12: #b1f1cb;
+  --green-1: #0e1512;
+  --green-2: #121b17;
+  --green-3: #132d21;
+  --green-4: #113b29;
+  --green-5: #174933;
+  --green-6: #20573e;
+  --green-7: #28714f;
+  --green-8: #2f7c57;
+  --green-9: #30a46c;
+  --green-10: #33b074;
+  --green-11: #3dd68c;
+  --green-12: #b1f1cb;
 
   /* amber */
-  --palette-amber-1: #16120c;
-  --palette-amber-2: #1d180f;
-  --palette-amber-3: #302008;
-  --palette-amber-4: #3f2700;
-  --palette-amber-5: #4d3000;
-  --palette-amber-6: #5c3d05;
-  --palette-amber-7: #714f19;
-  --palette-amber-8: #8f6424;
-  --palette-amber-9: #ffc53d;
-  --palette-amber-10: #ffd60a;
-  --palette-amber-11: #ffca16;
-  --palette-amber-12: #ffe7b3;
+  --amber-1: #16120c;
+  --amber-2: #1d180f;
+  --amber-3: #302008;
+  --amber-4: #3f2700;
+  --amber-5: #4d3000;
+  --amber-6: #5c3d05;
+  --amber-7: #714f19;
+  --amber-8: #8f6424;
+  --amber-9: #ffc53d;
+  --amber-10: #ffd60a;
+  --amber-11: #ffca16;
+  --amber-12: #ffe7b3;
 
   /* blue */
-  --palette-blue-1: #0d1520;
-  --palette-blue-2: #111927;
-  --palette-blue-3: #0d2847;
-  --palette-blue-4: #003362;
-  --palette-blue-5: #004074;
-  --palette-blue-6: #104d87;
-  --palette-blue-7: #205d9e;
-  --palette-blue-8: #2870bd;
-  --palette-blue-9: #0090ff;
-  --palette-blue-10: #3b9eff;
-  --palette-blue-11: #70b8ff;
-  --palette-blue-12: #c2e6ff;
+  --blue-1: #0d1520;
+  --blue-2: #111927;
+  --blue-3: #0d2847;
+  --blue-4: #003362;
+  --blue-5: #004074;
+  --blue-6: #104d87;
+  --blue-7: #205d9e;
+  --blue-8: #2870bd;
+  --blue-9: #0090ff;
+  --blue-10: #3b9eff;
+  --blue-11: #70b8ff;
+  --blue-12: #c2e6ff;
 
   /* cyan */
-  --palette-cyan-1: #0b161a;
-  --palette-cyan-2: #101b20;
-  --palette-cyan-3: #082c36;
-  --palette-cyan-4: #003848;
-  --palette-cyan-5: #004558;
-  --palette-cyan-6: #045468;
-  --palette-cyan-7: #12677e;
-  --palette-cyan-8: #11809c;
-  --palette-cyan-9: #00a2c7;
-  --palette-cyan-10: #23afd0;
-  --palette-cyan-11: #4ccce6;
-  --palette-cyan-12: #b6ecf7;
+  --cyan-1: #0b161a;
+  --cyan-2: #101b20;
+  --cyan-3: #082c36;
+  --cyan-4: #003848;
+  --cyan-5: #004558;
+  --cyan-6: #045468;
+  --cyan-7: #12677e;
+  --cyan-8: #11809c;
+  --cyan-9: #00a2c7;
+  --cyan-10: #23afd0;
+  --cyan-11: #4ccce6;
+  --cyan-12: #b6ecf7;
 
   /* orange */
-  --palette-orange-1: #17120e;
-  --palette-orange-2: #1e160f;
-  --palette-orange-3: #331e0b;
-  --palette-orange-4: #462100;
-  --palette-orange-5: #562800;
-  --palette-orange-6: #66350c;
-  --palette-orange-7: #7e451d;
-  --palette-orange-8: #a35829;
-  --palette-orange-9: #f76b15;
-  --palette-orange-10: #ff801f;
-  --palette-orange-11: #ffa057;
-  --palette-orange-12: #ffe0c2;
+  --orange-1: #17120e;
+  --orange-2: #1e160f;
+  --orange-3: #331e0b;
+  --orange-4: #462100;
+  --orange-5: #562800;
+  --orange-6: #66350c;
+  --orange-7: #7e451d;
+  --orange-8: #a35829;
+  --orange-9: #f76b15;
+  --orange-10: #ff801f;
+  --orange-11: #ffa057;
+  --orange-12: #ffe0c2;
 }
 
 /* ============================================================
@@ -289,67 +268,18 @@
      really are a scale, and every step is in use. Step 1 stays
      pure white rather than the palette's off-white, because the
      app background is a deliberate choice, not a grey. */
-  --neutral-1: #ffffff; /* app background — not palette-gray-1 */
-  --neutral-2: var(--palette-gray-2); /* subtle background     */
-  --neutral-3: var(--palette-gray-3); /* component background  */
-  --neutral-4: var(--palette-gray-4); /* component hover       */
-  --neutral-5: var(--palette-gray-5); /* component selected    */
-  --neutral-6: var(--palette-gray-6); /* subtle border         */
-  --neutral-7: var(--palette-gray-7); /* border                */
-  --neutral-8: var(--palette-gray-8); /* border hover          */
-  --neutral-9: var(--palette-gray-9); /* solid fill, tertiary text */
-  /* Steps 10-12 deliberately do NOT track palette gray 10-12.
-     Radix's 11 is "low-contrast text", sized to pass on its own step-2
-     background. This system points --text-secondary at step 10 and asks it to
-     stay readable on bg-inset and bg-hover, which are darker — the guard
-     measured palette-gray-10 at Lc 56.5 there against a 60 target. So
-     secondary text takes a darker step than the palette's naming suggests,
-     and the inverse-fill steps keep the near-black they were sized for. */
-  --neutral-10: var(--palette-gray-11); /* secondary text      */
-  --neutral-11: #262626; /* dark fill — sized against bg-inverse */
-  --neutral-12: #0a0a0a; /* high-contrast text                  */
-
-  /* --- Accent. A slot, not a colour. -----------------------
-     Nothing above this family knows the hue. Point these five at
-     a different palette hue to change the accent; every role
-     below follows. Current hue: purple.
-
-     Text takes step 12, not step 11. Radix sizes step 11 for a
-     WCAG 4.5:1 target; this system judges with APCA at Lc 60, and
-     every hue's step 11 measured Lc 55-61 on the surfaces these
-     roles must clear — legal by WCAG, short of our target. Step 12
-     clears every pairing in both modes with room to spare. The
-     guard found this; do not lower it back to 11. */
-  --accent-tint: var(--palette-purple-3); /* tinted surface     */
-  --accent-tint-hover: var(--palette-purple-4); /* tint hover   */
-  --accent-border: var(--palette-purple-8); /* border, focus ring */
-  --accent-fill: var(--palette-purple-9); /* solid fill         */
-  --accent-text: var(--palette-purple-12); /* accent text       */
-
-  /* --- Status. The same five jobs, per family. -------------- */
-  --danger-tint: var(--palette-red-3);
-  --danger-tint-hover: var(--palette-red-4);
-  --danger-border: var(--palette-red-8);
-  --danger-fill: var(--palette-red-9);
-  --danger-text: var(--palette-red-12);
-
-  --success-tint: var(--palette-green-3);
-  --success-tint-hover: var(--palette-green-4);
-  --success-border: var(--palette-green-8);
-  --success-fill: var(--palette-green-9);
-  --success-text: var(--palette-green-12);
-
-  --warning-tint: var(--palette-amber-3);
-  --warning-tint-hover: var(--palette-amber-4);
-  --warning-border: var(--palette-amber-8);
-  --warning-fill: var(--palette-amber-9);
-  --warning-text: var(--palette-amber-12);
-
-  --info-tint: var(--palette-blue-3);
-  --info-tint-hover: var(--palette-blue-4);
-  --info-border: var(--palette-blue-8);
-  --info-fill: var(--palette-blue-9);
-  --info-text: var(--palette-blue-12);
+  --neutral-1: #ffffff; /* app background            */
+  --neutral-2: #f9f9f9; /* subtle background         */
+  --neutral-3: #f0f0f0; /* component background      */
+  --neutral-4: #e8e8e8; /* component hover           */
+  --neutral-5: #e0e0e0; /* component selected        */
+  --neutral-6: #d9d9d9; /* subtle border             */
+  --neutral-7: #cecece; /* border                    */
+  --neutral-8: #bbbbbb; /* border hover              */
+  --neutral-9: #8d8d8d; /* solid fill, tertiary text */
+  --neutral-10: #646464; /* secondary text           */
+  --neutral-11: #262626; /* dark fill                */
+  --neutral-12: #0a0a0a; /* high-contrast text       */
 
   /* --- Glass. A translucency ramp of fills. ---------------- */
   --glass-1: #ffffff5c; /* barely there   */
@@ -358,10 +288,23 @@
   --glass-4: #ffffffc7; /* glass hovered  */
   --glass-5: #ffffffe0; /* nearly solid   */
 
-  /* --- Gradients. Numbered background treatments. ---------- */
-  --gradient-1:
-    radial-gradient(at 85% 88%, #eef2d4 0%, transparent 62%),
-    linear-gradient(158deg, #f5f7f8 0%, #dfeaf3 52%, #e9efe0 100%);
+  /* --- Backdrop treatments. Named visual values, not colours.
+     These treatments only exist in the mode where their names are true. The
+     semantic pairings below provide the stable cross-mode selection. -------- */
+  --gradient-sky-field:
+    radial-gradient(at 88% 84%, #f5e99e 0%, transparent 60%),
+    linear-gradient(148deg, #f8fbff 0%, #c6e8fb 50%, #d9f0d5 100%);
+  --gradient-peach-field:
+    radial-gradient(at 8% 85%, #fac8d3 0%, transparent 60%),
+    linear-gradient(150deg, #fff9f7 0%, #f5d5df 48%, #d5eafa 100%);
+  --gradient-blue-hour:
+    radial-gradient(at 12% 14%, #bfeefa 0%, transparent 56%),
+    radial-gradient(at 88% 86%, #ddd0fa 0%, transparent 61%),
+    linear-gradient(153deg, #f6f9ff 0%, #d6e4fb 51%, #eee4f7 100%);
+  --gradient-orchid-field:
+    radial-gradient(at 14% 87%, #fac8e8 0%, transparent 57%),
+    radial-gradient(at 85% 14%, #d9d4ff 0%, transparent 57%),
+    linear-gradient(154deg, #fbf8ff 0%, #e9ddf8 50%, #dce8fb 100%);
 
   /* --- Texture. Separate from colour and gradient. --------- */
   --texture-dots-color: #0a0a0a0f;
@@ -440,29 +383,110 @@
   --glass-4: #1c1c1cc7;
   --glass-5: #1c1c1ce0;
 
-  --gradient-1:
-    radial-gradient(at 85% 88%, #23261a 0%, transparent 62%),
-    linear-gradient(158deg, #15171b 0%, #172231 52%, #191d19 100%);
+  /* Dark treatments are their own scenes, not dimmed versions of their light
+     counterparts. Their scene pairing lives in the semantic layer below. */
+  --gradient-night-garden:
+    radial-gradient(
+      ellipse 110% 100% at 52% 50%,
+      transparent 34%,
+      rgba(2, 11, 13, 0.42) 100%
+    ),
+    radial-gradient(at 88% 16%, rgba(52, 211, 153, 0.56) 0%, transparent 42%),
+    radial-gradient(at 12% 86%, rgba(56, 189, 248, 0.52) 0%, transparent 46%),
+    radial-gradient(at 52% 48%, rgba(6, 95, 70, 0.3) 0%, transparent 78%),
+    linear-gradient(153deg, #071311 0%, #0a2929 51%, #081722 100%);
+  --gradient-signal-flare:
+    radial-gradient(
+      ellipse 110% 100% at 52% 50%,
+      transparent 34%,
+      rgba(16, 4, 7, 0.42) 100%
+    ),
+    radial-gradient(at 14% 14%, rgba(245, 158, 11, 0.6) 0%, transparent 40%),
+    radial-gradient(at 88% 88%, rgba(244, 63, 94, 0.56) 0%, transparent 47%),
+    radial-gradient(at 52% 48%, rgba(154, 52, 18, 0.3) 0%, transparent 78%),
+    linear-gradient(158deg, #160e09 0%, #351315 52%, #190915 100%);
+  --gradient-electric-dusk:
+    radial-gradient(
+      ellipse 110% 100% at 52% 50%,
+      transparent 34%,
+      rgba(3, 6, 16, 0.4) 100%
+    ),
+    radial-gradient(at 12% 12%, rgba(34, 211, 238, 0.58) 0%, transparent 42%),
+    radial-gradient(at 88% 92%, rgba(124, 58, 237, 0.63) 0%, transparent 48%),
+    radial-gradient(at 48% 40%, rgba(37, 99, 235, 0.3) 0%, transparent 78%),
+    linear-gradient(158deg, #0a0d16 0%, #121d38 50%, #180d2b 100%);
+  --gradient-ultraviolet:
+    radial-gradient(
+      ellipse 110% 100% at 52% 50%,
+      transparent 34%,
+      rgba(8, 3, 16, 0.42) 100%
+    ),
+    radial-gradient(at 14% 88%, rgba(236, 72, 153, 0.57) 0%, transparent 43%),
+    radial-gradient(at 86% 14%, rgba(99, 102, 241, 0.62) 0%, transparent 44%),
+    radial-gradient(at 48% 52%, rgba(109, 40, 217, 0.28) 0%, transparent 79%),
+    linear-gradient(155deg, #100914 0%, #21113c 52%, #081622 100%);
 
   --texture-dots-color: #ffffff14;
 }
 
 /* ============================================================
-   LAYER 2 — PUBLIC ROLES
-   The only layer a screen may use. Every value below points at
-   a ramp step, except the documented exceptions at the bottom.
+   LAYER 1 — SEMANTIC BACKDROP CHOICES
+   Numbered slots pair one named light treatment with one named
+   dark treatment. They are the appearance-preference seam: a
+   person selects `gradient-1`, not a light-only scene name.
    ============================================================ */
 
 :root {
-  /* --- Structural surfaces. Named by region. ---------------
-     Ask one question: is it behind, on, above, or in?         */
-  --bg-app: var(--gradient-1);
-  --bg-panel: var(--neutral-1);
-  --bg-float: var(--neutral-1);
-  --bg-inset: var(--neutral-3);
-  --bg-hover: var(--neutral-4);
+  --gradient-1: var(--gradient-sky-field);
+  --gradient-2: var(--gradient-peach-field);
+  --gradient-3: var(--gradient-blue-hour);
+  --gradient-4: var(--gradient-orchid-field);
+}
 
-  /* --- Emphasis. One ramp shared by text and borders. ------ */
+.dark {
+  --gradient-1: var(--gradient-night-garden);
+  --gradient-2: var(--gradient-signal-flare);
+  --gradient-3: var(--gradient-electric-dusk);
+  --gradient-4: var(--gradient-ultraviolet);
+}
+
+/* ============================================================
+   LAYER 2 — PUBLIC ROLES
+   The only layer a screen may use. Every value below points at
+   a ramp step or semantic backdrop choice, except the documented
+   exceptions at the bottom.
+   ============================================================ */
+
+:root {
+  /* --- Structural surfaces. ---------------------------------
+     THE ROLES THAT EXIST BECAUSE A RAMP STEP CANNOT SAY THEM.
+     Each one takes a DIFFERENT step per mode, so no class like
+     `bg-neutral-1` is correct in both. That is the whole test for
+     whether a name is earned; everything that passed it is here.
+
+     `bg-app` qualifies for the same reason in a different shape:
+     the gradient itself is swapped per mode.                  */
+  --bg-app: var(--gradient-1);
+  --bg-panel: var(--neutral-1); /* dark: neutral-3 */
+  --bg-float: var(--neutral-1); /* dark: neutral-5 */
+  --bg-inset: var(--neutral-3); /* dark: neutral-2 */
+
+  /* `bg-hover` was here and is gone. It was neutral-4 in both modes, so
+     `bg-neutral-4` says it exactly. Its five call sites now do.
+
+     Worth knowing before recreating it: hover means "one step more
+     contrast than whatever is underneath", which is a relationship, not
+     a value — hover on a panel and hover on an inset are different
+     numbers. A single token could never express that, so the name was
+     promising something it did not deliver.                   */
+
+  /* --- Emphasis. -------------------------------------------
+     These are the exception to the rule above: every one is the
+     same step in both modes, so a class would work. They stay
+     because the NAME enforces something — there are deliberately
+     three levels of text and one border weight, and a ramp cannot
+     say "three". Reaching for `text-neutral-11` because it looks
+     right is how a fourth level appears without anyone deciding.  */
   --text-primary: var(--neutral-12);
   --text-secondary: var(--neutral-10);
   --text-tertiary: var(--neutral-9);
@@ -472,62 +496,86 @@
      information here that a person needs. */
   --text-disabled: var(--neutral-8);
 
-  --border-primary: var(--neutral-7);
-  --border-secondary: var(--neutral-6);
-  --border-tertiary: var(--neutral-5);
+  /* One border, not three. `primary` names the sole deliberate weight,
+     and neutral-4 keeps it at the threshold of perception over both the
+     panel and the atmospheric backdrop. A second weight arrives only with
+     a design that proves a different boundary needs one. */
+  --border-primary: var(--neutral-4);
 
-  /* --- Identity. Two arrangements only: SOLID fill with
-     paired text on it, or TINT fill with coloured text.       */
-  --bg-accent: var(--accent-fill);
-  --bg-accent-tint: var(--accent-tint);
-  --bg-accent-tint-hover: var(--accent-tint-hover);
-  --text-accent: var(--accent-text);
-  --border-accent: var(--accent-border);
+  /* --- Identity: deliberately absent. ----------------------
+     There were six accent roles and every one held the same purple
+     step in both modes, so each was a name in front of a number —
+     `bg-accent` was `purple-9` and nothing else. The screens now say
+     `bg-purple-9`, `bg-purple-3`, `text-purple-12`, `border-purple-8`.
 
-  --bg-inverse: var(--neutral-11);
-  --bg-inverse-hover: var(--neutral-10);
+     `bg-inverse` went the same way (`neutral-11`), and so did its
+     paired text (`neutral-1`).
 
-  /* --- Status. Identical shape, four times over. ----------- */
-  --bg-danger: var(--danger-fill);
-  --bg-danger-tint: var(--danger-tint);
-  --bg-danger-tint-hover: var(--danger-tint-hover);
-  --text-danger: var(--danger-text);
-  --border-danger: var(--danger-border);
+     The argument FOR naming them was that accent is a slot whose hue
+     could change. It is a real argument and it lost to a simpler fact:
+     the hue already changed once — the accent moved to Tailwind purple
+     — and it was five values in the ramp, not a rename. The ramp is
+     the slot. A role in front of it only adds a hop.
 
-  --bg-success: var(--success-fill);
-  --bg-success-tint: var(--success-tint);
-  --bg-success-tint-hover: var(--success-tint-hover);
-  --text-success: var(--success-text);
-  --border-success: var(--success-border);
+     When a repeated accent PATTERN appears — not a colour, a pattern,
+     like a tinted callout that turns up on four screens — that earns a
+     name, and it will be named for the pattern.               */
 
-  --bg-warning: var(--warning-fill);
-  --bg-warning-tint: var(--warning-tint);
-  --bg-warning-tint-hover: var(--warning-tint-hover);
-  --text-warning: var(--warning-text);
-  --border-warning: var(--warning-border);
+  /* --- Status: deliberately absent. ------------------------
+     There were twenty roles here — danger, success, warning, info, five
+     each, the accent's shape copied four times. Nineteen of the twenty
+     had no reader outside the /design pages that displayed them, and the
+     one real consumer was a 8px presence dot.
 
-  --bg-info: var(--info-fill);
-  --bg-info-tint: var(--info-tint);
-  --bg-info-tint-hover: var(--info-tint-hover);
-  --text-info: var(--info-text);
-  --border-info: var(--info-border);
+     They were invented by symmetry rather than by need, and the symmetry
+     was actively misleading: the red ramp alone offers red-3, red-8,
+     red-9 and red-12 for "an error", and a set of pre-made names hid
+     that choice instead of making it. `text-danger` shipped pointing at
+     the wrong red for months (see the registration note below) and
+     nothing noticed, because no design had ever looked at it.
+
+     Status colour gets designed when there is a screen to design it on.
+     Until then the ramps are right there: an error message picks its
+     step, and once two screens pick the same one it earns a name. The
+     hues stay in the palette — nothing was deleted from layer 0.
+
+     Two things briefly had names here — `text-error` and
+     `bg-agent-running` — and they went too, for the same reason as the
+     accent: both were one step, identical in both modes. Error text is
+     `text-red-12` and the running dot is `bg-green-9`, written where
+     they are used.
+
+     The measurement that chose red-12 is the part worth keeping, and it
+     lives in DESIGN.md rather than in a token: red-11 is the more
+     obviously red choice and fails the Lc 60 body target on a dark panel
+     (59.7) and the dark composer (57.5).                      */
 
   /* --- Material. Translucency and blur live inside the value.
-     A component never assembles them.                        */
-  --bg-chrome-glass: var(--glass-3);
-  --bg-chrome-glass-hover: var(--glass-4);
-  --bg-chrome-selected: var(--neutral-1);
-  --bg-panel-glass: var(--glass-2);
-  --bg-float-glass: var(--glass-3);
+     A component never assembles them.
 
-  /* --- Focus. ----------------------------------------------
-     Legible on every neutral surface (WCAG 3.0–3.5:1), but it is an accent
-     against accent: on `bg-accent` it measures 1.1:1 and disappears. A focused
-     primary button therefore needs the ring separated from the fill — an offset
-     in the surface colour, not a different ring hue, so one focus treatment
-     works everywhere. Whatever component layer introduces focus owns that
-     offset; there is no second ring token.                     */
-  --ring-focus: var(--accent-border);
+     Named by STACKING DEPTH, not by the component that uses it.
+     `primary` sits on the backdrop; `secondary` sits over something
+     already glass. Elevation reads as less translucency, so the
+     higher it sits the more opaque it gets — DESIGN.md § Surface
+     and depth. The `glass-primary` / `glass-secondary` utilities in
+     globals.css are the only legitimate readers: they pair each fill
+     with its blur, rim, and lift so a material cannot arrive in
+     pieces.                                                   */
+  --bg-glass-primary: var(--glass-2);
+  --bg-glass-primary-hover: var(--glass-3);
+  --bg-glass-secondary: var(--glass-4);
+  --bg-glass-secondary-hover: var(--glass-5);
+  --bg-chrome-selected: var(--neutral-1);
+
+  /* --- Focus: `purple-8`, written directly. -----------------
+     Same step in both modes, so it was a name in front of a number too.
+     The judgement that survives is not the value: purple-8 is legible on
+     every neutral surface (WCAG 3.0–3.5:1) but measures 1.1:1 on
+     `purple-9` and disappears. **A focused primary button needs the ring
+     separated from the fill** — an offset in the surface colour, not a
+     different ring hue, so one focus treatment works everywhere. That
+     belongs to whichever component layer introduces focus. It is in
+     DESIGN.md, which is where a rule lives; a token could not state it. */
 
   /* --- Geometry. Repeated relationships from Messages. ----- */
   --space-workspace-inset: var(--space-4);
@@ -535,6 +583,7 @@
   --space-panel-inset: var(--space-5);
   --space-control-inset: var(--space-3);
   --space-row-gap: var(--space-2);
+  --space-section-gap: var(--space-4);
   /* An inline chip sits in a line of text, so its inset and gap are tighter
      than a control's and are its own repeated relationship. Both are below the
      4px spacing floor because a chip hugs its label — the design draws 3px of
@@ -568,23 +617,21 @@
         purple fill and unreadable on yellow or lime. Until the
         computation lands, these hold literals.                */
   --text-on-accent: #ffffff;
-  --text-on-inverse: var(--neutral-1);
 
-  /* The status families need their paired text for the same reason accent does:
-     `bg-danger` is a saturated fill, and text on it must be the paired value
-     rather than whatever it inherits. The registry documented these four before
-     they were declared, so `text-on-danger` resolved to nothing and text on a
-     danger button fell back to near-black on red. The token table found it.
-     Literals for now, on the same exception as text-on-accent — they become
-     computed when the lightness rule lands. */
-  --text-on-danger: #ffffff;
-  --text-on-success: #ffffff;
-  /* A literal, not `var(--neutral-12)`: the warning fill is the same amber in
-     both modes, so its paired text must be dark in both. neutral-12 flips to
-     near-white in dark mode, which put #f5f5f5 on #eab308 — APCA Lc 34, WCAG
-     1.76. A paired-text token follows its fill, never the mode. */
-  --text-on-warning: #0a0a0a;
-  --text-on-info: #ffffff;
+  /* `text-on-inverse` was `var(--neutral-1)` in both modes and went with
+     `bg-inverse`; its two call sites pair `bg-neutral-11` with
+     `text-neutral-1` directly. It is listed here rather than silently
+     dropped because the paired-text RULE below still governs that pair:
+     the text follows the fill, so if the fill moves off neutral-11 the
+     text is re-measured, not inherited.                        */
+
+  /* The four status paired-text roles went with their fills. Keep the finding
+     they produced, because it is the rule and not a bug report: a paired-text
+     token follows its FILL, never the mode. `--text-on-warning` was
+     `var(--neutral-12)`, which flips to near-white in dark mode and put #f5f5f5
+     on the same amber — APCA Lc 34. The amber is identical in both modes, so its
+     text had to be dark in both. Whatever names status ends up with, they take
+     literals or a computed lightness, never a neutral step. */
 
   /*  2. The glass rim. A directional light effect, not a solid
         line: bright along the lit edge, dimmer on the opposite
@@ -620,65 +667,189 @@
 @theme inline {
   --color-*: initial;
 
+  /* ---------------------------------------------------------------
+     THE RAMPS, REACHABLE DIRECTLY.
+
+     `bg-neutral-4`, `text-red-12`, `border-purple-8`. This is the layer
+     a screen is built from now, and it is a deliberate reversal: the
+     colour guard used to reject exactly these classes.
+
+     The reason it is safe here and was not safe in Tailwind's own
+     palette is that **every step is authored per mode.** `neutral-11`
+     is one value in light and another in dark, so a component naming a
+     step still behaves in both. Tailwind's `neutral-800` is a single
+     literal, which is why reaching for it used to break dark mode and
+     why a semantic name was the only correct move.
+
+     What a semantic role is still FOR is the case a step cannot
+     express — see the four surface roles above, where light and dark
+     take different steps. Everything else was a name in front of a
+     number, and a name in front of a number hides the choice instead
+     of recording it.
+     --------------------------------------------------------------- */
+  /* neutral */
+  --color-neutral-1: var(--neutral-1);
+  --color-neutral-2: var(--neutral-2);
+  --color-neutral-3: var(--neutral-3);
+  --color-neutral-4: var(--neutral-4);
+  --color-neutral-5: var(--neutral-5);
+  --color-neutral-6: var(--neutral-6);
+  --color-neutral-7: var(--neutral-7);
+  --color-neutral-8: var(--neutral-8);
+  --color-neutral-9: var(--neutral-9);
+  --color-neutral-10: var(--neutral-10);
+  --color-neutral-11: var(--neutral-11);
+  --color-neutral-12: var(--neutral-12);
+
+  /* purple */
+  --color-purple-1: var(--purple-1);
+  --color-purple-2: var(--purple-2);
+  --color-purple-3: var(--purple-3);
+  --color-purple-4: var(--purple-4);
+  --color-purple-5: var(--purple-5);
+  --color-purple-6: var(--purple-6);
+  --color-purple-7: var(--purple-7);
+  --color-purple-8: var(--purple-8);
+  --color-purple-9: var(--purple-9);
+  --color-purple-10: var(--purple-10);
+  --color-purple-11: var(--purple-11);
+  --color-purple-12: var(--purple-12);
+
+  /* red */
+  --color-red-1: var(--red-1);
+  --color-red-2: var(--red-2);
+  --color-red-3: var(--red-3);
+  --color-red-4: var(--red-4);
+  --color-red-5: var(--red-5);
+  --color-red-6: var(--red-6);
+  --color-red-7: var(--red-7);
+  --color-red-8: var(--red-8);
+  --color-red-9: var(--red-9);
+  --color-red-10: var(--red-10);
+  --color-red-11: var(--red-11);
+  --color-red-12: var(--red-12);
+
+  /* green */
+  --color-green-1: var(--green-1);
+  --color-green-2: var(--green-2);
+  --color-green-3: var(--green-3);
+  --color-green-4: var(--green-4);
+  --color-green-5: var(--green-5);
+  --color-green-6: var(--green-6);
+  --color-green-7: var(--green-7);
+  --color-green-8: var(--green-8);
+  --color-green-9: var(--green-9);
+  --color-green-10: var(--green-10);
+  --color-green-11: var(--green-11);
+  --color-green-12: var(--green-12);
+
+  /* amber */
+  --color-amber-1: var(--amber-1);
+  --color-amber-2: var(--amber-2);
+  --color-amber-3: var(--amber-3);
+  --color-amber-4: var(--amber-4);
+  --color-amber-5: var(--amber-5);
+  --color-amber-6: var(--amber-6);
+  --color-amber-7: var(--amber-7);
+  --color-amber-8: var(--amber-8);
+  --color-amber-9: var(--amber-9);
+  --color-amber-10: var(--amber-10);
+  --color-amber-11: var(--amber-11);
+  --color-amber-12: var(--amber-12);
+
+  /* blue */
+  --color-blue-1: var(--blue-1);
+  --color-blue-2: var(--blue-2);
+  --color-blue-3: var(--blue-3);
+  --color-blue-4: var(--blue-4);
+  --color-blue-5: var(--blue-5);
+  --color-blue-6: var(--blue-6);
+  --color-blue-7: var(--blue-7);
+  --color-blue-8: var(--blue-8);
+  --color-blue-9: var(--blue-9);
+  --color-blue-10: var(--blue-10);
+  --color-blue-11: var(--blue-11);
+  --color-blue-12: var(--blue-12);
+
+  /* cyan */
+  --color-cyan-1: var(--cyan-1);
+  --color-cyan-2: var(--cyan-2);
+  --color-cyan-3: var(--cyan-3);
+  --color-cyan-4: var(--cyan-4);
+  --color-cyan-5: var(--cyan-5);
+  --color-cyan-6: var(--cyan-6);
+  --color-cyan-7: var(--cyan-7);
+  --color-cyan-8: var(--cyan-8);
+  --color-cyan-9: var(--cyan-9);
+  --color-cyan-10: var(--cyan-10);
+  --color-cyan-11: var(--cyan-11);
+  --color-cyan-12: var(--cyan-12);
+
+  /* orange */
+  --color-orange-1: var(--orange-1);
+  --color-orange-2: var(--orange-2);
+  --color-orange-3: var(--orange-3);
+  --color-orange-4: var(--orange-4);
+  --color-orange-5: var(--orange-5);
+  --color-orange-6: var(--orange-6);
+  --color-orange-7: var(--orange-7);
+  --color-orange-8: var(--orange-8);
+  --color-orange-9: var(--orange-9);
+  --color-orange-10: var(--orange-10);
+  --color-orange-11: var(--orange-11);
+  --color-orange-12: var(--orange-12);
+
   --color-app: var(--bg-app);
   --color-panel: var(--bg-panel);
   --color-float: var(--bg-float);
   --color-inset: var(--bg-inset);
-  --color-hover: var(--bg-hover);
 
-  --color-primary: var(--text-primary);
-  --color-secondary: var(--text-secondary);
-  --color-tertiary: var(--text-tertiary);
-  --color-disabled: var(--text-disabled);
+  /* TEXT COLOUR REGISTERS IN ITS OWN NAMESPACE, like borders below.
+     Not `--color-*`.
 
-  /* Borders register in their OWN namespace, not `--color-*`.
-     Text and borders share the emphasis names — primary, secondary, tertiary —
-     but hold different values: text is the dark end of the neutral ramp
-     (12/10/9), borders the light end (7/6/5). `--color-*` is a single namespace,
-     so registering borders there would make `border-primary` resolve to the text
-     colour and draw every hairline at near-black. It did exactly that until
-     these three lines existed. */
+     `--color-x` is shared by every colour prefix at once: it makes `bg-x`,
+     `text-x`, `border-x`, `ring-x` and the rest, all pointing at one value. So
+     the moment two roles differ only by which prefix uses them, that namespace
+     picks one and silently drops the other.
+
+     It had already happened twice. Borders were the first, fixed below. Text
+     colour was the second and shipped: `--color-danger: var(--bg-danger)` also
+     defined `text-danger`, so error text rendered in red-9 — the saturated fill
+     — instead of red-12. On a dark panel that measured APCA Lc 34 against a
+     target of 60, and `check-contrast` passed the whole time because it audited
+     `--text-danger`, a token no class could reach.
+
+     A guard measuring a token nothing resolves to is worse than no guard, so
+     every text role now registers as `--text-color-*` and is what it says. */
+  --text-color-primary: var(--text-primary);
+  --text-color-secondary: var(--text-secondary);
+  --text-color-tertiary: var(--text-tertiary);
+  --text-color-disabled: var(--text-disabled);
+  --text-color-on-accent: var(--text-on-accent);
+
+  /* Borders register in their OWN namespace for the same reason — this is where
+     the collision was found first. Text and borders shared the emphasis names,
+     holding different values: text the dark end of the neutral ramp, borders the
+     light end. Registered under `--color-*`, `border-primary` resolved to the
+     text colour and drew every hairline at near-black. It did exactly that until
+     this line existed. */
   --border-color-primary: var(--border-primary);
-  --border-color-secondary: var(--border-secondary);
-  --border-color-tertiary: var(--border-tertiary);
 
-  --color-accent: var(--bg-accent);
-  --color-accent-tint: var(--bg-accent-tint);
-  --color-accent-tint-hover: var(--bg-accent-tint-hover);
-  --color-on-accent: var(--text-on-accent);
+  /* `--color-*` now registers backgrounds only, so `bg-accent` is the one
+     utility each of these makes. Text colour is `--text-color-*` above. */
 
-  --color-inverse: var(--bg-inverse);
-  --color-inverse-hover: var(--bg-inverse-hover);
-  --color-on-inverse: var(--text-on-inverse);
-
-  --color-danger: var(--bg-danger);
-  --color-danger-tint: var(--bg-danger-tint);
-  --color-danger-tint-hover: var(--bg-danger-tint-hover);
-  --color-on-danger: var(--text-on-danger);
-  --color-success: var(--bg-success);
-  --color-success-tint: var(--bg-success-tint);
-  --color-success-tint-hover: var(--bg-success-tint-hover);
-  --color-on-success: var(--text-on-success);
-  --color-on-warning: var(--text-on-warning);
-  --color-on-info: var(--text-on-info);
-  --color-warning: var(--bg-warning);
-  --color-warning-tint: var(--bg-warning-tint);
-  --color-warning-tint-hover: var(--bg-warning-tint-hover);
-  --color-info: var(--bg-info);
-  --color-info-tint: var(--bg-info-tint);
-  --color-info-tint-hover: var(--bg-info-tint-hover);
-
-  --color-chrome-glass: var(--bg-chrome-glass);
-  --color-chrome-glass-hover: var(--bg-chrome-glass-hover);
+  /* The glass fills are deliberately NOT registered as Tailwind colour
+     utilities. A `bg-glass-primary` class would be the fill without its
+     blur, rim, or lift — the exact failure the materials exist to prevent.
+     Use the `glass-primary` / `glass-secondary` utilities instead. */
   --color-chrome-selected: var(--bg-chrome-selected);
-  --color-panel-glass: var(--bg-panel-glass);
-  --color-float-glass: var(--bg-float-glass);
 
   --spacing-workspace-inset: var(--space-workspace-inset);
   --spacing-panel-gap: var(--space-panel-gap);
   --spacing-panel-inset: var(--space-panel-inset);
   --spacing-control-inset: var(--space-control-inset);
   --spacing-row-gap: var(--space-row-gap);
+  --spacing-section-gap: var(--space-section-gap);
   --spacing-chip-inset: var(--space-chip-inset);
   --spacing-chip-gap: var(--space-chip-gap);
 }

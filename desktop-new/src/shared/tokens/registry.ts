@@ -21,8 +21,6 @@ export interface RampStep {
   job: string;
   /** The CSS custom property, without `var()`. */
   variable: string;
-  /** The palette step this resolves to, when the ramp is a family. */
-  palette?: string;
 }
 
 /** A private ramp. */
@@ -64,7 +62,13 @@ export interface RoleGroup {
    PRIVATE RAMPS
    ============================================================ */
 
-const NEUTRAL_JOBS = [
+/**
+ * What each of the twelve steps is *for*. The same twelve jobs in every hue —
+ * which is the whole point of a twelve-step scale, and what makes the
+ * step-to-role mapping deterministic: a role picks a step number, not a colour.
+ * Named from the neutral ramp because that is where every step is in use.
+ */
+const STEP_JOBS = [
   "app background",
   "subtle background",
   "component background",
@@ -79,67 +83,46 @@ const NEUTRAL_JOBS = [
   "high-contrast text",
 ];
 
-/**
- * The five jobs every coloured family does, and the palette step each takes.
- *
- * Named rather than numbered, because a number invited reading `--accent-2` as
- * "a light purple" when it means "the surface an accent tint sits on". The step
- * numbers are the palette position, shown so the ramp relationship stays legible.
- *
- * Text takes step 12, not the 11 Radix names "low-contrast text": Radix sizes 11
- * for WCAG 4.5:1, and every hue's step 11 measured Lc 55-61 against this
- * system's Lc 60 target on the surfaces these roles must clear.
- */
-const FAMILY_JOBS: Array<[string, number, string]> = [
-  ["tint", 3, "tinted surface"],
-  ["tint-hover", 4, "tint hover / selected"],
-  ["border", 8, "border, focus ring"],
-  ["fill", 9, "solid fill"],
-  ["text", 12, "text on a tint or a neutral surface"],
-];
-
-function identityRamp(
-  id: string,
-  name: string,
-  description: string,
-  hue: string,
-): Ramp {
-  return {
-    id,
-    name,
-    description,
-    steps: FAMILY_JOBS.map(([job, step, use]) => ({
-      step,
-      job: `${job} — ${use}`,
-      variable: `--${id}-${job}`,
-      palette: `--palette-${hue}-${step}`,
-    })),
-  };
-}
-
 /** A palette hue: twelve steps, authored per mode. The bottom layer. */
 export interface PaletteHue {
   id: string;
-  /** Which family, if any, currently draws from this hue. */
+  /** Which identity, if any, currently draws from this hue. */
   usedBy?: string;
-  steps: Array<{ step: number; variable: string }>;
+  steps: Array<{ step: number; variable: string; job: string }>;
+}
+
+/**
+ * A private, named backdrop treatment.
+ *
+ * Unlike a colour ramp, a treatment is a complete visual composition: several
+ * colours plus their positions, falloff, and sometimes a vignette. Its name is
+ * deliberately mode-specific — Night garden is the dark counterpart of Sky
+ * field, not Sky field with its brightness turned down.
+ */
+export interface BackdropTreatment {
+  id: string;
+  name: string;
+  variable: string;
+  mode: "light" | "dark";
+  pairedWith: string;
+  description: string;
 }
 
 /**
  * Every hue in the palette.
  *
- * The layer beneath the families, and the only place a literal colour lives.
+ * The bottom layer, and the only place a literal colour lives.
  * Values are Radix Colors (MIT), transcribed rather than depended on — Radix is
  * not on Block's Tech Radar, so this is a values-only copy with no package.
  *
- * It exists for two reasons. The families above it were 114 hand-picked hex
+ * It exists for two reasons. The tokens above it were 114 hand-picked hex
  * values with nothing enforcing that two tokens doing the same job agreed, and
  * they drifted. And a hue's dark steps are not its light steps dimmed: reaching
  * for a subtler dark purple by writing `purple-950/50` in a component put a real
  * colour decision somewhere it could not be named, paired, or measured.
  */
 export const PALETTE: PaletteHue[] = [
-  { id: "gray", usedBy: "neutral", steps: [] },
+  { id: "neutral", usedBy: "structure", steps: [] },
   { id: "purple", usedBy: "accent", steps: [] },
   { id: "red", usedBy: "danger", steps: [] },
   { id: "green", usedBy: "success", steps: [] },
@@ -151,37 +134,112 @@ export const PALETTE: PaletteHue[] = [
   ...hue,
   steps: Array.from({ length: 12 }, (_, i) => ({
     step: i + 1,
-    variable: `--palette-${hue.id}-${i + 1}`,
+    variable: `--${hue.id}-${i + 1}`,
+    job: STEP_JOBS[i],
   })),
 }));
 
-export const RAMPS: Ramp[] = [
+export const BACKDROP_TREATMENTS: BackdropTreatment[] = [
   {
-    id: "neutral",
-    name: "Neutral",
-    description:
-      "Twelve steps, each step a fixed job. The number means a job, not a brightness — which is what lets a role encode a position that stays true across every palette.",
-    steps: NEUTRAL_JOBS.map((job, i) => ({
-      step: i + 1,
-      job,
-      variable: `--neutral-${i + 1}`,
-    })),
+    id: "sky-field",
+    name: "Sky field",
+    variable: "--gradient-sky-field",
+    mode: "light",
+    pairedWith: "night-garden",
+    description: "Blue sky, fresh green, and a sunlit yellow edge.",
   },
-  identityRamp(
-    "accent",
-    "Accent — a slot, not a colour",
-    "Nothing above this family knows the hue, so the accent can change, become a person's preference, or vary per theme without a single component changing. Point the five steps at a different palette hue and every role follows.",
-    "purple",
-  ),
-  identityRamp(
-    "danger",
-    "Danger",
-    "The same five jobs as accent. Learning one family teaches all of them.",
-    "red",
-  ),
-  identityRamp("success", "Success", "The same five jobs as accent.", "green"),
-  identityRamp("warning", "Warning", "The same five jobs as accent.", "amber"),
-  identityRamp("info", "Info", "The same five jobs as accent.", "blue"),
+  {
+    id: "peach-field",
+    name: "Peach field",
+    variable: "--gradient-peach-field",
+    mode: "light",
+    pairedWith: "signal-flare",
+    description: "A bright peach wash with a cool blue edge.",
+  },
+  {
+    id: "blue-hour",
+    name: "Blue hour",
+    variable: "--gradient-blue-hour",
+    mode: "light",
+    pairedWith: "electric-dusk",
+    description: "Cyan, periwinkle, and a quiet lavender horizon.",
+  },
+  {
+    id: "orchid-field",
+    name: "Orchid field",
+    variable: "--gradient-orchid-field",
+    mode: "light",
+    pairedWith: "ultraviolet",
+    description: "Lilac, periwinkle, and a low orchid-pink bloom.",
+  },
+  {
+    id: "night-garden",
+    name: "Night garden",
+    variable: "--gradient-night-garden",
+    mode: "dark",
+    pairedWith: "sky-field",
+    description: "Deep teal atmosphere, emerald high light, and blue below.",
+  },
+  {
+    id: "signal-flare",
+    name: "Signal flare",
+    variable: "--gradient-signal-flare",
+    mode: "dark",
+    pairedWith: "peach-field",
+    description:
+      "A warm ember field with orange high light and a rose horizon.",
+  },
+  {
+    id: "electric-dusk",
+    name: "Electric dusk",
+    variable: "--gradient-electric-dusk",
+    mode: "dark",
+    pairedWith: "blue-hour",
+    description: "Cyan and ultraviolet light over a deep blue atmosphere.",
+  },
+  {
+    id: "ultraviolet",
+    name: "Ultraviolet",
+    variable: "--gradient-ultraviolet",
+    mode: "dark",
+    pairedWith: "orchid-field",
+    description: "A deep violet field, blue high light, and a low rose flare.",
+  },
+];
+
+/** The four stable appearance slots, each pairing one light and dark scene. */
+export const BACKDROP_CHOICES = [
+  {
+    token: "gradient-1",
+    variable: "--gradient-1",
+    lightTreatment: "sky-field",
+    darkTreatment: "night-garden",
+    use: "The default app backdrop: Sky field in light mode, Night garden in dark.",
+  },
+  {
+    token: "gradient-2",
+    variable: "--gradient-2",
+    lightTreatment: "peach-field",
+    darkTreatment: "signal-flare",
+    use: "A warm paired app backdrop: Peach field in light mode, Signal flare in dark.",
+  },
+  {
+    token: "gradient-3",
+    variable: "--gradient-3",
+    lightTreatment: "blue-hour",
+    darkTreatment: "electric-dusk",
+    use: "A cool paired app backdrop: Blue hour in light mode, Electric dusk in dark.",
+  },
+  {
+    token: "gradient-4",
+    variable: "--gradient-4",
+    lightTreatment: "orchid-field",
+    darkTreatment: "ultraviolet",
+    use: "A violet paired app backdrop: Orchid field in light mode, Ultraviolet in dark.",
+  },
+] as const;
+
+export const RAMPS: Ramp[] = [
   {
     id: "glass",
     name: "Glass",
@@ -202,76 +260,37 @@ export const RAMPS: Ramp[] = [
    PUBLIC ROLES
    ============================================================ */
 
-function identityGroup(
-  id: string,
-  label: string,
-  description: string,
-): RoleGroup {
-  return {
-    id,
-    name: label,
-    description,
-    roles: [
-      {
-        token: `bg-${id}`,
-        variable: `--bg-${id}`,
-        pointsAt: `${id} fill`,
-        use: "The solid fill: primary buttons, active toggles. Takes its paired text.",
-        status: "core",
-      },
-      {
-        token: `text-on-${id}`,
-        variable: `--text-on-${id}`,
-        pointsAt: "computed from the fill's lightness",
-        use: `Text sitting on bg-${id}.`,
-        status: "core",
-        exception:
-          "Computed rather than fixed: white is readable on a blue or purple fill and unreadable on yellow or lime.",
-      },
-      {
-        token: `text-${id}`,
-        variable: `--text-${id}`,
-        pointsAt: `${id} text`,
-        use: "Coloured text on a neutral background: links, labels.",
-        status: "core",
-      },
-      {
-        token: `bg-${id}-tint`,
-        variable: `--bg-${id}-tint`,
-        pointsAt: `${id} tint`,
-        use: "A tinted surface carrying meaning: chips, callouts, selected rows. Takes coloured text.",
-        status: "core",
-      },
-      {
-        token: `bg-${id}-tint-hover`,
-        variable: `--bg-${id}-tint-hover`,
-        pointsAt: `${id} tint-hover`,
-        use: "That tinted surface hovered or selected.",
-        status: "core",
-      },
-      {
-        token: `border-${id}`,
-        variable: `--border-${id}`,
-        pointsAt: `${id} border`,
-        use: "Focus rings and active borders.",
-        status: "core",
-      },
-    ],
-  };
-}
+/**
+ * There is no identity-group generator any more, and that is the point.
+ *
+ * A helper here built five roles from one line of a hue lookup — `bg-accent`,
+ * `bg-accent-tint`, `text-accent`, and so on — which is exactly how twenty status
+ * roles came to exist without anyone designing them. Every one of those roles
+ * held the same palette step in both modes, so each was a name in front of a
+ * number.
+ *
+ * Screens now write the step: `bg-purple-9`, `bg-purple-3`, `text-purple-12`.
+ * Safe here and not in Tailwind because **every step is authored per mode**, so a
+ * class still behaves in light and dark. The step-to-role mapping in DESIGN.md
+ * survives as guidance for *which* step to reach for; it is no longer a
+ * generator.
+ *
+ * A name comes back when a repeated accent PATTERN appears — a tinted callout on
+ * four screens — and it will be named for the pattern, not the colour.
+ */
 
 export const ROLE_GROUPS: RoleGroup[] = [
   {
     id: "surfaces",
     name: "Structural surfaces",
     description:
-      "Named and closed, because there are only a few right answers and guessing produces a broken interface. Ask one question: is it behind, on, above, or in?",
+      "The roles that exist because a ramp step cannot say them: each takes a different step in light and dark, so no single class like `bg-neutral-1` is correct in both. That is the whole test for whether a colour earns a name. Ask one question: is it behind, on, above, or in? (`bg-hover` was here and is now written as `bg-neutral-4` \u2014 it was the same step in both modes. Hover is a *relationship*, one step more contrast than whatever is underneath, which no single token could express anyway.)",
     roles: [
       {
         token: "bg-app",
         variable: "--bg-app",
-        pointsAt: "gradient-1",
-        use: "The backdrop everything sits on.",
+        pointsAt: "gradient-1 (Sky field light / Night garden dark)",
+        use: "The backdrop everything sits on. It takes the first paired appearance choice by default.",
         status: "core",
       },
       {
@@ -293,13 +312,6 @@ export const ROLE_GROUPS: RoleGroup[] = [
         variable: "--bg-inset",
         pointsAt: "neutral 3 light / neutral 2 dark",
         use: "Anything pushed in: inputs, code blocks, quotes.",
-        status: "core",
-      },
-      {
-        token: "bg-hover",
-        variable: "--bg-hover",
-        pointsAt: "neutral 4",
-        use: "Any neutral row or item under the cursor. Region-less — it works on any neutral surface, which is why there is only one of them.",
         status: "core",
       },
     ],
@@ -341,118 +353,44 @@ export const ROLE_GROUPS: RoleGroup[] = [
       {
         token: "border-primary",
         variable: "--border-primary",
-        pointsAt: "neutral 7",
-        use: "The default visible line.",
-        status: "core",
-      },
-      {
-        token: "border-secondary",
-        variable: "--border-secondary",
-        pointsAt: "neutral 6",
-        use: "A lighter separator inside a group.",
-        status: "core",
-      },
-      {
-        token: "border-tertiary",
-        variable: "--border-tertiary",
-        pointsAt: "neutral 5",
-        use: "The faintest line.",
+        pointsAt: "neutral 4",
+        use: "Every deliberate line: panel boundaries, dividers, separators. One quiet weight; add another only when a design proves a different boundary needs it.",
         status: "core",
       },
     ],
   },
-  identityGroup(
-    "accent",
-    "Accent",
-    "Two arrangements and no third: a solid fill with paired text on it, or a tint fill with coloured text on it. There is deliberately nothing between them.",
-  ),
-  {
-    id: "inverse",
-    name: "Inverse",
-    description:
-      "A high-contrast fill for surfaces that must stand apart from everything: tooltips, toasts.",
-    roles: [
-      {
-        token: "bg-inverse",
-        variable: "--bg-inverse",
-        pointsAt: "neutral 11",
-        use: "High-contrast fill: tooltips, toasts.",
-        status: "core",
-      },
-      {
-        token: "bg-inverse-hover",
-        variable: "--bg-inverse-hover",
-        pointsAt: "neutral 10",
-        use: "Its hover. Step 10 sits on the light side of step 11 in the light ramp and the dark side in the dark ramp, so the hover inverts direction with no special-casing.",
-        status: "core",
-      },
-      {
-        token: "text-on-inverse",
-        variable: "--text-on-inverse",
-        pointsAt: "computed from the fill's lightness",
-        use: "Text sitting on bg-inverse.",
-        status: "core",
-        exception: "Computed rather than fixed.",
-      },
-    ],
-  },
-  identityGroup("danger", "Danger", "Destructive actions and error states."),
-  identityGroup("success", "Success", "Confirmation and healthy states."),
-  identityGroup("warning", "Warning", "Caution that is not yet an error."),
-  identityGroup("info", "Info", "Neutral information and guidance."),
   {
     id: "material",
     name: "Material",
     description:
-      "A translucent blurred surface is the same region in a different material. Translucency and blur live inside the value; a component never assembles them from a fill, a transparency, and a blur amount.",
+      "Glass is applied as a whole material — a fill, a blur, a rim, and sometimes a lift — through the `glass-primary` and `glass-secondary` utilities. The fills below are what those utilities read; they are deliberately not registered as Tailwind colour utilities, because a bare `bg-glass-primary` class would be the fill without the rest, which is the failure the materials exist to prevent. Named by stacking depth: primary sits on the backdrop, secondary sits over something already glass. See the glass page.",
     roles: [
       {
-        token: "bg-chrome-glass",
-        variable: "--bg-chrome-glass",
-        pointsAt: "glass 3 + blur-md",
-        use: "The top bar and floating chrome.",
+        token: "glass-primary",
+        variable: "--bg-glass-primary",
+        pointsAt: "glass 2 + blur-md + rim",
+        use: "Glass sitting directly on the backdrop: chrome, nav, a region in glass. The most translucent, because the backdrop is the thing worth seeing through to.",
         status: "core",
       },
       {
-        token: "bg-chrome-glass-hover",
-        variable: "--bg-chrome-glass-hover",
-        pointsAt: "glass 4 + blur-md",
-        use: "A chrome control under the cursor. A glass hover moves one step up the ramp, changing opacity and never blur.",
+        token: "glass-secondary",
+        variable: "--bg-glass-secondary",
+        pointsAt: "glass 4 + blur-lg + rim + shadow-sm",
+        use: "Glass over something already glass: popovers, menus, a modal over a panel. Less translucent so it separates, and a real shadow because it is genuinely above.",
         status: "core",
       },
       {
         token: "bg-chrome-selected",
         variable: "--bg-chrome-selected",
         pointsAt: "neutral 1 light / neutral 5 dark",
-        use: "The selected item inside chrome. Carries no material suffix because omitting it means opaque — on glass, elevation reads as less translucency, not a lighter colour.",
+        use: "The selected item inside chrome. Opaque rather than a glass step, because on glass elevation reads as less translucency, not a lighter colour.",
         status: "core",
       },
       {
-        token: "bg-panel-glass",
-        variable: "--bg-panel-glass",
-        pointsAt: "glass 2 + blur-lg",
-        use: "A panel that should let the backdrop through.",
-        status: "core",
-      },
-      {
-        token: "bg-float-glass",
-        variable: "--bg-float-glass",
-        pointsAt: "glass 3 + blur-md",
-        use: "A floating surface that should let content through.",
-        status: "core",
-      },
-    ],
-  },
-  {
-    id: "focus",
-    name: "Focus",
-    description: "Focus is part of the design, never an artefact to suppress.",
-    roles: [
-      {
-        token: "ring-focus",
-        variable: "--ring-focus",
-        pointsAt: "accent border",
-        use: "The keyboard focus ring.",
+        token: "glass-primary-interactive",
+        variable: "--bg-glass-primary-hover",
+        pointsAt: "glass 3 on hover",
+        use: "Primary glass you can click: chrome buttons, topbar controls. The hover moves one step up the ramp and never changes blur — re-blurring a large surface every frame is expensive enough to feel.",
         status: "core",
       },
     ],
@@ -469,12 +407,15 @@ export const ROLE_GROUPS: RoleGroup[] = [
 export const VOCABULARY: Array<{ group: string; words: string[] }> = [
   { group: "property", words: ["bg", "text", "border", "ring"] },
   { group: "region", words: ["app", "panel", "float", "chrome", "inset"] },
-  { group: "emphasis", words: ["primary", "secondary", "tertiary"] },
+  { group: "emphasis", words: ["primary", "secondary", "tertiary", "default"] },
   { group: "state", words: ["hover", "selected", "disabled"] },
   { group: "material", words: ["glass"] },
   { group: "modifier", words: ["tint"] },
   { group: "identity", words: ["accent", "inverse"] },
-  { group: "status", words: ["success", "warning", "danger", "info"] },
+  // Not a status vocabulary: `error` names one situation that needed a colour,
+  // and `agent-running` names another. A tier vocabulary is what produced four
+  // undesigned identities, so these stay concrete until a pattern repeats.
+  { group: "situation", words: ["error", "agent-running"] },
   { group: "paired", words: ["on-accent", "on-inverse"] },
 ];
 
@@ -482,7 +423,7 @@ export const GRAMMAR = "<property>-<role>[-<modifier>][-<material>][-<state>]";
 
 /** Fixed order, so there is only one correct spelling. */
 export const GRAMMAR_EXAMPLES = {
-  legal: ["bg-chrome-glass-hover", "bg-accent-tint-hover", "text-secondary"],
+  legal: ["bg-accent-tint-hover", "text-primary", "bg-chrome-selected"],
   illegal: ["bg-chrome-hover-glass", "bg-hover-chrome"],
 };
 
@@ -722,7 +663,7 @@ export const SPACE_ROLES = [
     token: "space-workspace-inset",
     variable: "--space-workspace-inset",
     pointsAt: "space 4",
-    use: "The distance between the window edge and its workspace panels.",
+    use: "The distance between the window edge and its panels.",
   },
   {
     token: "space-panel-gap",
@@ -747,6 +688,12 @@ export const SPACE_ROLES = [
     variable: "--space-row-gap",
     pointsAt: "space 2",
     use: "The gap between an icon, label, and trailing metadata in one row.",
+  },
+  {
+    token: "space-section-gap",
+    variable: "--space-section-gap",
+    pointsAt: "space 4",
+    use: "The gap between adjacent navigator sections. Larger than the 1px between rows inside one, because that difference is the only thing saying where a group ends.",
   },
 ];
 
@@ -840,7 +787,7 @@ export const EXCEPTIONS = [
     why: "The glass rim is a directional light effect, not a solid line. It is not on the glass ramp — that is a ramp of fills, and in dark mode the fill is translucent near-black while the rim stays translucent white. It is not one of the numbered gradients either: those are background treatments, this is a material detail.",
   },
   {
-    name: "gradient-1, texture-dots",
-    why: "Not colours in the ramp sense.",
+    name: "backdrop treatments and gradient-1…4, texture-dots",
+    why: "Not colours in the ramp sense. A named backdrop treatment is a complete visual composition; gradient-1…4 pair one light scene and one dark scene for a stable appearance choice.",
   },
 ];
