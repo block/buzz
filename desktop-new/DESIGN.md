@@ -12,7 +12,7 @@ Buzz is a place where people build together and bring their agents into the room
 
 - **Panels sit on the backdrop; the backdrop is a gradient.** Everything else is a panel in a different place. The navigation column is not a special kind of surface.
 - **A region is separated by a soft fill, not by an outline.** Reach for `bg-inset` before reaching for a border. A bordered box announces its own edges; a filled one lets the content sit in a place. Grouping is the common case, so the quiet treatment is the default one.
-- **A border is for a genuine boundary, and never above `border-secondary`.** A hairline that reads as a line — rather than as the edge where two surfaces meet — is too strong. Text and borders share the emphasis names but not their values: text lives at the dark end of the neutral ramp, borders at the light end. If a divider looks like text, it is pointed at the wrong role.
+- **A border is for a genuine boundary, and there is one weight: `border-primary`.** It is neutral 4: visible enough to hold the edge of a panel over the gradient, but quiet enough that internal dividers do not become the hierarchy. A second weight arrives only with the design that proves a different boundary needs it. Text and borders still hold different values — text at the dark end of the neutral ramp, borders at the light end — so if a divider looks like text, it is pointed at the wrong role.
 - **No page-wide gradient behind documentation or dense reading.** The gradient is the product's backdrop for chrome and panels. Behind a column of prose it fights the text and makes contrast position-dependent — such surfaces sit on `bg-panel`.
 - **Shadows stay at the threshold of perception.** If a shadow is obvious, it is too strong. The two elevation values are the whole vocabulary.
 - **Elevation is carried by shadow in light mode and by lightness in dark mode.** On a near-black background there is nothing darker for a shadow to cast, so a floating surface becomes a step lighter instead. Never reach for a stronger shadow to make something float in dark mode.
@@ -21,6 +21,9 @@ Buzz is a place where people build together and bring their agents into the room
 - **A glass rim is not an outline.** If a surface needs a visible boundary rather than a material edge, it wants a border role, not glass.
 - **Glass needs something behind it worth seeing.** Translucency over a flat fill is wasted cost; use it where the gradient, an image, or content actually shows through.
 - **Only panels and chrome should sit directly on the gradient as a default.** Text and hairlines on a gradient have position-dependent contrast. Good practice rather than a hard rule — a rotated label pill on the backdrop is fine.
+- **A translucent surface has no contrast guarantee, and this one is measured.** `check-contrast` pairs each text role with the *opaque* surface roles, so glass is invisible to it — the surface a person actually reads against is the fill composited over whatever gradient happens to be behind it, which varies by position on screen. Sampled from a rendered dark-mode screenshot, primary glass over Night garden runs from `#162e28` in its quiet regions to `#1e4a3c` where the green glow reaches through. On the darker end everything clears; on the brighter end **`text-secondary` measures Lc 58 and `text-tertiary` Lc 43**, against targets of 60 and 45. Marginal, and only in a region the glow reaches — but real, and no guard can see it. Three ways out, none obviously right: make the gradients' bright stops dimmer where panels sit, raise the glass fill a ramp step under a bright backdrop, or keep meta text off glass. **Deliberately unresolved** — it needs the real product content on screen, not a token edit.
+- **A redundant fill on glass is not free — it compounds.** Two identical translucent layers are not one layer: `glass-2` over `glass-2` composites to **0.77 alpha**, a value no token holds. Four panels each set the same fill as the container they exactly covered, so panels meant to be the most translucent surface in the system read as nearly solid. Before giving a region a glass fill, check whether its parent already is glass; if the region covers it, it needs no fill of its own.
+- **A component that can sit on either the gradient or a panel says so, with a variant.** `Tabs` takes `chrome` (a glass pill for the app backdrop) or `panel` (an underline for a plain surface); `IconButton` has the same axis as its `chrome` variant. The failure that earned it: the chrome container is `glass-2`, which over a white panel composites to pure white, and its selected pill is `neutral-1` — also pure white. Container and selection became one colour with only a shadow between them, and no guard could see it because the component had no way to state which background it expected. **The fix was never to retint `--bg-chrome-selected`** — that moves the collision rather than removing it. **One component with a variant, not two components:** behaviour, keyboard model, accessibility, props, and the Base UI parts underneath are identical, so a sibling component would duplicate all of it to change how selection is drawn, and the two would drift exactly as the four hand-assembled chrome surfaces did. When adding a component that could appear in both places, give it the axis and put both on its specimen page — the chrome-only specimen is why this defect survived until it appeared on a real screen.
 
 ## State
 
@@ -40,6 +43,23 @@ Buzz is a place where people build together and bring their agents into the room
 
 ## Type
 
+Two layers, and the same rule as colour: only roles are used when building a
+screen. Layer 1 is the raw ramps (`--type-size-*`, `--type-leading-*`,
+`--type-tracking-*`, `--type-weight-*`); layer 2 is the roles, which register in
+Tailwind's `--text-*` namespace and become utilities like `text-body`. The
+authoring lives in `src/shared/styles/typography.css`.
+
+**Size roles and colour roles never collide**, because they live in different
+namespaces: colour registers as `--color-*` and is named for emphasis
+(`text-primary`), size registers as `--text-*` and is named for an editorial job
+(`text-body`). So `text-primary text-body` is one colour plus one setting, and no
+name ever means both.
+
+Nine roles. Sans: `text-display` 32, `text-title` 24, `text-heading` 16/600,
+`text-body-lg` 16, `text-body` 14, `text-body-sm` 12. Mono: `text-mono-lg` 15,
+`text-mono` 13, `text-mono-sm` 11. Two faces — `font-sans` (Inter Variable) and
+`font-mono` (JetBrains Mono) — both already shipped in every current Buzz client.
+
 - **A type role carries its whole setting.** Size, line height, letter spacing, and weight are one decision, not four. `text-body` alone produces correctly set text, and its line height is never overridden — that is how two supposedly identical labels drift apart.
 - **There are two weights: 400 and 600.** 400 is content — everything read. 600 is structure and emphasis: the thing that names what you are looking at, or the words a sentence leans on. `font-semibold` is what bold means here.
 - **Bold body text is two utilities, composed.** `text-body font-semibold`, `text-body-sm font-semibold`. This is the one place a component adds a weight, and it is deliberate: **the size is the paragraph's decision, the weight is the phrase's.** A `text-body-bold` role would fuse them, so an agent emphasising three words would also be re-asserting a size it has no business choosing. Composing also means one rule covers every size instead of doubling the ramp.
@@ -53,7 +73,7 @@ Buzz is a place where people build together and bring their agents into the room
 - **Mono is one step below its sans partner, always.** 11↔12, 13↔14, 15↔16. At equal size a monospace face reads larger than Inter and pulls the eye off the sentence, so the correction is a rule rather than a judgement: pick the sans size, step down. Mono never exceeds body size in ordinary interface text; the one exception is a code or key a person must transcribe, which is what `text-mono-lg` is for.
 - **Mono roles are named for the setting, not the content.** `text-mono`, not `text-code` — most mono in a product is a pubkey, a path, a branch name, or a hex value. Calling the role `code` made it read as a lie everywhere except an actual code block.
 - **Never all-caps, and never tracked-out labels.** A capitalised label is harder to read than its sentence-case version and reads as enterprise chrome. A quiet label earns its quietness from size and colour — `text-body-sm` on `text-tertiary` — rather than from being shouted. There is deliberately no uppercase utility in this system.
-- **Every size is relative.** Nothing may be expressed in px: fixed pixel text freezes against keyboard zoom and ignores the person's font-size preference. The existing client shipped a regression from exactly this.
+- **Every size is relative.** Nothing may be expressed in px: fixed pixel text freezes against keyboard zoom and ignores the person's font-size preference. The existing client shipped a regression from exactly this. Everything derives from one virtual rem, so zoom and the font-size preference both work by construction — which is why an arbitrary rem literal is rejected too. It zooms correctly and still re-fragments the scale.
 - **Tracking is an optical correction, not a style.** Inter needs progressively tighter spacing as it grows. The ramp already applies it per step; do not add tracking by hand.
 
 ## Both modes
@@ -81,6 +101,184 @@ Buzz is a place where people build together and bring their agents into the room
 - **Never animate blur.** Re-blurring a large surface every frame is expensive enough to feel. Animate opacity instead.
 - **Motion explains a change; it does not decorate one.** If removing an animation loses no information, remove it.
 
+## Colour structure
+
+Two layers, and only the role layer is used when building a screen.
+
+| Layer | Example | What it is |
+|---|---|---|
+| **0 palette** | `--purple-9`, `--neutral-4` | Every hue, twelve steps, authored per mode. The only place a literal lives. **Public: a screen writes `bg-purple-9`.** |
+| **1 roles** | `--bg-panel` | The fifteen cases a step cannot express. Public too. |
+| **2 components** | `bg-panel`, `bg-neutral-4` | Tailwind utilities, from either layer. |
+
+**Screens are built from the ramps.** This reverses the rule this file used to
+state, and the reversal turns on one fact: **every palette step is authored per
+mode.** `neutral-4` is `#e8e8e8` in light and `#232323` in dark, so a component
+naming the step behaves correctly in both. That is what makes a raw step safe
+here and unsafe in stock Tailwind, where `neutral-200` is a single literal —
+naming it there really does break dark mode, and a semantic layer really is the
+only fix.
+
+Once a step is mode-aware, **a role whose light and dark values are the same step
+is a name in front of a number**, and a name in front of a number hides the
+decision instead of recording it. `bg-accent` was `purple-9`; `text-error` was
+`red-12`. Nineteen roles were exactly that and are gone.
+
+### When a name is earned
+
+Three cases, and `pnpm check:color` enforces the first two by rejecting any new
+role that fails them:
+
+1. **Light and dark take different steps.** `bg-panel` is `neutral-1` in light and
+   `neutral-3` in dark. No single class can say that, so the name is load-bearing.
+   The four structural surfaces are all of this kind.
+2. **The name enforces a rule a ramp cannot state.** There are deliberately three
+   levels of text and one border weight. `text-neutral-11` looks reasonable and is
+   how a fourth level appears without anyone deciding, so `text-secondary` stays
+   even though its step is identical in both modes.
+3. **Morgan sees a repeated pattern and asks for one.** A tinted callout that
+   turns up on four screens earns a name — for the *pattern*, not the colour. This
+   is the only route by which the role layer grows, and it is deliberately manual.
+
+`neutral` is a hue like any other — the same twelve steps, the same naming. There
+is no separate grey ramp and no `palette-` prefix: a step is `--neutral-4`, the
+way Tailwind names a colour.
+
+**Tailwind's default palette is deleted** with `--color-*: initial`, so
+`text-gray-500` does not exist. It is a build error, not a style choice.
+
+**There used to be a families layer** — `--accent-fill`, `--danger-tint`, thirty
+steps in five families, sitting between the palette and the roles. It was
+deleted. Every one of its thirty steps had exactly *one* reader, so it renamed a
+colour rather than abstracting one, and answering "what colour is this button"
+meant reading three lines in two places
+(`bg-accent` → `accent-fill` → `palette-purple-9`). The naming survives where it
+was always clearest — in the role names, which say *what the colour is for*
+(`bg-accent-tint` is a background) rather than restating a job (`accent fill`
+does not tell you where to put it).
+
+**The role layer was then cut from 54 names to 15, by the same test.** A census
+counted every reader of every role — both `var(--x)` in a stylesheet and the
+Tailwind class each role registers as, with the /design pages counted separately
+from product code, since a page displaying a swatch proves only that the token
+exists. Eighteen roles had no reader anywhere and six were read only by the docs
+that documented them; the rest went once palette steps became reachable as
+classes and the "same step in both modes" test above disqualified them.
+
+**The argument that lost is worth recording, because it is a good one.** A role is
+a slot whose hue can change, so `bg-accent-tint` survives a retint where
+`purple-3` does not. It lost to a fact: the accent hue *did* change, to Tailwind
+purple, and it was five values in the ramp rather than a rename. The ramp is the
+slot. A role in front of it only adds a hop.
+
+The palette stays because it is where **light and dark are reconciled**. A hue's
+dark steps are not its light steps dimmed — purple's step 12 is near-black in
+light and near-white in dark; step 3 is a lilac wash in light and a deep plum in
+dark. Only step 9 is identical. Two hand-authored ramps under one name is what
+lets a role be a single line and still behave in both modes, and what keeps
+`.dark` to a restatement of values rather than the 50 hand-picked colours it used
+to hold — which is where an accent tint and a categorical purple drifted into two
+different purples in dark.
+
+To retint, change the ramp. The accent moved to Tailwind purple in five values,
+which is the demonstration that **the ramp is the slot** — no rename, nothing
+above it needed to know.
+
+### Which step, for what
+
+Twelve steps mean the same twelve jobs in every hue, so this is the map from a job
+to a step. It used to generate roles; now it tells you which class to write:
+
+| step | job | example |
+|---|---|---|
+| 3 | a tinted surface | `bg-purple-3` |
+| 4 | that tint, hovered | `bg-purple-4` |
+| 8 | border, focus ring | `border-purple-8` |
+| 9 | solid fill | `bg-purple-9` |
+| 10 | that fill, hovered | `bg-purple-10` |
+| 12 | coloured text on a neutral surface | `text-purple-12` |
+
+Adding a hue is mechanical — generate twelve steps, and the map above already
+answers which one is the button. `cyan` and `orange` are authored and unused, so
+that half is proven.
+
+**Being mechanical is exactly why it must not run ahead of the product.** This map
+is how four status identities came to exist: twenty roles from one line of a
+lookup table, nineteen of which nothing ever read. It tells you which step to take
+*once a design needs the colour*. It is not a licence to pre-generate a set.
+
+**It is a good default, not a guarantee — measure the pair you actually use.**
+Step 10 crosses over, darker than step 9 in light and lighter in dark, so a hover
+reads as a press in light mode and a lift in dark with no special-casing. But
+green's and blue's step 10 lift *too* far in dark mode and drop white text below
+the APCA target. Likewise step 12 is the safe text step and step 11 is the
+tempting one: red-11 is more obviously red and fails the Lc 60 body target on a
+dark panel (59.7) and the dark composer (57.5), which is why error text is
+`text-red-12`. A step used for text goes into `TEXT_ROLES` in
+`scripts/check-contrast.mjs` so the guard measures what screens actually write.
+
+Palette values are Radix Colors (MIT), transcribed rather than depended on —
+Radix is not on Block's Tech Radar, so this is a values-only copy with no
+package. Its twelve-step contract is the one this system already described in
+comments, step for step. Two deliberate divergences, both documented in
+`tokens.css`: `text-*` roles take step 12 rather than the 11 Radix names
+"low-contrast text" (Radix sizes 11 for WCAG 4.5:1; every hue's step 11 measured
+Lc 55–61 against this system's Lc 60 target), and the **neutral ramp** is
+hand-authored in both modes because it was sized against the real panel stack
+rather than taken from an even ramp.
+
+### Naming grammar
+
+```
+<property>-<role>[-<modifier>][-<material>][-<state>]
+```
+
+Fixed order, so there is one correct spelling: `--bg-glass-primary-hover` is
+legal, `--bg-glass-hover-primary` is not. One modifier, one material, one state per name.
+This governs the fifteen roles; a ramp class is `<property>-<hue>-<step>` and has
+no grammar to get wrong, which is part of its appeal.
+
+Every word a token may be built from is listed in `VOCABULARY` in the registry
+and on `/design/vocabulary`. Combining them freely is routine. Introducing a new
+word is allowed but is the thing the audit reports on its own line — use an
+existing word if one fits.
+
+### Text and borders register in their own namespaces
+
+**`--color-x` is not one utility. It is all of them.** One such line defines
+`bg-x`, `text-x`, `border-x`, `ring-x` and the rest, every one pointing at the
+same value. So the moment two roles differ only by *which prefix uses them*, that
+namespace picks one and silently drops the other.
+
+This has now shipped twice, and both times the symptom looked like a design
+mistake rather than a registration one.
+
+**Borders, first.** Text and borders shared the emphasis names while holding
+different values — text at the dark end of the neutral ramp, borders at the light
+end. Registered under `--color-*`, `border-primary` resolved to the *text* colour
+and every hairline drew at near-black. It is why the first design system site had
+black dividers while the tokens said `#d4d4d4`. Fixed with `--border-color-*`.
+
+**Text colour, second, and worse.** `--color-danger: var(--bg-danger)` also
+defined `text-danger`, so error text rendered in red-9 — the saturated *fill* —
+instead of red-12. On a dark panel that measured **APCA Lc 34 against a target of
+60**, on real error messages, for months. And `check-contrast` passed the entire
+time, because it measured `--text-danger`: a token that was declared, documented,
+audited, and which no class could reach.
+
+So the rule, and it is a rule rather than a caution:
+
+> A text role registers as `--text-color-*`. A border role registers as
+> `--border-color-*`. Only backgrounds use the shared `--color-*`.
+
+`src/shared/tokens/registry.test.ts` binds this to the file — a text or border
+role registered under `--color-*` fails there now, rather than after shipping.
+
+**The general lesson is about the guards, not the namespaces.** A guard that
+measures a token nothing resolves to is worse than no guard: it reports the
+system is fine and is not wrong about the token, only about whether anything uses
+it. When adding a check, verify it measures the value the *browser* computes.
+
 ## Colour discipline
 
 - **Colour is signal.** Status, authorship, presence, and mentions earn colour. Ordinary structure does not.
@@ -88,6 +286,9 @@ Buzz is a place where people build together and bring their agents into the room
 - **A colour is used one of two ways: solid or tint.** Solid carries an action and takes its paired text; tint carries a meaning and takes coloured text. There is deliberately nothing between them.
 - **Accent is signal, never structure.** Reaching for an accent surface where a neutral one belongs is the most common way a functional screen starts to look decorated.
 - **Never use a status colour decoratively.** A green that does not mean success teaches people to stop trusting green.
+- **There are no status roles, and that is deliberate.** Danger, success, warning, and info existed as four identities of five roles each — the accent's shape copied four times, generated from one line of a lookup table. **Nineteen of the twenty had no reader outside the page that displayed them.** They were invented by symmetry rather than by need, and the symmetry actively hid the decision: the red ramp alone offers red-3, red-8, red-9 and red-12 for "an error", and a set of ready-made names made that look settled when it never was. The proof is that `text-danger` shipped resolving to the wrong red and no design had ever looked closely enough to notice. **Status colour gets designed on the screen that needs it.** Until then the ramps are right there — pick a step, measure it, and once two screens pick the same one it has earned a name.
+- **Write the step, not a name for the step.** Error text is `text-red-12` and the running-agent dot is `bg-green-9`, written where they are used. Both briefly had semantic names and both were one step, identical in both modes — a name in front of a number. The name comes back if the pattern repeats across screens, and it will be named for the pattern.
+- **Measure the step, do not reason about it.** Red-11 is the more obviously red choice for error text and was the first pick; measured against every surface the text actually lands on, it fails the Lc 60 body target on a dark panel (59.7) and the dark composer (57.5). Two of five surfaces — invisible to judgement, decisive on inspection. Red-12 clears all five at 82–97.
 - **Categorical colours are the one place appearance-naming would be allowed.** Telling two projects apart genuinely is a choice about appearance, so a hue name is honest there. No such roles exist yet — the palette carries eight hues, and a categorical role gets named when a feature actually needs to distinguish things, not before.
 - **Opacity is not how you reach a subtler colour.** If a tint looks too strong, take a different palette step — do not dim a stronger one. `purple-950/50` composites to a real, correct colour, which is exactly the trap: it is a colour decision with no name, no light/dark pair, and nothing the contrast guard can measure. A missing shade is a missing palette step, and adding one is an ordinary reviewed edit. `scripts/check-color.mjs` enforces this.
 - **Transparency is a different axis from shade, and it has its own tokens.** `glass-*` exists for surfaces something must show through. Alpha baked into a named value at the palette layer is the system working; alpha applied to a token in a component is not.
@@ -137,9 +338,9 @@ it is the rule a generated theme is measured against.
   every surface it can sit on, in both modes, parsed from `tokens.css` so the
   check cannot drift from the tokens. Exceptions live in that script with a
   stated reason, which keeps the list short and arguable.
-- **A tint's hover is the hardest surface in its family**, so a `text-*` step is
+- **A tint's hover is the hardest surface an identity has**, so a `text-*` role is
   sized against that rather than against the neutral panel. Every failure the
-  audit found in the coloured families was on a tint-hover, never at rest.
+  audit found on a coloured surface was on a tint-hover, never at rest.
 - **Hairline dividers are not held to a contrast target.** WCAG's 3:1 non-text
   rule covers boundaries needed to identify a *control* or its state, not
   grouping lines. Buzz's borders measure 1.2–1.8:1, which is where Radix and
