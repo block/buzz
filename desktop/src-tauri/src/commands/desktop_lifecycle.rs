@@ -339,7 +339,7 @@ fn execute(
     conn: &rusqlite::Connection,
     owner: &str,
     request: &Request,
-    prepared: Result<&managed_agents::runtime_configurations::PreparedLaunch, &Outcome>,
+    prepared: Result<&configurations::CapturedLaunch, &Outcome>,
 ) -> Result<Outcome, String> {
     let target = &request.target;
     if request.configuration.is_none() {
@@ -375,37 +375,40 @@ fn execute(
             community: &target.community,
             agent: &target.agent,
         },
-        plan.record(),
+        plan.plan.record(),
     ) {
         Ok(b) => b,
         Err(outcome) => return Ok(outcome),
     };
-    if request.action == Action::Restart
-        && managed_agents::stop_pair_locked(
-            target.agent.clone(),
-            target.community.clone(),
-            app.clone(),
-        )
-        .is_err()
-    {
-        return Ok(Outcome::Failed);
-    }
-    // Existing transition lock spans final intent check, ordinary launch and registration.
+    // Shared admission validates the captured Stop fence and generation BEFORE
+    // destructive Restart. The transition lock spans that Stop, launch and receipt.
     if placement::blocked(conn, &target.agent, &target.desktop)? {
         return Ok(Outcome::Unknown);
     }
-    match managed_agents::start_pair_prepared_locked(
+    match managed_agents::start_pair_captured_locked(
         target.agent.clone(),
         target.community.clone(),
         true,
         None,
-        true,
+        plan.resume.as_ref(),
         Some(&broker),
-        Some(plan),
+        &plan.plan,
+        false, // Explicit wire reference, not the destination's next selection.
+        request.action == Action::Restart,
+        Some(&plan.generation),
         app.clone(),
     ) {
-        Ok(_) => Ok(Outcome::Running),
-        Err(_) => Ok(Outcome::Failed),
+        Ok(status)
+            if status.running_configuration == request.configuration
+                && !matches!(
+                    status.lifecycle,
+                    managed_agents::ManagedAgentRuntimeLifecycle::Failed
+                        | managed_agents::ManagedAgentRuntimeLifecycle::Stopped
+                ) =>
+        {
+            Ok(Outcome::Running)
+        }
+        Ok(_) | Err(_) => Ok(Outcome::Failed),
     }
 }
 

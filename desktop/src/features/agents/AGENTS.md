@@ -463,8 +463,12 @@ confirms source Stop, then requests a fresh Start of that exact revision. Prefli
 and Catalog cannot write placement intent or stop a process. The native consumer
 uses ordinary asynchronous preflight outside the transition lock, revalidates the
 immutable plan inside it, and delegates to the shared prepared launcher under the
-existing admission/Stop fences. No second spawn path or launch authority is allowed.
-Missing/edited targets fail rather than substitute another configuration. Remote
+existing admission/Stop fences. Only explicit Start captures the shared Stop-fence
+resume ticket before preflight; probes and Restart never receive that authority.
+Shared admission checks the captured runtime generation before destructive Restart,
+and a post-Stop Failed status must never become a Running response. No second spawn
+path or launch authority is allowed. Missing/edited targets fail rather than
+substitute another configuration. Remote
 keyless provisioning remains its existing independent fail-closed gate; a known
 provisioning failure must exclude Switch before source Stop.
 

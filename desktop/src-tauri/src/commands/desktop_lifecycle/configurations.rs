@@ -3,6 +3,13 @@ use super::*;
 use buzz_core_pkg::desktop_lifecycle::{CatalogPage, Observation, RuntimeConfigurationSummary};
 use managed_agents::runtime_configurations::{self as configurations, PreparedLaunch};
 
+/// The shared launch plan and its pre-await lifecycle fences; never wire data.
+pub(super) struct CapturedLaunch {
+    pub(super) plan: PreparedLaunch,
+    pub(super) resume: Option<managed_agents::remote_stop::ResumeTicket>,
+    pub(super) generation: Option<String>,
+}
+
 fn record(app: &AppHandle, agent: &str) -> Result<managed_agents::ManagedAgentRecord, String> {
     let state = app.state::<AppState>();
     let _store = state
@@ -19,16 +26,51 @@ pub(super) async fn prepare(
     app: &AppHandle,
     owner: &str,
     request: &Request,
-) -> Result<PreparedLaunch, Outcome> {
+) -> Result<CapturedLaunch, Outcome> {
     let reference = request.configuration.as_ref().ok_or(Outcome::Ineligible)?;
-    let record = record(app, &request.target.agent).map_err(|_| Outcome::Ineligible)?;
-    let plan = configurations::prepare_for_app(
-        app,
-        &record,
-        Some(reference),
-        owner,
-        &request.target.community,
-    )
+    let mut captured = (|| -> Result<CapturedLaunch, String> {
+        let state = app.state::<AppState>();
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        scope(app, &state, owner, &request.target.community)?;
+        let record = record(app, &request.target.agent)?;
+        let plan = configurations::prepare_for_app(
+            app,
+            &record,
+            Some(reference),
+            owner,
+            &request.target.community,
+        )?;
+        let key = managed_agents::ManagedAgentRuntimeKey::new(
+            &request.target.agent,
+            &request.target.community,
+        )?;
+        // Only explicit Start can supersede an older Stop. Capture its existing
+        // shared fence before await; probes and Restart receive no resume authority.
+        let resume = if request.action == Action::Start {
+            Some(managed_agents::remote_stop::capture_resume(
+                app,
+                &key,
+                &request.target.community,
+                owner,
+            )?)
+        } else {
+            None
+        };
+        let generation = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&key)
+            .map(|runtime| runtime.start_nonce.clone());
+        Ok(CapturedLaunch {
+            plan,
+            resume,
+            generation,
+        })
+    })()
     .map_err(|_| Outcome::Ineligible)?;
     // Do not advertise an eligible Switch that is known to fail after source Stop.
     broker_launch::provision(
@@ -37,20 +79,38 @@ pub(super) async fn prepare(
             community: &request.target.community,
             agent: &request.target.agent,
         },
-        plan.record(),
+        captured.plan.record(),
     )?;
-    configurations::preflight_prepared(app, &plan, owner, &request.target.community)
-        .await
-        .map_err(|_| Outcome::Ineligible)?;
-    Ok(plan)
+    configurations::preflight_with(
+        &mut captured.plan,
+        owner,
+        &request.target.community,
+        false,
+        |model, allow| async move {
+            #[cfg(feature = "mesh-llm")]
+            {
+                crate::commands::ensure_relay_mesh_for_record(app, model.as_deref(), allow).await
+            }
+            #[cfg(not(feature = "mesh-llm"))]
+            {
+                let _ = (app, model, allow);
+                Ok(())
+            }
+        },
+    )
+    .await
+    .map_err(|_| Outcome::Ineligible)?;
+    Ok(captured)
 }
 
 pub(super) fn revalidate(
     app: &AppHandle,
     owner: &str,
     request: &Request,
-    plan: &PreparedLaunch,
+    captured: &CapturedLaunch,
 ) -> Result<(), String> {
+    let plan = &captured.plan;
+    plan.require_preflight()?;
     plan.check_scope(Some(owner), &request.target.community)?;
     if plan.configuration().as_ref() != request.configuration.as_ref() {
         return Err("Prepared configuration does not match the request".into());
