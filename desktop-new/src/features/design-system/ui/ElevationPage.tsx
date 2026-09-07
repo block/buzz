@@ -1,4 +1,4 @@
-import { ELEVATION } from "@/shared/tokens/registry";
+import { BLUR, ELEVATION } from "@/shared/tokens/registry";
 
 import { Note, PageHeader, Section } from "./primitives";
 
@@ -23,6 +23,28 @@ export function ElevationPage() {
               <span className="max-w-44 text-body-sm text-secondary">
                 {level.use}
               </span>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* Blur lives here rather than on the glass page: it is a depth cue like
+          a shadow, and the glass materials already carry their own blur, so
+          showing the amounts beside the shadows keeps every depth value in one
+          place. */}
+      <Section
+        title="Blur"
+        description="Depth behind a translucent surface. The glass materials each carry one of these, so a screen picks a material rather than a blur amount."
+      >
+        <div className="glass-scene flex flex-wrap gap-3 rounded-xl p-6">
+          {BLUR.map((blur) => (
+            <div
+              key={blur.token}
+              className="glass-primary flex flex-col gap-1 rounded-xl px-5 py-4"
+              style={{ backdropFilter: `blur(${blur.value})` }}
+            >
+              <code className="text-mono-sm text-primary">{blur.token}</code>
+              <span className="text-body-sm text-tertiary">{blur.value}</span>
             </div>
           ))}
         </div>

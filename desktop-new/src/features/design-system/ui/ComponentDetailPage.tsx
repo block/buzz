@@ -1,4 +1,5 @@
 import { COMPONENTS } from "@/shared/ui/registry";
+import { BaseUiBackingLine } from "./BaseUiBackingLine";
 import { COMPONENT_SPECIMENS } from "./componentSpecimens";
 
 export function ComponentDetailPage({ slug }: { slug: string }) {
@@ -10,6 +11,10 @@ export function ComponentDetailPage({ slug }: { slug: string }) {
     <>
       <header className="component-page-heading">
         <h1 className="text-title text-primary">{component.name}</h1>
+        <BaseUiBackingLine
+          slug={component.slug}
+          behavior={component.behavior}
+        />
       </header>
       {Specimen ? <Specimen /> : null}
     </>

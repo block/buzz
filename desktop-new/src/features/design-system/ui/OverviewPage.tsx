@@ -7,8 +7,8 @@ import { PageHeader, Section } from "./primitives";
 const LAYERS: Array<[string, string, string]> = [
   ["Layer 0", "a hue", "a theme package, or a person's preference"],
   ["Layer 1", "--accent-1…12   --neutral-1…12   --glass-1…5", "private ramps"],
-  ["Layer 2", "--bg-accent: var(--accent-9)", "public roles, point at steps"],
-  ["Layer 3", "bg-accent", "components, roles only"],
+  ["Layer 2", "--bg-purple-9: var(--accent-9)", "public roles, point at steps"],
+  ["Layer 3", "bg-purple-9", "components, roles only"],
 ];
 
 export function OverviewPage() {
@@ -39,12 +39,12 @@ export function OverviewPage() {
       </Section>
 
       <Section title="The grammar">
-        <div className="rounded-lg bg-inverse px-5 py-4">
-          <code className="text-body text-on-inverse">{GRAMMAR}</code>
+        <div className="rounded-lg bg-neutral-11 px-5 py-4">
+          <code className="text-body text-neutral-1">{GRAMMAR}</code>
         </div>
         <p className="text-body-sm text-secondary">
           The order is fixed, so there is one correct spelling. See{" "}
-          <Link to="/design/vocabulary" className="text-accent underline">
+          <Link to="/design/vocabulary" className="text-purple-12 underline">
             the vocabulary
           </Link>{" "}
           for every word a token can be built from.
@@ -58,25 +58,25 @@ export function OverviewPage() {
         <div className="flex flex-wrap gap-2">
           <Link
             to="/design/color"
-            className="rounded-lg bg-accent px-4 py-2 text-body text-on-accent transition-opacity hover:opacity-90"
+            className="rounded-lg bg-purple-9 px-4 py-2 text-body text-on-accent transition-opacity hover:opacity-90"
           >
             Color
           </Link>
           <Link
             to="/design/typography"
-            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-hover hover:text-primary"
+            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
           >
             Typography
           </Link>
           <Link
             to="/design/glass"
-            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-hover hover:text-primary"
+            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
           >
             Glass
           </Link>
           <Link
             to="/design/growth"
-            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-hover hover:text-primary"
+            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
           >
             Growing the system
           </Link>

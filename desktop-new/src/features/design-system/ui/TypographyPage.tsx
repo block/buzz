@@ -21,7 +21,7 @@ function RoleSpecimen({ role }: { role: TypeRole }) {
         {role.mono ? "createChannel(name, members)" : "Bring your agents in"}
       </p>
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <code className="text-mono text-accent">{role.token}</code>
+        <code className="text-mono text-purple-12">{role.token}</code>
         <span className="text-body-sm text-tertiary">{role.pointsAt}</span>
         <span className="text-body-sm text-tertiary">
           {role.size} / {role.lineHeight} / {role.tracking} / {role.weight}
@@ -54,7 +54,7 @@ export function TypographyPage() {
               >
                 {family.name}
               </p>
-              <code className="text-mono text-accent">{family.token}</code>
+              <code className="text-mono text-purple-12">{family.token}</code>
               <p className="max-w-xl text-body-sm text-secondary">
                 {family.use}
               </p>

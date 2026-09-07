@@ -1,5 +1,8 @@
 @layer components {
   .component-page-heading {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
     margin-bottom: var(--space-6);
   }
 
@@ -11,6 +14,7 @@
 
   .component-specimen-group {
     display: flex;
+    min-width: 0;
     flex-direction: column;
     gap: var(--space-2);
   }
@@ -19,24 +23,76 @@
     margin: 0;
   }
 
+  /* The live specimen, and it must read as a separate thing from the prose
+     around it.
+
+     **It has a border because its fill cannot do that job.** The frame was
+     `bg-panel` on a page that is also `bg-panel` — white on white in light mode,
+     with no border and no shadow — so every plain specimen on every component
+     page had an invisible container. A reader could not tell where the
+     documentation stopped and the running component began, and the padding then
+     looked like the component's own indent rather than the frame's inset. The
+     gradient variant below was the only one that ever read as a container, which
+     is why the problem hid: the pages that used it looked correct.
+
+     A hairline rather than a tinted fill, because the specimen must show the
+     component against the surface it is designed for. Tinting the frame would
+     change what is being judged. */
   .component-specimen-frame {
     display: flex;
+    min-width: 0;
     min-height: 7rem;
     align-items: center;
+    /* A specimen wider than the viewport scrolls inside its own frame rather
+       than pushing the page sideways. Chrome tabs with icons and a trailing
+       action are 377px of unshrinkable inline-flex, so at a narrow width
+       something has to give — and a horizontally scrolling documentation page is
+       worse than a specimen you swipe. */
+    overflow-x: auto;
     padding: var(--space-6);
+    /* `neutral-6` rather than `border-primary` (neutral-4). This boundary has to
+       survive in both modes, and neutral-4 measured 1.23:1 against the light page
+       and 1.08:1 against the dark one — technically drawn, effectively invisible
+       in dark. neutral-6 is 1.41 and 1.35. Still a hairline, which is the point:
+       it separates the specimen without competing with what is inside it.
+
+       Written as a ramp step because the product's one border weight is for
+       product boundaries; the /design pages' own furniture is documentation
+       chrome and may be tuned for legibility on its own terms. */
+    border: 1px solid var(--neutral-6);
     border-radius: var(--radius-panel);
     background: var(--bg-panel);
   }
 
+  /* Chrome components are judged on the app backdrop, which is a container in
+     its own right — the gradient already separates it from the page, so it
+     carries no border. */
   .component-specimen-frame[data-backdrop] {
+    border-color: transparent;
     background: var(--bg-app);
   }
 
   .component-specimen-row {
     display: flex;
     flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-4);
+  }
+
+  /* A sample and the prop that produced it, as one unit — so the caption stays
+     with its sample when the row wraps. Centred on the sample rather than
+     left-aligned: an icon button is narrower than `variant="chrome"`, and a
+     caption hanging off one edge reads as belonging to its neighbour. */
+  .component-specimen {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-2);
+  }
+
+  .component-specimen-prop {
+    white-space: nowrap;
   }
 
   .component-single-surface-demo {
@@ -46,7 +102,7 @@
     background: var(--bg-app);
   }
 
-  .component-single-surface-demo .workspace-surface {
+  .component-single-surface-demo .panel {
     height: 100%;
   }
 
@@ -63,21 +119,20 @@
     background: var(--bg-app);
   }
 
-  .component-surface-demo .workspace-surface {
+  .component-surface-demo .panel {
     height: 100%;
   }
 
-  .workspace-surface[data-variant="navigator-demo"] {
+  .panel[data-variant="navigator-demo"] {
     width: min(100%, var(--size-navigator));
     padding: var(--space-2);
-    background: var(--bg-panel);
   }
 
   .component-navigator-search {
     margin-bottom: var(--space-4);
   }
 
-  .workspace-surface[data-variant="navigator-demo"]
+  .panel[data-variant="navigator-demo"]
     .navigator-section
     + .navigator-section {
     margin-top: var(--space-4);
@@ -107,9 +162,13 @@
     gap: var(--space-3);
   }
 
+  /* The same boundary as a specimen frame, for the same reason: this is a live
+     thumbnail on a page the same colour as itself. Its inner frames drop their
+     own border so the card reads as one container rather than a box in a box. */
   .component-overview-preview {
     height: 13rem;
     overflow: hidden;
+    border: 1px solid var(--neutral-6);
     border-radius: var(--radius-panel);
     background: var(--bg-panel);
   }
@@ -122,6 +181,7 @@
 
   .component-overview-preview .component-specimen-frame {
     min-height: 8rem;
+    border-color: transparent;
   }
 
   .component-overview-item > a {
@@ -130,7 +190,7 @@
   }
 
   .component-overview-item > a:hover {
-    color: var(--text-accent);
+    color: var(--purple-12);
   }
 
   .component-radius-demo {
@@ -146,8 +206,15 @@
     width: 8rem;
     height: 5rem;
     place-items: center;
-    border: 1px solid var(--border-tertiary);
+    border: 1px solid var(--border-primary);
     box-shadow: var(--shadow-xs);
+  }
+
+  /* The glass specimen uses the shipped default backdrop choice. `bg-app`
+   * resolves through gradient-1, preserving the Sky field / Night garden pair
+   * when the documentation mode changes. */
+  .glass-scene {
+    background: var(--bg-app);
   }
 
   @media (max-width: 48rem) {

@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
  * Surface convention on these pages: a region is separated by a soft fill, not
  * by an outline. Reach for `bg-inset` before reaching for a border; use a
  * hairline only where a genuine boundary is needed, and never above
- * `border-secondary`. See DESIGN.md § Surface and depth.
+ * `border-primary`. See DESIGN.md § Surface and depth.
  */
 
 export function PageHeader({
@@ -31,9 +31,16 @@ export function PageHeader({
   );
 }
 
+/**
+ * Marks a token as `proposed` on the /design pages.
+ *
+ * Amber, until the status roles it borrowed were deleted as undesigned. It is
+ * the accent now, which is arguably more honest: "proposed" is a note about
+ * this system, not a warning about the interface.
+ */
 export function StatusPill({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded-full bg-warning-tint px-2.5 py-1 text-body-sm text-warning">
+    <span className="rounded-full bg-purple-3 px-2.5 py-1 text-body-sm text-purple-12">
       {children}
     </span>
   );
@@ -102,7 +109,7 @@ export function Rows({ children }: { children: ReactNode }) {
 
 export function Row({ children }: { children: ReactNode }) {
   return (
-    <div className="border-tertiary border-b py-3 last:border-b-0">
+    <div className="border-primary border-b py-3 last:border-b-0">
       {children}
     </div>
   );
@@ -136,7 +143,7 @@ export function Swatch({
   return (
     <div className="flex min-w-0 flex-col gap-2">
       <div
-        className={`h-16 rounded-lg border-tertiary border ${
+        className={`h-16 rounded-lg border-primary border ${
           translucent ? "blur-chrome" : ""
         }`}
         style={{ background: `var(${variable})` }}

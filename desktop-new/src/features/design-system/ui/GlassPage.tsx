@@ -1,30 +1,39 @@
-import { BLUR, RAMPS } from "@/shared/tokens/registry";
+import { RAMPS } from "@/shared/tokens/registry";
 
-import { Note, PageHeader, Section, Swatch } from "./primitives";
+import { PageHeader, Section } from "./primitives";
 
 const GLASS = RAMPS.find((ramp) => ramp.id === "glass");
 
-function ChromePill() {
-  const items: Array<[string, boolean]> = [
-    ["Me", false],
-    ["Messages", true],
-    ["Projects", false],
-  ];
+const MATERIALS = [
+  {
+    utility: "glass-primary",
+    spec: "glass-2 · blur-md · rim",
+    use: "On the backdrop",
+  },
+  {
+    utility: "glass-secondary",
+    spec: "glass-4 · blur-lg · rim · shadow-sm",
+    use: "Over glass",
+  },
+];
+
+/**
+ * A material, rendered as itself over the backdrop.
+ *
+ * The label sits inside the specimen rather than in a caption beneath it: the
+ * subject is a translucent surface, so text on it is part of what is being
+ * judged — whether it stays legible with the gradient reading through.
+ */
+function Material({ material }: { material: (typeof MATERIALS)[number] }) {
   return (
-    <div className="rim-glass blur-chrome flex items-center gap-1 rounded-full bg-chrome-glass p-1.5">
-      {items.map(([label, selected]) => (
-        <button
-          key={label}
-          type="button"
-          className={
-            selected
-              ? "elevate-xs rounded-full bg-chrome-selected px-5 py-2 text-body text-primary"
-              : "rounded-full px-5 py-2 text-body text-secondary transition-colors hover:bg-chrome-glass-hover hover:text-primary"
-          }
-        >
-          {label}
-        </button>
-      ))}
+    <div
+      className={`${material.utility} flex min-h-[8rem] flex-col justify-between gap-6 rounded-xl px-5 py-4`}
+    >
+      <span className="text-body-sm text-secondary">{material.use}</span>
+      <div className="flex flex-col gap-1">
+        <code className="text-mono text-primary">{material.utility}</code>
+        <span className="text-body-sm text-tertiary">{material.spec}</span>
+      </div>
     </div>
   );
 }
@@ -34,90 +43,84 @@ export function GlassPage() {
     <>
       <PageHeader
         title="Glass"
-        intro="A translucent blurred surface is the same region in a different material, so it is named as that region plus its material rather than assembled per screen from a fill, a transparency, and a blur amount. Translucency and blur live inside the value."
+        intro="Two materials, named by how high they sit. Each one is a fill, a blur, a rim, and sometimes a shadow, applied as a single utility so it cannot arrive in pieces."
       />
 
       <Section
-        title="Live"
-        description="The chrome pill, rendered from the real tokens over the real backdrop. Hover an unselected item to see the glass hover move one step up the ramp."
+        title="The materials"
+        description="Over the app backdrop, because translucency can only be judged against what shows through it."
       >
-        <div className="texture-dots flex items-center justify-center rounded-xl bg-app px-8 py-12">
-          <ChromePill />
-        </div>
-        <div className="flex flex-col gap-1 text-body-sm text-secondary">
-          <span>
-            container <code className="text-primary">bg-chrome-glass</code> +{" "}
-            <code className="text-primary">rim-glass</code> +{" "}
-            <code className="text-primary">blur-chrome</code>
-          </span>
-          <span>
-            selected <code className="text-primary">bg-chrome-selected</code> —
-            opaque where its container is glass
-          </span>
-        </div>
-      </Section>
-
-      {GLASS ? (
-        <Section title="The glass ramp" description={GLASS.description}>
-          <div className="grid grid-cols-3 gap-3 rounded-xl bg-app p-4 sm:grid-cols-5">
-            {GLASS.steps.map((step) => (
-              <Swatch
-                key={step.variable}
-                variable={step.variable}
-                label={`glass ${step.step}`}
-                sublabel={step.job}
-                translucent
-              />
-            ))}
-          </div>
-        </Section>
-      ) : null}
-
-      <Section
-        title="Blur"
-        description="A separate axis from translucency: a glass role names one step on the glass ramp and one blur amount, so a quiet glass can still be heavily blurred."
-      >
-        <div className="flex flex-wrap gap-3 rounded-xl bg-app p-4">
-          {BLUR.map((blur) => (
-            <div
-              key={blur.token}
-              className="flex flex-col items-center gap-2 rounded-lg bg-chrome-glass px-6 py-5"
-              style={{ backdropFilter: `blur(${blur.value})` }}
-            >
-              <code className="text-body-sm text-primary">{blur.token}</code>
-              <span className="text-body-sm text-tertiary">{blur.value}</span>
-            </div>
+        <div className="glass-scene grid gap-4 rounded-xl p-6 sm:grid-cols-2">
+          {MATERIALS.map((material) => (
+            <Material key={material.utility} material={material} />
           ))}
         </div>
       </Section>
 
       <Section
-        title="The rim"
-        description="A deliberate exception: two literal values, not a ramp step and not one of the numbered gradients. Those are background treatments; this is a material detail. Real glass catches light along one edge and falls away on the opposite one, so the rim is a directional pair from one fixed light direction that every glass surface shares."
+        title="Interactive"
+        description="The same materials with a hover, for glass you can click. Hover moves one step up the ramp and never changes blur."
       >
-        <div className="rounded-lg bg-inverse px-5 py-4">
-          <code className="whitespace-pre text-body-sm text-on-inverse">
-            {`box-shadow:\n  inset 0  1px 0 var(--rim-lit),\n  inset 0 -1px 0 var(--rim-shade);`}
-          </code>
+        <div className="glass-scene flex flex-wrap gap-3 rounded-xl p-6">
+          <button
+            type="button"
+            className="glass-primary-interactive rounded-full px-5 py-2.5 text-body text-primary transition-colors"
+          >
+            glass-primary-interactive
+          </button>
+          <button
+            type="button"
+            className="glass-secondary-interactive rounded-full px-5 py-2.5 text-body text-primary transition-colors"
+          >
+            glass-secondary-interactive
+          </button>
         </div>
-        <Note>
-          CSS borders accept only solid colours, so every gradient-border
-          technique is a workaround. `border-image` takes a gradient but ignores
-          `border-radius`, which is fatal on a pill. The two-background
-          `background-clip` trick respects radius but needs an opaque inner
-          fill, so it bleeds across a translucent surface. Two inset shadows
-          respect radius, cost nothing, and work over translucency. The known
-          limit is that each shadow is one solid colour, so a corner transitions
-          in two discrete edges rather than a smooth sweep.
-        </Note>
       </Section>
 
-      <Note>
-        A glass hover changes opacity and never blur — re-blurring a large
-        surface every frame is expensive enough to feel. Glass surfaces use
-        their own `-glass-hover` rather than the shared `bg-hover`, which is a
-        neutral built to sit on an opaque surface.
-      </Note>
+      {GLASS ? (
+        <Section
+          title="The ramp"
+          description="Each step is the mode's own surface colour at an increasing opacity, which is what lets a hover move one step up instead of holding its own literal. Fills only — the rim is separate."
+        >
+          {/* One continuous strip rather than five separate swatches: the
+              subject is a progression, and gaps between cards let the backdrop
+              re-enter between them so each step is read against a different
+              part of the gradient instead of against its neighbours.
+              Deliberately not the shared `Swatch` — its hairline border reads
+              as the glass rim on a translucent fill. */}
+          <div className="glass-scene rounded-xl p-6">
+            <div className="flex overflow-hidden rounded-xl">
+              {GLASS.steps.map((step) => (
+                <div
+                  key={step.variable}
+                  className="blur-chrome flex min-w-0 flex-1 flex-col justify-end gap-1 px-3 py-4"
+                  style={{ background: `var(${step.variable})` }}
+                >
+                  <code className="truncate text-mono-sm text-primary">
+                    glass {step.step}
+                  </code>
+                  <span className="truncate text-body-sm text-tertiary">
+                    {step.job}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </Section>
+      ) : null}
+
+      <Section
+        title="The rim"
+        description="Real glass catches light along one edge and falls away on the opposite one, so the rim is a directional pair sharing one fixed light direction. Two inset shadows rather than a border, because a CSS border cannot hold a gradient and keep its radius."
+      >
+        <div className="glass-scene rounded-xl p-6">
+          <div className="glass-primary rounded-xl px-5 py-4">
+            <code className="whitespace-pre text-mono-sm text-primary">
+              {`inset 0  1px 0 var(--rim-lit)\ninset 0 -1px 0 var(--rim-shade)`}
+            </code>
+          </div>
+        </div>
+      </Section>
     </>
   );
 }

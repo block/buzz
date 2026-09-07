@@ -51,7 +51,7 @@ export function GrowthPage() {
         <ol className="flex flex-col gap-2 rounded-xl bg-inset px-5 py-4">
           {GROWTH_PROCEDURE.map((step, index) => (
             <li key={step} className="flex gap-3">
-              <span className="w-4 shrink-0 text-body text-accent">
+              <span className="w-4 shrink-0 text-body text-purple-12">
                 {index + 1}
               </span>
               <span className="text-body text-secondary">{step}</span>
@@ -68,7 +68,7 @@ export function GrowthPage() {
           {AUDIT.map(([check, action]) => (
             <div
               key={check}
-              className="flex flex-col gap-1 border-b border-tertiary py-3 last:border-b-0 sm:flex-row sm:gap-4"
+              className="flex flex-col gap-1 border-b border-primary py-3 last:border-b-0 sm:flex-row sm:gap-4"
             >
               <span className="flex-1 text-body-sm text-primary">{check}</span>
               <span className="flex-1 text-body-sm text-secondary">

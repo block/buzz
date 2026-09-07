@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 
 import {
   describeValueKind,
@@ -7,7 +7,14 @@ import {
   isHex,
   useResolvedTokens,
 } from "@/features/design-system/useResolvedToken";
-import { RAMPS, ROLE_GROUPS } from "@/shared/tokens/registry";
+import {
+  BACKDROP_CHOICES,
+  BACKDROP_TREATMENTS,
+  PALETTE,
+  RAMPS,
+  ROLE_GROUPS,
+} from "@/shared/tokens/registry";
+import { Tabs } from "@/shared/ui/Tabs";
 
 import { Note, PageHeader, Section } from "./primitives";
 
@@ -26,7 +33,7 @@ interface TableRow {
   token: string;
   variable: string;
   /** Which layer this row belongs to. */
-  layer: "role" | "ramp";
+  layer: "role" | "ramp" | "backdrop" | "choice";
   group: string;
 }
 
@@ -44,6 +51,21 @@ function collectRows(): TableRow[] {
     }
   }
 
+  // The palette was missing from this table entirely — 96 steps across eight
+  // hues, the layer every role resolves *to*, and the one place a literal
+  // lives. `RAMPS` holds only glass, so listing it alone showed five of the
+  // hundred-and-one steps that exist.
+  for (const hue of PALETTE) {
+    for (const step of hue.steps) {
+      rows.push({
+        token: step.variable.replace(/^--/, ""),
+        variable: step.variable,
+        layer: "ramp",
+        group: hue.usedBy ? `${hue.id} — ${hue.usedBy}` : hue.id,
+      });
+    }
+  }
+
   for (const ramp of RAMPS) {
     for (const step of ramp.steps) {
       rows.push({
@@ -55,6 +77,24 @@ function collectRows(): TableRow[] {
     }
   }
 
+  for (const treatment of BACKDROP_TREATMENTS) {
+    rows.push({
+      token: treatment.name,
+      variable: treatment.variable,
+      layer: "backdrop",
+      group: `${treatment.mode} backdrop treatments`,
+    });
+  }
+
+  for (const choice of BACKDROP_CHOICES) {
+    rows.push({
+      token: choice.token,
+      variable: choice.variable,
+      layer: "choice",
+      group: "Semantic backdrop choices",
+    });
+  }
+
   return rows;
 }
 
@@ -62,18 +102,35 @@ function ValueSwatch({ value }: { value: string }) {
   return (
     <span
       aria-hidden="true"
-      className="inline-block h-4 w-4 shrink-0 rounded border border-tertiary align-middle"
+      className="inline-block h-4 w-4 shrink-0 rounded border border-primary align-middle"
       style={{ background: value }}
     />
   );
 }
 
+const VIEWS = [
+  { value: "roles", label: "Roles" },
+  { value: "choices", label: "Backdrop choices" },
+  { value: "ramps", label: "Palette & ramps" },
+] as const;
+
+type View = (typeof VIEWS)[number]["value"];
+
 export function ColorTablePage() {
+  /* Two tabs rather than two stacked sections. The palette is 96 steps and the
+     roles are 55, so one page meant scrolling past a hundred rows to reach the
+     other layer — and the ramps were the half nobody could find. Tabs also state
+     the distinction the system cares about: what you may type, and what it
+     resolves to. */
+  const [view, setView] = useState<View>("roles");
   const rows = collectRows();
   const resolved = useResolvedTokens(rows.map((row) => row.variable));
 
   const roleRows = rows.filter((row) => row.layer === "role");
-  const rampRows = rows.filter((row) => row.layer === "ramp");
+  const backdropChoiceRows = rows.filter((row) => row.layer === "choice");
+  const rampRows = rows.filter(
+    (row) => row.layer === "ramp" || row.layer === "backdrop",
+  );
 
   return (
     <>
@@ -82,30 +139,81 @@ export function ColorTablePage() {
         intro="Every colour token in one list: the name you type, the base token it resolves through, and the value it actually paints. Values are read from the live cascade rather than written down, so this table cannot drift from the system — and it re-resolves when you switch modes."
       />
 
-      <Note>
-        Roles are the only layer a screen may use. Ramp steps are listed
-        underneath so you can see what a role resolves through, but a component
-        referencing one directly is a bug. The reasoning behind each name lives
-        on the{" "}
-        <Link to="/design/color" className="text-accent underline">
-          colour page
-        </Link>
-        .
-      </Note>
+      <div className="mb-6">
+        {/* `panel`, because the /design pages sit on `bg-panel` rather than the
+            app gradient. This page is what surfaced the need for the variant:
+            the chrome pill's glass container composites to white on a white
+            page, and its selected pill is white too. */}
+        <Tabs
+          value={view}
+          items={VIEWS}
+          label="Token layer"
+          onValueChange={setView}
+          variant="panel"
+        />
+      </div>
 
-      <Section
-        title="Roles"
-        description="Grouped as they are in the system. The base column is what the role points at; the value column is where that chain ends."
-      >
-        <TokenTable rows={roleRows} resolved={resolved} showGroups />
-      </Section>
+      {view === "roles" ? (
+        <>
+          <Note>
+            Build screens from the <strong>Ramps</strong> — every step is
+            authored per mode, so <code>bg-neutral-4</code> behaves in both.
+            These fifteen roles are the exceptions: each one either takes a
+            different step in light and dark, so no class can say it, or its
+            name enforces a rule a ramp cannot. The reasoning lives on the{" "}
+            <Link to="/design/color" className="text-purple-12 underline">
+              colour page
+            </Link>
+            .
+          </Note>
 
-      <Section
-        title="Ramp steps"
-        description="Layer 1. These hold the literal values every role resolves to, which is why the base column is empty for them."
-      >
-        <TokenTable rows={rampRows} resolved={resolved} showGroups />
-      </Section>
+          <Section
+            title="Roles"
+            description="Grouped as they are in the system. The base column is what the role points at; the value column is where that chain ends."
+          >
+            <TokenTable rows={roleRows} resolved={resolved} showGroups />
+          </Section>
+        </>
+      ) : view === "choices" ? (
+        <>
+          <Note>
+            Each numbered choice is a stable selection rather than a scene name:
+            <code className="text-mono"> gradient-1 </code> resolves to Sky
+            field in light mode and Night garden in dark. Product surfaces keep
+            using <code className="text-mono">bg-app</code>; an appearance
+            preference can select another numbered choice without knowing which
+            mode is active.
+          </Note>
+
+          <Section
+            title="Semantic backdrop choices"
+            description="Four paired selections. The base column exposes the named treatment currently selected for this mode."
+          >
+            <TokenTable
+              rows={backdropChoiceRows}
+              resolved={resolved}
+              showGroups
+            />
+          </Section>
+        </>
+      ) : (
+        <>
+          <Note>
+            The palette is where every literal lives, and{" "}
+            <code className="text-mono">neutral</code> is a hue like any other.
+            It also contains named backdrop treatments: complete, mode-specific
+            visual compositions that semantic backdrop choices pair together. A
+            component referencing either directly is a bug.
+          </Note>
+
+          <Section
+            title="Palette values and ramps"
+            description="Every hue has twelve authored steps, alongside the named light and dark backdrop treatments and the glass translucency ramp. These hold raw values, which is why the base column is empty for them."
+          >
+            <TokenTable rows={rampRows} resolved={resolved} showGroups />
+          </Section>
+        </>
+      )}
     </>
   );
 }
@@ -137,7 +245,7 @@ function TokenTable({
         <col className="w-1/3" />
       </colgroup>
       <thead>
-        <tr className="border-tertiary border-b">
+        <tr className="border-primary border-b">
           <th scope="col" className="py-2 pr-4 text-body text-tertiary">
             Token
           </th>
@@ -169,7 +277,7 @@ function TokenTable({
                   </th>
                 </tr>
               ) : null}
-              <tr className="border-tertiary border-b">
+              <tr className="border-primary border-b">
                 <td className="py-2.5 pr-4 align-top">
                   <code className="break-words text-mono text-primary">
                     {row.token}

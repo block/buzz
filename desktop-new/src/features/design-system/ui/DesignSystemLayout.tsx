@@ -41,6 +41,7 @@ const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
           `/design/components/${component.slug}`,
         ]),
       ],
+      ["Base UI backing", "/design/components/base-ui"],
     ],
   },
 ];
@@ -59,10 +60,10 @@ function NavLink({
     <Link
       to={to}
       activeOptions={exact ? { exact: true } : undefined}
-      className="block rounded-lg px-3 py-2 text-body text-secondary transition-colors hover:bg-hover hover:text-primary"
+      className="block rounded-lg px-3 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
       activeProps={{
         className:
-          "block rounded-lg px-3 py-2 text-body bg-accent-tint text-accent",
+          "block rounded-lg px-3 py-2 text-body bg-purple-3 text-purple-12",
       }}
     >
       {children}
@@ -131,7 +132,7 @@ export function DesignSystemLayout() {
           type="button"
           onClick={toggle}
           aria-label={`Switch to ${scheme === "light" ? "dark" : "light"} mode`}
-          className="mx-3 self-start rounded-lg bg-inset px-3 py-2 text-body text-secondary transition-colors hover:bg-hover hover:text-primary"
+          className="mx-3 self-start rounded-lg bg-inset px-3 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
         >
           {scheme === "light" ? "Dark mode" : "Light mode"}
         </button>

@@ -15,8 +15,10 @@ import { NavigatorRow } from "@/shared/ui/NavigatorRow";
 import { NavigatorSection } from "@/shared/ui/NavigatorSection";
 import { PanelHeader } from "@/shared/ui/PanelHeader";
 import { SearchField } from "@/shared/ui/SearchField";
-import { SegmentedNavigation } from "@/shared/ui/SegmentedNavigation";
-import { WorkspaceSurface } from "@/shared/ui/WorkspaceSurface";
+import { Tabs } from "@/shared/ui/Tabs";
+
+import { ComponentAnatomy } from "./ComponentAnatomy";
+import { Panel } from "@/shared/ui/Panel";
 import type { ChipAddress } from "@/shared/chips/address";
 import { chipFaces } from "@/shared/chips/faceResolver";
 
@@ -60,30 +62,71 @@ function SpecimenGroup({
   );
 }
 
+/**
+ * One sample with the prop that produced it printed underneath.
+ *
+ * A row of four icon buttons is unreadable without this — they differ only by
+ * fill, so there is no way to tell which one is `solid` and which is `chrome`,
+ * and the page is documentation. The caption names the prop as you would type
+ * it (`variant="solid"`), not a prose paraphrase, so reading the page tells you
+ * what to write.
+ */
+function Specimen({
+  prop,
+  children,
+}: {
+  /** As typed in JSX, e.g. `variant="quiet"`. Omit for a default. */
+  prop?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="component-specimen">
+      {children}
+      <code className="component-specimen-prop text-mono-sm text-tertiary">
+        {prop ?? "default"}
+      </code>
+    </div>
+  );
+}
+
 function ButtonSpecimen() {
   return (
     <div className="component-specimen-stack">
       <SpecimenGroup label="Variants">
         <div className="component-specimen-row">
-          <Button variant="primary">Primary</Button>
-          <Button variant="quiet">Quiet</Button>
-          <Button variant="ghost">Ghost</Button>
+          <Specimen prop='variant="primary"'>
+            <Button variant="primary">Save</Button>
+          </Specimen>
+          <Specimen prop='variant="quiet"'>
+            <Button variant="quiet">Save</Button>
+          </Specimen>
+          <Specimen prop='variant="ghost"'>
+            <Button variant="ghost">Save</Button>
+          </Specimen>
         </div>
       </SpecimenGroup>
       <SpecimenGroup label="Sizes">
         <div className="component-specimen-row">
-          <Button variant="quiet" size="compact">
-            Compact
-          </Button>
-          <Button variant="quiet">Default</Button>
+          <Specimen prop='size="compact"'>
+            <Button variant="quiet" size="compact">
+              Save
+            </Button>
+          </Specimen>
+          <Specimen prop='size="default"'>
+            <Button variant="quiet">Save</Button>
+          </Specimen>
         </div>
       </SpecimenGroup>
       <SpecimenGroup label="States">
         <div className="component-specimen-row">
-          <Button variant="primary">Enabled</Button>
-          <Button variant="quiet" disabled>
-            Disabled
-          </Button>
+          <Specimen>
+            <Button variant="primary">Save</Button>
+          </Specimen>
+          <Specimen prop="disabled">
+            <Button variant="quiet" disabled>
+              Save
+            </Button>
+          </Specimen>
         </div>
       </SpecimenGroup>
     </div>
@@ -97,50 +140,98 @@ function IconButtonSpecimen() {
   };
   return (
     <div className="component-specimen-stack">
+      {/* `chrome` sits on the app backdrop, because it is a translucent glass
+          fill — on a flat panel it has nothing to be translucent over and reads
+          as a plain grey. */}
       <SpecimenGroup label="Variants">
         <div className="component-specimen-row">
-          <IconButton aria-label="Quiet add" icon={icons.add} variant="quiet" />
-          <IconButton
-            aria-label="Ghost more"
-            icon={icons.more}
-            variant="ghost"
-          />
-          <IconButton aria-label="Solid add" icon={icons.add} variant="solid" />
-          <IconButton
-            aria-label="Chrome settings"
-            icon={icons.settings}
-            variant="chrome"
-          />
+          <Specimen prop='variant="quiet"'>
+            <IconButton
+              aria-label="Quiet add"
+              icon={icons.add}
+              variant="quiet"
+            />
+          </Specimen>
+          <Specimen prop='variant="ghost"'>
+            <IconButton
+              aria-label="Ghost more"
+              icon={icons.more}
+              variant="ghost"
+            />
+          </Specimen>
+          <Specimen prop='variant="solid"'>
+            <IconButton
+              aria-label="Solid add"
+              icon={icons.add}
+              variant="solid"
+            />
+          </Specimen>
         </div>
       </SpecimenGroup>
+      <section className="component-specimen-group">
+        <h2 className="text-body-sm text-tertiary">
+          Chrome, over the workspace backdrop
+        </h2>
+        <SpecimenFrame backdrop>
+          <div className="component-specimen-row">
+            <Specimen prop='variant="chrome"'>
+              <IconButton
+                aria-label="Chrome settings"
+                icon={icons.settings}
+                variant="chrome"
+              />
+            </Specimen>
+          </div>
+        </SpecimenFrame>
+      </section>
+      {/* Shown on `quiet`, not the default `ghost`: the three sizes differ only
+          in hit area (30 / 36 / 40px), and with no fill they render as three
+          identical 16px glyphs — the page would claim to show a size ramp while
+          showing nothing. A fill makes the box the sample. */}
       <SpecimenGroup label="Sizes">
         <div className="component-specimen-row">
-          <IconButton
-            aria-label="Compact settings"
-            icon={icons.settings}
-            size="compact"
-          />
-          <IconButton aria-label="Default settings" icon={icons.settings} />
-          <IconButton
-            aria-label="Large settings"
-            icon={icons.settings}
-            size="large"
-          />
+          <Specimen prop='size="compact"'>
+            <IconButton
+              aria-label="Compact settings"
+              icon={icons.settings}
+              variant="quiet"
+              size="compact"
+            />
+          </Specimen>
+          <Specimen prop='size="default"'>
+            <IconButton
+              aria-label="Default settings"
+              icon={icons.settings}
+              variant="quiet"
+            />
+          </Specimen>
+          <Specimen prop='size="large"'>
+            <IconButton
+              aria-label="Large settings"
+              icon={icons.settings}
+              variant="quiet"
+              size="large"
+            />
+          </Specimen>
         </div>
       </SpecimenGroup>
       <SpecimenGroup label="States">
         <div className="component-specimen-row">
-          <IconButton
-            aria-label="Enabled add"
-            icon={icons.add}
-            variant="quiet"
-          />
-          <IconButton
-            aria-label="Disabled add"
-            icon={icons.add}
-            variant="quiet"
-            disabled
-          />
+          <Specimen>
+            <IconButton
+              aria-label="Enabled add"
+              icon={icons.add}
+              variant="quiet"
+            />
+          </Specimen>
+          <Specimen prop="disabled">
+            <IconButton
+              aria-label="Disabled add"
+              icon={icons.add}
+              variant="quiet"
+              disabled
+            />
+          </Specimen>
         </div>
       </SpecimenGroup>
     </div>
@@ -151,68 +242,145 @@ function AvatarSpecimen() {
     <div className="component-specimen-stack">
       <SpecimenGroup label="Sizes">
         <div className="component-specimen-row">
-          <Avatar
-            src="/design-system/morgan.png"
-            alt="Morgan Martin"
-            fallback="Morgan"
-            size="small"
-          />
-          <Avatar
-            src="/design-system/morgan.png"
-            alt="Morgan Martin"
-            fallback="Morgan"
-          />
-          <Avatar
-            src="/design-system/morgan.png"
-            alt="Morgan Martin"
-            fallback="Morgan"
-            size="large"
-          />
+          <Specimen prop='size="small"'>
+            <Avatar
+              src="/design-system/morgan.png"
+              alt="Morgan Martin"
+              fallback="Morgan"
+              size="small"
+            />
+          </Specimen>
+          <Specimen prop='size="default"'>
+            <Avatar
+              src="/design-system/morgan.png"
+              alt="Morgan Martin"
+              fallback="Morgan"
+            />
+          </Specimen>
+          <Specimen prop='size="large"'>
+            <Avatar
+              src="/design-system/morgan.png"
+              alt="Morgan Martin"
+              fallback="Morgan"
+              size="large"
+            />
+          </Specimen>
         </div>
       </SpecimenGroup>
-      <SpecimenGroup label="Fallback">
+      {/* No `src`, so the fallback initial shows. Same three sizes, because a
+          fallback has to hold the ramp as well as an image does. */}
+      <SpecimenGroup label="Fallback, with no src">
         <div className="component-specimen-row">
-          <Avatar alt="Cynthia Chen" fallback="Cynthia" size="small" />
-          <Avatar alt="Cynthia Chen" fallback="Cynthia" />
-          <Avatar alt="Cynthia Chen" fallback="Cynthia" size="large" />
+          <Specimen prop='size="small"'>
+            <Avatar alt="Cynthia Chen" fallback="Cynthia" size="small" />
+          </Specimen>
+          <Specimen prop='size="default"'>
+            <Avatar alt="Cynthia Chen" fallback="Cynthia" />
+          </Specimen>
+          <Specimen prop='size="large"'>
+            <Avatar alt="Cynthia Chen" fallback="Cynthia" size="large" />
+          </Specimen>
         </div>
       </SpecimenGroup>
     </div>
   );
 }
-function WorkspaceSurfaceSpecimen() {
+function PanelSpecimen() {
   return (
     <div className="component-specimen-stack">
-      <SpecimenGroup label="Panel">
+      <SpecimenGroup label='variant="panel" — the default, rounded on every edge'>
         <div className="component-single-surface-demo">
-          <WorkspaceSurface aria-label="Standalone panel example">
+          <Panel aria-label="Standalone panel example">
             <PanelHeader variant="compact" title="Standalone panel" />
-          </WorkspaceSurface>
+          </Panel>
         </div>
       </SpecimenGroup>
-      <SpecimenGroup label="Connected edges">
+      {/* The connected pair reads only side by side: each variant squares off
+          the edge it meets so the seam between them is a single line. */}
+      <SpecimenGroup label='variant="connected-right" and variant="connected-left"'>
         <div className="component-surface-demo">
-          <WorkspaceSurface
+          <Panel
             as="aside"
             variant="connected-right"
             aria-label="Right-connected surface example"
           >
             <PanelHeader variant="compact" title="Navigator" />
-          </WorkspaceSurface>
-          <WorkspaceSurface
+          </Panel>
+          <Panel
             variant="connected-left"
             aria-label="Left-connected surface example"
           >
             <PanelHeader variant="compact" title="Conversation" />
-          </WorkspaceSurface>
+          </Panel>
         </div>
       </SpecimenGroup>
     </div>
   );
 }
 
-function SegmentedNavigationSpecimen() {
+/**
+ * The parts of Tabs, per variant.
+ *
+ * Two lists rather than one, because the interesting fact is that the *same*
+ * parts are drawn differently — the container and the tab carry no fill at all
+ * in `panel`, and the indicator changes from a pill to a bar.
+ */
+const TABS_CHROME_PARTS = [
+  {
+    name: "Container",
+    selector: ".buzz-tabs",
+    show: ["background", "shadow", "blur", "radius"],
+    note: "The glass material: fill, blur, and rim arrive together as glass-primary.",
+  },
+  {
+    name: "Selection",
+    selector: ".buzz-tabs-indicator",
+    show: ["background", "shadow", "radius"],
+    note: "An opaque pill behind the selected tab. Opaque because on glass, elevation reads as less translucency.",
+  },
+  {
+    name: "Selected tab",
+    selector: ".buzz-tabs-tab[data-selected]",
+    show: ["color", "background"],
+    note: "Draws no fill of its own — the pill behind it is the selection.",
+  },
+  {
+    name: "Unselected tab",
+    selector: ".buzz-tabs-tab:not([data-selected])",
+    show: ["color", "background"],
+  },
+] as const;
+
+const TABS_PANEL_PARTS = [
+  {
+    name: "Container",
+    selector: ".buzz-tabs",
+    show: ["background", "shadow", "blur", "radius"],
+    note: "Nothing drawn. On a panel the tabs are text and the bar is the only mark.",
+  },
+  {
+    name: "Selection",
+    selector: ".buzz-tabs-indicator",
+    show: ["background", "radius"],
+    note: "A 2px bar on the bottom edge, spanning the selected tab.",
+  },
+  {
+    name: "Selected tab",
+    selector: ".buzz-tabs-tab[data-selected]",
+    show: ["color", "background"],
+    note: "Same size as unselected — selection is colour and the bar, never weight, which would reflow the row.",
+  },
+  {
+    name: "Unselected tab",
+    selector: ".buzz-tabs-tab:not([data-selected])",
+    show: ["color", "background"],
+  },
+] as const;
+
+function TabsSpecimen() {
   const [destination, setDestination] = useState<Destination>("messages");
+  const [panelDestination, setPanelDestination] =
+    useState<Destination>("messages");
   const [iconDestination, setIconDestination] = useState<Destination>("home");
   const iconItems = DESTINATIONS.map((item) => ({
     ...item,
@@ -221,22 +389,56 @@ function SegmentedNavigationSpecimen() {
   return (
     <div className="component-specimen-stack">
       <section className="component-specimen-group">
-        <h2 className="text-body-sm text-tertiary">Labels</h2>
+        <h2 className="text-body-sm text-tertiary">
+          Chrome — a glass pill, for the app backdrop
+        </h2>
         <SpecimenFrame backdrop>
-          <SegmentedNavigation
-            value={destination}
-            items={DESTINATIONS}
-            label="Prototype destinations"
-            onValueChange={setDestination}
-          />
+          <div data-anatomy="tabs-chrome">
+            <Tabs
+              value={destination}
+              items={DESTINATIONS}
+              label="Prototype destinations"
+              onValueChange={setDestination}
+            />
+          </div>
         </SpecimenFrame>
+        <ComponentAnatomy
+          scope='[data-anatomy="tabs-chrome"]'
+          caption="Which token draws each part of the chrome variant, read from the specimen above."
+          parts={TABS_CHROME_PARTS}
+        />
+      </section>
+      {/* On a panel rather than the backdrop, because that is the whole point of
+          the variant — and because this specimen showing only the chrome version
+          on only the gradient is why the panel failure went unnoticed until it
+          appeared on a real page. */}
+      <section className="component-specimen-group">
+        <h2 className="text-body-sm text-tertiary">
+          Panel — an underline, for a plain surface
+        </h2>
+        <SpecimenFrame>
+          <div data-anatomy="tabs-panel">
+            <Tabs
+              value={panelDestination}
+              items={DESTINATIONS}
+              label="Prototype destinations on a panel"
+              onValueChange={setPanelDestination}
+              variant="panel"
+            />
+          </div>
+        </SpecimenFrame>
+        <ComponentAnatomy
+          scope='[data-anatomy="tabs-panel"]'
+          caption="The same parts in the panel variant. The container and the tab draw nothing at all, which is what makes this legible on a plain surface: there is no second fill to collide with the first."
+          parts={TABS_PANEL_PARTS}
+        />
       </section>
       <section className="component-specimen-group">
         <h2 className="text-body-sm text-tertiary">
-          Icons and trailing action
+          Chrome, with icons and a trailing action outside the selection
         </h2>
         <SpecimenFrame backdrop>
-          <SegmentedNavigation
+          <Tabs
             value={iconDestination}
             items={iconItems}
             label="Prototype destinations with icons"
@@ -265,8 +467,8 @@ function PanelHeaderSpecimen() {
   );
   return (
     <div className="component-specimen-stack">
-      <SpecimenGroup label="Default">
-        <WorkspaceSurface aria-label="Default panel header example">
+      <SpecimenGroup label='variant="default" — with icon and actions'>
+        <Panel aria-label="Default panel header example">
           <PanelHeader
             title="Conversation"
             icon={
@@ -274,12 +476,12 @@ function PanelHeaderSpecimen() {
             }
             actions={actions}
           />
-        </WorkspaceSurface>
+        </Panel>
       </SpecimenGroup>
-      <SpecimenGroup label="Compact">
-        <WorkspaceSurface aria-label="Compact panel header example">
+      <SpecimenGroup label='variant="compact" — shorter, for a nested panel'>
+        <Panel aria-label="Compact panel header example">
           <PanelHeader variant="compact" title="Thread" actions={actions} />
-        </WorkspaceSurface>
+        </Panel>
       </SpecimenGroup>
     </div>
   );
@@ -290,7 +492,7 @@ function SearchFieldSpecimen() {
   const [filledQuery, setFilledQuery] = useState("design");
   return (
     <div className="component-specimen-stack">
-      <SpecimenGroup label="Empty">
+      <SpecimenGroup label='value="" — the clear action is absent'>
         <div className="component-field-demo">
           <SearchField
             value={emptyQuery}
@@ -300,7 +502,7 @@ function SearchFieldSpecimen() {
           />
         </div>
       </SpecimenGroup>
-      <SpecimenGroup label="Filled and clearable">
+      <SpecimenGroup label='value="design" — the clear action appears'>
         <div className="component-field-demo">
           <SearchField
             value={filledQuery}
@@ -317,7 +519,7 @@ function SearchFieldSpecimen() {
 function NavigatorSectionSpecimen() {
   return (
     <div className="component-specimen-stack">
-      <SpecimenGroup label="With rows">
+      <SpecimenGroup label='label="Pinned", with rows as children'>
         <div className="component-navigator-section-demo">
           <NavigatorSection label="Pinned">
             <NavigatorRow
@@ -331,7 +533,7 @@ function NavigatorSectionSpecimen() {
           </NavigatorSection>
         </div>
       </SpecimenGroup>
-      <SpecimenGroup label="Adjacent sections">
+      <SpecimenGroup label="Two sections adjacent — the gap between them is the grouping">
         <div className="component-navigator-section-demo">
           <NavigatorSection label="Projects">
             <NavigatorRow label="berd-main" />
@@ -349,7 +551,9 @@ function NavigatorRowSpecimen() {
   const [selected, setSelected] = useState("buzz-design");
   return (
     <div className="component-specimen-stack">
-      <SpecimenGroup label="Default, selected, and metadata">
+      {/* Interactive: clicking moves `selected`, so the selected fill and the
+          unselected rest state are both visible at once and comparable. */}
+      <SpecimenGroup label="Selected, and trailing for metadata — click to move the selection">
         <div className="component-navigator-section-demo">
           <NavigatorRow
             label="buzz-design"
@@ -366,7 +570,7 @@ function NavigatorRowSpecimen() {
           />
         </div>
       </SpecimenGroup>
-      <SpecimenGroup label="Inset">
+      <SpecimenGroup label="Inset — one level of nesting under a row">
         <div className="component-navigator-section-demo">
           <NavigatorRow
             label="Session interaction model"
@@ -449,14 +653,14 @@ function InlineChipSpecimen() {
   return (
     <div className="component-specimen-stack">
       <SpecimenGroup label="Kinds">
-        <div className="flex flex-col gap-3">
+        {/* Caption under the sample, not in a fixed-width column beside it: a
+            label column wide enough for `kind: "channel"` left the link chip
+            nowhere to truncate and pushed it off a 380px viewport. */}
+        <div className="component-specimen-row">
           {CHIP_KIND_ROWS.map((row) => (
-            <div key={row.label} className="flex items-baseline gap-3">
-              <span className="w-16 shrink-0 text-body-sm text-tertiary">
-                {row.label}
-              </span>
+            <Specimen key={row.label} prop={`kind: "${row.address.kind}"`}>
               <InlineChip address={row.address} />
-            </div>
+            </Specimen>
           ))}
         </div>
       </SpecimenGroup>
@@ -526,8 +730,8 @@ export const COMPONENT_SPECIMENS: Record<string, () => ReactNode> = {
   "icon-button": IconButtonSpecimen,
   avatar: AvatarSpecimen,
   "inline-chip": InlineChipSpecimen,
-  "workspace-surface": WorkspaceSurfaceSpecimen,
-  "segmented-navigation": SegmentedNavigationSpecimen,
+  panel: PanelSpecimen,
+  tabs: TabsSpecimen,
   "panel-header": PanelHeaderSpecimen,
   "search-field": SearchFieldSpecimen,
   "navigator-section": NavigatorSectionSpecimen,
