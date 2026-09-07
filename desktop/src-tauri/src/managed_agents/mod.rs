@@ -110,8 +110,8 @@ pub use runtime::*;
 pub use runtime_commands::*;
 pub use runtime_types::*;
 pub(crate) use session_policy::{
-    acp_session_policy, apply_app_acp_session_policy_env, insert_acp_session_policy_env,
-    AcpSessionPolicy, ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
+    acp_session_policy, insert_acp_session_policy_env, AcpSessionPolicy,
+    ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
 };
 pub use storage::*;
 pub use teams::*;

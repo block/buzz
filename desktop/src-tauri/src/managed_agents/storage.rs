@@ -82,7 +82,11 @@ fn is_safe_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
-pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
+/// Legacy per-agent log path, also available to isolated runtime fixtures.
+pub fn managed_agent_log_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pubkey: &str,
+) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
 }
 

@@ -1,5 +1,5 @@
 use nostr::{Keys, ToBech32};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use super::managed_agent_definition::validate_create_definition;
 
@@ -352,7 +352,7 @@ where
         crate::managed_agents::runtime_configurations::check_selection(
             record,
             Some(&launch_owner),
-            launch_relay.as_str(),
+            workspace_relay_url.as_str(),
             configuration.as_ref(),
         )?;
     }
