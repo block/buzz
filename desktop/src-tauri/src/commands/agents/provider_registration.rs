@@ -86,6 +86,7 @@ pub(super) async fn attest(
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     record.updated_at = now_iso();
     record.last_error = result.as_ref().err().cloned();
+    record.provider_attestation_pending = result.is_err();
     save_managed_agents(app, &records)?;
     result
 }

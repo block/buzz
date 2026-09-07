@@ -693,6 +693,10 @@ pub async fn create_managed_agent(
             backend: input.backend.clone(),
             backend_agent_id: registration.as_ref().map(|value| value.agent_id.clone()),
             provider_policy_pending: false,
+            // Persist the incomplete handshake before the network call. The
+            // provider clears this only after attest succeeds, so a crash or
+            // error leaves the existing Start action available for retry.
+            provider_attestation_pending: provider_uses_registration,
             provider_binary_path,
             persona_team_dir: None,
             persona_name_in_team: None,

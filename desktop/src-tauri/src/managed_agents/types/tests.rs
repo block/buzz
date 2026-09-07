@@ -446,6 +446,10 @@ fn managed_agent_record_without_key_deserializes_empty() {
         !record.provider_policy_pending,
         "pre-pending stores must deserialize as acknowledged"
     );
+    assert!(
+        !record.provider_attestation_pending,
+        "pre-attestation-state stores must deserialize as acknowledged"
+    );
 }
 
 #[test]
@@ -457,6 +461,18 @@ fn pending_provider_policy_round_trips() {
     let reloaded: ManagedAgentRecord = serde_json::from_str(&json).expect("reload pending policy");
 
     assert!(reloaded.provider_policy_pending);
+}
+
+#[test]
+fn pending_provider_attestation_round_trips() {
+    let mut record = sample_agent_record();
+    record.provider_attestation_pending = true;
+
+    let json = serde_json::to_string(&record).expect("serialize pending attestation");
+    let reloaded: ManagedAgentRecord =
+        serde_json::from_str(&json).expect("reload pending attestation");
+
+    assert!(reloaded.provider_attestation_pending);
 }
 
 fn sample_agent_record() -> ManagedAgentRecord {

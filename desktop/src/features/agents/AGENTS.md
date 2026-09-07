@@ -317,8 +317,10 @@ with a TypeScript lookup table or an id comparison in a component.
    infer provider custody from an empty `private_key_nsec`: for local custody,
    empty still means an unavailable or missing key and local spawn must refuse.
    Provider-custodied records must never enter legacy `deploy` or policy
-   redeploy paths. Start must re-attest them idempotently so an interrupted
-   create-time handshake remains recoverable even when no error was persisted.
+   redeploy paths. Persist their attestation as pending before the network call
+   and clear it only after provider acknowledgement; pending records summarize
+   as not deployed so Start remains available. Start must re-attest them
+   idempotently so an interrupted create-time handshake remains recoverable.
 
 ## Channel-only runtime controls
 

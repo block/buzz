@@ -196,6 +196,7 @@ mod tests {
             },
             backend_agent_id: Some("remote-id".to_string()),
             provider_policy_pending: false,
+            provider_attestation_pending: false,
             provider_binary_path: Some("/path/to/binary".to_string()),
             team_id: None,
             persona_team_dir: None,

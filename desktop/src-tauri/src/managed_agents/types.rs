@@ -149,6 +149,7 @@ impl AgentDefinition {
             backend: BackendKind::default(),
             backend_agent_id: None,
             provider_policy_pending: false,
+            provider_attestation_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -351,6 +352,12 @@ pub struct ManagedAgentRecord {
     pub backend_agent_id: Option<String>,
     #[serde(default)]
     pub provider_policy_pending: bool,
+    /// A provider-custodied identity has been registered but its owner
+    /// attestation has not yet been durably acknowledged by the provider.
+    /// While set, the agent remains startable so Desktop can retry the
+    /// idempotent attestation after an error or interrupted create flow.
+    #[serde(default)]
+    pub provider_attestation_pending: bool,
     #[serde(default)]
     pub provider_binary_path: Option<String>,
     /// Installed team directory path (absolute). Set when agent was created from a team persona.

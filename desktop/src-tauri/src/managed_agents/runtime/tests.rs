@@ -125,6 +125,18 @@ use super::{build_respond_to_env, build_respond_to_env_with_policy};
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
 
 #[test]
+fn provider_attestation_must_complete_before_remote_agent_is_deployed() {
+    let mut record = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));
+    record.backend_agent_id = Some("provider-agent-id".into());
+    record.provider_attestation_pending = true;
+
+    assert_eq!(super::remote_deployment_status(&record), "not_deployed");
+
+    record.provider_attestation_pending = false;
+    assert_eq!(super::remote_deployment_status(&record), "deployed");
+}
+
+#[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
     let rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));
     let (set, remove) = build_respond_to_env(&rec, Some("owner")).unwrap();

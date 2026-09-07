@@ -197,6 +197,7 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         backend: crate::managed_agents::BackendKind::Local,
         backend_agent_id: None,
         provider_policy_pending: false,
+        provider_attestation_pending: false,
         provider_binary_path: None,
         persona_team_dir: None,
         persona_name_in_team: None,

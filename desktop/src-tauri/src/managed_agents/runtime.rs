@@ -166,11 +166,7 @@ pub fn build_managed_agent_summary(
         // (infrastructure still exists). This is intentional — the provider may
         // have allocated a VM/container that persists across process restarts.
         // A future provider `undeploy` operation (v2) will handle teardown.
-        let status = if record.backend_agent_id.is_some() {
-            "deployed".to_string()
-        } else {
-            "not_deployed".to_string()
-        };
+        let status = remote_deployment_status(record).to_string();
         (status, None, String::new())
     } else {
         let persisted_pid = record.runtime_pid.filter(|pid| process_is_running(*pid));
@@ -335,6 +331,14 @@ pub fn build_managed_agent_summary(
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
     })
+}
+
+fn remote_deployment_status(record: &ManagedAgentRecord) -> &'static str {
+    if record.backend_agent_id.is_some() && !record.provider_attestation_pending {
+        "deployed"
+    } else {
+        "not_deployed"
+    }
 }
 
 pub fn find_managed_agent_mut<'a>(

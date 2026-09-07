@@ -15,7 +15,6 @@ use crate::managed_agents::AcpAvailabilityStatus;
 #[test]
 fn resolves_known_avatar_for_bare_command() {
     let avatar_url = managed_agent_avatar_url("goose").expect("goose avatar should resolve");
-
     assert_eq!(avatar_url, GOOSE_AVATAR_URL);
 }
 
@@ -239,6 +238,7 @@ fn record_with(
         backend: Default::default(),
         backend_agent_id: None,
         provider_policy_pending: false,
+        provider_attestation_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
