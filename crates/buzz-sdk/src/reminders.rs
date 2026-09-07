@@ -54,7 +54,6 @@ pub struct Reminder {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expiration: Option<u64>,
     /// Decrypted private content.
-    #[serde(flatten)]
     pub content: Content,
 }
 
@@ -81,6 +80,14 @@ fn hex_id(value: &str) -> bool {
 }
 
 fn validate_content(content: &Content) -> Result<(), SdkError> {
+    if ["status", "target", "note"]
+        .iter()
+        .any(|field| content.extra.contains_key(*field))
+    {
+        return Err(invalid(
+            "extra reminder fields conflict with known content fields",
+        ));
+    }
     let mut has_reference = false;
     if let Some(target) = &content.target {
         let target = target

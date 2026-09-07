@@ -188,3 +188,23 @@ fn an_expired_pending_reminder_cannot_wake_even_if_replayed() {
     assert!(reminder.is_due(29));
     assert!(!reminder.is_due(30));
 }
+
+#[test]
+fn unknown_private_fields_cannot_shadow_the_envelope_in_cli_output() {
+    let keys = Keys::generate();
+    let mut content = pending();
+    content
+        .extra
+        .insert("id".into(), json!("a different reminder"));
+    content
+        .extra
+        .insert("event_id".into(), json!("a different version"));
+    let decoded =
+        Reminder::decrypt(&event(&keys, "actual-id", &content, Some(20), 10), &keys).unwrap();
+    let output = serde_json::to_value(&decoded).unwrap();
+    assert_eq!(output["id"], "actual-id");
+    assert_eq!(output["event_id"], decoded.event_id);
+    assert_eq!(output["content"]["id"], "a different reminder");
+    content.extra.insert("status".into(), json!("done"));
+    assert!(build(&keys, "id", &content, Some(20), 10).is_err());
+}
