@@ -276,7 +276,17 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+#[cfg(test)]
+#[path = "relay/endpoint_tests.rs"]
+mod endpoint_tests;
+
 impl RestClient {
+    fn endpoint_url(&self, path: &str) -> Result<String, RelayError> {
+        buzz_core::relay::relay_http_endpoint(&self.base_url, path)
+            .map(String::from)
+            .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))
+    }
+
     /// Fetch the relay's stable signing identity from its NIP-11 document.
     ///
     /// Relay-authored workflow attribution is trusted only when the event signer
@@ -289,7 +299,7 @@ impl RestClient {
         let mut saw_document_without_self = false;
 
         for path in ["/", "/info"] {
-            let url = format!("{}{path}", self.base_url);
+            let url = self.endpoint_url(path)?;
             let response = match self
                 .http
                 .get(&url)
@@ -457,7 +467,7 @@ impl RestClient {
         path: &str,
         body_bytes: &[u8],
     ) -> Result<reqwest::Response, RelayError> {
-        let url = format!("{}{}", self.base_url, path);
+        let url = self.endpoint_url(path)?;
         let body_owned = body_bytes.to_vec();
         let auth_tag_header = self.auth_tag_json.clone();
         self.request_with_retry("POST", path, || {
@@ -3723,12 +3733,39 @@ async fn send_auth_response(
 ///
 /// `ws://host:port` → `http://host:port`
 /// `wss://host:port` → `https://host:port`
-/// Trailing slashes are stripped.
+/// A root path slash is removed; non-root paths and queries are preserved.
 pub(crate) fn relay_ws_to_http(url: &str) -> String {
-    url.replace("wss://", "https://")
-        .replace("ws://", "http://")
-        .trim_end_matches('/')
-        .to_string()
+    let mut parsed = match url::Url::parse(url.trim()) {
+        Ok(parsed) => parsed,
+        Err(_) => return url.trim().to_string(),
+    };
+    let scheme = match parsed.scheme() {
+        "wss" => "https".to_owned(),
+        "ws" => "http".to_owned(),
+        scheme => scheme.to_owned(),
+    };
+    let _ = parsed.set_scheme(&scheme);
+    let had_root_path = parsed.path() == "/";
+    if had_root_path {
+        parsed.set_path("");
+    } else if parsed.query().is_none() && parsed.fragment().is_none() {
+        let path = parsed.path().trim_end_matches('/').to_owned();
+        parsed.set_path(&path);
+    }
+    let mut serialized = parsed.to_string();
+    if had_root_path {
+        let delimiter = serialized.find(['?', '#']);
+        match delimiter {
+            Some(index) if serialized.as_bytes().get(index.wrapping_sub(1)) == Some(&b'/') => {
+                serialized.remove(index - 1);
+            }
+            None if serialized.ends_with('/') => {
+                serialized.pop();
+            }
+            _ => {}
+        }
+    }
+    serialized
 }
 
 /// Build the subscription ID for a channel: `ch-<uuid>`.
@@ -4430,6 +4467,26 @@ mod tests {
         assert_eq!(
             relay_ws_to_http("wss://relay.example.com:4000/ws"),
             "https://relay.example.com:4000/ws"
+        );
+    }
+
+    #[test]
+    fn relay_ws_to_http_preserves_queries() {
+        assert_eq!(
+            relay_ws_to_http("wss://relay.example.com/?next=/"),
+            "https://relay.example.com?next=/"
+        );
+        assert_eq!(
+            relay_ws_to_http("wss://relay.example.com/?url=wss://other.example/"),
+            "https://relay.example.com?url=wss://other.example/"
+        );
+        assert_eq!(
+            relay_ws_to_http("wss://relay.example.com/nostr/"),
+            "https://relay.example.com/nostr"
+        );
+        assert_eq!(
+            relay_ws_to_http("wss://relay.example.com/nostr/?next=/"),
+            "https://relay.example.com/nostr/?next=/"
         );
     }
 
