@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     app_state::AppState,
-    managed_agents::{self, broker_launch, placement, retention::open_retention_db},
+    managed_agents::{self, placement, retention::open_retention_db},
 };
 use buzz_core_pkg::{
     desktop_lifecycle::{Action, Outcome, Request, ResultMessage, RuntimeConfigurationRef},
@@ -132,8 +132,8 @@ pub fn read_desktop_placement(
     placement::latest_start(&open_retention_db(&scope.db_path)?, &agent)
 }
 
-fn generation(
-    app: &AppHandle,
+fn generation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     agent: &str,
     community: &str,
@@ -158,7 +158,7 @@ fn generation(
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
-    let records = managed_agents::load_managed_agents(app)?;
+    let records = managed_agents::storage::load_agent_store(app)?;
     let legacy = records
         .iter()
         .find(|r| r.pubkey == agent)
@@ -181,8 +181,8 @@ fn generation(
     Ok(None)
 }
 
-fn status(
-    app: &AppHandle,
+fn status<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     conn: &rusqlite::Connection,
     state: &AppState,
     event: &Event,
@@ -201,8 +201,8 @@ fn status(
     conn.execute("DELETE FROM desktop_status_generation WHERE rowid NOT IN (SELECT rowid FROM desktop_status_generation ORDER BY rowid DESC LIMIT 256)",[]).map_err(|e|e.to_string())?;
     Ok(Outcome::Running)
 }
-fn current_observation(
-    app: &AppHandle,
+fn current_observation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     conn: &rusqlite::Connection,
     state: &AppState,
     request: &Request,
@@ -236,6 +236,37 @@ pub async fn receive_desktop_lifecycle(
     community: String,
     event: Event,
 ) -> Result<Option<Event>, String> {
+    let preflight_app = app.clone();
+    receive_desktop_lifecycle_with(app, owner, community, event, move |model, allow| {
+        let app = preflight_app.clone();
+        async move {
+            #[cfg(feature = "mesh-llm")]
+            {
+                crate::commands::ensure_relay_mesh_for_record(&app, model.as_deref(), allow).await
+            }
+            #[cfg(not(feature = "mesh-llm"))]
+            {
+                let _ = (app, model, allow);
+                Ok(())
+            }
+        }
+    })
+    .await
+}
+
+// Production receiver with only ordinary provider I/O replaceable in isolated tests.
+pub(crate) async fn receive_desktop_lifecycle_with<R, F, Fut>(
+    app: AppHandle<R>,
+    owner: String,
+    community: String,
+    event: Event,
+    preflight: F,
+) -> Result<Option<Event>, String>
+where
+    R: tauri::Runtime,
+    F: Fn(Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     // Authenticate and fence the destination before reading any configuration or
     // doing ordinary async preflight. Never hold the transition lock across await.
     let request = {
@@ -259,18 +290,23 @@ pub async fn receive_desktop_lifecycle(
         &request.target.agent,
     )?;
     let fresh = nostr::Timestamp::now().as_secs() < event.created_at.as_secs().saturating_add(30);
-    let prepared = if owned
+    let mut prepared = if owned
         && fresh
         && matches!(
             request.action,
             Action::Start | Action::Restart | Action::Preflight
         ) {
-        configurations::prepare(&app, &owner, &request).await
+        configurations::prepare(&app, &owner, &request, &preflight).await
     } else {
         Err(Outcome::Ineligible)
     };
+    if let Ok(captured) = &mut prepared {
+        captured
+            .plan
+            .expire_at(event.created_at.as_secs().saturating_add(30));
+    }
     let catalog = if owned && fresh && request.action == Action::Catalog {
-        configurations::catalog(&app, &owner, &request).await
+        configurations::catalog(&app, &owner, &request, &preflight).await
     } else {
         Err("Catalog is unavailable".into())
     };
@@ -333,8 +369,8 @@ pub async fn receive_desktop_lifecycle(
     .map_err(|e| format!("Desktop lifecycle task failed: {e}"))?
 }
 
-fn execute(
-    app: &AppHandle,
+fn execute<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     conn: &rusqlite::Connection,
     owner: &str,
@@ -367,19 +403,6 @@ fn execute(
     if configurations::revalidate(app, owner, request, plan).is_err() {
         return Ok(Outcome::Ineligible);
     }
-    // Provision before destructive Restart Stop. No supported session: leave the
-    // existing child running and return the precise non-secret missing capability.
-    let broker = match broker_launch::provision(
-        broker_launch::LaunchScope {
-            owner,
-            community: &target.community,
-            agent: &target.agent,
-        },
-        plan.plan.record(),
-    ) {
-        Ok(b) => b,
-        Err(outcome) => return Ok(outcome),
-    };
     // Shared admission validates the captured Stop fence and generation BEFORE
     // destructive Restart. The transition lock spans that Stop, launch and receipt.
     if placement::blocked(conn, &target.agent, &target.desktop)? {
@@ -391,7 +414,6 @@ fn execute(
         true,
         None,
         plan.resume.as_ref(),
-        Some(&broker),
         &plan.plan,
         false, // Explicit wire reference, not the destination's next selection.
         request.action == Action::Restart,

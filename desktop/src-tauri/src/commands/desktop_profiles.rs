@@ -8,8 +8,8 @@ use tauri::{AppHandle, State};
 use crate::app_state::AppState;
 use crate::managed_agents::retention::{active_retention_scope, open_retention_db, RetentionScope};
 
-pub(super) fn scope(
-    app: &AppHandle,
+pub(super) fn scope<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     owner: &str,
     community: &str,

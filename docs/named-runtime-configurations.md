@@ -60,9 +60,35 @@ sets `BUZZ_ACP_REQUIRED_MODEL` to the exact prepared wire ID after inherited,
 harness and mesh writes; non-Claude `BUZZ_ACP_MODEL` is pinned too. Default removes
 both strict variables. Claude retains A1 (`ANTHROPIC_MODEL`, no `BUZZ_ACP_MODEL`).
 ACP requires matching fresh session/current-model or verified switch evidence
-before any prompt, not merely catalog membership or a successful child spawn. Remote lifecycle policy
-is independent: this feature does not remove the existing keyless broker gate,
-transfer keys, or prove cross-host Move.
+before any prompt, not merely catalog membership or a successful child spawn.
+
+## Remote Start credentials
+
+Remote-initiated Start uses the same destination-local credential behavior as
+ordinary local Start. The owner must independently provision the agent's matching
+identity key on that host. Buzz does not transfer/distribute keys, issue a broker
+session, or enroll a host through lifecycle messages. The native shared launcher
+may pass that already-local key to its child just as ordinary Start does; lifecycle
+requests/results never carry keys, resolved credentials, or local paths.
+
+Catalog and preflight require the exact owner/community/agent/host configuration
+ID and revision, matching local identity, executable harness/tools, workspace and
+runtime/provider prerequisites. Launch reads bypass a warm keyring cache and never
+migrate a missing key into existence. Missing, unreadable or wrong identity means
+ineligible, not an eligible inventory host. Catalog eligibility is revalidated
+after async preflight. It is advisory and expires, never launch authority.
+
+Execution repeats those checks under the shared admission lock before destructive
+Restart and after teardown, so a revoked key cannot be recovered from a captured
+plan. Named launch success/failure saves only lifecycle metadata into a fresh raw
+store; it never persists captured/hydrated credentials or migrates keys. Ownership
+and generation reads likewise do not hydrate or migrate keys. The request deadline
+also survives through Stop into shared spawn. Failure after Stop is Failed, not
+Running or automatic resurrection. A missing key does
+not hide a still-running process or block ordinary owner-authorized Stop. Move
+preflights before source Stop and rechecks expiry and exact revision afterward;
+same-host switches use these same fences. General host inventory is retained;
+selection and running configuration are separate. No new provisioning UX is implied.
 
 ## Regression evidence
 
@@ -70,4 +96,10 @@ transfer keys, or prove cross-host Move.
 foreign refs/hosts, plan revalidation and shared child spawn. The child is a shell
 fixture, not a real model. `RuntimeConfigurations.test.mjs` mounts the editor with
 mock IPC and checks exact revision, next-launch-only writes, failure and unmount
-fences. Neither test suite constitutes native/model or two-Desktop acceptance.
+fences. `runtime_configurations/tests/remote_credentials.rs` exercises the signed
+receiver and shared launch with synthetic identities and bounded child processes,
+including actual Stop-time credential/executable loss and post-Stop expiry. Run it
+on Unix with `cargo test --manifest-path desktop/src-tauri/Cargo.toml
+--no-default-features managed_agents::runtime_configurations::tests::remote_credentials
+-- --test-threads=1` (seven tests; default system-keyring builds exclude the fixture).
+These fixture suites do not constitute real-model or two-Desktop acceptance.

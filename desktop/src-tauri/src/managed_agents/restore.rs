@@ -396,13 +396,12 @@ where
                                             None,
                                         )?;
                                         super::terminate_untracked_pair_runtime(app, &key)?;
-                                        super::runtime::spawn_agent_child_with_broker(
+                                        super::runtime::spawn_agent_child_prepared(
                                             app,
                                             current,
                                             &relay_url,
                                             true,
                                             owner_hex_ref,
-                                            None,
                                             None,
                                             None,
                                             Some(prepared),

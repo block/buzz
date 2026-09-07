@@ -242,7 +242,7 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
 
 /// Read the raw unified store — keyed instances AND key-less definitions —
 /// with fail-loud parse handling. Internal seam; public readers filter.
-fn load_agent_store<R: tauri::Runtime>(
+pub(crate) fn load_agent_store<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<ManagedAgentRecord>, String> {
     let path = managed_agents_store_path(app)?;
@@ -273,6 +273,28 @@ pub fn load_managed_agents<R: tauri::Runtime>(
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);
+    Ok(records)
+}
+
+/// Read launch inputs without migrating keys or trusting a warm keyring cache.
+/// Missing/unreadable credentials remain unavailable, but do not hide the record
+/// from Status/Stop. Inline keys are the existing destination-local file fallback.
+pub(crate) fn load_managed_agents_for_launch<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ManagedAgentRecord>, String> {
+    let mut records = load_agent_store(app)?;
+    records.retain(|record| !record.pubkey.is_empty());
+    if let Some(store) = agent_secret_store() {
+        for record in &mut records {
+            if record.private_key_nsec.is_empty() {
+                record.private_key_nsec = store
+                    .load_fresh_readonly(&agent_keyring_name(&record.pubkey))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+            }
+        }
+    }
     Ok(records)
 }
 
@@ -394,6 +416,28 @@ pub fn save_managed_agents<R: tauri::Runtime>(
     persist_agent_keys(&mut sorted);
 
     write_agent_store(app, definitions, sorted)
+}
+
+/// Persist only lifecycle bookkeeping from a named launch. Caller holds the
+/// store lock. Never feed captured/hydrated keys into the migration save path:
+/// the fresh raw store owns inline credentials, and the keyring is not written.
+/// Re-read even on failure so a revoked key or removed record stays removed.
+pub(crate) fn save_runtime_metadata<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    record: &ManagedAgentRecord,
+) -> Result<(), String> {
+    let mut current = load_agent_store(app)?;
+    if let Some(saved) = current.iter_mut().find(|r| r.pubkey == record.pubkey) {
+        saved.runtime_pid = record.runtime_pid;
+        saved.updated_at = record.updated_at.clone();
+        saved.last_started_at = record.last_started_at.clone();
+        saved.last_stopped_at = record.last_stopped_at.clone();
+        saved.last_exit_code = record.last_exit_code;
+        saved.last_error = record.last_error.clone();
+        saved.last_error_code = record.last_error_code;
+    }
+    let (definitions, instances) = current.into_iter().partition(|r| r.pubkey.is_empty());
+    write_agent_store(app, definitions, instances)
 }
 
 /// Save the key-less agent *definitions*, preserving the keyed instances —

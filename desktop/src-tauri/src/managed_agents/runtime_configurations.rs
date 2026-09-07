@@ -43,6 +43,7 @@ pub(crate) struct PreparedLaunch {
     pub(super) effective: super::effective_config::EffectiveAgentConfig,
     legacy_default: bool,
     preflight_complete: bool,
+    expires_at: Option<u64>,
     host: String,
     scope: (String, String),
     // Catalog-only preparation has no app context and cannot be executed.
@@ -60,9 +61,20 @@ impl PreparedLaunch {
         Ok(())
     }
 
+    /// Bound a remote request through destructive Stop as well as async preflight.
+    pub(crate) fn expire_at(&mut self, deadline: u64) {
+        self.expires_at = Some(self.expires_at.map_or(deadline, |old| old.min(deadline)));
+    }
+
     /// Preparation is not launch authority. Only the successful ordinary async
     /// provider boundary can authorize these exact inputs for shared spawn.
     pub(crate) fn require_preflight(&self) -> Result<(), String> {
+        if self
+            .expires_at
+            .is_some_and(|deadline| nostr::Timestamp::now().as_secs() >= deadline)
+        {
+            return Err("Runtime launch request expired".into());
+        }
         if !self.preflight_complete {
             return Err("Captured runtime launch has not completed provider preflight".into());
         }
@@ -160,6 +172,7 @@ pub(crate) fn prepare(
         effective,
         legacy_default: false,
         preflight_complete: false,
+        expires_at: None,
         host: host.into(),
         scope: (owner.into(), community.into()),
         app_inputs: None,
@@ -184,6 +197,7 @@ fn prepare_default(
         record,
         legacy_default: true,
         preflight_complete: false,
+        expires_at: None,
         host: String::new(),
         scope: (owner.into(), community.into()),
         app_inputs: None,
@@ -353,10 +367,14 @@ pub(crate) fn preflight(
     if keys.public_key().to_hex() != record.pubkey {
         return Err("Local identity does not match this agent".into());
     }
-    if super::resolve_command(&record.acp_command).is_none() {
+    if !super::resolve_command(&record.acp_command)
+        .is_some_and(|path| super::discovery::is_executable_file(&path))
+    {
         return Err("ACP runtime is unavailable".into());
     }
-    if super::resolve_command(&descriptor.command).is_none() {
+    if !super::resolve_command(&descriptor.command)
+        .is_some_and(|path| super::discovery::is_executable_file(&path))
+    {
         return Err("Selected runtime is unavailable on this Desktop".into());
     }
     if config.is_some() {

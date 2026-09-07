@@ -325,13 +325,12 @@ async fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() 
     )
     .unwrap();
     assert!(plan.require_preflight().is_err());
-    let unpreflighted = agents::spawn_agent_child_with_broker(
+    let unpreflighted = agents::spawn_agent_child_prepared(
         app.handle(),
         &record,
         community,
         true,
         Some(&owner),
-        None,
         None,
         None,
         Some(&plan),
@@ -503,3 +502,6 @@ fn ordinary_selection_fence_includes_default() {
 #[cfg(unix)]
 #[path = "orchestration_tests.rs"]
 mod orchestration;
+
+#[cfg(all(unix, not(feature = "system-keyring")))]
+mod remote_credentials;

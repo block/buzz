@@ -10,23 +10,32 @@ pub(super) struct CapturedLaunch {
     pub(super) generation: Option<String>,
 }
 
-fn record(app: &AppHandle, agent: &str) -> Result<managed_agents::ManagedAgentRecord, String> {
+fn record<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    agent: &str,
+) -> Result<managed_agents::ManagedAgentRecord, String> {
     let state = app.state::<AppState>();
     let _store = state
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
-    managed_agents::load_managed_agents(app)?
+    managed_agents::storage::load_managed_agents_for_launch(app)?
         .into_iter()
         .find(|r| r.pubkey == agent)
         .ok_or_else(|| "Agent is not provisioned on this Desktop".into())
 }
 
-pub(super) async fn prepare(
-    app: &AppHandle,
+pub(super) async fn prepare<R, F, Fut>(
+    app: &AppHandle<R>,
     owner: &str,
     request: &Request,
-) -> Result<CapturedLaunch, Outcome> {
+    preflight: &F,
+) -> Result<CapturedLaunch, Outcome>
+where
+    R: tauri::Runtime,
+    F: Fn(Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     let reference = request.configuration.as_ref().ok_or(Outcome::Ineligible)?;
     let mut captured = (|| -> Result<CapturedLaunch, String> {
         let state = app.state::<AppState>();
@@ -72,39 +81,20 @@ pub(super) async fn prepare(
         })
     })()
     .map_err(|_| Outcome::Ineligible)?;
-    // Do not advertise an eligible Switch that is known to fail after source Stop.
-    broker_launch::provision(
-        broker_launch::LaunchScope {
-            owner,
-            community: &request.target.community,
-            agent: &request.target.agent,
-        },
-        captured.plan.record(),
-    )?;
     configurations::preflight_with(
         &mut captured.plan,
         owner,
         &request.target.community,
         false,
-        |model, allow| async move {
-            #[cfg(feature = "mesh-llm")]
-            {
-                crate::commands::ensure_relay_mesh_for_record(app, model.as_deref(), allow).await
-            }
-            #[cfg(not(feature = "mesh-llm"))]
-            {
-                let _ = (app, model, allow);
-                Ok(())
-            }
-        },
+        preflight,
     )
     .await
     .map_err(|_| Outcome::Ineligible)?;
     Ok(captured)
 }
 
-pub(super) fn revalidate(
-    app: &AppHandle,
+pub(super) fn revalidate<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     owner: &str,
     request: &Request,
     captured: &CapturedLaunch,
@@ -122,11 +112,17 @@ pub(super) fn revalidate(
     )
 }
 
-pub(super) async fn catalog(
-    app: &AppHandle,
+pub(super) async fn catalog<R, F, Fut>(
+    app: &AppHandle<R>,
     owner: &str,
     request: &Request,
-) -> Result<CatalogPage, String> {
+    preflight: &F,
+) -> Result<CatalogPage, String>
+where
+    R: tauri::Runtime,
+    F: Fn(Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     let record = record(app, &request.target.agent)?;
     let mut entries =
         configurations::catalog_for_app(app, &record, owner, &request.target.community)?
@@ -177,7 +173,18 @@ pub(super) async fn catalog(
                 cursor: None,
                 ..request.clone()
             };
-            entry.eligible = prepare(app, owner, &probe).await.is_ok();
+            entry.eligible = match prepare(app, owner, &probe, preflight).await {
+                Ok(captured) => {
+                    let state = app.state::<AppState>();
+                    let _transition = state
+                        .managed_agent_runtime_transition
+                        .lock()
+                        .map_err(|e| e.to_string())?;
+                    scope(app, &state, owner, &request.target.community)?;
+                    revalidate(app, owner, &probe, &captured).is_ok()
+                }
+                Err(_) => false,
+            };
         }
     }
     Ok(CatalogPage { entry, next })

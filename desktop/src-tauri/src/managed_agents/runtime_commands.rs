@@ -356,7 +356,6 @@ where
             true,
             None,
             resume.as_ref(),
-            None,
             &plan,
             true,
             restart,
@@ -368,21 +367,6 @@ where
     .map_err(|e| format!("runtime admission task failed: {e}"))?
 }
 
-/// The keyless lifecycle adapter remains provisioning-unavailable. A synchronous
-/// caller cannot manufacture async launch authority when that adapter is added;
-/// it must carry a preflighted plan into start_pair_captured_locked instead.
-pub(crate) fn start_pair_locked(
-    _pubkey: String,
-    _relay_url: String,
-    _lazy: bool,
-    _expected_updated_at: Option<&str>,
-    _explicit_start: bool,
-    _broker: Option<&super::broker_launch::BrokerSession>,
-    _app: AppHandle,
-) -> Result<ManagedAgentRuntimeStatus, String> {
-    Err("Captured preflighted runtime launch required".into())
-}
-
 /// Captured automatic starts additionally fence the durable next-launch selection.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_pair_captured_locked<R: tauri::Runtime>(
@@ -391,7 +375,6 @@ pub(crate) fn start_pair_captured_locked<R: tauri::Runtime>(
     lazy: bool,
     expected_updated_at: Option<&str>,
     resume: Option<&super::remote_stop::ResumeTicket>,
-    broker: Option<&super::broker_launch::BrokerSession>,
     plan: &super::runtime_configurations::PreparedLaunch,
     check_selection: bool,
     restart: bool,
@@ -406,7 +389,11 @@ pub(crate) fn start_pair_captured_locked<R: tauri::Runtime>(
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(&app)?;
+    let mut records = if plan.configuration().is_some() {
+        super::storage::load_managed_agents_for_launch(&app)?
+    } else {
+        load_managed_agents(&app)?
+    };
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
@@ -480,7 +467,23 @@ pub(crate) fn start_pair_captured_locked<R: tauri::Runtime>(
         state.clear_agent_session_cache(&key);
     }
     let process_result = (|| {
-        let mut process = super::spawn_agent_child_with_broker(
+        if plan.configuration().is_some() {
+            // Stop may take time. A credential revoked during teardown must not
+            // be resurrected from the captured plan or the pre-Stop record.
+            record.private_key_nsec.clear();
+            let fresh = super::storage::load_managed_agents_for_launch(&app)?;
+            let current = fresh
+                .iter()
+                .find(|r| r.pubkey == record.pubkey)
+                .ok_or("Agent removed during launch")?;
+            plan.revalidate(
+                current,
+                &load_personas(&app)?,
+                &load_global_agent_config(&app)?,
+            )?;
+            record.private_key_nsec = current.private_key_nsec.clone();
+        }
+        let mut process = super::spawn_agent_child_prepared(
             &app,
             record,
             &relay_url,
@@ -488,7 +491,6 @@ pub(crate) fn start_pair_captured_locked<R: tauri::Runtime>(
             Some(&owner),
             None,
             resume,
-            broker,
             Some(plan),
         )?;
         let mut receipt = ManagedAgentRuntimeReceipt::new(
@@ -518,7 +520,11 @@ pub(crate) fn start_pair_captured_locked<R: tauri::Runtime>(
             status.lifecycle = ManagedAgentRuntimeLifecycle::Failed;
             status.error = Some(error);
             drop(runtimes);
-            save_managed_agents(&app, &records)?;
+            if plan.configuration().is_some() {
+                super::storage::save_runtime_metadata(&app, record)?;
+            } else {
+                save_managed_agents(&app, &records)?;
+            }
             emit_status(&app, &status);
             return Ok(status);
         }
@@ -534,7 +540,11 @@ pub(crate) fn start_pair_captured_locked<R: tauri::Runtime>(
     super::remote_stop::finish_resume(&app, &key, &relay_url, Some(&owner), resume)?;
     let status = status_for(&app, record, &key, runtimes.get(&key), None);
     drop(runtimes);
-    save_managed_agents(&app, &records)?;
+    if plan.configuration().is_some() {
+        super::storage::save_runtime_metadata(&app, record)?;
+    } else {
+        save_managed_agents(&app, &records)?;
+    }
     emit_status(&app, &status);
     Ok(status)
 }

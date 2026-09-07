@@ -593,6 +593,25 @@ impl SecretStore {
         }
     }
 
+    /// Read one already-provisioned secret from the backend, bypassing the cache.
+    /// Launch admission must observe revocation and outages; never migrate or write.
+    pub(crate) fn load_fresh_readonly(&self, key: &str) -> Result<Option<String>, String> {
+        #[cfg(feature = "system-keyring")]
+        {
+            let Some(raw) = self.read_blob_raw()? else {
+                return Ok(None);
+            };
+            let mut map: HashMap<String, String> =
+                serde_json::from_slice(&raw).map_err(|_| "Invalid secret store".to_string())?;
+            Ok(map.remove(key))
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            let _ = key;
+            Err("system-keyring feature disabled".into())
+        }
+    }
+
     /// Insert all entries from `entries` into the blob in a single mutation.
     ///
     /// Entries that already exist in the blob are overwritten; entries not

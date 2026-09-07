@@ -59,7 +59,7 @@ function message(outcome: LifecycleOutcome) {
     case "running":
       return "Desktop confirmed a running local process. This does not prove model readiness.";
     case "provisioning_unavailable":
-      return "Destination keyless launch provisioning is unavailable. No new process was started.";
+      return "Destination cannot launch this agent. No new process was started.";
     case "stopped":
       return "Desktop reports the agent stopped.";
     case "ineligible":

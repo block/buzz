@@ -62,6 +62,15 @@ pub async fn receive_desktop_stop(
     community: String,
     event: Event,
 ) -> Result<Option<Event>, String> {
+    receive_desktop_stop_for_app(app, owner, community, event).await
+}
+
+pub(crate) async fn receive_desktop_stop_for_app<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    owner: String,
+    community: String,
+    event: Event,
+) -> Result<Option<Event>, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _transition = state
@@ -144,8 +153,8 @@ pub fn read_desktop_stop_results(
 }
 
 /// Local possession/profile alone never establishes owner authority.
-pub(super) fn owned_local(
-    app: &AppHandle,
+pub(super) fn owned_local<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     owner: &str,
     agent: &str,
@@ -154,7 +163,7 @@ pub(super) fn owned_local(
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
-    let records = managed_agents::load_managed_agents(app)?;
+    let records = managed_agents::storage::load_agent_store(app)?;
     Ok(records.iter().find(|r| r.pubkey == agent).is_some_and(|r| {
         r.backend == managed_agents::BackendKind::Local
             && r.auth_tag

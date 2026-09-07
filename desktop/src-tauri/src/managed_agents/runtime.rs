@@ -473,7 +473,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     replay_floor_unix: Option<u64>,
     resume: Option<&super::remote_stop::ResumeTicket>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
-    spawn_agent_child_with_broker(
+    spawn_agent_child_prepared(
         app,
         record,
         relay_url,
@@ -482,12 +482,11 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         replay_floor_unix,
         resume,
         None,
-        None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
+pub(crate) fn spawn_agent_child_prepared<R: tauri::Runtime>(
     app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     relay_url: &str,
@@ -495,18 +494,11 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     owner_hex: Option<&str>,
     replay_floor_unix: Option<u64>,
     resume: Option<&super::remote_stop::ResumeTicket>,
-    broker: Option<&super::broker_launch::BrokerSession>,
     prepared: Option<&super::runtime_configurations::PreparedLaunch>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
     super::remote_stop::check_launch(app, &key, relay_url, owner_hex, resume)?;
-    if let Some(session) = broker {
-        session.validate(super::broker_launch::LaunchScope {
-            owner: owner_hex.ok_or("Desktop owner unavailable")?,
-            community: relay_url,
-            agent: &record.pubkey,
-        })?;
-    } else if let Some(error) = spawn_key_refusal(record) {
+    if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
@@ -535,7 +527,11 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
     plan.require_preflight()?;
     plan.check_scope(owner_hex, relay_url)?;
     plan.revalidate(record, &personas, &global)?;
-    let record = &plan.record;
+    // Keep projected settings immutable, but deliver only the current credential
+    // that just passed revalidation, never the captured plan's copy.
+    let mut launch_record = plan.record.clone();
+    launch_record.private_key_nsec = record.private_key_nsec.clone();
+    let record = &launch_record;
     let effective_cfg = plan.effective.clone();
     let descriptor = &plan.descriptor;
     let effective_command = &descriptor.command;
@@ -876,16 +872,6 @@ pub(crate) fn spawn_agent_child_with_broker<R: tauri::Runtime>(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    if let Some(session) = broker {
-        session.apply(
-            &mut command,
-            super::broker_launch::LaunchScope {
-                owner: owner_hex.ok_or("Desktop owner unavailable")?,
-                community: relay_url,
-                agent: &record.pubkey,
-            },
-        )?;
-    }
     // Applied last so inherited environment cannot weaken explicit model selection.
     let configuration = super::runtime_configurations::selected(record)?;
     let required_model = configuration
@@ -1024,7 +1010,7 @@ pub(crate) fn start_managed_agent_process_prepared<R: tauri::Runtime>(
     // replace. Selection enforces host-preserving authority provenance and
     // uses the ordinary process-tree termination contract.
     terminate_untracked_pair_runtime(app, &key)?;
-    let mut process = spawn_agent_child_with_broker(
+    let mut process = spawn_agent_child_prepared(
         app,
         record,
         workspace_relay.as_str(),
@@ -1032,7 +1018,6 @@ pub(crate) fn start_managed_agent_process_prepared<R: tauri::Runtime>(
         owner_hex,
         replay_floor_unix,
         resume,
-        None,
         prepared,
     )?;
     let now = now_iso();

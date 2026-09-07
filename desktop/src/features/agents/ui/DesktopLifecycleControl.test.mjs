@@ -88,9 +88,7 @@ test("mounted picker expires without refresh, reports actual ref, and preserves 
         return (
           probeResult(args.request) ?? {
             outcome:
-              args.request.action === "status"
-                ? "running"
-                : "provisioning_unavailable",
+              args.request.action === "status" ? "running" : "ineligible",
             observation: {
               running_configuration: {
                 id: "actual-config",
@@ -155,7 +153,7 @@ test("mounted picker expires without refresh, reports actual ref, and preserves 
     await click("Start on destination");
     assert.match(
       document.body.textContent,
-      /keyless launch provisioning is unavailable/,
+      /exact configuration is missing, changed, or unavailable/,
     );
     assert.equal(
       prepared.find((r) => r.action === "start").desktop,

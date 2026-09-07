@@ -50,7 +50,8 @@ pub enum Outcome {
     Running,
     /// Actual status confirms no managed process at this target.
     Stopped,
-    /// Destination-local broker session issuance is not available.
+    /// Legacy receiver refusal, retained for wire compatibility. New receivers
+    /// use destination-local credentials and report Ineligible when unavailable.
     ProvisioningUnavailable,
     /// Runtime/readiness/ownership rejected the request.
     Failed,

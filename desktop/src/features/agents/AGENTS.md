@@ -468,9 +468,12 @@ resume ticket before preflight; probes and Restart never receive that authority.
 Shared admission checks the captured runtime generation before destructive Restart,
 and a post-Stop Failed status must never become a Running response. No second spawn
 path or launch authority is allowed. Missing/edited targets fail rather than
-substitute another configuration. Remote
-keyless provisioning remains its existing independent fail-closed gate; a known
-provisioning failure must exclude Switch before source Stop.
+substitute another configuration. Remote Start uses ordinary destination-local
+credentials: a matching agent key must already be independently provisioned on the
+host. Catalog/preflight and execution recheck that local access; missing, unreadable
+or wrong identity excludes launch choices before source Stop. No key transfer,
+broker issuer, enrollment or provisioning wizard is part of this flow. Readiness
+never hides an existing running process or its ordinary Stop control.
 
 Running identity comes only from the actual live process snapshot, never the next
 selection. A different or unknown running configuration cannot satisfy an explicit
