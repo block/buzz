@@ -494,6 +494,24 @@ impl EventQueue {
         })
     }
 
+    /// Earliest retry throttle for queued work not already in flight.
+    ///
+    /// Includes expired deadlines: an event-loop iteration can cross eligibility
+    /// before it arms its timer. The caller must gate on idle pool capacity and
+    /// dispatch when woken. Dispatch either makes the scope in-flight or releases
+    /// it with `mark_complete`, which clears the expired throttle even when a
+    /// busy session owner holds the batch. Empty/removed scopes never arm a timer.
+    pub fn next_retry_deadline(&self) -> Option<Instant> {
+        self.retry_after
+            .iter()
+            .filter(|(scope, _)| {
+                !self.in_flight_scopes.contains(*scope)
+                    && self.queues.get(*scope).is_some_and(|q| !q.is_empty())
+            })
+            .map(|(_, &deadline)| deadline)
+            .min()
+    }
+
     /// Mark the prompt for `channel_id` as complete.
     ///
     /// Removes the channel from `in_flight_channels` and `in_flight_deadlines`.
@@ -2199,6 +2217,95 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn retry_wake_redelivers_before_and_after_replacement_eligibility() {
+        use crate::recovery_wake::{wait, RecoveryWake};
+        for replacement_first in [true, false] {
+            let mut queue = EventQueue::new(DedupMode::Queue);
+            let channel = Uuid::new_v4();
+            let event = make_queued(channel, "original batch");
+            let id = event.event.id;
+            let received_at = event.received_at;
+            queue.push(event);
+            let batch = queue.flush_next().unwrap();
+            assert!(queue.requeue(batch).is_none());
+            queue.mark_complete(channel);
+            // Production requeue installs a future throttle, not an immediate
+            // dispatch. Accelerate only the test's clock boundary.
+            assert!(queue.next_retry_deadline().unwrap() > Instant::now());
+            let deadline = if replacement_first {
+                Instant::now() + Duration::from_millis(30)
+            } else {
+                Instant::now() - Duration::from_millis(30)
+            };
+            queue.retry_after.insert(conv(channel), deadline);
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.send(crate::RespawnResult {
+                index: 0,
+                result: Err(anyhow::anyhow!("wake token")),
+            })
+            .await
+            .unwrap();
+            // With no idle agent the event loop disables the retry timer,
+            // even if its deadline is already past. Respawn is the wake owner.
+            assert!(matches!(
+                wait(&mut rx, None, None).await,
+                RecoveryWake::Respawn(_)
+            ));
+            if replacement_first {
+                assert!(
+                    queue.flush_next().is_none(),
+                    "respawn must not bypass backoff"
+                );
+            }
+            assert!(matches!(
+                wait(&mut rx, queue.next_retry_deadline(), None).await,
+                RecoveryWake::Retry
+            ));
+            let retried = queue.flush_next().unwrap();
+            assert_eq!(retried.events.len(), 1);
+            assert_eq!(retried.events[0].event.id, id);
+            assert_eq!(retried.events[0].received_at, received_at);
+            assert_eq!(
+                queue.next_retry_deadline(),
+                None,
+                "in-flight work cannot hot-loop"
+            );
+            queue.mark_complete(channel);
+            assert!(
+                queue.flush_next().is_none(),
+                "completed work must not duplicate"
+            );
+            assert_eq!(queue.next_retry_deadline(), None);
+            assert!(tokio::time::timeout(
+                Duration::from_millis(20),
+                wait(&mut rx, queue.next_retry_deadline(), None)
+            )
+            .await
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn retry_deadline_excludes_empty_removed_and_held_scopes() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel = Uuid::new_v4();
+        let past = Instant::now() - Duration::from_secs(1);
+        queue.retry_after.insert(conv(channel), past);
+        assert_eq!(queue.next_retry_deadline(), None);
+        queue.push(make_queued(channel, "held"));
+        assert_eq!(queue.next_retry_deadline(), Some(past));
+        let held = queue.flush_next().unwrap();
+        assert_eq!(queue.next_retry_deadline(), None);
+        // This is dispatch_pending's busy-owner / no-slot release path.
+        queue.requeue_preserve_timestamps(held);
+        queue.mark_complete(channel);
+        assert_eq!(queue.next_retry_deadline(), None);
+        queue.retry_after.insert(conv(channel), past);
+        queue.drain_channel(channel);
+        assert_eq!(queue.next_retry_deadline(), None);
+    }
 
     /// Build a test event with the given content and kind.
     fn make_event(content: &str) -> Event {

@@ -11,6 +11,7 @@ mod pool_lifecycle;
 mod prompt_framing;
 mod prompt_project;
 mod queue;
+mod recovery_wake;
 mod relay;
 mod scope;
 mod setup_mode;
@@ -3005,6 +3006,7 @@ async fn tokio_main() -> Result<()> {
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
         Wake(u32, Result<AgentPool, String>),
+        Recovery(recovery_wake::RecoveryWake),
     }
 
     loop {
@@ -3090,37 +3092,8 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
-        let mut respawn_collected = false;
-        while let Ok(rr) = respawn_rx.try_recv() {
-            crash_history[rr.index].respawn_in_flight = false;
-            match rr.result {
-                Ok((acp, protocol_version, agent_name)) => {
-                    let agent = OwnedAgent {
-                        index: rr.index,
-                        acp,
-                        state: SessionState::default(),
-                        model_capabilities: None,
-                        desired_model: config.model.clone(),
-                        model_overridden: false,
-                        desired_model_request_id: None,
-                        desired_model_pending_ack: false,
-                        startup_effort: config.effort_level.clone(),
-                        agent_name,
-                        goose_system_prompt_supported: None,
-                        protocol_version,
-                    };
-                    pool.return_agent(agent);
-                    tracing::info!(agent = rr.index, "respawn complete");
-                    respawn_collected = true;
-                }
-                Err(e) => {
-                    crash_history[rr.index].mark_spawn_failed();
-                    tracing::warn!(agent = rr.index, "respawn failed: {e} — circuit re-opened");
-                }
-            }
-        }
         // Reap completed respawn handles from the JoinSet. Payloads are
-        // delivered out-of-band through `respawn_rx` (drained above), so the
+        // delivered out-of-band through `respawn_rx` (selected below), so the
         // JoinSet is never joined by the normal flow — Tokio retains finished
         // tasks until `join_next`, so without this the set grows on every
         // refill/crash recovery and `!respawn_tasks.is_empty()` would stay true
@@ -3130,26 +3103,27 @@ async fn tokio_main() -> Result<()> {
         // slot's `respawn_in_flight` is cleared when its payload is received),
         // not JoinSet occupancy.
         while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
-        // Flush requeued events that were waiting for a live agent. Without
-        // this, batches requeued during crash recovery sit idle until the
-        // next relay event arrives — which can be minutes on quiet channels.
-        if respawn_collected {
-            for (scope, thread_tags) in dispatch_pending(
-                &mut pool,
-                &mut queue,
-                &ctx,
-                &mut last_activity,
-                observer.as_ref(),
-            ) {
-                typing_channels.insert(scope, thread_tags);
-            }
-        }
+        // Retry deadlines are actionable only with idle capacity. A busy pool
+        // wakes on its result/respawn instead of spinning on an expired retry.
+        let retry_at = if pool_ready && pool.any_idle() {
+            queue.next_retry_deadline()
+        } else {
+            None
+        };
+        let maintenance_at = pool_ready.then_some(last_maintenance + maintenance_interval);
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         let pool_event: Option<PoolEvent> = {
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
                 biased;
+                _ = shutdown_rx.changed() => {
+                    tracing::info!("shutting down");
+                    break;
+                }
+                wake = recovery_wake::wait(&mut respawn_rx, retry_at, maintenance_at) => {
+                    Some(PoolEvent::Recovery(wake))
+                }
                 // recv() returning None means all senders dropped (pool was torn down).
                 // Break cleanly instead of panicking.
                 r = result_rx.recv(), if pool_ready => match r {
@@ -3733,14 +3707,56 @@ async fn tokio_main() -> Result<()> {
                     }
                     None
                 }
-                _ = shutdown_rx.changed() => {
-                    tracing::info!("shutting down");
-                    break;
-                }
             }
         };
 
         match pool_event {
+            Some(PoolEvent::Recovery(wake)) => {
+                match wake {
+                    recovery_wake::RecoveryWake::Respawn(rr) => {
+                        crash_history[rr.index].respawn_in_flight = false;
+                        match rr.result {
+                            Ok((acp, protocol_version, agent_name)) => {
+                                let agent = OwnedAgent {
+                                    index: rr.index,
+                                    acp,
+                                    state: SessionState::default(),
+                                    model_capabilities: None,
+                                    desired_model: config.model.clone(),
+                                    model_overridden: false,
+                                    desired_model_request_id: None,
+                                    desired_model_pending_ack: false,
+                                    startup_effort: config.effort_level.clone(),
+                                    agent_name,
+                                    goose_system_prompt_supported: None,
+                                    protocol_version,
+                                };
+                                pool.return_agent(agent);
+                                tracing::info!(agent = rr.index, "respawn complete");
+                            }
+                            Err(e) => {
+                                crash_history[rr.index].mark_spawn_failed();
+                                tracing::warn!(
+                                    agent = rr.index,
+                                    "respawn failed: {e} — circuit re-opened"
+                                );
+                            }
+                        }
+                    }
+                    // Maintenance runs at the top of the next iteration.
+                    recovery_wake::RecoveryWake::Maintenance => continue,
+                    recovery_wake::RecoveryWake::Retry => {}
+                }
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
+                    typing_channels.insert(scope, thread_tags);
+                }
+            }
             Some(PoolEvent::Result(result)) => {
                 // Stop the typing indicator for the completed turn's exact scope,
                 // not the whole channel — a sibling thread still running in the
