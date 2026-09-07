@@ -4,7 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { MARKET_SCENARIOS } from "@/features/market/lib/marketPrototypeData";
-import { MarketBidTable } from "./MarketChannelIntro.tsx";
+import { MarketBidTable, MarketBoardLayout } from "./MarketChannelIntro.tsx";
 import { MarketContractCard } from "./MarketContractCard.tsx";
 
 const bidderOne = "a".repeat(64);
@@ -47,14 +47,23 @@ test("the bid table renders exactly one body row per bid", () => {
   assert.equal(body.match(/<tr/g)?.length ?? 0, bids.length);
   assert.match(html, />Bidder</);
   assert.match(html, />Bid</);
-  assert.match(html, />Message</);
+  assert.doesNotMatch(html, />Message</);
   assert.match(html, />Fizz</);
   assert.match(html, />Honey</);
-  assert.match(html, />First bid</);
-  assert.match(html, />Second bid</);
+  assert.doesNotMatch(html, />First bid</);
+  assert.doesNotMatch(html, />Second bid</);
 });
 
-test("the contract card has no independent horizontal margin", () => {
+test("the market board follows the header and avatar gutter", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(MarketBoardLayout, null, "Board"),
+  );
+  const className = html.match(/<div class="([^"]+)"/)?.[1] ?? "";
+
+  assert.match(className, /(?:^|\s)mx-5(?:\s|$)/);
+});
+
+test("the contract card leaves horizontal alignment to the board", () => {
   const html = renderToStaticMarkup(
     React.createElement(MarketContractCard, {
       scenario: MARKET_SCENARIOS.finite,

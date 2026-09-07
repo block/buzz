@@ -16,6 +16,13 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
+const MARKET_BOARD_GUTTER_CLASS = "mx-5";
+
+/** Aligns the market board with the channel header and timeline avatars. */
+export function MarketBoardLayout({ children }: { children: React.ReactNode }) {
+  return <div className={`${MARKET_BOARD_GUTTER_CLASS} mt-2`}>{children}</div>;
+}
+
 export function MarketBidTable({
   bids,
   onOpenBid,
@@ -27,17 +34,14 @@ export function MarketBidTable({
 }) {
   return (
     <div className="overflow-x-auto rounded-xl border border-border/70">
-      <table className="w-full min-w-[44rem] table-fixed border-collapse text-left text-sm">
+      <table className="w-full min-w-[28rem] table-fixed border-collapse text-left text-sm">
         <thead className="bg-muted/35 text-xs text-muted-foreground">
           <tr>
             <th className="w-[12rem] px-3 py-2 font-medium" scope="col">
               Bidder
             </th>
-            <th className="w-[10rem] px-3 py-2 font-medium" scope="col">
-              Bid
-            </th>
             <th className="px-3 py-2 font-medium" scope="col">
-              Message
+              Bid
             </th>
             <th className="w-[6.5rem] px-3 py-2 font-medium" scope="col">
               <span className="sr-only">Action</span>
@@ -69,9 +73,6 @@ export function MarketBidTable({
                     ? `${bid.amountSats} sats per unit`
                     : "Terms in thread"}
                   {` · ${bid.quantity} ${bid.quantity === 1 ? "unit" : "units"}`}
-                </td>
-                <td className="truncate px-3 py-2 text-muted-foreground">
-                  <span title={bid.message}>{bid.message}</span>
                 </td>
                 <td className="px-2 py-1 text-right">
                   <Button
@@ -140,13 +141,13 @@ export function MarketChannelIntro({
   if (!projection || isMarketProtocolMessage(anchorMessage)) return undefined;
   const visibleBids = marketBidsAfterAnchor(bids, anchorMessage);
   return (
-    <div className="mt-2">
+    <MarketBoardLayout>
       <MarketContractCard scenario={projection.scenario} />
       <BidList
         bids={visibleBids}
         channelId={projection.channelId}
         profiles={profiles}
       />
-    </div>
+    </MarketBoardLayout>
   );
 }
