@@ -283,6 +283,13 @@ mod tests {
     // cross-test races when the suite runs with multiple threads.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    // tracing's callsite Interest registry is process-global and sticky: once a
+    // callsite has been enabled by any subscriber in the process, that
+    // registration persists across thread-local `with_default` scopes. Serialize
+    // tests that install subscribers / assert callsite enablement so parallel
+    // `cargo test` cannot race the registry against this module's fixtures.
+    static CALLSITE_LOCK: Mutex<()> = Mutex::new(());
+
     // Helper: read service.name from the Resource's schema_url-independent KV list.
     fn service_name_from(resource: &Resource) -> Option<String> {
         resource
@@ -307,6 +314,7 @@ mod tests {
 
     #[test]
     fn trace_context_json_correlates_nested_span_logs() {
+        let _callsite_guard = CALLSITE_LOCK.lock().unwrap();
         let output = Arc::new(Mutex::new(Vec::new()));
         let output_writer = Arc::clone(&output);
         let exporter = InMemorySpanExporter::default();
@@ -474,6 +482,7 @@ mod tests {
 
     #[test]
     fn trace_context_lookup_does_not_enable_callsites() {
+        let _callsite_guard = CALLSITE_LOCK.lock().unwrap();
         let context_lookup = TraceContextLookup::default();
         let subscriber = tracing_subscriber::registry().with(
             context_lookup
