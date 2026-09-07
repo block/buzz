@@ -59,6 +59,25 @@ void exactMentionTests() {
     },
   );
 
+  testWidgets('unbound qualified text cannot notify a shorter member alias', (
+    tester,
+  ) async {
+    List<String>? sent;
+    await tester.pumpWidget(
+      _buildComposeBar(
+        uploadService: _testUploadService(nostr.Keys.generate().nsec),
+        members: [members().first],
+        onSend: (_, keys, {mediaTags = const []}) async => sent = keys,
+      ),
+    );
+    await _expandComposer(tester);
+    await tester.enterText(find.byType(TextField), '@Scout ($second)');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(LucideIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(sent, isEmpty);
+  });
+
   testWidgets('ambiguous typed names fail visibly without clearing the draft', (
     tester,
   ) async {

@@ -3,6 +3,23 @@ import 'package:buzz/features/channels/message_content.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('untagged qualifiers cannot become shorter clickable aliases', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: MessageContent(
+          content: '@Scout (${'b' * 64})',
+          mentionNames: {'a' * 64: 'Scout'},
+          onMentionTap: (_) => fail('unbound text is not a profile target'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Scout'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('namesake chips resolve exact tagged keys, not tag order', (
     tester,
   ) async {

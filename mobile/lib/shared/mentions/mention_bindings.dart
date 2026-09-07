@@ -29,8 +29,14 @@ List<({int start, int end, String label})> mentionOccurrences(
   final matches = <int, ({int start, int end, String label})>{};
   for (final label in labels) {
     if (label.isEmpty) continue;
+    // A qualifier and reservation suffix belong to the literal even when no
+    // candidate binds it. Never fall back to a shorter, different recipient.
+    final suffix =
+        RegExp(r' \([0-9a-f]{64}\)$', caseSensitive: false).hasMatch(label)
+        ? r'(?! (?:[2-9]|[1-9][0-9]+)(?=[\s,;.!?:)\]}*_]|$))'
+        : '';
     final pattern = RegExp(
-      '(?:^|\\s|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
+      '(?:^|\\s|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?! \\([0-9a-f]{64}\\))$suffix(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
       caseSensitive: false,
     );
     for (final match in pattern.allMatches(text)) {
@@ -70,12 +76,14 @@ Map<String, Set<String>> renderedMentionBindings(
   ).allMatches(content)) {
     final key = match.group(2)!.toLowerCase();
     final label = match.group(0)!.substring(1).toLowerCase();
-    if (!keys.contains(key) ||
-        !mentionOccurrences(content, [
-          label,
-        ]).any((range) => range.start == match.start)) {
+    if (!mentionOccurrences(content, [
+      label,
+    ]).any((range) => range.start == match.start)) {
       continue;
     }
+    // Untagged qualified literals are recognition blockers, not bindings.
+    bindings.putIfAbsent(label, () => <String>{});
+    if (!keys.contains(key)) continue;
     qualified.add((
       label: label,
       base: match.group(1)!.toLowerCase(),

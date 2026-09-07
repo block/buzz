@@ -23,6 +23,11 @@ void main() {
     );
     expect(mentionOccurrences('@A @B', ['A @B', 'B']).single.label, 'A @B');
     expect(mentionOccurrences('mail@Scout', ['Scout']), isEmpty);
+    expect(mentionOccurrences('@Scout ($second)', ['Scout']), isEmpty);
+    expect(
+      mentionOccurrences('@Scout ($second) 2', ['Scout ($second)']),
+      isEmpty,
+    );
   });
   test(
     'tagged qualified identity narrows a namesake independently of tag order',
@@ -49,7 +54,7 @@ void main() {
         renderedMentionBindings('@Scout ($second)', {
           first: 'Scout',
         })['scout ($second)'],
-        isNull,
+        isEmpty,
       );
       expect(
         renderedMentionBindings('@Old ($second)', {
