@@ -5,7 +5,7 @@ set -euo pipefail
 usage() {
   cat <<'TXT'
 Usage:
-  market-sandbox.sh create --actor NAME --title TEXT --summary TEXT [--direction offer|request] [--mechanism fixed|reverse-auction|tender] [--quantity N|unlimited] [--price N] [--budget N] [--decrement N] [--delivery-minutes N] [--closes-at UNIX]
+  market-sandbox.sh create --actor NAME --title TEXT --summary TEXT [--direction offer|request] [--mechanism fixed|auction|reverse-auction|tender] [--quantity N|unlimited] [--price N] [--budget N] [--increment N] [--decrement N] [--delivery-minutes N] [--closes-at UNIX]
   market-sandbox.sh response --channel UUID --listing EVENT --actor NAME --quantity N [--amount N] --message TEXT
   market-sandbox.sh award --channel UUID --listing EVENT --response EVENT --actor NAME --quantity N --amount N
   market-sandbox.sh fulfill --channel UUID --listing EVENT --award EVENT --actor NAME --message TEXT
@@ -28,7 +28,7 @@ if [[ "$command_name" == "-h" || "$command_name" == "--help" ]]; then usage; exi
 shift
 
 channel="" actor="" title="" summary="" direction="offer" mechanism="fixed"
-quantity="" price="" budget="" decrement="" delivery="" closes=""
+quantity="" price="" budget="" increment="" decrement="" delivery="" closes=""
 listing="" response="" award="" fulfillment="" amount="" message=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --quantity) quantity="${2:-}"; shift 2 ;;
     --price) price="${2:-}"; shift 2 ;;
     --budget) budget="${2:-}"; shift 2 ;;
+    --increment) increment="${2:-}"; shift 2 ;;
     --decrement) decrement="${2:-}"; shift 2 ;;
     --delivery-minutes) delivery="${2:-}"; shift 2 ;;
     --closes-at) closes="${2:-}"; shift 2 ;;
@@ -58,8 +59,8 @@ done
 listing_json() {
   jq -cn --arg actorName "$actor" --arg direction "$direction" --arg mechanism "$mechanism" \
     --arg title "$title" --arg summary "$summary" --arg quantity "$quantity" --arg price "$price" \
-    --arg budget "$budget" --arg decrement "$decrement" --arg delivery "$delivery" --arg closes "$closes" \
-    '{actorName:$actorName,direction:$direction,mechanism:$mechanism,title:$title,summary:$summary,quantity:(if $quantity=="unlimited" then "unlimited" else ($quantity|tonumber) end)} + (if $price!="" then {priceSats:($price|tonumber)} else {} end) + (if $budget!="" then {maxBudgetSats:($budget|tonumber)} else {} end) + (if $decrement!="" then {minimumDecrementSats:($decrement|tonumber)} else {} end) + (if $delivery!="" then {deliveryMinutes:($delivery|tonumber)} else {} end) + (if $closes!="" then {closesAt:($closes|tonumber)} else {} end)'
+    --arg budget "$budget" --arg increment "$increment" --arg decrement "$decrement" --arg delivery "$delivery" --arg closes "$closes" \
+    '{actorName:$actorName,direction:$direction,mechanism:$mechanism,title:$title,summary:$summary,quantity:(if $quantity=="unlimited" then "unlimited" else ($quantity|tonumber) end)} + (if $price!="" then {priceSats:($price|tonumber)} else {} end) + (if $budget!="" then {maxBudgetSats:($budget|tonumber)} else {} end) + (if $increment!="" then {minimumIncrementSats:($increment|tonumber)} else {} end) + (if $decrement!="" then {minimumDecrementSats:($decrement|tonumber)} else {} end) + (if $delivery!="" then {deliveryMinutes:($delivery|tonumber)} else {} end) + (if $closes!="" then {closesAt:($closes|tonumber)} else {} end)'
 }
 
 case "$command_name" in

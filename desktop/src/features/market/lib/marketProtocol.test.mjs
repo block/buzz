@@ -230,6 +230,108 @@ test("projectMarketChannel rejects cross-contract and unauthorized transitions",
   );
 });
 
+test("ascending auction accepts only minimum raises and awards the high bid after close", () => {
+  const auction = contract({
+    mechanism: "auction",
+    priceSats: 50,
+    minimumIncrementSats: 10,
+    closesAt: 200,
+  });
+  const secondBidId = "6".repeat(64);
+  const projection = projectMarketChannel(
+    [
+      note(LISTING_ID, SELLER, 100, auction),
+      note(
+        RESPONSE_ID,
+        BUYER,
+        101,
+        lifecycle("response", {
+          actorName: "Bidder One",
+          quantity: 1,
+          amountSats: 50,
+          message: "Opening bid.",
+        }),
+      ),
+      note(
+        "7".repeat(64),
+        "c".repeat(64),
+        102,
+        lifecycle("response", {
+          actorName: "Bidder Two",
+          quantity: 1,
+          amountSats: 55,
+          message: "Invalid small raise.",
+        }),
+      ),
+      note(
+        secondBidId,
+        "c".repeat(64),
+        103,
+        lifecycle("response", {
+          actorName: "Bidder Two",
+          quantity: 1,
+          amountSats: 60,
+          message: "Minimum valid raise.",
+        }),
+      ),
+      note(
+        "9".repeat(64),
+        SELLER,
+        104,
+        lifecycle("award", {
+          responseEventId: secondBidId,
+          actorName: "Seller Agent",
+          quantity: 1,
+          amountSats: 60,
+        }),
+      ),
+      note(
+        "8".repeat(64),
+        SELLER,
+        201,
+        lifecycle("award", {
+          responseEventId: RESPONSE_ID,
+          actorName: "Seller Agent",
+          quantity: 1,
+          amountSats: 50,
+        }),
+      ),
+      note(
+        AWARD_ID,
+        SELLER,
+        202,
+        lifecycle("award", {
+          responseEventId: secondBidId,
+          actorName: "Seller Agent",
+          quantity: 1,
+          amountSats: 60,
+        }),
+      ),
+    ],
+    CHANNEL_ID,
+  );
+
+  assert.ok(projection);
+  assert.equal(projection.scenario.mode, "Highest-bid auction");
+  assert.deepEqual(projection.scenario.liveMetrics[1], {
+    label: "Highest bid",
+    value: "60 sats",
+  });
+  assert.equal(projection.scenario.status, "Awarded");
+  assert.deepEqual(
+    projection.bids.map(({ amountSats }) => amountSats),
+    [50, 60],
+  );
+  assert.deepEqual(
+    projection.rejected.map(({ reason }) => reason),
+    [
+      "bid does not meet minimum increment",
+      "auction cannot be awarded before close",
+      "auction award must select highest bid",
+    ],
+  );
+});
+
 test("reverse auction enforces the minimum decrement", () => {
   const auction = contract({
     direction: "request",

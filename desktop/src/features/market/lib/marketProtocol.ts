@@ -27,7 +27,7 @@ const AnnouncementEnvelope = BaseEnvelope.extend({
   listing: z.object({
     actorName: ActorName,
     direction: z.enum(["offer", "request"]),
-    mechanism: z.enum(["fixed", "reverse-auction", "tender"]),
+    mechanism: z.enum(["fixed", "auction", "reverse-auction", "tender"]),
     title: z.string().min(1).max(160),
     summary: z.string().min(1).max(2_000),
     quantity: z.union([PositiveInteger, z.literal("unlimited")]),
@@ -36,6 +36,7 @@ const AnnouncementEnvelope = BaseEnvelope.extend({
     closesAt: PositiveInteger.optional(),
     deliveryMinutes: PositiveInteger.optional(),
     minimumDecrementSats: PositiveInteger.optional(),
+    minimumIncrementSats: PositiveInteger.optional(),
     imageUrl: z.string().url().max(500).optional(),
   }),
 });
@@ -139,7 +140,12 @@ function scenarioIdForListing(
   settled: boolean,
 ): MarketScenarioId {
   if (settled) return "awarded";
-  if (listing.mechanism === "reverse-auction") return "auction";
+  if (
+    listing.mechanism === "auction" ||
+    listing.mechanism === "reverse-auction"
+  ) {
+    return "auction";
+  }
   if (listing.mechanism === "tender") return "tender";
   return listing.quantity === "unlimited" ? "unlimited" : "finite";
 }
@@ -161,6 +167,9 @@ function listingPrice(listing: MarketListing): string {
   if (listing.mechanism === "fixed") {
     return `${listing.priceSats ?? 0} sats per unit`;
   }
+  if (listing.mechanism === "auction") {
+    return `Bidding starts at ${listing.priceSats ?? 0} sats`;
+  }
   if (listing.mechanism === "reverse-auction") {
     return `Maximum ${listing.maxBudgetSats ?? 0} sats`;
   }
@@ -176,8 +185,26 @@ function validateListing(listing: MarketListing): string | null {
   if (listing.mechanism === "fixed" && listing.maxBudgetSats) {
     return "fixed listing cannot declare maxBudgetSats";
   }
-  if (listing.mechanism !== "reverse-auction" && listing.minimumDecrementSats) {
+  if (listing.minimumDecrementSats && listing.mechanism !== "reverse-auction") {
     return "minimumDecrementSats is only valid for reverse auctions";
+  }
+  if (listing.minimumIncrementSats && listing.mechanism !== "auction") {
+    return "minimumIncrementSats is only valid for auctions";
+  }
+  if (listing.mechanism === "auction" && listing.direction !== "offer") {
+    return "auction listing must offer an item";
+  }
+  if (listing.mechanism === "auction" && listing.quantity !== 1) {
+    return "auction listing quantity must be one";
+  }
+  if (listing.mechanism === "auction" && !listing.priceSats) {
+    return "auction requires priceSats";
+  }
+  if (listing.mechanism === "auction" && !listing.closesAt) {
+    return "auction requires closesAt";
+  }
+  if (listing.mechanism === "auction" && listing.maxBudgetSats) {
+    return "auction cannot declare maxBudgetSats";
   }
   if (listing.mechanism === "reverse-auction" && !listing.maxBudgetSats) {
     return "reverse auction requires maxBudgetSats";
@@ -211,6 +238,17 @@ function responseIsValid(
     response.amountSats !== listing.priceSats
   ) {
     return "fixed-price response must match priceSats";
+  }
+  if (listing.mechanism === "auction") {
+    if (!response.amountSats) return "auction response requires amountSats";
+    const increment = listing.minimumIncrementSats ?? 1;
+    const minimumBid =
+      bestAuctionBid === null
+        ? (listing.priceSats ?? 0)
+        : bestAuctionBid + increment;
+    if (response.amountSats < minimumBid) {
+      return "bid does not meet minimum increment";
+    }
   }
   if (listing.mechanism === "reverse-auction") {
     if (!response.amountSats)
@@ -317,6 +355,7 @@ export function projectMarketChannel(
   const rejected: MarketProjection["rejected"] = [];
   let awardedQuantity = 0;
   let bestAuctionBid: number | null = null;
+  let winningAuctionResponseId: string | null = null;
 
   for (const entry of marketEvents) {
     const { envelope, note } = entry;
@@ -358,8 +397,12 @@ export function projectMarketChannel(
       }
       responses.set(note.id, { note, envelope });
       acceptedEventIds.add(note.id);
-      if (listing.listing.mechanism === "reverse-auction") {
+      if (
+        listing.listing.mechanism === "auction" ||
+        listing.listing.mechanism === "reverse-auction"
+      ) {
         bestAuctionBid = envelope.amountSats ?? bestAuctionBid;
+        winningAuctionResponseId = note.id;
       }
       continue;
     }
@@ -377,14 +420,21 @@ export function projectMarketChannel(
             ? "award references unknown response"
             : awards.has(envelope.responseEventId)
               ? "response already awarded"
-              : envelope.quantity > response.envelope.quantity
-                ? "award quantity exceeds response quantity"
-                : envelope.quantity > available
-                  ? "award quantity exceeds available quantity"
-                  : listing.listing.mechanism !== "tender" &&
-                      envelope.amountSats !== response.envelope.amountSats
-                    ? "award amount differs from response"
-                    : null;
+              : listing.listing.mechanism === "auction" &&
+                  envelope.responseEventId !== winningAuctionResponseId
+                ? "auction award must select highest bid"
+                : listing.listing.mechanism === "auction" &&
+                    listing.listing.closesAt &&
+                    note.createdAt <= listing.listing.closesAt
+                  ? "auction cannot be awarded before close"
+                  : envelope.quantity > response.envelope.quantity
+                    ? "award quantity exceeds response quantity"
+                    : envelope.quantity > available
+                      ? "award quantity exceeds available quantity"
+                      : listing.listing.mechanism !== "tender" &&
+                          envelope.amountSats !== response.envelope.amountSats
+                        ? "award amount differs from response"
+                        : null;
       if (reason) {
         rejected.push({ eventId: note.id, reason });
         continue;
@@ -477,6 +527,7 @@ export function projectMarketChannel(
           detail: envelope.message,
           state: "discussion",
           title:
+            listing.listing.mechanism === "auction" ||
             listing.listing.mechanism === "reverse-auction"
               ? "Bid submitted"
               : "Response submitted",
@@ -544,7 +595,14 @@ export function projectMarketChannel(
     ? "Fulfilled"
     : awards.size > 0
       ? "Awarded"
-      : "Open";
+      : listing.listing.closesAt &&
+          listing.listing.closesAt < Date.now() / 1_000
+        ? "Closed"
+        : "Open";
+  const auctionNextBid =
+    bestAuctionBid === null
+      ? (listing.listing.priceSats ?? 0)
+      : bestAuctionBid + (listing.listing.minimumIncrementSats ?? 1);
   let escrowedSats = 0;
   let settledSats = 0;
   for (const award of awards.values()) {
@@ -574,17 +632,21 @@ export function projectMarketChannel(
       mode:
         listing.listing.mechanism === "fixed"
           ? "Fixed price"
-          : listing.listing.mechanism === "reverse-auction"
-            ? "Reverse auction"
-            : "Qualitative tender",
+          : listing.listing.mechanism === "auction"
+            ? "Highest-bid auction"
+            : listing.listing.mechanism === "reverse-auction"
+              ? "Reverse auction"
+              : "Qualitative tender",
       status,
       statusDetail: `Channel state ${accepted.at(-1)?.note.id.slice(0, 8) ?? listingEventId.slice(0, 8)} · ${formatAt(accepted.at(-1)?.note.createdAt ?? listingEntry.note.createdAt)}`,
       closeAt,
       contractId: `${MARKET_PROTOCOL}:${channelId}:v${listing.version}`,
       primaryAction:
-        listing.listing.mechanism === "reverse-auction"
-          ? `Bid below ${bestAuctionBid ?? listing.listing.maxBudgetSats ?? 0} sats`
-          : `Respond for ${listing.listing.priceSats ?? listing.listing.maxBudgetSats ?? 0} sats`,
+        listing.listing.mechanism === "auction"
+          ? `Bid at least ${auctionNextBid} sats`
+          : listing.listing.mechanism === "reverse-auction"
+            ? `Bid below ${bestAuctionBid ?? listing.listing.maxBudgetSats ?? 0} sats`
+            : `Respond for ${listing.listing.priceSats ?? listing.listing.maxBudgetSats ?? 0} sats`,
       terms: [
         {
           label: directionLabel,
@@ -613,6 +675,17 @@ export function projectMarketChannel(
       ],
       liveMetrics: [
         { label: "Available", value: available },
+        ...(listing.listing.mechanism === "auction"
+          ? [
+              {
+                label: "Highest bid",
+                value:
+                  bestAuctionBid === null
+                    ? "No bids"
+                    : `${bestAuctionBid} sats`,
+              },
+            ]
+          : []),
         { label: "Responses", value: String(responses.size) },
         { label: "Awarded", value: String(awards.size) },
         {
