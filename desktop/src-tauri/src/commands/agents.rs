@@ -378,23 +378,25 @@ pub async fn create_managed_agent(
 
     // Negotiate identity custody before minting any key material. Existing
     // deploy-only providers retain the legacy Desktop-custodied path.
-    let provider_uses_registration =
-        if let BackendKind::Provider { ref config, ref id } = input.backend {
-            validate_provider_config(config)?;
-            resolve_provider_binary(id)?;
-            let uses_registration = provider_registration::uses_registration(id).await?;
-            let expected_custody = input.expected_key_custody.ok_or_else(|| {
-                "provider creation requires the key custody observed during provider selection"
-                    .to_string()
-            })?;
-            provider_registration::require_expected_custody(expected_custody, uses_registration)?;
-            uses_registration
-        } else {
-            if input.expected_key_custody.is_some() {
-                return Err("expectedKeyCustody is only valid for provider backends".to_string());
-            }
-            false
-        };
+    let provider_custody = if let BackendKind::Provider { ref config, ref id } = input.backend {
+        validate_provider_config(config)?;
+        resolve_provider_binary(id)?;
+        let uses_registration = provider_registration::uses_registration(id).await?;
+        Some(provider_registration::require_expected_custody(
+            input.expected_key_custody,
+            uses_registration,
+        )?)
+    } else {
+        if input.expected_key_custody.is_some() {
+            return Err("expectedKeyCustody is only valid for provider backends".to_string());
+        }
+        None
+    };
+    // The opaque token above is the compile-time binding between custody
+    // validation and the command's key-minting / registration side effects.
+    let provider_uses_registration = provider_custody
+        .as_ref()
+        .is_some_and(|custody| custody.uses_registration());
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {

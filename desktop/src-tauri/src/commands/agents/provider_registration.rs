@@ -32,20 +32,40 @@ pub(super) async fn uses_registration(provider_id: &str) -> Result<bool, String>
     }
 }
 
+/// Proof that the create command validated a freshly negotiated custody mode.
+///
+/// The field is private so callers cannot construct this token without passing
+/// through [`require_expected_custody`]. The create command must consume the
+/// token to choose its key-minting or provider-registration path, which binds
+/// the guard to that production side-effect boundary at compile time.
+#[must_use = "validated custody must select the agent creation path"]
+pub(super) struct ValidatedCustodyMode {
+    uses_registration: bool,
+}
+
+impl ValidatedCustodyMode {
+    pub(super) fn uses_registration(&self) -> bool {
+        self.uses_registration
+    }
+}
+
 /// Bind creation to the custody mode the user saw after the provider probe.
 /// A fresh negotiation may confirm that mode, but it must never silently
 /// switch paths after the UI has described which process receives the key.
 pub(super) fn require_expected_custody(
-    expected: AgentKeyCustody,
+    expected: Option<AgentKeyCustody>,
     uses_registration: bool,
-) -> Result<(), String> {
+) -> Result<ValidatedCustodyMode, String> {
+    let expected = expected.ok_or_else(|| {
+        "provider creation requires the key custody observed during provider selection".to_string()
+    })?;
     let negotiated = if uses_registration {
         AgentKeyCustody::Provider
     } else {
         AgentKeyCustody::Local
     };
     if negotiated == expected {
-        Ok(())
+        Ok(ValidatedCustodyMode { uses_registration })
     } else {
         Err(format!(
             "provider key custody changed after selection (expected {expected:?}, negotiated {negotiated:?}); select the provider again"
@@ -118,10 +138,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custody_assertion_fails_closed_when_negotiation_changes() {
-        assert!(require_expected_custody(AgentKeyCustody::Provider, true).is_ok());
-        assert!(require_expected_custody(AgentKeyCustody::Local, false).is_ok());
-        assert!(require_expected_custody(AgentKeyCustody::Provider, false).is_err());
-        assert!(require_expected_custody(AgentKeyCustody::Local, true).is_err());
+    fn custody_validation_returns_the_command_path_token_only_for_an_exact_match() {
+        assert!(
+            require_expected_custody(Some(AgentKeyCustody::Provider), true)
+                .unwrap()
+                .uses_registration()
+        );
+        assert!(
+            !require_expected_custody(Some(AgentKeyCustody::Local), false)
+                .unwrap()
+                .uses_registration()
+        );
+        assert!(require_expected_custody(Some(AgentKeyCustody::Provider), false).is_err());
+        assert!(require_expected_custody(Some(AgentKeyCustody::Local), true).is_err());
+        assert!(require_expected_custody(None, true).is_err());
     }
 }
