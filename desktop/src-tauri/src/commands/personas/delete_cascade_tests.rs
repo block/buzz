@@ -7,6 +7,29 @@
 //! in-memory data structures (no `AppHandle` required).
 
 use super::{collect_cascade_pubkeys, collect_remote_deployed, commit_cascade_agents};
+
+#[test]
+fn cascade_retention_failure_prevents_disk_removal() {
+    let mut agents: Vec<crate::managed_agents::ManagedAgentRecord> = serde_json::from_value(serde_json::json!([{
+        "pubkey": "local-key", "name": "Scout", "persona_id": "persona", "relay_url": "https://relay.example",
+        "acp_command": "buzz-acp", "agent_command": "goose", "agent_args": [], "mcp_command": "",
+        "turn_timeout_seconds": 320, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+    }])).unwrap();
+    let cascade = std::collections::HashSet::from(["local-key".to_string()]);
+    let saved = std::cell::Cell::new(false);
+    let result = commit_cascade_agents(
+        &mut agents,
+        &cascade,
+        |_| Err("retention unavailable".into()),
+        |_| {
+            saved.set(true);
+            Ok(())
+        },
+    );
+    assert_eq!(result, Err("retention unavailable".into()));
+    assert!(!saved.get());
+    assert_eq!(agents.len(), 1);
+}
 use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -154,9 +177,12 @@ fn failing_save_is_retry_safe() {
     ];
     let cascade: HashSet<String> = ["pk-a".to_string(), "pk-b".to_string()].into();
 
-    let result = commit_cascade_agents(&mut agents, &cascade, |_| {
-        Err("simulated disk failure".to_string())
-    });
+    let result = commit_cascade_agents(
+        &mut agents,
+        &cascade,
+        |_| Ok(()),
+        |_| Err("simulated disk failure".to_string()),
+    );
 
     assert!(
         result.is_err(),

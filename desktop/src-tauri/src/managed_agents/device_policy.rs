@@ -1,6 +1,7 @@
 //! Host/observer separation belongs to the device, never synchronized definitions.
 
 pub(crate) mod model;
+pub(crate) mod persona_names;
 pub(crate) mod sync;
 pub(crate) mod unique_names;
 use model::{active_policy, load_policy, DeviceAgentPolicy};
@@ -160,7 +161,9 @@ pub struct DeviceAgentPolicyStatus {
 
 /// Read this device's hosting setting without changing any agent definition.
 #[tauri::command]
-pub fn get_agent_device_policy(app: AppHandle) -> Result<DeviceAgentPolicyStatus, String> {
+pub fn get_agent_device_policy<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<DeviceAgentPolicyStatus, String> {
     let current = active(&app);
     let saved = load_policy(&managed_agents_base_dir(&app)?.join("agent-device-policy.json"));
     let load_error = current.as_ref().err().or(saved.as_ref().err()).cloned();
@@ -203,5 +206,9 @@ pub fn set_agent_device_policy(
     get_agent_device_policy(app)
 }
 
+#[cfg(test)]
+mod deletion_flush_tests;
+#[cfg(test)]
+mod discovery_commands_tests;
 #[cfg(test)]
 mod tests;

@@ -106,6 +106,17 @@ impl DeviceAgentPolicy {
     }
 }
 
+/// Apply device preferences to a non-hosting read. Execution and mutations must
+/// use the fallible active policy directly, never this presentation boundary.
+pub(crate) fn discovery_policy(policy: Result<DeviceAgentPolicy, String>) -> DeviceAgentPolicy {
+    // A damaged device preference must not take chat or Settings recovery away.
+    // Do not use the hosting-enabled historical default for the read projection.
+    policy.unwrap_or_else(|_| DeviceAgentPolicy {
+        client_only: true,
+        ..Default::default()
+    })
+}
+
 /// Read a bounded policy file. Only a missing file inherits the historical default.
 pub fn load_policy(path: &Path) -> Result<DeviceAgentPolicy, String> {
     let file = match std::fs::File::open(path) {
@@ -149,6 +160,19 @@ pub fn active_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_policy_keeps_discovery_open_but_local_availability_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::write(&path, "broken").unwrap();
+        let cache = OnceLock::new();
+        let policy = discovery_policy(active_policy(&cache, || load_policy(&path)).cloned());
+        assert!(policy.require_hosting().is_err());
+        assert!(policy.preferred_agents.is_empty());
+        assert!(policy.allows_identity("https://relay.example", Some("owner"), "Scout", "remote"));
+        assert!(active_policy(&cache, || Ok(DeviceAgentPolicy::default())).is_err());
+    }
 
     #[tokio::test]
     async fn local_configuration_edit_does_not_depend_on_an_online_name_directory() {

@@ -274,6 +274,12 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/archive/mod_tests.rs", 1, 0),
     // Selective-flush loopback receiver; production uses guarded boundary 1.
     ("src/managed_agents/persona_events.rs", 1, 0),
+    // Test-only deletion-recovery receiver; the real flush uses the same guard.
+    (
+        "src/managed_agents/device_policy/deletion_flush_tests.rs",
+        1,
+        0,
+    ),
     ("src/managed_agents/persona_events/tests.rs", 1, 0),
     ("src/commands/team_snapshot/tests.rs", 1, 0),
     // Mock-relay route in its in-file tests; production publish goes through

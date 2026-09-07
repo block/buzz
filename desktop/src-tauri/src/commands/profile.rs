@@ -262,14 +262,16 @@ fn build_user_search_filter(query: &str, limit: usize, page: u32) -> serde_json:
 }
 
 #[tauri::command]
-pub async fn search_users(
+pub async fn search_users<R: tauri::Runtime>(
     query: String,
     limit: Option<u32>,
     cursor: Option<String>,
     state: State<'_, AppState>,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
 ) -> Result<SearchUsersResponse, String> {
-    let policy = crate::managed_agents::device_policy::active(&app)?;
+    let policy = crate::managed_agents::device_policy::model::discovery_policy(
+        crate::managed_agents::device_policy::active(&app),
+    );
     let relay_url = crate::relay::relay_api_base_url_with_override(&state);
     let keys = state.signing_keys()?;
     let response = search_users_unfiltered(

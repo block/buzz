@@ -303,16 +303,18 @@ pub async fn flush_active_pending_events<R: tauri::Runtime>(
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
     let policy = super::device_policy::active(app)?;
     if policy.unique_names {
-        let mut keys = {
-            let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
-            super::device_policy::sync::registered(&conn)?
+        let keys = {
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|e| e.to_string())?;
+            crate::commands::local_keys_for_flush_at(
+                &scope.db_path,
+                &scope.owner_keys,
+                &super::storage::managed_agents_store_path(app)?,
+                &policy,
+            )?
         };
-        keys.retain(|key| {
-            !policy
-                .preferred_agents
-                .iter()
-                .any(|agent| agent.pubkey.eq_ignore_ascii_case(key))
-        });
         return flush_pending_events_selected(
             &scope.db_path,
             state,

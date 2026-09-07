@@ -168,7 +168,21 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
         .find(|persona| persona.id == input.id)
         .ok_or_else(|| format!("agent {} not found", input.id))?
         .display_name;
-    let existing_key = linked.first().map(|record| record.pubkey.as_str());
+    let policy = crate::managed_agents::device_policy::active(&app)?;
+    let existing_identity = crate::managed_agents::device_policy::persona_names::rename_identity(
+        &policy,
+        &input.id,
+        &current_name,
+        &input.display_name,
+        linked.iter().map(|record| {
+            (
+                record.name.as_str(),
+                record.pubkey.as_str(),
+                record.persona_id.as_deref(),
+            )
+        }),
+    )?;
+    let existing_key = existing_identity.as_deref();
     crate::managed_agents::device_policy::active(&app)?
         .check_name_update(
             &current_name,
@@ -212,6 +226,20 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .iter_mut()
                 .find(|record| record.id == input.id)
                 .ok_or_else(|| format!("agent {} not found", input.id))?;
+
+            crate::managed_agents::device_policy::persona_names::rename_identity(
+                &crate::managed_agents::device_policy::active(&app)?,
+                &input.id,
+                &persona.display_name,
+                &display_name,
+                load_managed_agents(&app)?.iter().map(|record| {
+                    (
+                        record.name.as_str(),
+                        record.pubkey.as_str(),
+                        record.persona_id.as_deref(),
+                    )
+                }),
+            )?;
 
             // Track what changed so we can propagate to linked agent records.
             let avatar_changed = persona.avatar_url != avatar_url;

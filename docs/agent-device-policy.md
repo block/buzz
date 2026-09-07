@@ -33,13 +33,19 @@ free a name. This is not an atomic cross-device reservation: simultaneous
 creation by another unconfigured client still requires relay-side coordination.
 Edits that keep the same name still enforce the protected-identity guards but
 do not require an online directory lookup; local credential, prompt and model
-configuration can therefore be saved while the relay is unavailable.
+configuration can therefore be saved while the relay is unavailable. A definition
+rename that would give multiple linked public keys the same new name is refused;
+rename those instances individually first. Pool-named instances keep their names.
 
 Unique-name mode keeps runnable definitions and team templates local, including
 their old pending backlog. Only lifecycle records for explicitly authored local
 identities are published: kind:30177, its deletion and its archive request. A
 durable key registry in the scoped retention database permits those operations
-to retry after deletion/restart without releasing unrelated queued events.
+to retry after deletion/restart without releasing unrelated queued events. Before
+selective publication, a surviving registered local identity head whose record
+has been removed from a valid on-disk store is retried as an atomic deletion and
+archive. Missing or malformed stores stop the flush rather than being treated as
+empty. Remote-only, unregistered heads are never inferred to be deletions.
 Public agent profiles and ownership policies remain visible to the other client
 for channel invitations and mentions. Individual agent imports are supported;
 team imports and catalog publication require unrestricted hosting.
@@ -88,7 +94,10 @@ preferences without deleting agents.
 
 The active policy, including read errors, is fixed for the process lifetime.
 The native boundary refuses execution on a malformed/unreadable policy; Settings
-can reset it to client-only mode and apply that recovery after restart. A missing
+shows the policy error and can reset it to client-only mode after restart.
+People search, relay-agent discovery, and definition listing remain available
+without preference filtering; definitions are displayed inactive without saving
+that activation projection. A missing
 file preserves existing hosting behavior. The file is bounded to 64 KiB and
 written atomically with restricted permissions.
 

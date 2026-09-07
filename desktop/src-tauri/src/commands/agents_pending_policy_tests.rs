@@ -23,6 +23,74 @@ fn policy() -> DeviceAgentPolicy {
 }
 
 #[test]
+fn selective_flush_recovers_failed_tombstone_after_disk_removal() {
+    use crate::managed_agents::retention::get_retained_event;
+    use nostr::JsonUtil;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retention.db");
+    let store = dir.path().join("managed-agents.json");
+    let keys = nostr::Keys::generate();
+    let mut record = record();
+    record.persona_id = Some("definition-before-delete".into());
+    let conn = open_retention_db(&path).unwrap();
+    let mut records = vec![record.clone()];
+    std::fs::write(&store, serde_json::to_vec(&records).unwrap()).unwrap();
+    super::super::run_managed_agent_deletion(
+        dir.path(),
+        &record.pubkey,
+        &mut records,
+        |record| retain_managed_agent_with_policy(&conn, &keys, record, &policy()),
+        |records| {
+            records.clear();
+            std::fs::write(&store, serde_json::to_vec(records).unwrap()).map_err(|e| e.to_string())
+        },
+    )
+    .unwrap();
+    // Fail AFTER the actual production deletion seam removes the disk record.
+    conn.execute_batch("CREATE TRIGGER deny_archive BEFORE INSERT ON persona_events WHEN NEW.kind = 9035 BEGIN SELECT RAISE(ABORT, 'archive blocked'); END;").unwrap();
+    assert!(tombstone_managed_agent_at(&path, &keys, &record.pubkey).is_err());
+    conn.execute_batch("DROP TRIGGER deny_archive").unwrap();
+    drop(conn);
+    // Reopen through the same recovery boundary used before selective publish.
+    let registered = local_keys_for_flush_at(&path, &keys, &store, &policy()).unwrap();
+    let conn = open_retention_db(&path).unwrap();
+    let pending = get_pending_sync(&conn).unwrap();
+    assert!(
+        get_retained_event(&conn, 30177, &keys.public_key().to_hex(), &record.pubkey)
+            .unwrap()
+            .is_none(),
+        "deleted head must not be republished"
+    );
+    let mut kinds: Vec<_> = pending.iter().map(|row| row.kind).collect();
+    kinds.sort();
+    assert_eq!(kinds, vec![5, 9035]);
+    for row in &pending {
+        assert!(sync::allows_coordinate(&registered, row.kind, &row.d_tag));
+        nostr::Event::from_json(&row.raw_event)
+            .unwrap()
+            .verify()
+            .unwrap();
+    }
+    assert!(pending
+        .iter()
+        .find(|row| row.kind == 9035)
+        .unwrap()
+        .content
+        .contains("definition-before-delete"));
+    let before: Vec<_> = pending.iter().map(|row| row.raw_event.clone()).collect();
+    local_keys_for_flush_at(&path, &keys, &store, &policy()).unwrap();
+    assert_eq!(
+        get_pending_sync(&conn)
+            .unwrap()
+            .iter()
+            .map(|row| row.raw_event.clone())
+            .collect::<Vec<_>>(),
+        before,
+        "successful deletes must not be re-enqueued on every restart"
+    );
+}
+
+#[test]
 fn deleting_preexisting_local_identity_leaves_both_effects_eligible_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("retention.db");
@@ -62,6 +130,55 @@ fn deleting_preexisting_local_identity_leaves_both_effects_eligible_after_reopen
         9035,
         "unrelated-old-identity"
     ));
+}
+
+#[test]
+fn recovery_never_infers_deletion_from_missing_or_corrupt_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retention.db");
+    let store = dir.path().join("managed-agents.json");
+    let keys = nostr::Keys::generate();
+    let record = record();
+    let conn = open_retention_db(&path).unwrap();
+    retain_managed_agent_with_policy(&conn, &keys, &record, &policy()).unwrap();
+    assert!(local_keys_for_flush_at(&path, &keys, &store, &policy()).is_err());
+    for bytes in ["broken", "null", "{}", "[{\"pubkey\":42}]"] {
+        std::fs::write(&store, bytes).unwrap();
+        assert!(local_keys_for_flush_at(&path, &keys, &store, &policy()).is_err());
+        assert_eq!(get_pending_sync(&conn).unwrap().len(), 1);
+        assert_eq!(get_pending_sync(&conn).unwrap()[0].kind, 30177);
+    }
+}
+
+#[test]
+fn recovery_leaves_live_remote_only_and_protected_heads_untouched() {
+    use crate::managed_agents::reconcile::retain_agent_record;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retention.db");
+    let store = dir.path().join("managed-agents.json");
+    let keys = nostr::Keys::generate();
+    let live = record();
+    let remote = record();
+    let protected = record();
+    let conn = open_retention_db(&path).unwrap();
+    retain_managed_agent_with_policy(&conn, &keys, &live, &policy()).unwrap();
+    retain_managed_agent_with_policy(&conn, &keys, &protected, &policy()).unwrap();
+    retain_agent_record(&conn, &keys, &remote).unwrap();
+    std::fs::write(&store, serde_json::to_vec(&[live]).unwrap()).unwrap();
+    let mut policy = policy();
+    policy.preferred_agents.push(
+        crate::managed_agents::device_policy::model::PreferredAgent {
+            relay_url: "https://relay.example".into(),
+            owner_pubkey: keys.public_key().to_hex(),
+            name: "protected".into(),
+            pubkey: protected.pubkey,
+            persona_id: None,
+        },
+    );
+    local_keys_for_flush_at(&path, &keys, &store, &policy).unwrap();
+    let pending = get_pending_sync(&conn).unwrap();
+    assert_eq!(pending.len(), 3);
+    assert!(pending.iter().all(|row| row.kind == 30177));
 }
 
 #[test]

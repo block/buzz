@@ -65,6 +65,71 @@ fn retain_managed_agent_with_policy(
     transaction.commit().map_err(|e| e.to_string())
 }
 
+/// Prepare the selective publisher's local identity set while the caller holds
+/// the agent store lock. The current store path is explicit for isolated tests.
+pub(crate) fn local_keys_for_flush_at(
+    db_path: &std::path::Path,
+    owner_keys: &nostr::Keys,
+    store_path: &std::path::Path,
+    policy: &crate::managed_agents::device_policy::model::DeviceAgentPolicy,
+) -> Result<std::collections::HashSet<String>, String> {
+    use crate::managed_agents::{
+        agent_events::managed_agent_content_from_event,
+        retention::{get_retained_event, open_retention_db},
+    };
+    use nostr::JsonUtil;
+    let conn = open_retention_db(db_path)?;
+    let mut keys = crate::managed_agents::device_policy::sync::registered(&conn)?;
+    keys.retain(|key| {
+        !policy
+            .preferred_agents
+            .iter()
+            .any(|agent| agent.pubkey.eq_ignore_ascii_case(key))
+    });
+    if keys.is_empty() {
+        return Ok(keys);
+    }
+    // No hydration, migration, or missing/corrupt-store => empty fallback here:
+    // absence is destructive evidence only after a successful strict disk read.
+    let bytes = std::fs::read(store_path)
+        .map_err(|e| format!("Cannot read agent store for deletion recovery: {e}"))?;
+    let records: Vec<ManagedAgentRecord> = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Cannot parse agent store for deletion recovery: {e}"))?;
+    let owner = owner_keys.public_key().to_hex();
+    for key in &keys {
+        if records
+            .iter()
+            .any(|record| record.pubkey.eq_ignore_ascii_case(key))
+        {
+            continue;
+        }
+        // Registration alone is not deletion intent: completed deletes remain
+        // registered. Only a surviving head can witness an interrupted delete.
+        let Some(head) = get_retained_event(&conn, 30177, &owner, key)? else {
+            continue;
+        };
+        let event = nostr::Event::from_json(&head.raw_event).map_err(|e| e.to_string())?;
+        event.verify().map_err(|e| e.to_string())?;
+        if event.pubkey != owner_keys.public_key()
+            || event.kind.as_u16() != 30177
+            || event.tags.identifier() != Some(key.as_str())
+        {
+            return Err("Invalid local agent deletion-recovery witness".into());
+        }
+        let content = managed_agent_content_from_event(&event)?;
+        if policy
+            .require_local_agent(&content.name, Some(key), content.persona_id.as_deref())
+            .is_err()
+        {
+            continue;
+        }
+        // Reuses the atomic kind:5 + kind:9035 transaction and its monotonic
+        // timestamp. Any failure aborts this flush before the old head can send.
+        tombstone_managed_agent_at(db_path, owner_keys, key)?;
+    }
+    Ok(keys)
+}
+
 /// Purge a deleted agent's pending row and enqueue a NIP-09 tombstone, both
 /// inside the `managed_agents_store_lock`-held delete body and NEVER across an
 /// `.await`.
@@ -105,9 +170,10 @@ pub(crate) fn tombstone_managed_agent_pending(
 /// NOT the deleted record. Unlike personas/teams, managed agents are NOT
 /// re-enqueued by the boot deletion sweep ([`crate::event_sync`]) — a retained
 /// 30177 head with no local record is the normal cross-device state, so a crash
-/// after the disk-authoritative record is removed but before this
-/// tombstone+archive transaction commits leaves agent deletion-retry a
-/// pre-existing gap owned by this direct delete path alone.
+/// after the disk-authoritative record is removed but before this transaction
+/// commits needs explicit local provenance. In unique-name mode both delete
+/// callers retain/register before removal, and `local_keys_for_flush_at` retries
+/// their surviving heads before publication. Unrestricted mode stays best-effort.
 pub(crate) fn tombstone_managed_agent_at(
     db_path: &std::path::Path,
     keys: &nostr::Keys,
