@@ -93,6 +93,33 @@ export function encodeTerminalKey(event: {
   return null;
 }
 
+export type TerminalPastePlatform = "linux" | "mac" | "windows";
+
+/**
+ * Keep the platform's paste chords out of `encodeTerminalKey` so the focused
+ * textarea can emit its synchronous `paste` event. In particular, Windows
+ * treats both Ctrl+V and Ctrl+Shift+V as paste; encoding them first would turn
+ * them into the control byte ^V and `preventDefault()` the clipboard event.
+ * Linux retains the shell's traditional Ctrl+V quote-next byte and reserves
+ * Ctrl+Shift+V for paste.
+ */
+export function isTerminalPasteChord(
+  event: {
+    altKey: boolean;
+    code: string;
+    ctrlKey: boolean;
+    key: string;
+    metaKey: boolean;
+    shiftKey: boolean;
+  },
+  platform: TerminalPastePlatform,
+): boolean {
+  if (event.altKey || event.key.toLowerCase() !== "v") return false;
+  if (platform === "mac") return event.metaKey && !event.ctrlKey;
+  if (!event.ctrlKey || event.metaKey) return false;
+  return platform === "windows" || event.shiftKey;
+}
+
 export type TabChord = "close" | "new" | "next" | "previous";
 
 /**
