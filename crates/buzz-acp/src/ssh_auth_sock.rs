@@ -43,6 +43,9 @@ pub(crate) fn safe_ssh_auth_sock_parent(socket: &Path, home: Option<&Path>) -> O
         );
         return None;
     }
+    if !ssh_auth_sock_parent_metadata_is_safe(&canonical_parent) {
+        return None;
+    }
     if !ssh_auth_sock_parent_contains_only_socket(&canonical_parent, socket) {
         return None;
     }
@@ -161,6 +164,51 @@ fn ssh_auth_sock_parent_contains_only_socket(parent: &Path, socket: &Path) -> bo
     saw_socket
 }
 
+#[cfg(unix)]
+fn ssh_auth_sock_parent_metadata_is_safe(parent: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = match std::fs::metadata(parent) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %error,
+                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent metadata is not readable"
+            );
+            return false;
+        }
+    };
+
+    let current_uid = nix::unistd::Uid::current().as_raw();
+    if metadata.uid() != current_uid {
+        tracing::warn!(
+            path = %parent.display(),
+            owner_uid = metadata.uid(),
+            current_uid,
+            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent owner is not current user"
+        );
+        return false;
+    }
+
+    let mode = metadata.mode() & 0o777;
+    if mode & 0o022 != 0 {
+        tracing::warn!(
+            path = %parent.display(),
+            mode = format_args!("{mode:o}"),
+            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent is group- or world-writable"
+        );
+        return false;
+    }
+
+    true
+}
+
+#[cfg(not(unix))]
+fn ssh_auth_sock_parent_metadata_is_safe(_parent: &Path) -> bool {
+    true
+}
+
 fn ssh_auth_sock_entry_is_socket(entry: &std::fs::DirEntry) -> bool {
     match entry.file_type() {
         Ok(file_type) if ssh_auth_sock_file_type_matches(&file_type) => true,
@@ -222,7 +270,7 @@ fn paths_equal_lexically(a: &Path, b: &Path) -> bool {
     normalize_path_lexically(a) == normalize_path_lexically(b)
 }
 
-fn normalize_path_lexically(path: &Path) -> PathBuf {
+pub(crate) fn normalize_path_lexically(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -234,4 +282,197 @@ fn normalize_path_lexically(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "buzz-acp-ssh-auth-sock-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ))
+    }
+
+    fn test_ssh_dir(name: &str) -> PathBuf {
+        PathBuf::from("/tmp").join(format!(
+            "ssh-buzz-acp-ssh-auth-sock-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ))
+    }
+
+    fn test_unrecognized_socket_dir() -> PathBuf {
+        PathBuf::from("/tmp").join(format!("bacp-{}", Uuid::new_v4().simple()))
+    }
+
+    fn create_test_dir(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_test_ssh_socket(socket: &Path) {
+        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        drop(listener);
+    }
+
+    #[cfg(not(unix))]
+    fn create_test_ssh_socket(socket: &Path) {
+        std::fs::write(socket, "").unwrap();
+    }
+
+    #[test]
+    fn includes_safe_ssh_socket_parent() {
+        let home = test_dir("safe-home");
+        let socket_dir = test_ssh_dir("safe");
+        create_test_dir(&home);
+        create_test_dir(&socket_dir);
+        let socket = socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+
+        let parent = safe_ssh_auth_sock_parent(&socket, Some(&home))
+            .expect("safe socket parent should be allowed");
+        let expected = socket_dir.canonicalize().unwrap().display().to_string();
+        assert_eq!(parent, expected);
+
+        std::fs::remove_dir_all(&socket_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uses_canonical_ssh_socket_parent() {
+        let home = test_dir("canonical-home");
+        let real_socket_dir = test_ssh_dir("canonical-real");
+        let link_socket_dir = test_ssh_dir("canonical-link");
+        create_test_dir(&home);
+        create_test_dir(&real_socket_dir);
+        std::os::unix::fs::symlink(&real_socket_dir, &link_socket_dir).unwrap();
+        let socket = link_socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+
+        let parent = safe_ssh_auth_sock_parent(&socket, Some(&home))
+            .expect("safe symlinked socket parent should be allowed");
+        let expected = real_socket_dir
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string();
+        assert_eq!(parent, expected);
+
+        std::fs::remove_file(&link_socket_dir).ok();
+        std::fs::remove_dir_all(&real_socket_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn omits_ssh_socket_parent_with_unrecognized_canonical_shape() {
+        let home = test_dir("canonical-shape-home");
+        let real_socket_dir = test_unrecognized_socket_dir();
+        let link_socket_dir =
+            PathBuf::from("/tmp").join(format!("ssh-bacp-{}", Uuid::new_v4().simple()));
+        create_test_dir(&home);
+        create_test_dir(&real_socket_dir);
+        std::os::unix::fs::symlink(&real_socket_dir, &link_socket_dir).unwrap();
+        let socket = link_socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+
+        assert_eq!(safe_ssh_auth_sock_parent(&socket, Some(&home)), None);
+
+        std::fs::remove_file(&link_socket_dir).ok();
+        std::fs::remove_dir_all(&real_socket_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn omits_broad_ssh_socket_parent() {
+        let home = test_dir("broad-home");
+        create_test_dir(&home);
+
+        assert_eq!(
+            safe_ssh_auth_sock_parent(&home.join("agent.sock"), Some(&home)),
+            None
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn omits_home_ssh_socket_parent() {
+        let home = test_dir("ssh-home");
+        let ssh_dir = home.join(".ssh");
+        create_test_dir(&ssh_dir);
+
+        assert_eq!(
+            safe_ssh_auth_sock_parent(&ssh_dir.join("agent.sock"), Some(&home)),
+            None
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn omits_ssh_socket_parent_with_extra_entries() {
+        let home = test_dir("extra-home");
+        let socket_dir = test_ssh_dir("extra");
+        create_test_dir(&home);
+        create_test_dir(&socket_dir);
+        let socket = socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+        std::fs::write(socket_dir.join("other"), "").unwrap();
+
+        assert_eq!(safe_ssh_auth_sock_parent(&socket, Some(&home)), None);
+
+        std::fs::remove_dir_all(&socket_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn omits_ssh_socket_parent_with_unrecognized_path_shape() {
+        let home = test_dir("shape-home");
+        let socket_dir = test_unrecognized_socket_dir();
+        create_test_dir(&home);
+        create_test_dir(&socket_dir);
+        let socket = socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+
+        assert_eq!(safe_ssh_auth_sock_parent(&socket, Some(&home)), None);
+
+        std::fs::remove_dir_all(&socket_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn omits_group_writable_ssh_socket_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = test_dir("mode-home");
+        let socket_dir = test_ssh_dir("mode");
+        create_test_dir(&home);
+        create_test_dir(&socket_dir);
+        let socket = socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+
+        let mut permissions = std::fs::metadata(&socket_dir).unwrap().permissions();
+        permissions.set_mode(0o770);
+        std::fs::set_permissions(&socket_dir, permissions).unwrap();
+
+        assert_eq!(safe_ssh_auth_sock_parent(&socket, Some(&home)), None);
+
+        std::fs::remove_dir_all(&socket_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
 }

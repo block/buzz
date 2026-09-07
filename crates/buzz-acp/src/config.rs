@@ -576,12 +576,6 @@ pub struct Config {
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
-    /// Buzz-generated `CODEX_CONFIG` from `codex_network_env()`. `AcpClient::spawn`
-    /// merges this explicit generated value with persona and parent `CODEX_CONFIG`
-    /// values, then forces the generated sandbox requirements back into the result.
-    /// When `None` (non-Codex agents or rejected relay URL), any persona-supplied
-    /// `CODEX_CONFIG` is handled with ordinary operator-wins semantics.
-    pub generated_codex_config: Option<String>,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
@@ -1124,12 +1118,6 @@ impl Config {
         let persona_env_vars = Vec::new();
         let model = args.model;
 
-        // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
-        // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
-        // for non-Codex agents or unparseable relay URLs.
-        let generated_codex_config =
-            codex_network_env(&agent_command, &args.relay_url).map(|(_, value)| value);
-
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
         let config = Config {
@@ -1176,7 +1164,6 @@ impl Config {
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
-            generated_codex_config,
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
@@ -1549,7 +1536,6 @@ mod tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
-            generated_codex_config: None,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
@@ -1759,37 +1745,6 @@ mod tests {
         codex_network_env_with_env(agent_command, relay_url, None, None)
     }
 
-    fn codex_test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "buzz-acp-codex-config-{name}-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ))
-    }
-
-    fn codex_test_ssh_dir(name: &str) -> PathBuf {
-        PathBuf::from("/tmp").join(format!(
-            "ssh-buzz-acp-codex-config-{name}-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ))
-    }
-
-    fn codex_test_unrecognized_socket_dir() -> PathBuf {
-        PathBuf::from("/tmp").join(format!("bacp-{}", Uuid::new_v4().simple()))
-    }
-
-    #[cfg(unix)]
-    fn create_test_ssh_socket(socket: &Path) {
-        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
-        drop(listener);
-    }
-
-    #[cfg(not(unix))]
-    fn create_test_ssh_socket(socket: &Path) {
-        std::fs::write(socket, "").unwrap();
-    }
-
     #[test]
     fn codex_network_env_wss_url() {
         let result =
@@ -1873,203 +1828,6 @@ mod tests {
             val.contains("\"network_access\":true"),
             "JSON must set network_access=true"
         );
-    }
-
-    #[test]
-    fn codex_network_env_includes_safe_ssh_socket_parent() {
-        let home = codex_test_dir("safe-home");
-        let socket_dir = codex_test_ssh_dir("safe");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&socket_dir).unwrap();
-        let socket = socket_dir.join("agent.sock");
-        create_test_ssh_socket(&socket);
-
-        let (_, value) = codex_network_env_with_env(
-            "codex-acp",
-            "wss://relay.example.com",
-            Some(socket.as_os_str()),
-            Some(&home),
-        )
-        .expect("valid Codex runtime should receive generated config");
-        let json: serde_json::Value =
-            serde_json::from_str(&value).expect("generated config must be valid JSON");
-        let socket_dir = socket_dir.canonicalize().unwrap().display().to_string();
-
-        assert_eq!(json["sandbox_workspace_write"]["network_access"], true);
-        assert!(json["sandbox_workspace_write"]
-            .get("writable_roots")
-            .is_none());
-        assert_eq!(
-            json["network"]["allow_unix_sockets"],
-            serde_json::json!([socket_dir])
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn codex_network_env_uses_canonical_ssh_socket_parent() {
-        let home = codex_test_dir("canonical-home");
-        let real_socket_dir = codex_test_ssh_dir("canonical-real");
-        let link_socket_dir = codex_test_ssh_dir("canonical-link");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&real_socket_dir).unwrap();
-        std::os::unix::fs::symlink(&real_socket_dir, &link_socket_dir).unwrap();
-        let socket = link_socket_dir.join("agent.sock");
-        create_test_ssh_socket(&socket);
-
-        let (_, value) = codex_network_env_with_env(
-            "codex-acp",
-            "wss://relay.example.com",
-            Some(socket.as_os_str()),
-            Some(&home),
-        )
-        .expect("valid Codex runtime should receive generated config");
-        let json: serde_json::Value =
-            serde_json::from_str(&value).expect("generated config must be valid JSON");
-        let real_socket_dir = real_socket_dir
-            .canonicalize()
-            .unwrap()
-            .display()
-            .to_string();
-
-        assert!(json["sandbox_workspace_write"]
-            .get("writable_roots")
-            .is_none());
-        assert_eq!(
-            json["network"]["allow_unix_sockets"],
-            serde_json::json!([real_socket_dir])
-        );
-
-        std::fs::remove_file(&link_socket_dir).ok();
-        std::fs::remove_dir_all(&real_socket_dir).ok();
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn codex_network_env_omits_ssh_socket_parent_with_unrecognized_canonical_shape() {
-        let home = codex_test_dir("canonical-shape-home");
-        let real_socket_dir = codex_test_unrecognized_socket_dir();
-        let link_socket_dir =
-            PathBuf::from("/tmp").join(format!("ssh-bacp-{}", Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&real_socket_dir).unwrap();
-        std::os::unix::fs::symlink(&real_socket_dir, &link_socket_dir).unwrap();
-        let socket = link_socket_dir.join("agent.sock");
-        create_test_ssh_socket(&socket);
-
-        let (_, value) = codex_network_env_with_env(
-            "codex-acp",
-            "wss://relay.example.com",
-            Some(socket.as_os_str()),
-            Some(&home),
-        )
-        .expect("valid Codex runtime should receive generated config");
-        let json: serde_json::Value =
-            serde_json::from_str(&value).expect("generated config must be valid JSON");
-
-        assert!(json["sandbox_workspace_write"]
-            .get("writable_roots")
-            .is_none());
-        assert!(json.get("network").is_none());
-
-        std::fs::remove_file(&link_socket_dir).ok();
-        std::fs::remove_dir_all(&real_socket_dir).ok();
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    #[test]
-    fn codex_network_env_omits_broad_ssh_socket_parent() {
-        let home = codex_test_dir("broad-home");
-        std::fs::create_dir_all(&home).unwrap();
-
-        let (_, value) = codex_network_env_with_env(
-            "codex-acp",
-            "wss://relay.example.com",
-            Some(home.join("agent.sock").as_os_str()),
-            Some(&home),
-        )
-        .expect("valid Codex runtime should receive generated config");
-        let json: serde_json::Value =
-            serde_json::from_str(&value).expect("generated config must be valid JSON");
-
-        assert!(json["sandbox_workspace_write"]
-            .get("writable_roots")
-            .is_none());
-        assert!(json.get("network").is_none());
-    }
-
-    #[test]
-    fn codex_network_env_omits_home_ssh_socket_parent() {
-        let home = codex_test_dir("ssh-home");
-        let ssh_dir = home.join(".ssh");
-        std::fs::create_dir_all(&ssh_dir).unwrap();
-
-        let (_, value) = codex_network_env_with_env(
-            "codex-acp",
-            "wss://relay.example.com",
-            Some(ssh_dir.join("agent.sock").as_os_str()),
-            Some(&home),
-        )
-        .expect("valid Codex runtime should receive generated config");
-        let json: serde_json::Value =
-            serde_json::from_str(&value).expect("generated config must be valid JSON");
-
-        assert!(json["sandbox_workspace_write"]
-            .get("writable_roots")
-            .is_none());
-        assert!(json.get("network").is_none());
-    }
-
-    #[test]
-    fn codex_network_env_omits_ssh_socket_parent_with_extra_entries() {
-        let home = codex_test_dir("extra-home");
-        let socket_dir = codex_test_ssh_dir("extra");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&socket_dir).unwrap();
-        let socket = socket_dir.join("agent.sock");
-        create_test_ssh_socket(&socket);
-        std::fs::write(socket_dir.join("other"), "").unwrap();
-
-        let (_, value) = codex_network_env_with_env(
-            "codex-acp",
-            "wss://relay.example.com",
-            Some(socket.as_os_str()),
-            Some(&home),
-        )
-        .expect("valid Codex runtime should receive generated config");
-        let json: serde_json::Value =
-            serde_json::from_str(&value).expect("generated config must be valid JSON");
-
-        assert!(json["sandbox_workspace_write"]
-            .get("writable_roots")
-            .is_none());
-        assert!(json.get("network").is_none());
-    }
-
-    #[test]
-    fn codex_network_env_omits_ssh_socket_parent_with_unrecognized_path_shape() {
-        let home = codex_test_dir("shape-home");
-        let socket_dir = codex_test_unrecognized_socket_dir();
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&socket_dir).unwrap();
-        let socket = socket_dir.join("agent.sock");
-        create_test_ssh_socket(&socket);
-
-        let (_, value) = codex_network_env_with_env(
-            "codex-acp",
-            "wss://relay.example.com",
-            Some(socket.as_os_str()),
-            Some(&home),
-        )
-        .expect("valid Codex runtime should receive generated config");
-        let json: serde_json::Value =
-            serde_json::from_str(&value).expect("generated config must be valid JSON");
-
-        assert!(json["sandbox_workspace_write"]
-            .get("writable_roots")
-            .is_none());
-        assert!(json.get("network").is_none());
     }
 
     #[test]

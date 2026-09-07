@@ -9,7 +9,7 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
@@ -17,6 +17,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
+use crate::ssh_auth_sock::normalize_path_lexically;
 use crate::usage::{
     PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
 };
@@ -262,10 +263,9 @@ fn deep_merge(
 ///    deep-merged into the result (parent wins on colliding keys at every nesting level;
 ///    unrelated keys from either side survive).
 /// 4. **Generated floor** — generated Codex sandbox requirements are applied
-///    last: `sandbox_workspace_write.network_access = true`, plus any
-///    generated `sandbox_workspace_write.writable_roots` and
+///    last: `sandbox_workspace_write.network_access = true`, plus any generated
 ///    `network.allow_unix_sockets` entries. Parent/persona entries outside that
-///    generated floor are preserved.
+///    floor are preserved.
 ///
 /// When `generated_codex_config` is `None`, the function returns `None` and the
 /// caller handles any persona-supplied `CODEX_CONFIG` with ordinary
@@ -274,9 +274,9 @@ fn deep_merge(
 /// # Errors
 ///
 /// Returns `Err(AcpError::Protocol)` when `generated_codex_config` is `Some`
-/// and any `CODEX_CONFIG` value is not valid JSON or is not a JSON object, or when
-/// `sandbox_workspace_write` is present but not an object after all merges, or
-/// when a forced string-array field has an incompatible shape.
+/// and any `CODEX_CONFIG` value is not valid JSON or is not a JSON object, or
+/// when `sandbox_workspace_write` or `network.allow_unix_sockets` has an
+/// incompatible shape.
 pub(crate) fn build_codex_config_env(
     extra_env: &[(String, String)],
     parent_codex_config: Option<&str>,
@@ -301,16 +301,8 @@ pub(crate) fn build_codex_config_env(
     for raw in codex_entries {
         parsed_entries.push(parse_codex_config_object(raw, "persona")?);
     }
-    let generated = parse_codex_config_object(generated_raw, "generated")?;
-
-    let generated_writable_roots = nested_string_array(
-        &generated,
-        "sandbox_workspace_write",
-        "writable_roots",
-        "generated",
-    )?;
-    let generated_unix_sockets =
-        nested_string_array(&generated, "network", "allow_unix_sockets", "generated")?;
+    let mut generated = parse_codex_config_object(generated_raw, "generated")?;
+    let generated_unix_sockets = take_generated_unix_sockets(&mut generated)?;
 
     // Start from first persona entry when present, then merge remaining persona
     // entries before applying the explicit generated overlay.
@@ -348,18 +340,7 @@ pub(crate) fn build_codex_config_env(
         }
     }
 
-    force_string_array_entries(
-        &mut base,
-        "sandbox_workspace_write",
-        "writable_roots",
-        &generated_writable_roots,
-    )?;
-    force_string_array_entries(
-        &mut base,
-        "network",
-        "allow_unix_sockets",
-        &generated_unix_sockets,
-    )?;
+    force_unix_socket_entries(&mut base, &generated_unix_sockets)?;
 
     Ok(Some(serde_json::Value::Object(base).to_string()))
 }
@@ -379,95 +360,92 @@ fn parse_codex_config_object(
     }
 }
 
-fn nested_string_array(
-    config: &serde_json::Map<String, serde_json::Value>,
-    section_key: &str,
-    array_key: &str,
-    source: &str,
+fn take_generated_unix_sockets(
+    config: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<Vec<String>, AcpError> {
-    let Some(section) = config.get(section_key) else {
+    let Some(network) = config.get_mut("network") else {
         return Ok(Vec::new());
     };
-    let serde_json::Value::Object(section) = section else {
-        return Err(AcpError::Protocol(format!(
-            "CODEX_CONFIG {source} {section_key} value is valid JSON but not an object"
-        )));
+    let serde_json::Value::Object(network) = network else {
+        return Err(AcpError::Protocol(
+            "CODEX_CONFIG generated network value is valid JSON but not an object".to_string(),
+        ));
     };
-    let Some(array) = section.get(array_key) else {
+    let Some(array) = network.remove("allow_unix_sockets") else {
         return Ok(Vec::new());
     };
     let serde_json::Value::Array(entries) = array else {
-        return Err(AcpError::Protocol(format!(
-            "CODEX_CONFIG {source} {section_key}.{array_key} is not an array"
-        )));
+        return Err(AcpError::Protocol(
+            "CODEX_CONFIG generated network.allow_unix_sockets is not an array".to_string(),
+        ));
     };
 
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in entries {
-        let Some(entry) = entry.as_str() else {
-            return Err(AcpError::Protocol(format!(
-                "CODEX_CONFIG {source} {section_key}.{array_key} contains a non-string entry"
-            )));
-        };
-        push_unique_config_path(&mut out, &mut seen, entry);
-    }
-    Ok(out)
+    collect_string_paths(
+        &entries,
+        "CODEX_CONFIG generated network.allow_unix_sockets",
+    )
 }
 
-fn force_string_array_entries(
+fn force_unix_socket_entries(
     config: &mut serde_json::Map<String, serde_json::Value>,
-    section_key: &str,
-    array_key: &str,
     entries: &[String],
 ) -> Result<(), AcpError> {
-    if entries.is_empty() && !config.contains_key(section_key) {
+    if entries.is_empty() && !config.contains_key("network") {
         return Ok(());
     }
 
     let section_entry = config
-        .entry(section_key.to_string())
+        .entry("network".to_string())
         .or_insert_with(|| serde_json::json!({}));
     let section = match section_entry {
         serde_json::Value::Object(section) => section,
         other => {
             return Err(AcpError::Protocol(format!(
-                "CODEX_CONFIG {section_key} is not an object (got {other}); \
-                 cannot set {array_key}"
+                "CODEX_CONFIG network is not an object (got {other}); \
+                 cannot set allow_unix_sockets"
             )));
         }
     };
-    if entries.is_empty() && !section.contains_key(array_key) {
+    if entries.is_empty() && !section.contains_key("allow_unix_sockets") {
         return Ok(());
     }
     let array_entry = section
-        .entry(array_key.to_string())
+        .entry("allow_unix_sockets".to_string())
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
     let array = match array_entry {
         serde_json::Value::Array(array) => array,
         other => {
             return Err(AcpError::Protocol(format!(
-                "CODEX_CONFIG {section_key}.{array_key} is not an array (got {other})"
+                "CODEX_CONFIG network.allow_unix_sockets is not an array (got {other})"
             )));
         }
     };
 
-    let mut merged = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in array.iter() {
-        let Some(entry) = entry.as_str() else {
-            return Err(AcpError::Protocol(format!(
-                "CODEX_CONFIG {section_key}.{array_key} contains a non-string entry"
-            )));
-        };
-        push_unique_config_path(&mut merged, &mut seen, entry);
-    }
+    let mut merged = collect_string_paths(array, "CODEX_CONFIG network.allow_unix_sockets")?;
+    let mut seen = merged.iter().cloned().collect::<HashSet<_>>();
     for entry in entries {
         push_unique_config_path(&mut merged, &mut seen, entry);
     }
     *array = merged.into_iter().map(serde_json::Value::String).collect();
 
     Ok(())
+}
+
+fn collect_string_paths(
+    entries: &[serde_json::Value],
+    source: &str,
+) -> Result<Vec<String>, AcpError> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let Some(entry) = entry.as_str() else {
+            return Err(AcpError::Protocol(format!(
+                "{source} contains a non-string entry"
+            )));
+        };
+        push_unique_config_path(&mut out, &mut seen, entry);
+    }
+    Ok(out)
 }
 
 fn push_unique_config_path(out: &mut Vec<String>, seen: &mut HashSet<String>, entry: &str) {
@@ -478,17 +456,9 @@ fn push_unique_config_path(out: &mut Vec<String>, seen: &mut HashSet<String>, en
 }
 
 fn normalize_config_path_entry(entry: &str) -> String {
-    let mut normalized = PathBuf::new();
-    for component in Path::new(entry).components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized.to_string_lossy().into_owned()
+    normalize_path_lexically(Path::new(entry))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// goose's non-standard mid-turn steer method. Requires `expectedRunId`, so it
@@ -5154,6 +5124,21 @@ mod tests {
     }
 
     #[test]
+    fn build_codex_config_env_preserves_persona_ssh_socket_without_parent_override() {
+        let persona = r#"{"network":{"allow_unix_sockets":["/tmp/persona","/tmp/ssh-agent/"]}}"#;
+        let extra = env(&[("CODEX_CONFIG", persona)]);
+        let merged = build_codex_config_env(&extra, None, Some(GENERATED_WITH_SSH_SOCKET))
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(
+            v["network"]["allow_unix_sockets"],
+            serde_json::json!(["/tmp/persona", "/tmp/ssh-agent"])
+        );
+    }
+
+    #[test]
     fn build_codex_config_env_errors_on_invalid_persona_json() {
         // Bad persona JSON + generated overlay: parse error before merging.
         let extra = env(&[("CODEX_CONFIG", "not-json")]);
@@ -5200,20 +5185,6 @@ mod tests {
         assert!(
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
-        );
-    }
-
-    #[test]
-    fn build_codex_config_env_errors_on_non_array_writable_roots() {
-        let extra = env(&[]);
-        let parent = r#"{"sandbox_workspace_write":{"writable_roots":"bad"}}"#;
-        let result = build_codex_config_env(&extra, Some(parent), Some(GENERATED));
-
-        assert!(result.is_err(), "non-array writable_roots must fail");
-        let msg = format!("{}", result.unwrap_err());
-        assert!(
-            msg.contains("writable_roots"),
-            "error must mention writable_roots"
         );
     }
 
