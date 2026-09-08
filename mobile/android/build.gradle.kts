@@ -1,7 +1,7 @@
 allprojects {
     repositories {
         google()
-        mavenCentral()
+        maven(url = "https://global.block-artifacts.com/artifactory/square-public")
     }
 }
 
