@@ -76,6 +76,19 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
 
+/// Maximum file size for generic document uploads (100 MB).
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+fn max_upload_bytes(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
+
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
 /// The event includes:
@@ -1181,11 +1194,7 @@ impl BuzzClient {
         }
 
         // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        let max = max_upload_bytes(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -2314,6 +2323,14 @@ mod retry_policy_tests {
 
         assert_eq!(descriptor.mime_type, "application/pdf");
         assert_eq!(descriptor.size, pdf.len() as u64);
+    }
+
+    #[test]
+    fn pdf_uses_generic_file_size_limit() {
+        assert_eq!(
+            super::max_upload_bytes("application/pdf"),
+            100 * 1024 * 1024
+        );
     }
 
     /// When all retry attempts for a stored event end with a partial body (200
