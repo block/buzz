@@ -17,7 +17,7 @@ Conversation → local task + new channel → implementation branch → pull req
 
 Use this template:
 
-```yaml
+```markdown
 ---
 buzz_schema: channel-backed-task/v1
 experiment: "https://github.com/block/buzz/blob/jtennant/task-channel-experiment/docs/experiments/channel-backed-tasks.md"
@@ -28,6 +28,8 @@ parent_channel: "buzz://channel/<channel UUID>"
 originating_thread: "buzz://message?channel=<channel UUID>&id=<message event ID>"
 branch: null
 ---
+
+[Experimental task](https://github.com/block/buzz/blob/jtennant/task-channel-experiment/docs/experiments/channel-backed-tasks.md): This channel uses the channel-backed task experiment.
 ```
 
 ## Agent decision flow
