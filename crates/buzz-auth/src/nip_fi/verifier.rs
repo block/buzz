@@ -362,7 +362,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         enforce_claim_semantics(policy, &claims)?;
 
         let subject = claim_string(&claims, SUBJECT_CLAIM, MAX_SUBJECT_BYTES)?;
-        let asserted_key = parse_nostr_pubkey_claim(policy, &claims)?;
+        let asserted_key = parse_nostr_pubkey_claim(&claims)?;
 
         let now = Utc::now();
         let deadlines = self.check_time_and_deadlines(policy, &key_set, &claims, now)?;
@@ -720,20 +720,13 @@ fn enforce_claim_semantics(
 }
 
 /// Parse the fixed `nostr_pubkey` claim: lowercase hex of exactly one 32-byte
-/// key. Bech32 and other aliases deny. Absence is permitted unless the policy
-/// requires an attested key.
+/// key. Bech32 and other aliases deny. Absence denies; the merged NIP-FI
+/// spec v2 (PR #7214) requires the `nostr_pubkey` claim unconditionally.
 fn parse_nostr_pubkey_claim(
-    policy: &IssuerPolicy,
     claims: &Map<String, Value>,
 ) -> Result<Option<PublicKey>, VerifierError> {
     match claims.get(NOSTR_PUBKEY_CLAIM) {
-        None => {
-            if policy.require_attested_key() {
-                Err(VerifierError::ClaimRejected)
-            } else {
-                Ok(None)
-            }
-        }
+        None => Err(VerifierError::ClaimRejected),
         Some(value) => {
             let raw = value.as_str().ok_or(VerifierError::ClaimRejected)?;
             if raw.len() != 64

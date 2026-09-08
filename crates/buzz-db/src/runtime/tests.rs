@@ -19,6 +19,245 @@ async fn setup_db() -> Db {
     Db::from_pool(pool)
 }
 
+#[tokio::test]
+async fn begin_transaction_compatibility_alias_is_preserved() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy(&crate::test_support::database_url())
+        .expect("construct lazy compatibility pool");
+    pool.close().await;
+    let db = Db::from_pool(pool);
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    #[allow(deprecated)]
+    let result = db.begin_transaction().await;
+    assert!(matches!(
+        result,
+        Err(DbError::Sqlx(sqlx::Error::PoolClosed))
+    ));
+
+    let counters = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter_map(|(key, _, _, value)| {
+            let name = key.key().name();
+            if ![
+                "buzz_db_pool_acquire_attempts_total",
+                "buzz_db_pool_acquisitions_total",
+            ]
+            .contains(&name)
+            {
+                return None;
+            }
+            let DebugValue::Counter(value) = value else {
+                panic!("pool acquisition terminals must be counters");
+            };
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            Some(((name.to_owned(), labels), value))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected = [
+        (
+            (
+                "buzz_db_pool_acquire_attempts_total".to_owned(),
+                [
+                    ("operation".to_owned(), "event_write".to_owned()),
+                    ("outcome".to_owned(), "error".to_owned()),
+                    ("pool_role".to_owned(), "writer".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            1,
+        ),
+        (
+            (
+                "buzz_db_pool_acquisitions_total".to_owned(),
+                [
+                    ("outcome".to_owned(), "error".to_owned()),
+                    ("pool_role".to_owned(), "writer".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            1,
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(counters, expected);
+}
+
+#[test]
+fn nip43_reconciliation_compatibility_alias_is_preserved() {
+    #[allow(deprecated)]
+    async fn call(
+        db: &Db,
+        community_id: CommunityId,
+        relay_pubkey: &nostr::PublicKey,
+    ) -> crate::Result<bool> {
+        db.nip43_membership_snapshot_needs_reconciliation(community_id, relay_pubkey)
+            .await
+    }
+
+    let _ = call;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn readiness_check_distinguishes_pool_exhaustion_from_success() {
+    let database_url = crate::test_support::database_url();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect size-one readiness test pool");
+    let held = pool
+        .acquire()
+        .await
+        .expect("hold the only readiness test connection");
+    let db = Db::from_pool(pool);
+
+    let exhausted = db
+        .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_millis(25))
+        .await;
+    assert_eq!(exhausted, DbReadinessOutcome::PoolTimeout);
+
+    drop(held);
+    let recovered = db
+        .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .await;
+    assert_eq!(recovered, DbReadinessOutcome::Success);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn readiness_check_classifies_closed_pool_query_timeout_and_query_error() {
+    let database_url = crate::test_support::database_url();
+
+    let closed_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect closed readiness test pool");
+    closed_pool.close().await;
+    let closed = Db::from_pool(closed_pool)
+        .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .await;
+    assert_eq!(closed, DbReadinessOutcome::PoolError);
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect query classification test pool");
+    let db = Db::from_pool(pool);
+
+    let timed_out = db
+        .readiness_check_sql(
+            tokio::time::Instant::now() + std::time::Duration::from_millis(25),
+            "SELECT pg_sleep(0.2)",
+        )
+        .await;
+    assert_eq!(timed_out, DbReadinessOutcome::QueryTimeout);
+
+    let query_error = db
+        .readiness_check_sql(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            "SELECT 1 / 0",
+        )
+        .await;
+    assert_eq!(query_error, DbReadinessOutcome::QueryError);
+
+    assert_eq!(
+        db.readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await,
+        DbReadinessOutcome::Success,
+        "query failures must return the acquired connection to the pool"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn readiness_check_cancellation_balances_waiter_and_inflight_connection() {
+    let database_url = crate::test_support::database_url();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect cancellation readiness test pool");
+    let held = pool
+        .acquire()
+        .await
+        .expect("hold sole connection before waiter cancellation");
+    let db = Db::from_pool(pool);
+
+    let waiting_db = db.clone();
+    let waiting = tokio::spawn(async move {
+        waiting_db
+            .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    waiting.abort();
+    assert!(waiting
+        .await
+        .expect_err("waiting check must be cancelled")
+        .is_cancelled());
+    drop(held);
+
+    assert_eq!(
+        db.readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await,
+        DbReadinessOutcome::Success,
+        "cancelled pool waiter must not consume the released connection"
+    );
+
+    let querying_db = db.clone();
+    let querying = tokio::spawn(async move {
+        querying_db
+            .readiness_check_sql(
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                "SELECT pg_sleep(5)",
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    querying.abort();
+    assert!(querying
+        .await
+        .expect_err("querying check must be cancelled")
+        .is_cancelled());
+
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let outcome = db
+                .readiness_check(
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(250),
+                )
+                .await;
+            match outcome {
+                DbReadinessOutcome::Success => break outcome,
+                DbReadinessOutcome::PoolTimeout => tokio::task::yield_now().await,
+                unexpected => panic!(
+                    "cancelled in-flight query produced unexpected recovery outcome: {unexpected:?}"
+                ),
+            }
+        }
+    })
+    .await
+    .expect("cancelled in-flight query must return or replace its connection");
+    assert_eq!(recovered, DbReadinessOutcome::Success);
+}
+
 async fn make_community(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     let host = format!("communities-of-channels-{}.example", id.simple());

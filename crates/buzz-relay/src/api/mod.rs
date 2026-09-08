@@ -223,7 +223,7 @@ pub mod relay_members {
         for (role, pubkey) in [("agent", agent), ("owner", owner)] {
             match state
                 .db
-                .ensure_user(tenant.community(), pubkey.as_bytes())
+                .ensure_user_for_authorization(tenant.community(), pubkey.as_bytes())
                 .await
             {
                 Ok(true) => {
@@ -243,7 +243,11 @@ pub mod relay_members {
 
         let materialized = match state
             .db
-            .set_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
+            .set_agent_owner_for_authorization(
+                tenant.community(),
+                agent.as_bytes(),
+                owner.as_bytes(),
+            )
             .await
         {
             Ok(true) => true,

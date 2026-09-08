@@ -10,6 +10,7 @@ import {
 } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
+import type { UserStatusInput } from "@/features/user-status/types";
 import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
 import type { Community } from "@/features/communities/types";
 import { CommunitySwitcher } from "@/features/communities/ui/CommunitySwitcher";
@@ -26,7 +27,7 @@ type SidebarProfileCardProps = {
   onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
   onSendFeedback?: () => void;
   onSetPresenceStatus?: (status: PresenceStatus) => void;
-  onSetUserStatus: (text: string, emoji: string) => void;
+  onSetUserStatus: (status: UserStatusInput) => void;
   onClearUserStatus: () => void;
   onSwitchCommunity: (id: string) => void;
   onUpdateCommunity: (
@@ -161,7 +162,9 @@ export function SidebarProfileCard({
             onSetUserStatus={onSetUserStatus}
             triggerContainerRef={profileCardRef}
             userStatusEmoji={selfUserStatus?.emoji}
+            userStatusExpiresAt={selfUserStatus?.expiresAt}
             userStatusText={selfUserStatus?.text}
+            userStatusUpdatedAt={selfUserStatus?.updatedAt}
             communitySwitcherSlot={
               <CommunitySwitcher
                 activeCommunity={activeCommunity}

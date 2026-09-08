@@ -251,20 +251,31 @@ async function addGenericAgent(
   );
 }
 
-async function waitForMockLiveSubscription(page: Page, channelName: string) {
+async function waitForMockLiveSubscription(
+  page: Page,
+  channelName: string,
+  kind?: number,
+) {
   await expect
     .poll(async () => {
-      return page.evaluate((channelName) => {
-        return (
-          (
-            window as Window & {
-              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                channelName: string;
-              }) => boolean;
-            }
-          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName }) ?? false
-        );
-      }, channelName);
+      return page.evaluate(
+        ({ channelName, kind }) => {
+          return (
+            (
+              window as Window & {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                  channelName: string;
+                  kind?: number;
+                }) => boolean;
+              }
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName,
+              kind,
+            }) ?? false
+          );
+        },
+        { channelName, kind },
+      );
     })
     .toBe(true);
 }
@@ -1131,6 +1142,25 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     "Memory Bot",
     longAgentInstruction,
   );
+  // A running process is not presence. Supply this scenario's snapshot and
+  // authored kind-20001 updates through the mock relay, not the query cache.
+  const emitAgentPresence = (status: "online" | "offline") =>
+    page.evaluate(
+      ({ pubkey, status }) => {
+        const emit = (
+          window as Window & {
+            __BUZZ_E2E_EMIT_MOCK_PRESENCE__?: (input: {
+              pubkey: string;
+              status: "online" | "offline";
+            }) => void;
+          }
+        ).__BUZZ_E2E_EMIT_MOCK_PRESENCE__;
+        if (!emit) throw new Error("Mock presence emitter is unavailable.");
+        emit({ pubkey, status });
+      },
+      { pubkey: agentPubkey, status },
+    );
+  await emitAgentPresence("online");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1169,6 +1199,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("user-profile-message")).toBeVisible();
   await expect(page.getByTestId("user-profile-huddle")).toHaveCount(0);
   await expect(page.getByTestId("user-profile-wave")).toHaveCount(0);
+  await expectHashSearchParam(page, "profile", agentPubkey);
   const agentPresenceBadge = page.getByTestId("user-profile-presence-badge");
   await expect(agentPresenceBadge).toBeVisible();
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
@@ -1231,9 +1262,13 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   );
   await expect(agentPrimaryAction).toHaveClass(/bg-foreground/);
   await expect(agentPrimaryAction).toHaveClass(/text-background/);
+  await waitForMockLiveSubscription(page, "general", 20001);
   await agentPrimaryAction.click();
   await expect(agentPrimaryAction).toHaveAttribute("aria-label", "Start agent");
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
+  await emitAgentPresence("offline");
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Offline");
+  await expectHashSearchParam(page, "profile", agentPubkey);
   await expect(agentPrimaryAction).toHaveClass(/bg-foreground/);
   await expect(agentPrimaryAction).toHaveClass(/text-background/);
   await expect(page.getByTestId("user-profile-agent-restart")).toHaveCount(0);
@@ -1250,6 +1285,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(agentPrimaryAction).toBeEnabled();
   await agentPrimaryAction.click();
   await expect(agentPrimaryAction).toHaveAttribute("aria-label", "Stop");
+  await waitForMockLiveSubscription(page, "general", 20001);
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Offline");
+  await emitAgentPresence("online");
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
   await expect(page.getByTestId("user-profile-agent-restart")).toBeVisible();
   await expectHashSearchParam(page, "profileTab", null);
@@ -1834,9 +1872,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
 });
 
-test("an older agent message opens the same persona instance as the Agents library", async ({
+test("an older agent message stays exact while persona navigation selects the live instance", async ({
   page,
-}) => {
+}, testInfo) => {
   const personaId = "profile-parity-agent";
   const historicalPubkey = TEST_IDENTITIES.charlie.pubkey;
   const currentPubkey = "d".repeat(64);
@@ -1875,7 +1913,6 @@ test("an older agent message opens the same persona instance as the Agents libra
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Stop");
-  const agentsLibraryContract = await readOwnedAgentProfileContract(page);
 
   await page.getByTestId("user-profile-tab-runtime").click();
   await page.getByTestId("user-profile-instances").click();
@@ -1889,6 +1926,8 @@ test("an older agent message opens the same persona instance as the Agents libra
     page.getByTestId(`user-profile-instance-${historicalPubkey}`),
   ).toContainText("Current");
 
+  const exactInstanceContract = await readOwnedAgentProfileContract(page);
+
   await page.getByTestId("auxiliary-panel-close").click();
   await page.getByTestId("channel-agents").click();
   const historicalMessage = page
@@ -1898,10 +1937,15 @@ test("an older agent message opens the same persona instance as the Agents libra
   await historicalMessage.locator("button").first().click();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
-  ).toHaveAttribute("aria-label", "Stop");
+  ).toHaveAttribute("aria-label", "Start agent");
   const messageContract = await readOwnedAgentProfileContract(page);
 
-  expect(messageContract).toEqual(agentsLibraryContract);
+  expect(messageContract).toEqual(exactInstanceContract);
+  await page.getByTestId("user-profile-tab-info").click();
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: testInfo.outputPath("historical-exact-instance.png"),
+  });
 });
 
 test("restored Inbox deep link hides the back arrow", async ({ page }) => {

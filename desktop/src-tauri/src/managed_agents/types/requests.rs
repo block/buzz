@@ -260,6 +260,16 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. `null` = clear the canonical effort column
+    /// (revert to inherited default). `"value"` = set the column.
+    ///
+    /// When present, persisted inside the locked update/restart transaction
+    /// so that an access-policy-change restart snapshots and launches the new
+    /// effort value rather than the old one. Uses the same
+    /// `apply_picker_effort_level` logic (via `apply_effort_update`) so
+    /// the record-scope alias sweep runs atomically with the column write.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub effort_level: Option<Option<String>>,
 }
 
 #[cfg(test)]
