@@ -7,9 +7,11 @@
  *
  * Tests render the real SettingsView and assert on the sidebar DOM.
  *
- * Mutation: restoring `shouldShowRelayAdminNav(relayAdminNav)` + the
- * useModerationNavResolution hook in SettingsView.tsx hides the nav entry
- * when discovery yields "none" or stays pending, causing these tests RED.
+ * Contract: the relay-admin nav entry is always visible. Authorization
+ * gates the panel itself, not the nav entry — so NIP-11 discovery state
+ * ("none", invalid, error, or pending) never hides or redirects the entry.
+ * Reintroducing any discovery-based gate on the nav entry turns these
+ * tests RED.
  */
 
 import assert from "node:assert/strict";
