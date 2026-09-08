@@ -229,7 +229,12 @@ async function setup(overrides = {}) {
     [["teams"], []],
     [["archivedIdentities"], { archived: [] }],
   ])
-    if (!(state.heldDirectory && key[0] === "relay-agents"))
+    if (
+      !(
+        (state.heldDirectory || state.coldDirectory) &&
+        key[0] === "relay-agents"
+      )
+    )
       client.setQueryData(key, data);
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -676,7 +681,7 @@ test("Space completes an exact name but remains literal for partial and same-nam
   );
 });
 
-for (const condition of ["denied", "missing", "failed"]) {
+for (const condition of ["denied", "missing", "failed", "cold-failed"]) {
   test(`disabled ${condition} member rejects pointer, keyboard and new pin intent`, async () => {
     await setup({
       owner: OTHER,
@@ -684,9 +689,22 @@ for (const condition of ["denied", "missing", "failed"]) {
       directoryVisible: true,
       policy: condition === "denied" ? "owner-only" : "anyone",
       missingDirectory: condition === "missing",
-      failDirectory: condition === "failed",
+      failDirectory: condition.endsWith("failed"),
+      coldDirectory: condition === "cold-failed",
+      searchUsers: [person(OTHER, "Remote Person")],
     });
+    await act(async () => mention.updateMentionQuery("@Remote", 7));
+    await settle();
+    assert.equal(mention.isMentionLoading, false);
     const row = rows()[0];
+    if (condition === "cold-failed") {
+      assert.equal(row.action, "unavailable");
+      assert.equal(typeof row.onRetry, "function");
+      assert.equal(
+        mention.suggestions.some((s) => s.pubkey === OTHER),
+        false,
+      );
+    }
     assert.equal(mention.canSelectMention(row), false);
     await act(async () => {
       picker.selectMentionSuggestion(row);

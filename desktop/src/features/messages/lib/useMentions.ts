@@ -118,7 +118,14 @@ export function useMentions(
   const canSearchGlobalUsers = canSearchGlobalPeople && agentDirectoriesReady;
   const userSearchQuery = useInfiniteUserSearchQuery(mentionQuery ?? "", {
     allowEmpty: true,
-    enabled: canSearchGlobalUsers && mentionQuery !== null,
+    // Terminal directory errors must allow required search to settle so known
+    // roster rows expose Unavailable/Retry. Discovery admission still requires
+    // successful directories below, independently of fetch enablement.
+    enabled:
+      canSearchGlobalPeople &&
+      !managedAgentsQuery.isPending &&
+      !relayAgentsQuery.isPending &&
+      mentionQuery !== null,
     limit: MENTION_SUGGESTION_LIMIT,
   });
   const userSearchResults = React.useMemo(

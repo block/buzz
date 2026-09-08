@@ -1881,108 +1881,111 @@ test("managed agents use the channel roster for membership labels", async ({
   await expect(carlRow).not.toContainText("Invite");
 });
 
-test("relay-agent directory errors fail closed and recover after a fresh fetch", async ({
-  page,
-}) => {
-  await installMockBridge(page, {
-    searchProfiles: [
-      {
-        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
-        displayName: "quinn",
-        isAgent: true,
-      },
-    ],
-    relayAgentListErrors: Array(20).fill("mock directory unavailable"),
-    relayAgents: [
-      {
-        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
-        name: "quinn",
-        respondTo: "allowlist",
-        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
-        channelNames: ["general"],
-      },
-    ],
-  });
-  await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  // Failed discovery cannot disclose an unknown directory-only identity.
-  // Seed a known channel member independently, so Retry has an existing row.
-  await page.evaluate(
-    async ({ channelId, pubkey }) => {
-      await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("add_channel_members", {
-        channelId,
-        pubkeys: [pubkey],
-        role: "bot",
-      });
-      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
-        queryKey: ["channels", channelId, "members"],
-      });
-    },
-    { channelId: GENERAL_CHANNEL_ID, pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY },
-  );
-  const input = page.getByTestId("message-input");
-  await input.fill("@quinn");
-  // Cold nonempty search cannot settle before directory recovery. Retry for a
-  // known member is available from the explicit picker, which needs no search.
-  await expect(page.getByTestId("mention-autocomplete-layer")).toContainText(
-    "Loading",
-  );
-  await input.fill("");
-  await page
-    .getByRole("button", { name: "Mention someone", exact: true })
-    .click();
-  await expect(
-    autocomplete(page).getByRole("button", {
-      name: "Unavailable quinn",
-      exact: true,
-    }),
-  ).toBeDisabled();
-  await input.press("Tab");
-  await expect(input).toBeEmpty();
-  await expect(input.locator(".mention-chip")).toHaveCount(0);
-
-  await page.evaluate(async () => {
-    window.__BUZZ_E2E__.mock!.relayAgentListErrors = [];
-  });
-  await autocomplete(page)
-    .getByRole("button", { name: "Retry access check for quinn", exact: true })
-    .click();
-  await expect(
-    autocomplete(page).getByRole("button", {
-      name: /^(Mention|Invite) quinn$/,
-    }),
-  ).toBeEnabled();
-
-  await page.evaluate(() => {
-    window.__BUZZ_E2E__.mock ??= {};
-    window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
-    void window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
-      queryKey: ["relay-agents"],
+for (const explicitPicker of [false, true]) {
+  test(`relay-agent directory errors fail closed and recover after a fresh fetch (${explicitPicker ? "explicit picker" : "typed query"})`, async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      searchProfiles: [
+        {
+          pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+          displayName: "quinn",
+          isAgent: true,
+        },
+      ],
+      relayAgentListErrors: Array(20).fill("mock directory unavailable"),
+      relayAgents: [
+        {
+          pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+          name: "quinn",
+          respondTo: "allowlist",
+          respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+          channelNames: ["general"],
+        },
+      ],
     });
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    // Failed discovery cannot disclose an unknown directory-only identity.
+    // Seed a known channel member independently, so Retry has an existing row.
+    await page.evaluate(
+      async ({ channelId, pubkey }) => {
+        await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("add_channel_members", {
+          channelId,
+          pubkeys: [pubkey],
+          role: "bot",
+        });
+        await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+          queryKey: ["channels", channelId, "members"],
+        });
+      },
+      { channelId: GENERAL_CHANNEL_ID, pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY },
+    );
+    const input = page.getByTestId("message-input");
+    await input.fill("@quinn");
+    if (explicitPicker) {
+      await input.fill("");
+      await page
+        .getByRole("button", { name: "Mention someone", exact: true })
+        .click();
+    }
+    await expect(
+      autocomplete(page).getByRole("button", {
+        name: "Unavailable quinn",
+        exact: true,
+      }),
+    ).toBeDisabled();
+    await input.press("Tab");
+    if (explicitPicker) await expect(input).toBeEmpty();
+    else await expect(input).toHaveText("@quinn");
+    await expect(input.locator(".mention-chip")).toHaveCount(0);
+
+    await page.evaluate(async () => {
+      window.__BUZZ_E2E__.mock!.relayAgentListErrors = [];
+    });
+    await autocomplete(page)
+      .getByRole("button", {
+        name: "Retry access check for quinn",
+        exact: true,
+      })
+      .click();
+    await expect(
+      autocomplete(page).getByRole("button", {
+        name: /^(Mention|Invite) quinn$/,
+      }),
+    ).toBeEnabled();
+
+    await page.evaluate(() => {
+      window.__BUZZ_E2E__.mock ??= {};
+      window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
+      void window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["relay-agents"],
+      });
+    });
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
+              ?.fetchStatus,
+        ),
+      )
+      .toBe("fetching");
+    await expect(autocomplete(page).getByText("quinn")).toBeVisible({
+      timeout: 200,
+    });
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
+              ?.fetchStatus,
+        ),
+      )
+      .toBe("idle");
+    await expect(autocomplete(page).getByText("quinn")).toBeVisible();
   });
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () =>
-          window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
-            ?.fetchStatus,
-      ),
-    )
-    .toBe("fetching");
-  await expect(autocomplete(page).getByText("quinn")).toBeVisible({
-    timeout: 200,
-  });
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () =>
-          window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
-            ?.fetchStatus,
-      ),
-    )
-    .toBe("idle");
-  await expect(autocomplete(page).getByText("quinn")).toBeVisible();
-});
+}
 
 test("relay-only allowlisted agents emit a p tag when sent", async ({
   page,
