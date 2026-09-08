@@ -31,80 +31,53 @@ impl ResourceLabel {
     }
 }
 
-/// The audience receiving a publication.
+/// An outbound request that passed the session's capability and audience checks.
 ///
-/// This type describes only the IFC destination. The trusted broker remains
-/// responsible for ordinary product policy, including resolving and checking
-/// the channel, message, URL, or other concrete destination named by the
-/// operation payload.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PublicationTarget {
-    audience: ConfidentialityLabel,
-}
-
-impl PublicationTarget {
-    /// Use an execution domain's authorized audience as a publication target.
-    pub fn from_domain(domain: &ExecutionDomain) -> Self {
-        Self {
-            audience: domain.audience.clone(),
-        }
-    }
-}
-
-/// A broker request to execute one publication operation with an exact
-/// payload.
-pub struct PublicationRequest<T> {
-    operation: String,
-    target: PublicationTarget,
-    payload: T,
-}
-
-impl<T> PublicationRequest<T> {
-    /// Construct a request after the broker has resolved its IFC target.
-    pub fn new(operation: impl Into<String>, target: PublicationTarget, payload: T) -> Self {
-        Self {
-            operation: operation.into(),
-            target,
-            payload,
-        }
-    }
-}
-
-/// Proof that an exact publication request passed the session's capability
-/// and information-flow checks.
+/// The request owns its serialized bytes and destination label. Neither can
+/// change through a shared reference after authorization. A broker sink should
+/// accept this type and execute those bytes, without substituting a new payload
+/// or resolving destination fields from mutable agent state.
 ///
-/// A broker sink should accept this type rather than [`PublicationRequest`].
-/// Its fields are private and it is not cloneable, so only
-/// [`IfcSession::publish`] can create the value that authorizes a sink call.
+/// Only [`IfcSession::publish`] can construct this value. It cannot be cloned.
 ///
 /// ```compile_fail
+/// # fn forge(destination: buzz_ifc::ConfidentialityLabel) {
 /// let forged = buzz_ifc::AuthorizedPublication {
 ///     operation: "buzz.reply".to_owned(),
-///     target: todo!(),
-///     payload: "unchecked",
+///     destination,
+///     payload: b"unchecked".to_vec(),
 /// };
+/// # }
+/// ```
+///
+/// Payload access is read-only until the sink consumes the authorization:
+///
+/// ```compile_fail
+/// # fn change(mut authorization: buzz_ifc::AuthorizedPublication) {
+/// authorization.payload()[0] = b'!';
+/// # }
 /// ```
 #[must_use = "the authorization must be consumed by the publication sink"]
-pub struct AuthorizedPublication<T> {
+pub struct AuthorizedPublication {
     operation: String,
-    target: PublicationTarget,
-    payload: T,
+    destination: ConfidentialityLabel,
+    payload: Vec<u8>,
 }
 
-impl<T> AuthorizedPublication<T> {
+impl AuthorizedPublication {
     /// Return the checked operation name.
     pub fn operation(&self) -> &str {
         &self.operation
     }
 
     /// Return the exact payload covered by the information-flow decision.
-    pub fn payload(&self) -> &T {
+    pub fn payload(&self) -> &[u8] {
         &self.payload
     }
 
     /// Consume the authorization and return the checked sink inputs.
-    pub fn into_parts(self) -> (String, PublicationTarget, T) {
-        (self.operation, self.target, self.payload)
+    pub fn into_parts(self) -> (String, ConfidentialityLabel, Vec<u8>) {
+        (self.operation, self.destination, self.payload)
     }
 }
 
@@ -113,27 +86,26 @@ impl<T> AuthorizedPublication<T> {
 /// The broker calls [`read`](Self::read) before delivering data to the agent,
 /// [`call`](Self::call) before executing operations that cannot publish, and
 /// [`publish`](Self::publish) before handing an exact outbound payload to a
-/// sink. These are the ordinary-flow checks described in Appendices F and G of
-/// the [design paper](../../../docs/practical-information-flow-for-buzz-agents.md#appendix-f-reference-monitor-pseudocode).
+/// sink. The audience checks follow the flow ordering in
+/// [Appendix G of the design paper](../../../docs/practical-information-flow-for-buzz-agents.md#appendix-g-security-labels-as-a-lattice).
+///
+/// The broker supplies the labels and serialized outbound request:
 ///
 /// ```
-/// # use buzz_ifc::{AuthorizedPublication, ExecutionDomain, IfcError, IfcSession,
-/// #     PublicationRequest, PublicationTarget, ResourceLabel};
-/// # fn broker_sink(_: AuthorizedPublication<Vec<u8>>) {}
+/// # use buzz_ifc::{AuthorizedPublication, ConfidentialityLabel, ExecutionDomain,
+/// #     IfcError, IfcSession, ResourceLabel};
+/// # fn broker_sink(_: AuthorizedPublication) {}
 /// # fn run_turn(
 /// #     domain: ExecutionDomain,
 /// #     resource: &ResourceLabel,
-/// #     target: PublicationTarget,
+/// #     destination: &ConfidentialityLabel,
+/// #     request_bytes: Vec<u8>,
 /// # ) -> Result<(), IfcError> {
-/// let mut session = IfcSession::enter(domain);
-/// session.read(resource)?;
+/// let session = IfcSession::enter(domain);
 /// session.call("buzz.read.current")?;
+/// session.read(resource)?;
 ///
-/// let authorization = session.publish(PublicationRequest::new(
-///     "buzz.reply",
-///     target,
-///     b"hello".to_vec(),
-/// ))?;
+/// let authorization = session.publish("buzz.reply", destination, request_bytes)?;
 /// broker_sink(authorization);
 /// # Ok(())
 /// # }
@@ -161,13 +133,12 @@ impl IfcSession {
         self.domain.key()
     }
 
-    /// Check and record a labeled resource before exposing it to the agent.
+    /// Check a labeled resource before exposing it to the agent.
     ///
-    /// A failed read does not taint the session because the broker must not
-    /// deliver the rejected resource. Successful reads are recorded
-    /// monotonically; the domain audience already conservatively bounds output
-    /// in this coarse-grained Buzz model.
-    pub fn read(&mut self, resource: &ResourceLabel) -> Result<(), IfcError> {
+    /// The broker must not deliver a rejected resource. Every admitted resource
+    /// is readable by the domain's entire audience, so reading it does not
+    /// further restrict output: `enter` already applied that audience.
+    pub fn read(&self, resource: &ResourceLabel) -> Result<(), IfcError> {
         if !resource.audience.can_flow_to(&self.domain.audience) {
             return Err(IfcError::ReadAudienceDenied);
         }
@@ -183,15 +154,14 @@ impl IfcSession {
             return Err(IfcError::StaleResourceEpoch);
         }
 
-        self.flow.observe(&resource.audience);
         Ok(())
     }
 
     /// Permanently record that unlabeled input reached the agent.
     ///
-    /// Ordinary publication remains blocked for the rest of the session. A
-    /// future declassification API may authorize a specific exceptional flow,
-    /// but this small wrapper deliberately provides no bypass.
+    /// No new publication can be authorized for the rest of the session.
+    /// Already authorized requests still contain only their earlier, frozen
+    /// bytes. They cannot be updated to include the unknown input.
     pub fn mark_unknown_input(&mut self) {
         self.flow.mark_unknown();
     }
@@ -206,11 +176,30 @@ impl IfcSession {
     }
 
     /// Authorize an exact outbound payload for a checked broker sink.
-    pub fn publish<T>(
+    ///
+    /// The broker must serialize the complete request, including its concrete
+    /// destination, and resolve `destination` from that request before calling
+    /// this method. The sink must execute the returned bytes as checked. This
+    /// method does not parse the request or check current destination policy.
+    ///
+    /// Owned bytes prevent a caller from changing the payload through a shared
+    /// mutable value after it passes the checks:
+    ///
+    /// ```compile_fail
+    /// # use buzz_ifc::{ConfidentialityLabel, IfcSession};
+    /// # use std::{cell::RefCell, rc::Rc};
+    /// # fn publish_shared(session: &IfcSession, destination: &ConfidentialityLabel) {
+    /// let payload = Rc::new(RefCell::new(b"hello".to_vec()));
+    /// session.publish("buzz.reply", destination, payload);
+    /// # }
+    /// ```
+    pub fn publish(
         &self,
-        request: PublicationRequest<T>,
-    ) -> Result<AuthorizedPublication<T>, IfcError> {
-        match self.domain.capabilities.effect(&request.operation) {
+        operation: &str,
+        destination: &ConfidentialityLabel,
+        payload: Vec<u8>,
+    ) -> Result<AuthorizedPublication, IfcError> {
+        match self.domain.capabilities.effect(operation) {
             Some(OperationEffect::Publication) => {}
             Some(OperationEffect::NonEgressing) => {
                 return Err(IfcError::NonEgressingRequiresCall);
@@ -218,11 +207,11 @@ impl IfcSession {
             None => return Err(IfcError::CapabilityDenied),
         }
 
-        self.flow.check_egress(&request.target.audience)?;
+        self.flow.check_egress(destination)?;
         Ok(AuthorizedPublication {
-            operation: request.operation,
-            target: request.target,
-            payload: request.payload,
+            operation: operation.to_owned(),
+            destination: destination.clone(),
+            payload,
         })
     }
 }
@@ -230,7 +219,7 @@ impl IfcSession {
 /// Why an IFC session refused a broker action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum IfcError {
-    /// The resource could be read by principals outside the session audience.
+    /// Some session readers are not allowed to read the resource.
     #[error("resource audience is not safe for this execution domain")]
     ReadAudienceDenied,
     /// The resource belongs to retained state this domain may not reuse.

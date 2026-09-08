@@ -22,10 +22,7 @@ pub use domain::{
     DomainFacts, DomainKey, ExecutionDomain, MembershipEpoch, OperationEffect,
 };
 pub use label::{CommunityId, ConfidentialityLabel, LabelError, Principal, PrincipalError};
-pub use session::{
-    AuthorizedPublication, IfcError, IfcSession, PublicationRequest, PublicationTarget,
-    ResourceLabel,
-};
+pub use session::{AuthorizedPublication, IfcError, IfcSession, ResourceLabel};
 
 #[cfg(test)]
 mod session_tests;
