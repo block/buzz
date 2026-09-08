@@ -740,3 +740,9 @@ Autocomplete inserts a literal full label and a separator, including multi-word
 names. Only autocomplete settlement may move the caret past that separator;
 internal label spaces and deliberate ArrowLeft/click movement must be respected.
 See `docs/mention-editor.md` and `desktop/tests/e2e/mention-spacing.spec.ts`.
+
+Selected mention labels bind exact keys, including same-name teammates and
+persistent automatic addresses. Use the returned label from registration for
+insert/restore/remove. Ambiguous manually typed names must fail visibly without
+clearing the draft in chat, edit, and standalone forum consumers; never fan out
+silently to all identities sharing a name. See `docs/mention-editor.md`.

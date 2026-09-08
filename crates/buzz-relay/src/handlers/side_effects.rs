@@ -16,6 +16,7 @@ use buzz_core::kind::{
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
 
+use super::channel_authz::{self, ChannelAuthzError, PutUserDecision, RemoveOtherDecision};
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
@@ -365,120 +366,51 @@ pub async fn validate_admin_event(
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
-            // PUT_USER: open channels allow any authenticated user; private channels
-            // require the actor to be an existing active member. Any active member may
-            // add an ordinary member, guest, or bot, but only owners/admins may grant
-            // an elevated role.
-            if channel.visibility == "private" {
-                if actor_role.is_none() {
-                    return Err(anyhow::anyhow!("actor not authorized"));
-                }
-
-                if requested_role.is_some_and(|role| role.is_elevated())
-                    && !actor_role.is_some_and(|role| role.is_elevated())
-                {
-                    return Err(anyhow::anyhow!(
-                        "only owners/admins may grant elevated roles"
-                    ));
-                }
-            }
-
-            // Changing an ACTIVE existing member's role is privileged in both
-            // directions, on every visibility. `get_members` filters
-            // `removed_at IS NULL`, so a soft-removed row is deliberately not an
-            // "existing member" here: its stored role is history, not live
-            // authority, and reactivation is governed by the elevated-granter
-            // check above rather than by the role the row remembers.
-            //
-            // `add_member` is the authority (it also covers the desktop/admin
-            // callers that skip this validator); rejecting here too means the
-            // client gets a real error instead of an OK for an event whose side
-            // effect then fails. Re-adding at the same role stays idempotent —
-            // the huddle bot-add path relies on that.
-            if let Some((target, role)) = members
-                .iter()
-                .find(|m| m.pubkey == target_pubkey)
-                .zip(requested_role)
-                .filter(|(m, role)| m.role != role.as_str())
-            {
-                if !actor_role.is_some_and(|r| r.is_elevated()) {
-                    return Err(anyhow::anyhow!(
-                        "only owners/admins may change an active member's role"
-                    ));
-                }
-                if target.role == "owner"
-                    && role != buzz_db::channel::MemberRole::Owner
-                    && members.iter().filter(|m| m.role == "owner").count() <= 1
-                {
-                    return Err(anyhow::anyhow!(
-                        "cannot demote the last owner — transfer ownership first"
-                    ));
-                }
-            }
-
-            // Self-add: always allowed regardless of policy.
-            if target_pubkey == actor_bytes {
-                return Ok(());
-            }
-
-            // Third-party add: check channel_add_policy on the target.
-            if let Some((policy, owner)) = state
-                .db
-                .get_agent_channel_policy(tenant.community(), &target_pubkey)
-                .await?
-            {
-                match policy.as_str() {
-                    "owner_only" => {
-                        let owner_bytes = owner.ok_or_else(|| {
-                            anyhow::anyhow!("policy:owner_only — agent has no owner set")
-                        })?;
-                        if actor_bytes != owner_bytes {
-                            return Err(anyhow::anyhow!(
-                                "policy:owner_only — only the agent owner can add this agent"
-                            ));
-                        }
+            // Authorization policy — visibility gate, elevated-grant gate,
+            // active-member role-change gate, and last-owner demotion — lives in
+            // `channel_authz`, which is pure and table-tested. The database reads
+            // it depends on stay here.
+            match channel_authz::decide_put_user(
+                &channel.visibility,
+                actor_role,
+                requested_role,
+                &members,
+                &target_pubkey,
+                &actor_bytes,
+            )? {
+                // Self-add: always allowed regardless of policy.
+                PutUserDecision::Allow => Ok(()),
+                // Third-party add: check channel_add_policy on the target.
+                PutUserDecision::CheckAddPolicy => {
+                    if let Some((policy, owner)) = state
+                        .db
+                        .get_agent_channel_policy(tenant.community(), &target_pubkey)
+                        .await?
+                    {
+                        channel_authz::decide_channel_add_policy(
+                            &policy,
+                            owner.as_deref(),
+                            &actor_bytes,
+                        )?;
                     }
-                    "nobody" => {
-                        return Err(anyhow::anyhow!(
-                            "policy:nobody — this agent has disabled external channel additions"
-                        ));
-                    }
-                    // "anyone" or any unknown value → allow.
-                    // NOTE: DB ENUM constraint prevents unknown values from being stored.
-                    // If a new policy value is added to the ENUM, update this match.
-                    _ => {}
+
+                    Ok(())
                 }
             }
-
-            Ok(())
         }
         9001 => {
             // REMOVE_USER: self-remove allowed unless actor is the last owner; removing others requires owner/admin
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
+            let members = state.db.get_members(tenant.community(), channel_id).await?;
             if target_pubkey == actor_bytes {
                 // Self-removal: must be an active member, and cannot be the last owner.
-                let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    None => {
-                        return Err(anyhow::anyhow!("actor is not an active member"));
-                    }
-                    Some(m) if m.role == "owner" => {
-                        let owner_count = members.iter().filter(|m| m.role == "owner").count();
-                        if owner_count <= 1 {
-                            return Err(anyhow::anyhow!("cannot remove the last owner"));
-                        }
-                    }
-                    _ => {}
-                }
+                channel_authz::decide_self_departure(&members, &actor_bytes)?;
                 Ok(())
             } else {
-                let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                    Some(_) => {
+                match channel_authz::classify_remove_other(&members, &actor_bytes) {
+                    RemoveOtherDecision::Allow => Ok(()),
+                    RemoveOtherDecision::CheckAgentOwner => {
                         if state
                             .db
                             .is_agent_owner(tenant.community(), &target_pubkey, &actor_bytes)
@@ -486,13 +418,13 @@ pub async fn validate_admin_event(
                         {
                             Ok(())
                         } else {
-                            Err(anyhow::anyhow!("actor not authorized"))
+                            Err(ChannelAuthzError::ActorNotAuthorized.into())
                         }
                     }
                     // Non-members fall here. We intentionally do NOT check
                     // is_agent_owner for non-members — you must be in the channel
                     // to remove anyone, even your own bot.
-                    _ => Err(anyhow::anyhow!("actor not authorized")),
+                    RemoveOtherDecision::Deny => Err(ChannelAuthzError::ActorNotAuthorized.into()),
                 }
             }
         }
@@ -742,20 +674,9 @@ pub async fn validate_admin_event(
         }
         9022 => {
             // LEAVE_REQUEST: must be an active member, and cannot be the last owner.
+            // Identical rule to kind:9001 self-removal, including its wording.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
-            let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-            match actor_member {
-                None => {
-                    return Err(anyhow::anyhow!("actor is not an active member"));
-                }
-                Some(m) if m.role == "owner" => {
-                    let owner_count = members.iter().filter(|m| m.role == "owner").count();
-                    if owner_count <= 1 {
-                        return Err(anyhow::anyhow!("cannot remove the last owner"));
-                    }
-                }
-                _ => {}
-            }
+            channel_authz::decide_self_departure(&members, &actor_bytes)?;
             Ok(())
         }
         _ => Ok(()),
@@ -1459,14 +1380,8 @@ async fn handle_remove_user(
             .db
             .get_members_for_event_write(tenant.community(), channel_id)
             .await?;
-        let owner_count = members.iter().filter(|m| m.role == "owner").count();
-        let actor_is_owner = members
-            .iter()
-            .any(|m| m.pubkey == actor_bytes && m.role == "owner");
-        if actor_is_owner && owner_count <= 1 {
-            return Err(anyhow::anyhow!(
-                "cannot remove the last owner — transfer ownership first"
-            ));
+        if channel_authz::is_sole_owner(&members, &actor_bytes) {
+            return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
         }
     }
 
@@ -2126,14 +2041,8 @@ async fn handle_leave_request(
         .db
         .get_members_for_event_write(tenant.community(), channel_id)
         .await?;
-    let owner_count = members.iter().filter(|m| m.role == "owner").count();
-    let actor_is_owner = members
-        .iter()
-        .any(|m| m.pubkey == actor_bytes && m.role == "owner");
-    if actor_is_owner && owner_count <= 1 {
-        return Err(anyhow::anyhow!(
-            "cannot remove the last owner — transfer ownership first"
-        ));
+    if channel_authz::is_sole_owner(&members, &actor_bytes) {
+        return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
     }
 
     state

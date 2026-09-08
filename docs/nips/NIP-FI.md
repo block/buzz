@@ -582,6 +582,107 @@ This exemption applies solely to the Git credential-helper proof pattern on
 these three endpoints. It is not a precedent for any other surface. A client
 change that enables per-request signing supersedes this exemption.
 
+### Media possession-proof exception (Blossom, kind 24242)
+
+Kind `24242` Blossom auth events are accepted as the NIP-FI pairing possession
+proof for media routes **only**.  This is a media-only, operation-specific
+alternative possession format — not a general "signed Nostr event" escape hatch
+and not precedent for any other surface.  Any future alternative proof format
+requires an explicit axis-by-axis security review covering: payload/resource
+binding, method/operation scope, audience/tenant scope, freshness, signature/key
+pairing, transport cardinality, and cross-endpoint replay.  Per-request NIP-98
+support supersedes this exception when available.
+
+#### Scope fence
+
+Kind-24242 proofs are valid **only** on the following routes and operations:
+
+| Proof type (`t` tag) | Valid route | Method |
+|---|---|---|
+| `upload` | `PUT /upload` (and temporary alias `PUT /media/upload` until that alias is removed) | PUT |
+| `get` | `GET /media/{hash…}`, `HEAD /media/{hash…}` | GET, HEAD |
+
+No other protected route may accept a kind-24242 proof.  A kind-24242 event
+presented on any other route MUST be rejected as `evidence_rejected`.
+
+#### Upload proofs
+
+Upload proofs MUST carry exactly one `x` tag whose value is the lowercase
+hexadecimal SHA-256 of the exact consumed request body bytes.  The signed `x`
+MUST be verified against the completed body; temporal admission is checked
+before the body is consumed.
+
+Upload proofs MUST carry exactly one `server` tag whose value matches the
+request's already-resolved tenant host.  An upload proof with an absent or
+mismatched `server` tag MUST be rejected as `evidence_rejected`.
+
+#### Read proofs
+
+Read proofs MAY be host-wide: no `x` tag is required for reads, and a valid
+read proof authorizes reads of any blob on the one bound tenant host.
+
+Read proofs MUST carry exactly one `server` tag whose value matches the
+request's already-resolved tenant host.  A read proof with an absent or
+mismatched `server` tag MUST be rejected as `evidence_rejected`.
+
+If an `x` tag is present on a read proof: there MUST be exactly one, and it
+MUST match the requested parent blob hash.  A mismatched `x` tag MUST be
+rejected as `evidence_rejected`.
+
+> **Named residual:** within a window of at most 60 seconds from minting (plus
+> a bounded 5-second future-skew allowance), a captured full header set allows
+> reading any media blob on exactly one tenant host.  This access is read-only,
+> membership-checked, and revocable via assertion expiry or deny-map
+> enforcement.  It is not state-changing and does not cross tenant boundaries.
+
+#### Freshness
+
+The following freshness rules apply to all kind-24242 proofs (upload and read):
+
+- `created_at <= now + 5s` — bounded future skew; a proof dated more than 5
+  seconds in the future MUST be rejected as `evidence_rejected`.
+- `now - created_at <= 60s` — a proof older than 60 seconds MUST be rejected
+  as `evidence_rejected`.
+- Exactly one `expiration` tag MUST be present, MUST be valid (strictly in the
+  future at admission time), and MUST satisfy `expiration <= created_at + 60s`.
+  An absent, duplicate, expired, or out-of-range `expiration` tag MUST be
+  rejected as `evidence_rejected`.
+
+#### Transport and cardinality
+
+The following cardinality rules apply to all kind-24242 proofs:
+
+- A missing `Authorization` header field MUST be treated as `missing_evidence`.
+  Repeated, comma-combined, empty, malformed, or wrong-scheme `Authorization`
+  values MUST be rejected as `evidence_rejected`.
+- Exactly one `t` tag MUST be present.  A missing, duplicate, or unrecognized
+  `t` value MUST be rejected as `evidence_rejected`.
+- Exactly one `expiration` tag MUST be present (see Freshness above).
+- Exactly one `server` tag MUST be present on all kind-24242 proofs (see
+  Upload proofs and Read proofs above).
+- If `x` is present, exactly one instance is permitted (see Upload proofs and
+  Read proofs above).
+- Malformed, empty, duplicate, or conflicting instances of any of these fields
+  MUST be rejected as `evidence_rejected`.
+
+#### Per-request pairing
+
+Every kind-24242 proof MUST be subject to the full NIP-FI per-request pairing
+requirement: full assertion verification, exact key equality between the
+assertion's `nostr_pubkey` claim and the kind-24242 event's public key, and
+deny-map enforcement (see Admission procedure, steps 1–5).
+
+The effectiveness of deny-map enforcement is contingent on the real
+issuer-scoped deny map.  Until that map is operational, the stub implementation
+constitutes a **known gap** in this section's security guarantees.
+
+#### Compliance note
+
+The implementation as of PR #7264 pairs via a permissive Blossom verifier and
+is explicitly non-compliant with this section.  The named gaps are:
+multi-tag acceptance, a 3600-second proof window, and an optional `server`
+tag.  These are resolved when the bounded hardening task lands.
+
 ### Request format
 
 Each protected HTTP request MUST present both of the following:
@@ -738,7 +839,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
 | `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` is registered before the deny-set check, ensuring the close scan catches it); two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
-| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface. |
+| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 5 seconds in the future denies; a proof older than 60 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry denies. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal `sub` values under different `iss` values remain distinct identities. |

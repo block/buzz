@@ -21,7 +21,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder};
 use metrics_util::MetricKindMask;
 
 /// HTTP latency buckets (milliseconds) — only for `http_request_latency_ms`.
@@ -154,23 +154,69 @@ fn configured_prometheus_builder(gauge_idle_timeout_secs: u64) -> PrometheusBuil
         .expect("valid fanout bucket boundaries")
 }
 
-/// Install the global metrics recorder and spawn the Prometheus HTTP exporter.
+/// A bounded class of metrics installation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetricsInstallFailure {
+    /// The Prometheus listener could not bind.
+    Bind,
+    /// Another component already installed a global recorder.
+    RecorderConflict,
+    /// The exporter could not be built for another reason.
+    ExporterBuild,
+}
+
+/// An error returned while installing Prometheus metrics.
+#[derive(Debug, thiserror::Error)]
+pub enum MetricsInstallError {
+    /// Prometheus exporter construction failed.
+    #[error("failed to build Prometheus exporter: {0}")]
+    Build(#[source] BuildError),
+    /// Another component already installed the process-global recorder.
+    #[error("the global metrics recorder is already installed")]
+    RecorderConflict,
+}
+
+impl MetricsInstallError {
+    /// Return the secret-safe lifecycle classification.
+    pub const fn failure(&self) -> MetricsInstallFailure {
+        match self {
+            Self::Build(BuildError::FailedToCreateHTTPListener(_)) => MetricsInstallFailure::Bind,
+            Self::Build(_) => MetricsInstallFailure::ExporterBuild,
+            Self::RecorderConflict => MetricsInstallFailure::RecorderConflict,
+        }
+    }
+}
+
+/// Try to install the global metrics recorder and spawn the Prometheus HTTP exporter.
 ///
 /// `build()` returns the recorder + exporter future and internally spawns
 /// the upkeep task, so no separate upkeep call is needed.
 ///
 /// Must be called from within a Tokio runtime.
-/// Panics if a recorder is already installed or the port is in use.
-pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
+/// Listener and global-recorder failures are returned rather than panicking.
+/// A later exporter exit remains detached from relay service; external scrape
+/// coverage is authoritative for exporter availability.
+pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), MetricsInstallError> {
     let (recorder, exporter) = configured_prometheus_builder(gauge_idle_timeout_secs)
         .with_http_listener(([0, 0, 0, 0], port))
         .build()
-        .expect("metrics exporter must build exactly once");
+        .map_err(MetricsInstallError::Build)?;
 
-    metrics::set_global_recorder(recorder).expect("global recorder must be set exactly once");
+    metrics::set_global_recorder(recorder)
+        .map_err(|_error| MetricsInstallError::RecorderConflict)?;
     describe_readiness_metrics();
     describe_db_pool_metrics();
     tokio::spawn(exporter);
+    Ok(())
+}
+
+/// Install the global metrics recorder and spawn the Prometheus HTTP exporter.
+///
+/// This compatibility entry point preserves the original panic-on-failure API.
+/// New startup code should use [`try_install`] to report typed failures.
+pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
+    try_install(port, gauge_idle_timeout_secs)
+        .unwrap_or_else(|error| panic!("metrics exporter must install exactly once: {error}"));
 }
 
 /// Register the frozen readiness metric descriptions with the active recorder.
@@ -280,7 +326,6 @@ pub async fn track_metrics(req: Request, next: Next) -> Response {
 
     response
 }
-
 #[cfg(test)]
 mod contract_tests {
     use std::collections::BTreeSet;
@@ -385,5 +430,35 @@ mod contract_tests {
             assert!(!line.contains("operation=\"other\""));
             assert!(!line.contains("result="));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn occupied_listener_is_classified_as_bind() {
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind occupied port");
+        let port = listener.local_addr().expect("occupied address").port();
+        let error = try_install(port, 300).expect_err("occupied listener must fail");
+        assert_eq!(error.failure(), MetricsInstallFailure::Bind);
+    }
+
+    #[tokio::test]
+    async fn recorder_conflict_is_typed_in_an_isolated_process() {
+        const CHILD_ENV: &str = "BUZZ_TEST_METRICS_RECORDER_CONFLICT";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let recorder = configured_prometheus_builder(300).build_recorder();
+            metrics::set_global_recorder(recorder).expect("install first recorder");
+            let error = try_install(0, 300).expect_err("second recorder must fail");
+            assert_eq!(error.failure(), MetricsInstallFailure::RecorderConflict);
+            return;
+        }
+
+        crate::test_support::run_exact_test_child(
+            "metrics::tests::recorder_conflict_is_typed_in_an_isolated_process",
+            CHILD_ENV,
+        );
     }
 }

@@ -1130,7 +1130,6 @@ pub fn discover_acp_runtimes_from(
     // Track all ids seen so far (builtins) to prevent preset/custom collisions.
     let mut seen_ids: std::collections::HashSet<String> =
         entries.iter().map(|e| e.id.clone()).collect();
-
     // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
     for def in PRESET_HARNESSES {
         if seen_ids.contains(def.id) {
