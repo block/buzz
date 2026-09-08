@@ -18,10 +18,24 @@ export type TimelineThreadSummaryParticipant = {
   isAgent?: boolean;
 };
 
+/**
+ * The most recent reply in a thread, for the collapsed summary row.
+ *
+ * `preview` is null whenever the reply's text is not in hand. A relay-only
+ * summary carries counts and participants but no content, so an older thread
+ * scrolled into view shows the author and time without a snippet.
+ */
+export type TimelineThreadLastReply = {
+  author: string;
+  createdAt: number;
+  preview: string | null;
+};
+
 export type TimelineThreadSummary = {
   threadHeadId: string;
   replyCount: number;
   lastReplyAt: number | null;
+  lastReply: TimelineThreadLastReply | null;
   participants: TimelineThreadSummaryParticipant[];
 };
 
@@ -34,6 +48,7 @@ export type ThreadDescendantStats = {
   descendantCount: number;
   unreadDescendantCount: number;
   lastReplyAt: number | null;
+  lastReply: TimelineThreadLastReply | null;
   recentParticipantsNewestFirst: TimelineThreadSummaryParticipant[];
 };
 
@@ -117,6 +132,31 @@ function buildDirectChildrenByParentId(messages: TimelineMessage[]) {
   return childrenByParentId;
 }
 
+const REPLY_PREVIEW_MAX_LENGTH = 120;
+
+/**
+ * A single-line snippet of a reply body for the collapsed summary row.
+ *
+ * Keeps the first non-empty line so a multi-paragraph reply previews as its
+ * opening sentence rather than as flattened prose, and returns null for a
+ * body with no text of its own (an image or file reply, say) so the row can
+ * fall back to author and time.
+ */
+export function buildReplyPreview(
+  body: string | null | undefined,
+): string | null {
+  if (typeof body !== "string") return null;
+  const firstLine = body
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!firstLine) return null;
+  const normalized = firstLine.replace(/\s+/g, " ");
+  const characters = [...normalized];
+  if (characters.length <= REPLY_PREVIEW_MAX_LENGTH) return normalized;
+  return `${characters.slice(0, REPLY_PREVIEW_MAX_LENGTH).join("").trimEnd()}...`;
+}
+
 export function buildDescendantStatsByMessageId(
   messages: TimelineMessage[],
   unreadReplyIds: ReadonlySet<string> = new Set(),
@@ -131,6 +171,7 @@ export function buildDescendantStatsByMessageId(
         descendantCount: 0,
         unreadDescendantCount: 0,
         lastReplyAt: null,
+        lastReply: null,
         recentParticipantsNewestFirst: [],
       },
     ]),
@@ -177,6 +218,16 @@ export function buildDescendantStatsByMessageId(
         ancestorStats.lastReplyAt ?? 0,
         message.createdAt,
       );
+
+      // This walk runs newest first, so the first descendant to reach an
+      // ancestor is that thread's most recent reply.
+      if (ancestorStats.lastReply === null) {
+        ancestorStats.lastReply = {
+          author: message.author,
+          createdAt: message.createdAt,
+          preview: buildReplyPreview(message.body),
+        };
+      }
 
       if (
         ancestorStats.recentParticipantsNewestFirst.length <
@@ -226,6 +277,7 @@ function buildSummaryForDirectReplies(
     threadHeadId: messageId,
     replyCount: descendantStats.descendantCount,
     lastReplyAt: descendantStats.lastReplyAt,
+    lastReply: descendantStats.lastReply,
     participants: [...descendantStats.recentParticipantsNewestFirst].reverse(),
   };
 }
@@ -249,6 +301,7 @@ export function buildThreadSummaryFromVisibleEntries(
 ): TimelineThreadSummary | null {
   let replyCount = 0;
   let lastReplyAt: number | null = null;
+  let lastReply: TimelineThreadLastReply | null = null;
   const participantCandidates: SummaryParticipantCandidate[] = [];
 
   const addParticipantCandidate = (
@@ -265,6 +318,11 @@ export function buildThreadSummaryFromVisibleEntries(
   for (const entry of entries) {
     replyCount += 1;
     lastReplyAt = Math.max(lastReplyAt ?? 0, entry.message.createdAt);
+    lastReply = mergeLastReplies(lastReply, {
+      author: entry.message.author,
+      createdAt: entry.message.createdAt,
+      preview: buildReplyPreview(entry.message.body),
+    });
     addParticipantCandidate(
       participantFromMessage(entry.message),
       entry.message.createdAt,
@@ -275,6 +333,7 @@ export function buildThreadSummaryFromVisibleEntries(
       if (entry.summary.lastReplyAt != null) {
         lastReplyAt = Math.max(lastReplyAt ?? 0, entry.summary.lastReplyAt);
       }
+      lastReply = mergeLastReplies(lastReply, entry.summary.lastReply);
 
       const summaryTimestamp =
         entry.summary.lastReplyAt ?? entry.message.createdAt;
@@ -314,6 +373,7 @@ export function buildThreadSummaryFromVisibleEntries(
     threadHeadId,
     replyCount,
     lastReplyAt,
+    lastReply,
     participants: recentParticipantsNewestFirst.reverse(),
   };
 }
@@ -395,10 +455,26 @@ function buildRelayThreadSummary(
   summary: ChannelWindowThreadSummary,
   profiles: UserProfileLookup | undefined,
 ): TimelineThreadSummary {
+  const lastReplier = summary.participantPubkeys[0];
+  const lastReplierProfile = lastReplier
+    ? profiles?.[lastReplier.toLowerCase()]
+    : undefined;
+
   return {
     threadHeadId: messageId,
     replyCount: summary.descendantCount,
     lastReplyAt: summary.lastReplyAt,
+    // The relay summary carries no reply text, so this half can name the last
+    // replier but never preview them. A locally assembled summary for the same
+    // thread wins the merge below and brings the snippet with it.
+    lastReply:
+      lastReplier && summary.lastReplyAt != null
+        ? {
+            author: lastReplierProfile?.displayName ?? lastReplier,
+            createdAt: summary.lastReplyAt,
+            preview: null,
+          }
+        : null,
     // The relay returns `participantPubkeys` most-recent-first. Take the 3 most
     // recent, then reverse to oldest-first so the facepile renders the last
     // replier at the end (rightmost) — matching the client-assembled path
@@ -415,6 +491,22 @@ function buildRelayThreadSummary(
           : {}),
       })),
   };
+}
+
+/**
+ * Newer reply wins. On an equal timestamp the two halves describe the same
+ * reply, so prefer whichever one actually carries a preview (the local half).
+ */
+function mergeLastReplies(
+  local: TimelineThreadLastReply | null,
+  relay: TimelineThreadLastReply | null,
+): TimelineThreadLastReply | null {
+  if (!local) return relay;
+  if (!relay) return local;
+  if (local.createdAt !== relay.createdAt) {
+    return local.createdAt > relay.createdAt ? local : relay;
+  }
+  return local.preview !== null ? local : relay;
 }
 
 function mergeThreadSummaries(
@@ -434,6 +526,7 @@ function mergeThreadSummaries(
     replyCount: Math.max(local.replyCount, relay.replyCount),
     lastReplyAt:
       Math.max(local.lastReplyAt ?? 0, relay.lastReplyAt ?? 0) || null,
+    lastReply: mergeLastReplies(local.lastReply, relay.lastReply),
     participants: [...participants.values()].slice(-3),
   };
 }

@@ -109,6 +109,7 @@ export default defineConfig({
         "**/thread-reply-anchor-roleplay.spec.ts",
         "**/threadpane-ultrawide.spec.ts",
         "**/thread-focus-mode.spec.ts",
+        "**/thread-summary-last-reply-screenshots.spec.ts",
         "**/animated-avatar.spec.ts",
         "**/reminders.spec.ts",
         "**/reminder-click-repro.spec.ts",
