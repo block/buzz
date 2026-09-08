@@ -544,10 +544,67 @@ pub enum ProbeError {
     MaskedActivity {
         /// Number of other client backends with masked/unknown state.
         masked: i64,
+        /// Test-only bounded facts from the refused aggregate, never raw labels.
+        #[cfg(test)]
+        diagnostic: serde_json::Value,
     },
     /// The single heartbeat row (migration 0026) is missing on the writer.
     #[error("replica_heartbeat row missing on the writer — migration 0026 not applied?")]
     HeartbeatRowMissing,
+}
+
+const ACTIVITY_SQL: &str = r#"
+        SELECT
+            least(
+                (SELECT min(xact_start)
+                   FROM pg_stat_activity
+                  WHERE pid <> pg_backend_pid()),
+                (SELECT min(prepared) FROM pg_prepared_xacts)
+            ) AS oldest_xact_start,
+            (SELECT count(*)
+               FROM pg_stat_activity
+              WHERE pid <> pg_backend_pid()
+                AND (backend_type IS NULL
+                     OR (backend_type = 'client backend'
+                         AND (state IS NULL
+                              OR (state <> 'idle' AND xact_start IS NULL))))
+            ) AS masked
+        "#;
+
+// Only the aggregate projection changes in test builds: count and one bounded,
+// label-free representative consume the SAME filtered rows, not a second scan.
+// A single statement alone would not establish that for arbitrary PG statistics
+// functions. Here both aggregates share one input from pg_stat_activity, so a
+// backend disappearing later cannot replace the refused sample. min(text) keeps
+// one fixed-width tuple, rather than collecting every backend into an array.
+#[cfg(test)]
+const MASKED_DIAGNOSTIC_AGGREGATE: &str = r#"jsonb_build_object(
+    'count', count(*),
+    'probe_pid', pg_backend_pid(),
+    'read_all_stats', pg_has_role(current_user, 'pg_read_all_stats', 'USAGE'),
+    'representative', min(jsonb_build_object(
+        'pid', pid,
+        'same_database', datname = current_database(),
+        'same_role', usesysid = current_user::regrole::oid,
+        'backend', CASE WHEN backend_type IS NULL THEN 'null'
+                        WHEN backend_type = 'client backend' THEN 'client'
+                        ELSE 'other' END,
+        'state', CASE WHEN state IS NULL THEN 'null'
+                      WHEN state = 'idle' THEN 'idle'
+                      WHEN state = 'active' THEN 'active'
+                      WHEN state = 'idle in transaction' THEN 'idle in transaction'
+                      WHEN state = 'idle in transaction (aborted)' THEN 'aborted'
+                      WHEN state = 'disabled' THEN 'disabled'
+                      ELSE 'other' END,
+        'xact_start', xact_start,
+        'backend_start', backend_start,
+        'state_change', state_change
+    )::text)::jsonb
+)"#;
+
+#[cfg(test)]
+fn diagnostic_activity_sql() -> String {
+    ACTIVITY_SQL.replacen("count(*)", MASKED_DIAGNOSTIC_AGGREGATE, 1)
 }
 
 /// Take one ordered writer sample: S, then activity scan, then commit the
@@ -593,30 +650,24 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
     //    after the token. Their deferred floor guard already ran at PREPARE,
     //    so `pg_prepared_xacts.prepared` bounds their rows exactly like
     //    `xact_start`; fold it into the same minimum.
-    let row = sqlx::query(
-        r#"
-        SELECT
-            least(
-                (SELECT min(xact_start)
-                   FROM pg_stat_activity
-                  WHERE pid <> pg_backend_pid()),
-                (SELECT min(prepared) FROM pg_prepared_xacts)
-            ) AS oldest_xact_start,
-            (SELECT count(*)
-               FROM pg_stat_activity
-              WHERE pid <> pg_backend_pid()
-                AND (backend_type IS NULL
-                     OR (backend_type = 'client backend'
-                         AND (state IS NULL
-                              OR (state <> 'idle' AND xact_start IS NULL))))
-            ) AS masked
-        "#,
-    )
-    .fetch_one(&mut *conn)
-    .await?;
+    #[cfg(not(test))]
+    let query = sqlx::query(ACTIVITY_SQL);
+    // Only two compile-time literals enter this test-only query builder.
+    #[cfg(test)]
+    let query = sqlx::query(sqlx::AssertSqlSafe(diagnostic_activity_sql()));
+    let row = query.fetch_one(&mut *conn).await?;
+    #[cfg(not(test))]
     let masked: i64 = row.get("masked");
+    #[cfg(test)]
+    let diagnostic: serde_json::Value = row.get("masked");
+    #[cfg(test)]
+    let masked = diagnostic["count"].as_i64().expect("count(*) is an i64");
     if masked > 0 {
-        return Err(ProbeError::MaskedActivity { masked });
+        return Err(ProbeError::MaskedActivity {
+            masked,
+            #[cfg(test)]
+            diagnostic,
+        });
     }
     let oldest_xact_start: Option<DateTime<Utc>> = row.get("oldest_xact_start");
 
@@ -799,6 +850,61 @@ pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>) {
                 tracing::warn!(error = %e, "replica fence probe failed; fence closed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn diagnostic_changes_only_the_aggregate_not_the_classified_set() {
+        // Frozen pre-diagnostic SQL, including whitespace: catches changes to
+        // the production predicate, other-PID scope, and prepared-xact minimum.
+        assert_eq!(
+            hex::encode(Sha256::digest(ACTIVITY_SQL.as_bytes())),
+            "a11e60f4316a81b8d00809140ed2e52613c3f96c22020eb0fa5c2abb4c25b380"
+        );
+        assert_eq!(ACTIVITY_SQL.matches("count(*)").count(), 1);
+        let instrumented = diagnostic_activity_sql();
+        // Full equality, not a substring test: undoing the single aggregate
+        // projection must restore every byte of the actual production query.
+        assert_eq!(
+            instrumented.replace(MASKED_DIAGNOSTIC_AGGREGATE, "count(*)"),
+            ACTIVITY_SQL
+        );
+        assert_eq!(instrumented.matches("count(*)").count(), 1);
+    }
+
+    #[test]
+    fn diagnostic_projection_is_a_bounded_data_allowlist() {
+        // Review the complete projection, not a blacklist of possible secrets.
+        // In particular, database/role identities are comparisons only, state
+        // and backend type map to literals, and min retains one WHOLE tuple.
+        let approved = r#"jsonb_build_object(
+            'count', count(*),
+            'probe_pid', pg_backend_pid(),
+            'read_all_stats', pg_has_role(current_user, 'pg_read_all_stats', 'USAGE'),
+            'representative', min(jsonb_build_object(
+                'pid', pid,
+                'same_database', datname = current_database(),
+                'same_role', usesysid = current_user::regrole::oid,
+                'backend', CASE WHEN backend_type IS NULL THEN 'null'
+                    WHEN backend_type = 'client backend' THEN 'client' ELSE 'other' END,
+                'state', CASE WHEN state IS NULL THEN 'null'
+                    WHEN state = 'idle' THEN 'idle'
+                    WHEN state = 'active' THEN 'active'
+                    WHEN state = 'idle in transaction' THEN 'idle in transaction'
+                    WHEN state = 'idle in transaction (aborted)' THEN 'aborted'
+                    WHEN state = 'disabled' THEN 'disabled' ELSE 'other' END,
+                'xact_start', xact_start,
+                'backend_start', backend_start,
+                'state_change', state_change
+            )::text)::jsonb
+        )"#;
+        let tokens = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(tokens(MASKED_DIAGNOSTIC_AGGREGATE), tokens(approved));
     }
 }
 
@@ -1072,9 +1178,16 @@ mod postgres_tests {
             .await
             .expect_err("masked pg_stat_activity must fail closed");
         assert!(
-            matches!(err, ProbeError::MaskedActivity { masked } if masked >= 1),
+            matches!(err, ProbeError::MaskedActivity { masked, .. } if masked >= 1),
             "expected MaskedActivity, got {err:?}"
         );
+
+        if let ProbeError::MaskedActivity { masked, diagnostic } = &err {
+            assert_eq!(diagnostic["count"].as_i64(), Some(*masked));
+            assert_eq!(diagnostic["read_all_stats"], false);
+            assert!(diagnostic["representative"]["pid"].is_i64());
+            assert_ne!(diagnostic["representative"]["pid"], diagnostic["probe_pid"]);
+        }
 
         tx.rollback().await.expect("rollback");
         unpriv.close().await;
