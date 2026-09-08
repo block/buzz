@@ -11,7 +11,8 @@ Conversation → local task + new channel → implementation branch → pull req
 - The task's mutable data lives in the channel canvas.
 - No native Buzz task is created.
 - The task has zero or one implementation branch.
-- Each implementation branch belongs to one task channel.
+- Each implementation branch has one home channel. Creating a branch from an appropriate task channel binds it to that channel instead of creating another one.
+- A branch created without an appropriate current channel gets a new channel. Rebinding an established branch is for correcting mistakes, not routine restructuring.
 - The branch, pull request, CI, and review use the task's channel.
 
 ## Canvas data model
