@@ -18,6 +18,10 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
   static let relayPrivateKey = String(repeating: "0", count: 63) + "3"
   static let gatewayBody = "Reconnect to your relay now"
   static let channelID = "123e4567-e89b-42d3-a456-426614174000"
+  static let unnamedSenderHex =
+    "aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4"
+  static let unnamedSenderNpub =
+    "npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy"
 
   override func setUp() {
     super.setUp()
@@ -129,6 +133,78 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result?.0.body, "lower ID")
   }
 
+  func testDecodeResolutionTitlesUnnamedSenderWithCompactNpub() {
+    let result = BuzzPushNotificationResolver.decodeResolution(
+      events: [event(pubkey: Self.unnamedSenderHex, content: "Preview")],
+      community: community()
+    )
+
+    XCTAssertEqual(result?.0.title, "npub14f8…9nsy")
+    XCTAssertEqual(result?.0.body, "Preview")
+  }
+
+  func testDecodeResolutionCanonicalizesNpubSenderAtBoundary() {
+    // A sender key that arrives as an npub is validated by checksum and
+    // payload, never by its prefix, and renders the same compact label.
+    let result = BuzzPushNotificationResolver.decodeResolution(
+      events: [
+        event(pubkey: Self.unnamedSenderNpub, content: "Preview"),
+        event(pubkey: "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqk7h3rf", content: "Dropped"),
+      ],
+      community: community()
+    )
+
+    XCTAssertEqual(result?.0.title, "npub14f8…9nsy")
+    XCTAssertEqual(result?.0.body, "Preview")
+  }
+
+  func testDecodeResolutionUsesNeutralIdentityForMalformedSenderKey() {
+    let result = BuzzPushNotificationResolver.decodeResolution(
+      events: [event(pubkey: "author-pubkey", content: "Preview")],
+      community: community()
+    )
+
+    // Unverifiable keys never leak raw key material into the title.
+    XCTAssertEqual(result?.0.title, "Someone")
+    XCTAssertEqual(result?.0.body, "Preview")
+    XCTAssertEqual(result?.0.subtitle, "Community")
+    XCTAssertEqual(result?.0.senderPubkey, "author-pubkey")
+  }
+
+  func testShortPubkeyRendersCompactNpub() {
+    // First 8 and last 4 characters of the entire npub string.
+    XCTAssertEqual(
+      BuzzPushNotificationResolver.shortPubkey(Self.unnamedSenderHex), "npub14f8…9nsy")
+    XCTAssertEqual(
+      BuzzPushNotificationResolver.shortPubkey(String(repeating: "00", count: 32)),
+      "npub1qqq…ujme")
+    XCTAssertEqual(
+      BuzzPushNotificationResolver.shortPubkey(String(repeating: "ff", count: 32)),
+      "npub1lll…lrjw")
+    // Uppercase hex and npub inputs canonicalize to the same label.
+    XCTAssertEqual(
+      BuzzPushNotificationResolver.shortPubkey(Self.unnamedSenderHex.uppercased()),
+      "npub14f8…9nsy")
+    XCTAssertEqual(
+      BuzzPushNotificationResolver.shortPubkey(Self.unnamedSenderNpub), "npub14f8…9nsy")
+  }
+
+  func testShortPubkeyFallsBackToNeutralIdentityWithoutLeakingKeyMaterial() {
+    for malformed in [
+      "",
+      "author-pubkey",
+      String(repeating: "a", count: 63),
+      String(repeating: "ab", count: 33),
+      // Valid npub with a mutated checksum character.
+      "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujma",
+      // Valid checksums that are not keys: wrong payload length or hrp.
+      "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqk7h3rf",
+      "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwkhnav",
+    ] {
+      XCTAssertEqual(BuzzPushNotificationResolver.shortPubkey(malformed), "Someone")
+    }
+  }
+
   func testResolveSucceedsAndMutatesGatewayContent() throws {
     let event = try JSONDecoder().decode(
       VerifiedNostrEvent.self,
@@ -146,7 +222,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
 
     XCTAssertNotEqual(result.title, Self.gatewayBody)
     XCTAssertNotEqual(result.body, Self.gatewayBody)
-    XCTAssertEqual(result.title, String(event.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "npub1ccz…mnyd")
     XCTAssertEqual(result.body, "Hello Buzz")
     XCTAssertEqual(result.subtitle, "Community")
     XCTAssertEqual(
@@ -559,7 +635,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(result.title, String(message.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "npub1ccz…mnyd")
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertEqual(result.subtitle, "Community")
     XCTAssertEqual(result.body, "Fallback content")
@@ -602,7 +678,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(result.title, String(message.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "npub1ccz…mnyd")
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertEqual(result.body, "Bounded fallback")
     XCTAssertEqual(URLProtocolStub.requests.count, 2)
