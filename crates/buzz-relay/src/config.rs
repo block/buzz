@@ -367,6 +367,12 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+
+    /// NIP-FI relay-level configuration: enforcement mode, issuer registry,
+    /// JWKS endpoints, and S4 admin-command fields.  Parsed from
+    /// `BUZZ_NIP_FI_MODE` and `BUZZ_NIP_FI_ISSUERS`.  Always present; mode
+    /// defaults to `Off` when the env vars are absent.
+    pub nip_fi: crate::nip_fi_config::NipFiRelayConfig,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -1257,7 +1263,133 @@ impl Config {
             admin,
             web_dir,
             serve_git_web_gui,
+            nip_fi: crate::nip_fi_config::NipFiRelayConfig::from_env()?,
         })
+    }
+
+    /// Construct a hermetic test configuration from deterministic explicit defaults.
+    ///
+    /// Makes **zero** direct or transitive calls to `Config::from_env()` and
+    /// performs **zero** process-environment reads.  Every field is assigned a
+    /// hard-coded development default — the same value `from_env()` selects
+    /// when the corresponding variable is absent, except for
+    /// `git_hook_hmac_secret` which uses a fixed test-only 64-hex literal
+    /// instead of the random value that `from_env()` generates — so two calls
+    /// always produce an identical [`Config`].
+    ///
+    /// The DB and Redis URLs use unreachable loopback endpoints (port 1) so
+    /// tests that never touch external services can construct an `AppState`
+    /// without side effects.
+    ///
+    /// The `nip_fi` field is constructed directly via
+    /// `NipFiRelayConfig::off_for_test()` (which is also env-free) so this
+    /// constructor never races with `nip_fi_config` tests that temporarily
+    /// mutate `BUZZ_NIP_FI_*` in the same test binary.
+    ///
+    /// Only available in test builds.
+    #[cfg(test)]
+    pub fn hermetic_for_test() -> Self {
+        // DB and Redis use port 1 (unreachable) so tests that call this but
+        // never actually connect to a DB/Redis don't accidentally hit a live
+        // service that happens to be running on the default dev ports.
+        let database_url = "postgres://buzz:buzz@127.0.0.1:1/buzz".to_string(); // sadscan:disable np.postgres.1
+        let redis_url = "redis://127.0.0.1:1".to_string();
+
+        // git_repo_path / git_pack_cache_path: use a stable tmpdir-relative
+        // path.  These directories are not created here; tests that exercise
+        // git functionality must create them themselves.
+        let git_repo_path = std::path::PathBuf::from("./repos");
+        let git_pack_cache_path = git_repo_path.join(".pack-cache");
+
+        let git_max_pack_bytes: u64 = 500 * 1024 * 1024; // 500 MB
+        let git_max_repo_bytes: u64 = git_max_pack_bytes.saturating_mul(2); // 1 GB
+        let git_pack_cache_max_bytes: u64 = git_max_repo_bytes.saturating_mul(5); // 5 GB
+
+        Self {
+            bind_addr: "0.0.0.0:3000".parse().expect("static default parses"),
+            database_url,
+            read_database_url: None,
+            replica_read_max_age_ms: 0,
+            drain_jitter_ms: 0,
+            redis_url,
+            redis_pool_size: 16,
+            db_pool_size: 50,
+            db_read_pool_size: None,
+            relay_url: "ws://localhost:3000".to_string(),
+            pairing_relay_url: None,
+            max_connections: 10_000,
+            max_concurrent_handlers: 1024,
+            send_buffer_size: 1_000,
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            slow_client_grace_limit: 15,
+            auth: buzz_auth::AuthConfig::default(),
+            require_auth_token: false,
+            cors_origins: Vec::new(),
+            relay_private_key: None,
+            uds_path: None,
+            health_port: 8080,
+            metrics_port: 9102,
+            pubkey_allowlist_enabled: false,
+            require_relay_membership: false,
+            huddle_audio_available: true,
+            mesh: buzz_relay_mesh::MeshConfig {
+                enabled: false,
+                bind_addr: "0.0.0.0:3478".parse().expect("static default parses"),
+                registry_refresh: std::time::Duration::from_secs(15),
+            },
+            mesh_demo_echo: false,
+            relay_owner_pubkey: None,
+            relay_operator_api_origin: None,
+            relay_operator_pubkeys: Vec::new(),
+            allow_nip_oa_auth: false,
+            klipy: None,
+            media: buzz_media::MediaConfig {
+                s3_endpoint: "http://localhost:9000".to_string(),
+                s3_access_key: "buzz_dev".to_string(),
+                s3_secret_key: "buzz_dev_secret".to_string(),
+                s3_bucket: "buzz-media".to_string(),
+                s3_region: "us-east-1".to_string(),
+                s3_addressing_style: buzz_media::config::S3AddressingStyle::default(),
+                max_image_bytes: 50 * 1024 * 1024,
+                max_gif_bytes: 10 * 1024 * 1024,
+                max_video_bytes: 500 * 1024 * 1024,
+                max_file_bytes: 100 * 1024 * 1024,
+                public_base_url: "http://localhost:3000/media".to_string(),
+                upload_records_enabled: false,
+                upload_ip_header: None,
+                upload_port_header: None,
+            },
+            media_max_concurrent_uploads: 8,
+            media_max_concurrent_uploads_per_pubkey: 2,
+            media_uploads_per_minute: 30,
+            audit_enabled: true,
+            ephemeral_ttl_override: None,
+            git_repo_path,
+            git_pack_cache_path,
+            git_max_pack_bytes,
+            git_max_repo_bytes,
+            git_pack_cache_max_bytes,
+            git_pack_cache_max_concurrent_populations: 2,
+            git_max_repos_per_pubkey: 100,
+            git_max_concurrent_ops: 20,
+            // Fixed test-only 64-hex secret.  The value is non-sensitive and
+            // intentionally constant so two calls to this constructor always
+            // produce an identical Config.
+            git_hook_hmac_secret:
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            push_enabled: false,
+            push_executor_key_id: "relay-v1".to_string(),
+            push_gateway_delivery_url: Some(
+                parse_push_gateway_delivery_url(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
+                    .expect("static default URL parses"),
+            ),
+            push_gateway_timeout: std::time::Duration::from_millis(2_000),
+            join_policy: None,
+            admin: None,
+            web_dir: None,
+            serve_git_web_gui: false,
+            nip_fi: crate::nip_fi_config::NipFiRelayConfig::off_for_test(),
+        }
     }
 }
 
@@ -1274,6 +1406,28 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("private-klipy-key"));
+    }
+
+    #[test]
+    fn hermetic_for_test_is_deterministic() {
+        // Two calls must produce identical configs — no random or env-sourced
+        // fields may differ.  This is the mandatory-red regression for the
+        // fixed HMAC secret: restoring the rand::random expression causes the
+        // two secrets to diverge and this assertion fails.
+        let a = Config::hermetic_for_test();
+        let b = Config::hermetic_for_test();
+        assert_eq!(
+            a.git_hook_hmac_secret, b.git_hook_hmac_secret,
+            "hermetic_for_test() must return identical git_hook_hmac_secret across calls"
+        );
+        // The secret must be the fixed test-only value (non-empty, 64 hex chars).
+        assert_eq!(a.git_hook_hmac_secret.len(), 64);
+        assert!(
+            a.git_hook_hmac_secret
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
+            "git_hook_hmac_secret must be 64 lowercase hex characters"
+        );
     }
 
     // Mutex to serialize tests that mutate environment variables.

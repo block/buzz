@@ -1836,6 +1836,54 @@ impl RemoteHuddleSession {
             debug!(owner = %self.owner, "huddle media datagram to owner failed: {e}");
         }
     }
+
+    /// Construct a minimal `RemoteHuddleSession` for handler-level tests.
+    /// Fields not relevant to the test path (transport, seq, protocol_version)
+    /// are zeroed. Only `fenced` and `pubkey` are used by `send_clean_close`,
+    /// which is the only method CW7 exercises on this type.
+    #[cfg(test)]
+    pub fn for_test(fenced: FencedHeader, pubkey: String) -> Self {
+        use std::sync::Arc;
+        struct NullTransport;
+        impl buzz_relay_mesh::RelayPeerTransport for NullTransport {
+            fn send_datagram(
+                &self,
+                _to: buzz_relay_mesh::RuntimeId,
+                _dgram: buzz_relay_mesh::MeshDatagram,
+            ) -> Result<(), buzz_relay_mesh::MeshError> {
+                Ok(())
+            }
+            fn open_session_stream(
+                &self,
+                _to: buzz_relay_mesh::RuntimeId,
+                _hello: buzz_relay_mesh::wire::StreamHello,
+            ) -> buzz_relay_mesh::BoxFuture<
+                '_,
+                Result<buzz_relay_mesh::MeshStream, buzz_relay_mesh::MeshError>,
+            > {
+                Box::pin(async {
+                    Err(buzz_relay_mesh::MeshError::PeerNotConnected(
+                        buzz_relay_mesh::RuntimeId([0u8; 32]),
+                    ))
+                })
+            }
+            fn set_inbound(&self, _handler: Box<dyn buzz_relay_mesh::InboundHandler>) {}
+        }
+        Self {
+            peer_index: 0,
+            epoch: 0,
+            protocol_version: 1,
+            roster: RosterSnapshot {
+                peers: vec![],
+                revision: 0,
+            },
+            fenced,
+            owner: fenced.owner_runtime_id,
+            pubkey,
+            transport: Arc::new(NullTransport),
+            seq: 0,
+        }
+    }
 }
 
 /// Unregister the client from the owner and close the control stream cleanly.

@@ -45,14 +45,19 @@ pub use rate_limit::{
 };
 pub use scope::{parse_scopes, Scope};
 
+/// Re-export `jsonwebtoken::Algorithm` so crates that use NIP-FI issuer policy
+/// construction do not need a direct `jsonwebtoken` dependency.
+pub use jsonwebtoken::Algorithm as JwtAlgorithm;
 pub use nip_fi::{
     validate_nip_fi_config, AssertionKeySet, AssertionPolicyId, CanonicalCapabilities,
-    ClientSubjectPosture, ConfidentialAssertion, DenialClass, FederatedAssertionVerifier,
-    FederatedIdentity, FederatedIdentityDiscovery, FreshnessClass, HttpJwksFetcher,
-    IssuerJwksConfig, IssuerKeySource, IssuerPolicy, IssuerPolicyError, IssuerRegistry,
-    JwksFetchError, JwksFetcher, JwksSourceContract, NipFiMode, NipFiStartupError,
-    ProductionJwksSource, RevalidationDependencies, SubjectClass, SubjectClassContract, TokenClass,
-    TransportContractId, VerifiedAssertion, VerifierError, CLIENT_ATTACHED_HEADER,
+    ClientSubjectPosture, CommandError, CommandIssuerPolicy, CommandPolicyError, CommandResult,
+    CommandVerifier, ConfidentialAssertion, CrossPodMergeResult, DenialClass, DenySetFull,
+    FederatedAssertionVerifier, FederatedIdentity, FederatedIdentityDiscovery, FreshnessClass,
+    HttpJwksFetcher, IssuerCapacity, IssuerJwksConfig, IssuerKeySource, IssuerPolicy,
+    IssuerPolicyError, IssuerRegistry, JwksFetchError, JwksFetcher, JwksSourceContract,
+    NipFiDenyMap, NipFiMode, NipFiStartupError, ProductionJwksSource, RevalidationDependencies,
+    SubjectClass, SubjectClassContract, TokenClass, TransportContractId, VerifiedAssertion,
+    VerifierError, CLIENT_ATTACHED_HEADER, COMMAND_JWT_TYP, MAX_COMMAND_AGE_SECONDS,
     NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
 };
 
