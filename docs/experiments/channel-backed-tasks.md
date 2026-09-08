@@ -11,6 +11,7 @@ Conversation → local task + new channel → implementation branch → pull req
 - The task's mutable data lives in the channel canvas.
 - No native Buzz task is created.
 - The task has zero or one implementation branch.
+- Each implementation branch belongs to one task channel.
 - The branch, pull request, CI, and review use the task's channel.
 
 ## Canvas data model
@@ -29,6 +30,14 @@ branch: null
 ---
 
 Experimental task: You must read and follow the [channel-backed task experiment](https://github.com/block/buzz/blob/jtennant/task-channel-experiment/docs/experiments/channel-backed-tasks.md) before working in this channel.
+```
+
+When implementation starts, replace `branch: null` with the branch's repository and name:
+
+```yaml
+branch:
+  repository: "<repository URL>"
+  name: "<branch name>"
 ```
 
 ## Agent decision flow
@@ -53,14 +62,23 @@ I've created the task in [#<channel name>](buzz://channel/<channel UUID>).
 2. Does the current channel have task details?
    - **No:** Add them to the canvas.
 3. Does the current channel have a branch?
-   - **No:** Create one and add its details to the canvas.
+   - **No:** Create one and add its repository and name to the canvas.
+   - **Yes, but the work needs another branch:** Create another task channel for that branch and relate the tasks when useful.
 4. Start work.
+
+## Valid progressions
+
+- A conversation becomes a task channel, then gains a branch when implementation starts.
+- A feature needs one branch in Berd and another in Voice Conversation CLI. The two task channels can be siblings under the Berd Voice channel, the Voice Conversation CLI task can be a subtask of the Berd runtime task, or a new branchless umbrella task can become the parent of both.
+- An implementation attempt fails and a new approach starts, so the agent creates another task channel and branch. An umbrella task can be added later to encompass both attempts.
+- An umbrella task remains branchless and coordinates branch-backed subtasks.
+
+The same work can have multiple valid representations: sibling tasks, a parent and subtask, or an umbrella task with children. Task relationships should reflect how people understand the work and do not need to be predicted when the first task is created.
 
 ## Future experiments
 
 - Start with a bare channel, then add a task or branch view.
 - Start with a branch channel, then add a task view.
-- Represent work requiring multiple implementation branches as a parent task with branch-backed subtasks.
 - Render a client-side "Task created" transition in an originating conversation when a task canvas references it through `originating_thread`.
 - Have the task-creation API record the originating conversation as a native relationship so clients can render the transition without requiring a stored message.
 - Turn this decision flow into an API so agents declare their intent and Buzz creates or reuses the correct channel and bindings.
