@@ -191,11 +191,10 @@ class _DmAvatar extends ConsumerWidget {
     }
 
     final avatarUrl = profile?.avatarUrl;
-    final initial =
-        profile?.initial ??
-        (channel.participants.isNotEmpty
-            ? channel.participants.first[0].toUpperCase()
-            : '?');
+    // Keyed to the hex public key when the counterpart is unnamed and the
+    // profile isn't cached — the compact-npub participant label would
+    // otherwise render `N` for every unnamed DM counterpart.
+    final initial = profile?.initial ?? dmAvatarInitial(channel);
     return SizedBox(
       width: _kDmAvatarSize,
       height: _kDmAvatarSize,

@@ -16,20 +16,18 @@ void main() {
   const canonicalCompact = 'npub180c\u2026h6w6';
 
   group('fullNpub', () {
-    test('encodes a hex public key to its canonical npub', () {
-      expect(fullNpub(canonicalHex), canonicalNpub);
-    });
-
-    test('canonicalizes uppercase hex input', () {
-      expect(fullNpub(canonicalHex.toUpperCase()), canonicalNpub);
-    });
-
-    test('trims surrounding whitespace', () {
-      expect(fullNpub('  $canonicalHex \n'), canonicalNpub);
-    });
-
-    test('round-trips an already-npub input to the canonical npub', () {
-      expect(fullNpub(canonicalNpub), canonicalNpub);
+    test('canonicalizes every accepted input wrapper', () {
+      // Every accepted wrapper — lowercase hex, uppercase hex, whitespace-
+      // padded, and an already-npub key — converges on the canonical npub.
+      final inputs = <String>[
+        canonicalHex,
+        canonicalHex.toUpperCase(),
+        '  $canonicalHex \n',
+        canonicalNpub,
+      ];
+      for (final input in inputs) {
+        expect(fullNpub(input), canonicalNpub, reason: input);
+      }
     });
 
     test('rejects malformed identities without echoing them back', () {

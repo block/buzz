@@ -107,8 +107,9 @@ void main() {
     expect(content, {'about': 'Building Buzz'});
     final profile = container.read(profileProvider).requireValue!;
     expect(profile.displayName, isNull);
+    // The exact compact label is pinned; its npub shape is covered by the
+    // shared string_utils vectors.
     expect(profile.label, shortPubkey(keys.public));
-    expect(profile.label, matches(RegExp(r'^npub1[a-z0-9]{3}…[a-z0-9]{4}$')));
   });
 
   test('malformed profile metadata can be repaired by an edit', () async {

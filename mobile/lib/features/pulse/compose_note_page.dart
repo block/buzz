@@ -192,7 +192,12 @@ class _ReplyContext extends ConsumerWidget {
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,
                 fallback: Text(
-                  (profile?.initial ?? displayName[0]).toUpperCase(),
+                  // Name-derived when the profile is cached; keyed to the
+                  // hex public key when it isn't, so the compact-npub
+                  // fallback label doesn't render `N` for every unnamed
+                  // author.
+                  profile?.initial ??
+                      (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?'),
                   style: context.textTheme.labelMedium?.copyWith(
                     color: context.colors.onPrimaryContainer,
                   ),

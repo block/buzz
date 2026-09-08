@@ -19,6 +19,7 @@ import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -124,17 +125,51 @@ void main() {
       createdBy: 'abc',
       createdAt: DateTime(2025),
       memberCount: 2,
-      participants: const ['Test', 'Alice'],
-      participantPubkeys: const ['aabb', 'alice'],
+      participants: const ['Alice', 'Test'],
+      participantPubkeys: const ['alice', 'aabb'],
       isMember: true,
     ),
   ];
 
   testWidgets('shows grouped channel list when data loads', (tester) async {
+    // Valid fixture keys whose npub encodings were verified against the
+    // NIP-19 codec independently of the code under test.
+    const a11ce =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    const b0b =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+    final unnamedDm = Channel(
+      id: 'dm-unnamed',
+      name: 'DM',
+      channelType: 'dm',
+      visibility: 'open',
+      description: 'Direct message',
+      createdBy: 'aabb',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      participants: [shortPubkey(a11ce), 'Test'],
+      participantPubkeys: const [a11ce, 'aabb'],
+      isMember: true,
+    );
+    final groupDm = Channel(
+      id: 'dm-group',
+      name: 'Group DM',
+      channelType: 'dm',
+      visibility: 'open',
+      description: 'Direct message',
+      createdBy: 'aabb',
+      createdAt: DateTime(2025),
+      memberCount: 3,
+      participants: [shortPubkey(a11ce), shortPubkey(b0b), 'Test'],
+      participantPubkeys: const [a11ce, b0b, 'aabb'],
+      isMember: true,
+    );
     await tester.pumpWidget(
       buildTestable(
         overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          channelsProvider.overrideWith(
+            () => _FakeNotifier([...testChannels, unnamedDm, groupDm]),
+          ),
         ],
       ),
     );
@@ -152,6 +187,26 @@ void main() {
     expect(find.byIcon(LucideIcons.ellipsisVertical), findsWidgets);
     expect(find.byIcon(LucideIcons.arrowUpDown), findsNothing);
     expect(find.byTooltip('DMs options'), findsOneWidget);
+
+    // DM identity display: the unnamed counterpart tile renders its
+    // compact npub label, but its avatar initial stays keyed to the hex
+    // public key — never the `N` the npub label starts with. The named
+    // tile keeps its authored initial from the positional participant
+    // label even without a cached profile.
+    expect(find.text(shortPubkey(a11ce)), findsOneWidget);
+    expect(_dmTileAvatarInitial(tester, shortPubkey(a11ce)), 'A');
+    expect(_dmTileAvatarInitial(tester, 'Alice'), 'A');
+    // A multi-counterpart DM still takes the group count badge — the
+    // single-counterpart avatar above is not shared with it.
+    final groupTile = _dmTileFor('${shortPubkey(a11ce)}, ${shortPubkey(b0b)}');
+    expect(
+      find.descendant(of: groupTile, matching: find.byType(AvatarImage)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: groupTile, matching: find.text('2')),
+      findsOneWidget,
+    );
 
     await tester.tap(find.byTooltip('Channels options'));
     await tester.pumpAndSettle();
@@ -2578,3 +2633,20 @@ ObservedUnreadEvent _observed({
   channelType: 'stream',
   isThreadedReply: isThreadedReply,
 );
+
+/// The channel tile (its `InkWell`) that renders [labelText] as its row
+/// label.
+Finder _dmTileFor(String labelText) => find
+    .ancestor(of: find.text(labelText), matching: find.byType(InkWell))
+    .first;
+
+/// Avatar fallback initial for the DM tile rendering [labelText] — asserts at
+/// the production seam (the tile's `_DmAvatar`), not the label helper.
+String _dmTileAvatarInitial(WidgetTester tester, String labelText) {
+  final tile = _dmTileFor(labelText);
+  final avatar = find.descendant(of: tile, matching: find.byType(AvatarImage));
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
+}
