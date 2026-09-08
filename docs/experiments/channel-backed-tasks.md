@@ -1,6 +1,6 @@
 # Channel-backed task experiment
 
-This is a living record of experiments based on [Buzz Channels — One Conversation, Many Views][channel-vision]. We are testing whether one Buzz channel can remain the shared home for a conversation as task, branch, and pull-request views appear.
+This is a living record of experiments based on [Buzz Channels — One Conversation, Many Views](https://github.com/block/buzz/blob/2b1ccbab542c42f227f9714e13eb7e1377bcbe16/VISION_CHANNELS.md#L1). We are testing whether one Buzz channel can remain the shared home for a conversation as task, branch, and pull-request views appear.
 
 ## Currently testing
 
@@ -12,6 +12,26 @@ Conversation → local task + new channel → implementation branch → pull req
 - No native Buzz task is created.
 - The task has zero or one implementation branch.
 - The branch, pull request, CI, and review use the task's channel.
+
+## Canvas data model
+
+The canvas begins with YAML front matter. References use canonical Buzz URIs rather than Markdown links so agents and clients can parse them without interpreting presentation text. The channel containing the canvas is implicit and must not be repeated in the data.
+
+Use this template:
+
+```yaml
+---
+buzz_schema: channel-backed-task/v1
+task:
+  title: "<task title>"
+  description: "<task description>"
+parent_channel: "buzz://channel/<channel UUID>"
+originating_thread: "buzz://message?channel=<channel UUID>&id=<message event ID>"
+branch: null
+---
+```
+
+Channel IDs are UUIDs. Message IDs are Nostr event IDs. Agents must copy these references from Buzz context or canonical Buzz links and must not guess them. A client can display `parent_channel` and `originating_thread` as friendly Markdown-style links while preserving the canonical URIs as the underlying values.
 
 ## Agent decision flow
 
@@ -40,5 +60,3 @@ Conversation → local task + new channel → implementation branch → pull req
 - Turn this decision flow into an API so agents declare their intent and Buzz creates or reuses the correct channel and bindings.
 
 We will update this document with what each experiment teaches us and which behavior requires native client or relay support.
-
-[channel-vision]: https://github.com/block/buzz/blob/2b1ccbab542c42f227f9714e13eb7e1377bcbe16/VISION_CHANNELS.md#L1
