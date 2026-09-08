@@ -1,5 +1,13 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
-  reverse_proxy relay:3000
+  # route {} disables Caddy's automatic directive sorting for this block, so
+  # the /pair match below is always tried before the catch-all reverse_proxy.
+  # Caddy proxies WebSocket upgrades transparently — no extra directive needed.
+  route {
+    @pairing path /pair /pair/*
+    reverse_proxy @pairing pairing-relay:5000
+
+    reverse_proxy relay:3000
+  }
 }
