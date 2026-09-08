@@ -12,6 +12,8 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
 import androidx.annotation.RequiresApi
+import com.google.android.play.agesignals.AgeSignalsException
+import com.google.android.play.agesignals.model.AgeSignalsErrorCode
 import com.google.android.play.agesignals.AgeSignalsAccessRequest
 import com.google.android.play.agesignals.AgeSignalsManager
 import com.google.android.play.agesignals.AgeSignalsManagerFactory
@@ -43,6 +45,21 @@ internal fun replyWithAgeSignalError(
     result: MethodChannel.Result,
     error: Exception,
 ) {
+    // Missing/outdated Play installations and non-Play installs cannot supply
+    // a signal. Preserve Buzz's unsupported-environment no-signal policy.
+    // Transport, binding, SDK integration, and unknown failures stay gated.
+    if (error is AgeSignalsException && error.errorCode in setOf(
+            AgeSignalsErrorCode.API_NOT_AVAILABLE,
+            AgeSignalsErrorCode.PLAY_STORE_NOT_FOUND,
+            AgeSignalsErrorCode.PLAY_SERVICES_NOT_FOUND,
+            AgeSignalsErrorCode.PLAY_STORE_VERSION_OUTDATED,
+            AgeSignalsErrorCode.PLAY_SERVICES_VERSION_OUTDATED,
+            AgeSignalsErrorCode.APP_NOT_OWNED,
+        )
+    ) {
+        result.success(noAgeSignalPayload())
+        return
+    }
     result.error(
         "age_signal_unavailable",
         "The age signal request failed.",
