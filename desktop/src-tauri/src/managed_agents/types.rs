@@ -245,9 +245,11 @@ pub struct ManagedAgentRecord {
     /// storage layer blanks this before writing JSON once the key is safely in
     /// the keyring, and re-hydrates it from the keyring on load.
     ///
-    /// It is only serialized inline (the `0o600` JSON fallback) when the
-    /// keyring is unreachable — `skip_serializing_if` keeps it out of JSON in
-    /// the normal keyring-backed case. `default` also lets an old build parse a
+    /// It is serialized inline (the `0o600` JSON fallback) when the keyring is
+    /// unreachable, and deliberately by the explicit existing-agent import,
+    /// which provisions the user-supplied key in the restricted local file in
+    /// one atomic write — `skip_serializing_if` keeps it out of JSON in the
+    /// normal keyring-backed case. `default` also lets an old build parse a
     /// store whose inline key was already migrated out and blanked.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub private_key_nsec: String,

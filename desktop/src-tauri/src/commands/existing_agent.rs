@@ -184,6 +184,16 @@ fn commit_verified<R: tauri::Runtime>(
         {
             return Err("Existing agent profile or community does not match".into());
         }
+        // The saved owner link must be usable by the exact current owner
+        // BEFORE any duplicate or repair effect. Launch preparation enforces
+        // this same verifier, so an absent/foreign/invalid attestation is
+        // refused here instead of reporting a healthy duplicate or a repaired
+        // key for a record that later refuses to run as unowned. No write, no
+        // silent re-attestation or owner migration.
+        agents::runtime_configurations::verify_owner(saved, &input.owner).map_err(|_| {
+            "Saved agent ownership is missing, invalid, or belongs to a different identity"
+                .to_string()
+        })?;
         if nostr::SecretKey::parse(&saved.private_key_nsec)
             .ok()
             .is_some_and(|key| Keys::new(key).public_key().to_hex() == input.pubkey)

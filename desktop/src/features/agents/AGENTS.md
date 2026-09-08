@@ -491,6 +491,10 @@ independently owner-signed kind:30177 persona link in the current community. The
 linked definition must already exist; it is never cloned. Workspace apply,
 identity mutation and agent store locks fence the commit. Healthy duplicates do
 not write; explicit repair changes only the credential, not runtime/config state.
+A saved record's ownership attestation must verify for the exact current owner
+and agent before either outcome — the same verifier launch preparation applies
+— so a missing, foreign, or invalid saved owner link is refused without writes
+instead of reporting success for a record that later refuses to run.
 This operation deliberately stores the user-supplied key in the restricted local
 agent file in one atomic write with the record, avoiding a keyring-first partial
 commit. The dialog discloses that storage choice. Ordinary save/Move/restore and
