@@ -74,6 +74,7 @@ npm install -g @agentclientprotocol/codex-acp
 
 # Run
 export OPENAI_API_KEY="sk-..."   # required — use an OpenAI API key, not a ChatGPT subscription
+export BUZZ_ACP_AGENT_COMMAND="codex-acp"
 
 buzz-acp
 ```
@@ -111,7 +112,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
-| `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
+| `BUZZ_ACP_IDLE_TIMEOUT` | no | `900` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 
@@ -174,6 +175,19 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
 ```
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
+
+> **Same-owner siblings:** `owner-only` and `allowlist` also accept other agents
+> that share this agent's owner, verified from the author's NIP-OA auth tag in
+> its kind:0 profile. The allowlist adds external pubkeys on top; it never
+> revokes same-owner team bots.
+
+> **DMs are stricter than the mode suggests:** clients auto-p-tag every DM
+> participant, so any participant's message would otherwise look like a mention
+> and fire a turn — which would turn `anyone` and `allowlist` into transitive
+> access grants for whoever lands in a DM with the agent. Inside a DM only the
+> owner and verified same-owner siblings may prompt the agent; `anyone` and the
+> explicit allowlist do not apply, and `nobody` still drops everything. Channel
+> type resolves fail-closed: unknown type is treated as a DM.
 
 **Examples:**
 
