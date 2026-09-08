@@ -27,6 +27,15 @@ const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const DM_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+// Unnamed roster fixtures whose two plausible orders disagree (the e2e twin
+// of the memberUtils unit pair): both keys share the `npub1qqq…` head, so
+// the compact display labels order V5 first (`…2hcx` < `…2w5c`) while the
+// full canonical npubs order V24 first (`…vq53…` < `…zsfj…`). Only the
+// full-npub order is correct for the roster.
+const UNNAMED_MEMBER_V5_PUBKEY =
+  "0000000000000000000000000000000000000000000000000000000000000005";
+const UNNAMED_MEMBER_V24_PUBKEY =
+  "0000000000000000000000000000000000000000000000000000000000000018";
 
 type MockFeedWindow = Window & {
   __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -4252,6 +4261,57 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
       `[data-index="${rosterCount - 1}"] > [data-testid^="sidebar-member-"]`,
     ),
   ).toBeVisible();
+});
+
+test("members sidebar orders unnamed members by full canonical npub", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const channelId = await page
+    .getByTestId("channel-random")
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Random channel id missing.");
+  }
+
+  // Added in the opposite of the expected order, so incoming membership
+  // order can never satisfy the assertion on its own.
+  await invokeMockCommand(page, "add_channel_members", {
+    channelId,
+    pubkeys: [UNNAMED_MEMBER_V5_PUBKEY, UNNAMED_MEMBER_V24_PUBKEY],
+    role: "member",
+  });
+
+  await openMembersSidebar(page, "random");
+  // "random" seeds alice, the mock identity, and bob, so the two unnamed
+  // fixtures round out a five-row roster that the initial virtual window
+  // renders entirely — both fixtures are visible without scrolling.
+  await expect(
+    page.getByTestId(`sidebar-member-${UNNAMED_MEMBER_V24_PUBKEY}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-member-${UNNAMED_MEMBER_V5_PUBKEY}`),
+  ).toBeVisible();
+
+  // The compact labels (`npub1qqq…2hcx` < `npub1qqq…2w5c`) would order V5
+  // first; the full canonical npubs disagree and order V24 first. The
+  // rendered roster must follow the full key, not the display label.
+  const renderedOrder = await page
+    .getByTestId("members-sidebar-people")
+    .locator('[data-index] > [data-testid^="sidebar-member-"]')
+    .evaluateAll((rows) =>
+      rows.map(
+        (row) =>
+          (row as HTMLElement).dataset.testid?.slice(
+            "sidebar-member-".length,
+          ) ?? "",
+      ),
+    );
+  const v24Position = renderedOrder.indexOf(UNNAMED_MEMBER_V24_PUBKEY);
+  const v5Position = renderedOrder.indexOf(UNNAMED_MEMBER_V5_PUBKEY);
+  expect(v24Position).toBeGreaterThanOrEqual(0);
+  expect(v5Position).toBeGreaterThanOrEqual(0);
+  expect(v24Position).toBeLessThan(v5Position);
 });
 
 test("opening a human-only members sidebar skips managed runtime discovery", async ({
