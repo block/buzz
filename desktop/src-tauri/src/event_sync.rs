@@ -18,6 +18,9 @@ pub fn run_event_sync(
     owner_keys: &nostr::Keys,
     db_path: &Path,
 ) -> Result<(), String> {
+    if crate::managed_agents::device_policy::pauses_sync(app) {
+        return Ok(());
+    }
     // Persona and agent legs stay best-effort: they log and swallow, and their
     // failure does not undo the boot team-membership repair. The team leg is
     // fatal — it establishes the superseding local head (a monotonic

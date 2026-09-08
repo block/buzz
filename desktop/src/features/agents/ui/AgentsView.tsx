@@ -1,3 +1,4 @@
+import { useDeviceAgentPolicy } from "@/features/agents/useDeviceAgentPolicy";
 import * as React from "react";
 import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
 import {
@@ -38,6 +39,7 @@ import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function AgentsView() {
+  const devicePolicy = useDeviceAgentPolicy();
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
@@ -143,6 +145,27 @@ export function AgentsView() {
           className="mx-auto w-full max-w-6xl space-y-8 [container-type:inline-size]"
           data-testid="agents-page-content"
         >
+          {devicePolicy.data?.activeClientOnly && (
+            <p
+              className="rounded-lg border border-border p-4 text-sm text-muted-foreground"
+              role="status"
+            >
+              Client-only mode is active. Use existing agents through the relay
+              and manage their configuration on the device that hosts them.
+              Change this device's mode in Settings → Agents.
+            </p>
+          )}
+          {devicePolicy.data?.activeUniqueNames &&
+            !devicePolicy.data.activeClientOnly && (
+              <p
+                className="rounded-lg border border-border p-4 text-sm text-muted-foreground"
+                role="status"
+              >
+                This device can host agents with unique names. Protected remote
+                agents use their existing identities and stay on their hosting
+                device.
+              </p>
+            )}
           <PageHeader
             action={
               <>

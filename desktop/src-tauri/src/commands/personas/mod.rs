@@ -76,8 +76,13 @@ pub use inbound::reconcile_inbound_persona_event;
 pub(crate) use inbound::retain_inbound_catalog_witness;
 
 #[tauri::command]
-pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, String> {
+pub async fn list_personas<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<AgentDefinition>, String> {
     use tauri::Manager;
+    let policy = crate::managed_agents::device_policy::model::discovery_policy(
+        crate::managed_agents::device_policy::active(&app),
+    );
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _store_guard = state
@@ -86,6 +91,16 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, Strin
             .map_err(|error| error.to_string())?;
         let mut personas = load_personas(&app)?;
         pending::project_active_persona_sharing(&app, &state, &mut personas);
+        // Effective local availability only: never persist this projection or
+        // publish it as a definition edit. Other devices keep their activation.
+        for persona in &mut personas {
+            if policy
+                .require_local_agent(&persona.display_name, None, Some(&persona.id))
+                .is_err()
+            {
+                persona.is_active = false;
+            }
+        }
         Ok(personas)
     })
     .await
@@ -134,19 +149,28 @@ fn collect_remote_deployed(
 /// Extracted from `delete_persona` so unit tests can inject a failing save and
 /// verify retry-safety without a full `AppHandle` mock: if `save` returns `Err`,
 /// this function propagates it before the keyring deletions and tombstones that
-/// appear after the `?` in the call site — nothing is destroyed and the command
-/// is safe to retry.
+/// appear after the `?` in the call site. `prepare` first retains each target's
+/// complete public identity and local sync permission, so an interrupted cascade
+/// can recover its atomic tombstone/archive even if the persona save fails.
 fn commit_cascade_agents(
     agents: &mut Vec<ManagedAgentRecord>,
     cascade: &std::collections::HashSet<String>,
+    prepare: impl Fn(&ManagedAgentRecord) -> Result<(), String>,
     save: impl FnOnce(&[ManagedAgentRecord]) -> Result<(), String>,
 ) -> Result<(), String> {
+    for record in agents
+        .iter()
+        .filter(|record| cascade.contains(&record.pubkey))
+    {
+        prepare(record)?;
+    }
     agents.retain(|a| !cascade.contains(&a.pubkey));
     save(agents)
 }
 
 #[tauri::command]
 pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
+    crate::managed_agents::device_policy::require_persona(&app, &id)?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -159,6 +183,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 .lock()
                 .map_err(|error| error.to_string())?;
 
+            crate::managed_agents::device_policy::require_persona(&app, &id)?;
             // Load and validate the persona before any destructive work.
             let mut personas = load_personas(&app)?;
             let persona = personas
@@ -246,8 +271,9 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
             //
             // Disk-authoritative writes first, side effects strictly after.
             // commit_cascade_agents is an injectable seam so unit tests can
-            // verify retry-safety: a failing save propagates before any keyring
-            // deletion or tombstone occurs.
+            // verify retry-safety: selective retention prepares every target
+            // before any record leaves disk; a failing save propagates before
+            // any keyring deletion or tombstone occurs.
             //
             // Failure semantics:
             //   agent save fails   → nothing destroyed; full cascade retries cleanly
@@ -255,9 +281,12 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
             //                        finds an empty cascade and proceeds cleanly
             // Keys and tombstones are enqueued only after their records leave disk.
             if !cascade.is_empty() {
-                commit_cascade_agents(&mut agents, &cascade, |recs| {
-                    save_managed_agents(&app, recs)
-                })?;
+                commit_cascade_agents(&mut agents, &cascade, |record| {
+                    if crate::managed_agents::device_policy::active(&app)?.unique_names {
+                        super::agents::retain_managed_agent_pending(&app, &state, record)?;
+                    }
+                    Ok(())
+                }, |recs| save_managed_agents(&app, recs))?;
             }
 
             let original_len = personas.len();
@@ -295,6 +324,7 @@ pub async fn set_persona_active(
     active: bool,
     app: AppHandle,
 ) -> Result<AgentDefinition, String> {
+    crate::managed_agents::device_policy::require_persona(&app, &id)?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -308,6 +338,7 @@ pub async fn set_persona_active(
             .find(|record| record.id == id)
             .ok_or_else(|| format!("agent {id} not found"))?;
 
+        crate::managed_agents::device_policy::require_persona(&app, &id)?;
         let referenced_by_managed_agent = !active
             && load_managed_agents(&app)?
                 .iter()

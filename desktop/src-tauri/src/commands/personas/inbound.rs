@@ -337,7 +337,7 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
                 "managed-agent content was not parsed before retention".to_string()
             })?;
             let access_changed = apply_inbound_managed_agent(&mut agents, &d_tag, managed_agent);
-            if access_changed {
+            if access_changed && !crate::managed_agents::device_policy::pauses_sync(&app) {
                 let record = agents
                     .iter_mut()
                     .find(|record| record.pubkey == d_tag)

@@ -53,6 +53,7 @@ pub async fn set_managed_agent_start_on_app_launch(
 
         {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
+            crate::managed_agents::device_policy::require_record(&app, record)?;
             record.start_on_app_launch = start_on_app_launch;
             record.updated_at = now_iso();
         }
@@ -97,6 +98,7 @@ pub async fn set_managed_agent_auto_restart(
 
         {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
+            crate::managed_agents::device_policy::require_record(&app, record)?;
             record.auto_restart_on_config_change = auto_restart_on_config_change;
             record.updated_at = now_iso();
         }

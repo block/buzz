@@ -269,6 +269,7 @@ pub async fn archive_identity(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubmitEventResponse, String> {
+    crate::managed_agents::device_policy::require_identity_archive(&app, &req.target_pubkey)?;
     archive_identity_core(&req, &state, &app).await
 }
 
@@ -281,6 +282,7 @@ pub async fn unarchive_identity(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubmitEventResponse, String> {
+    crate::managed_agents::device_policy::require_identity_archive(&app, &req.target_pubkey)?;
     unarchive_identity_core(&req, &state, &app).await
 }
 

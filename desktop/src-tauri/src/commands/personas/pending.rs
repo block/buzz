@@ -104,8 +104,8 @@ fn retained_persona_is_shared(row: Option<&RetainedEvent>) -> bool {
 /// never present an unshared persona as published. The durable share state
 /// lives in the retention head, so nothing is lost: the true value reappears
 /// once the identity is signable again.
-pub(super) fn project_active_persona_sharing(
-    app: &AppHandle,
+pub(super) fn project_active_persona_sharing<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     personas: &mut [AgentDefinition],
 ) {

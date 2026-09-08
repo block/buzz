@@ -306,8 +306,24 @@ async fn list_relay_agents_for_selection(
 }
 
 #[tauri::command]
-pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
-    list_relay_agents_for_state(&state).await
+pub async fn list_relay_agents<R: tauri::Runtime>(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
+) -> Result<Vec<RelayAgentInfo>, String> {
+    let policy = crate::managed_agents::device_policy::model::discovery_policy(
+        crate::managed_agents::device_policy::active(&app),
+    );
+    let relay_url = crate::relay::relay_api_base_url_with_override(&state);
+    let mut agents = list_relay_agents_for_state(&state).await?;
+    agents.retain(|agent| {
+        policy.allows_identity(
+            &relay_url,
+            agent.owner_pubkey.as_deref(),
+            &agent.name,
+            &agent.pubkey,
+        )
+    });
+    Ok(agents)
 }
 
 /// Revalidate only the selected relay agents in the target channel.

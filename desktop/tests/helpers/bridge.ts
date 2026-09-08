@@ -521,6 +521,16 @@ type MockBridgeOptions = {
     model: string | null;
     preferred_runtime?: string | null;
   };
+  agentDevicePolicy?: {
+    client_only: boolean;
+    unique_names?: boolean;
+    preferred_agents: Array<{
+      relay_url: string;
+      owner_pubkey: string;
+      name: string;
+      pubkey: string;
+    }>;
+  };
   ownerOnlyAccessBuild?: boolean;
   /** File-layer config returned by runtime id. */
   runtimeFileConfigs?: Record<

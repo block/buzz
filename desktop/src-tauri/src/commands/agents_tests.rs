@@ -1,6 +1,54 @@
 use super::*;
 use crate::managed_agents::AgentDefinition;
 
+#[test]
+fn device_policy_refuses_native_deploy_payload_before_accessing_secrets() {
+    use crate::managed_agents::device_policy::model::DeviceAgentPolicy;
+    use tauri::Manager;
+    let state = crate::app_state::build_app_state();
+    state
+        .agent_device_policy
+        .set(Ok(DeviceAgentPolicy {
+            client_only: true,
+            ..Default::default()
+        }))
+        .unwrap();
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let error = build_deploy_payload(
+        app.handle(),
+        &app.state(),
+        &bare_agent_record(None, None, None),
+    )
+    .unwrap_err();
+    assert!(error.contains("client-only"));
+}
+
+#[test]
+fn unique_name_policy_refuses_deploy_of_renamed_remote_key() {
+    use crate::managed_agents::device_policy::model::DeviceAgentPolicy;
+    use tauri::Manager;
+    let state = crate::app_state::build_app_state();
+    let policy: DeviceAgentPolicy = serde_json::from_str(r#"{
+        "client_only":false,"unique_names":true,"preferred_agents":[{
+        "relay_url":"https://relay.example","owner_pubkey":"owner","name":"Scout","pubkey":"agent"}]}"#).unwrap();
+    state.agent_device_policy.set(Ok(policy)).unwrap();
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let record = bare_agent_record(None, None, None);
+    assert!(build_deploy_payload(app.handle(), &app.state(), &record)
+        .unwrap_err()
+        .contains("another device"));
+    assert!(!crate::managed_agents::device_policy::can_host_record(
+        app.handle(),
+        &record
+    ));
+}
+
 fn bare_agent_record(
     persona_id: Option<&str>,
     model: Option<&str>,
@@ -211,9 +259,13 @@ fn production_delete_orchestration_restores_bestie_when_agent_save_fails() {
     record.pubkey.clone_from(&pubkey);
     let mut records = vec![record];
 
-    let result = run_managed_agent_deletion(dir.path(), &pubkey, &mut records, |_records| {
-        Err::<(), _>("injected managed-agent save failure".to_string())
-    });
+    let result = run_managed_agent_deletion(
+        dir.path(),
+        &pubkey,
+        &mut records,
+        |_| Ok(()),
+        |_records| Err::<(), _>("injected managed-agent save failure".to_string()),
+    );
 
     assert_eq!(
         result,

@@ -20,26 +20,114 @@ use crate::{app_state::AppState, managed_agents::ManagedAgentRecord};
 /// [`agent_event_content`] projection — the retention upsert's content-equality
 /// guard compares this projection, so an operational start/stop that mutates
 /// only runtime fields produces an identical row and never re-enqueues a
-/// publish. Best-effort: a failure here is logged and swallowed so a retention
-/// hiccup never blocks the disk-authoritative write.
+/// publish. Unique-name mode propagates failures because boot reconciliation
+/// intentionally holds unregistered identities. Unrestricted mode remains best-effort.
 pub(crate) fn retain_managed_agent_pending(
     app: &AppHandle,
     state: &AppState,
     record: &ManagedAgentRecord,
-) {
-    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
+) -> Result<(), String> {
+    use crate::managed_agents::retention::open_retention_db;
 
+    let policy = crate::managed_agents::device_policy::active(app)?;
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let conn = open_retention_db(&scope.db_path)?;
-        // Shared engine with the boot-time reconcile: projection content diff
-        // (no republish for runtime-only churn) + monotonic created_at bump
-        // past the retained head (NIP-AP step 3).
-        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
+        retain_managed_agent_with_policy(&conn, &scope.owner_keys, record, &policy)
     })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: agent-retain: {e}");
+    if policy.unique_names {
+        result.map_err(|error| format!("Agent saved locally, but synchronization failed: {error}. Retry saving this agent."))
+    } else {
+        if let Err(error) = result {
+            eprintln!("buzz-desktop: agent-retain: {error}");
+        }
+        Ok(())
     }
+}
+
+fn retain_managed_agent_with_policy(
+    conn: &rusqlite::Connection,
+    keys: &nostr::Keys,
+    record: &ManagedAgentRecord,
+    policy: &crate::managed_agents::device_policy::model::DeviceAgentPolicy,
+) -> Result<(), String> {
+    use crate::managed_agents::{device_policy::sync, reconcile::retain_agent_record};
+    policy.require_local_agent(
+        &record.name,
+        Some(&record.pubkey),
+        record.persona_id.as_deref(),
+    )?;
+    let transaction = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    if policy.unique_names {
+        sync::register(&transaction, &record.pubkey)?;
+    }
+    retain_agent_record(&transaction, keys, record)?;
+    transaction.commit().map_err(|e| e.to_string())
+}
+
+/// Prepare the selective publisher's local identity set while the caller holds
+/// the agent store lock. The current store path is explicit for isolated tests.
+pub(crate) fn local_keys_for_flush_at(
+    db_path: &std::path::Path,
+    owner_keys: &nostr::Keys,
+    store_path: &std::path::Path,
+    policy: &crate::managed_agents::device_policy::model::DeviceAgentPolicy,
+) -> Result<std::collections::HashSet<String>, String> {
+    use crate::managed_agents::{
+        agent_events::managed_agent_content_from_event,
+        retention::{get_retained_event, open_retention_db},
+    };
+    use nostr::JsonUtil;
+    let conn = open_retention_db(db_path)?;
+    let mut keys = crate::managed_agents::device_policy::sync::registered(&conn)?;
+    keys.retain(|key| {
+        !policy
+            .preferred_agents
+            .iter()
+            .any(|agent| agent.pubkey.eq_ignore_ascii_case(key))
+    });
+    if keys.is_empty() {
+        return Ok(keys);
+    }
+    // No hydration, migration, or missing/corrupt-store => empty fallback here:
+    // absence is destructive evidence only after a successful strict disk read.
+    let bytes = std::fs::read(store_path)
+        .map_err(|e| format!("Cannot read agent store for deletion recovery: {e}"))?;
+    let records: Vec<ManagedAgentRecord> = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Cannot parse agent store for deletion recovery: {e}"))?;
+    let owner = owner_keys.public_key().to_hex();
+    for key in &keys {
+        if records
+            .iter()
+            .any(|record| record.pubkey.eq_ignore_ascii_case(key))
+        {
+            continue;
+        }
+        // Registration alone is not deletion intent: completed deletes remain
+        // registered. Only a surviving head can witness an interrupted delete.
+        let Some(head) = get_retained_event(&conn, 30177, &owner, key)? else {
+            continue;
+        };
+        let event = nostr::Event::from_json(&head.raw_event).map_err(|e| e.to_string())?;
+        event.verify().map_err(|e| e.to_string())?;
+        if event.pubkey != owner_keys.public_key()
+            || event.kind.as_u16() != 30177
+            || event.tags.identifier() != Some(key.as_str())
+        {
+            return Err("Invalid local agent deletion-recovery witness".into());
+        }
+        let content = managed_agent_content_from_event(&event)?;
+        if policy
+            .require_local_agent(&content.name, Some(key), content.persona_id.as_deref())
+            .is_err()
+        {
+            continue;
+        }
+        // Reuses the atomic kind:5 + kind:9035 transaction and its monotonic
+        // timestamp. Any failure aborts this flush before the old head can send.
+        tombstone_managed_agent_at(db_path, owner_keys, key)?;
+    }
+    Ok(keys)
 }
 
 /// Purge a deleted agent's pending row and enqueue a NIP-09 tombstone, both
@@ -82,9 +170,10 @@ pub(crate) fn tombstone_managed_agent_pending(
 /// NOT the deleted record. Unlike personas/teams, managed agents are NOT
 /// re-enqueued by the boot deletion sweep ([`crate::event_sync`]) — a retained
 /// 30177 head with no local record is the normal cross-device state, so a crash
-/// after the disk-authoritative record is removed but before this
-/// tombstone+archive transaction commits leaves agent deletion-retry a
-/// pre-existing gap owned by this direct delete path alone.
+/// after the disk-authoritative record is removed but before this transaction
+/// commits needs explicit local provenance. In unique-name mode both delete
+/// callers retain/register before removal, and `local_keys_for_flush_at` retries
+/// their surviving heads before publication. Unrestricted mode stays best-effort.
 pub(crate) fn tombstone_managed_agent_at(
     db_path: &std::path::Path,
     keys: &nostr::Keys,
@@ -436,3 +525,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "agents_pending_policy_tests.rs"]
+mod policy_tests;

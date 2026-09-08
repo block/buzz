@@ -511,6 +511,7 @@ pub async fn confirm_team_snapshot_import(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TeamSnapshotImportResult, String> {
+    crate::managed_agents::device_policy::require_full_hosting(&app)?;
     // ── Phase 1: validate (no I/O) ───────────────────────────────────────────
     let snapshot = decode_team_snapshot_from_bytes(&input.file_bytes)?;
     let now = now_iso();
@@ -536,7 +537,11 @@ pub async fn confirm_team_snapshot_import(
 
         let (agent_keys, private_key_nsec, pubkey, auth_tag) = {
             let owner_keys = state.signing_keys()?;
-            let agent_keys = nostr::Keys::generate();
+            let agent_keys = crate::managed_agents::device_policy::generate_agent_keys(
+                &app,
+                &display_name,
+                None,
+            )?;
             let pubkey = agent_keys.public_key().to_hex();
             let private_key_nsec = {
                 use nostr::ToBech32;
