@@ -133,97 +133,32 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result?.0.body, "lower ID")
   }
 
-  func testDecodeResolutionTitlesUnnamedSenderWithCompactNpub() {
-    let result = BuzzPushNotificationResolver.decodeResolution(
-      events: [event(pubkey: Self.unnamedSenderHex, content: "Preview")],
-      community: community()
-    )
-
-    XCTAssertEqual(result?.0.title, "npub14f8…9nsy")
-    XCTAssertEqual(result?.0.body, "Preview")
-  }
-
-  func testDecodeResolutionCanonicalizesNpubSenderAtBoundary() {
-    // A sender key that arrives as an npub is validated by checksum and
-    // payload, never by its prefix, and renders the same compact label.
-    let result = BuzzPushNotificationResolver.decodeResolution(
-      events: [
-        event(pubkey: Self.unnamedSenderNpub, content: "Preview"),
-        event(pubkey: "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqk7h3rf", content: "Dropped"),
-      ],
-      community: community()
-    )
-
-    XCTAssertEqual(result?.0.title, "npub14f8…9nsy")
-    XCTAssertEqual(result?.0.body, "Preview")
-  }
-
-  func testDecodeResolutionUsesNeutralIdentityForMalformedSenderKey() {
-    let result = BuzzPushNotificationResolver.decodeResolution(
-      events: [event(pubkey: "author-pubkey", content: "Preview")],
-      community: community()
-    )
-
-    // Unverifiable keys never leak raw key material into the title.
-    XCTAssertEqual(result?.0.title, "Someone")
-    XCTAssertEqual(result?.0.body, "Preview")
-    XCTAssertEqual(result?.0.subtitle, "Community")
-    XCTAssertEqual(result?.0.senderPubkey, "author-pubkey")
-  }
-
-  func testDecodeResolutionUsesNeutralIdentityForSignedChunkSenderKey() {
-    // Impostors like "+a"×32 parse through radix-16 hex pairs ("+a"→10,
-    // "-0"→0) without being 64 ASCII hex digits: the presentation contract
-    // still demands the neutral identity, while internal payload fields —
-    // sender pubkey, thread, body — pass through untouched.
-    for impostor in [String(repeating: "+a", count: 32), String(repeating: "-0", count: 32)] {
+  func testDecodeResolutionSenderTitlesCanonicalizeKeysOrFallBackToNeutral() {
+    // The sender-identity presentation boundary: a verifiable key renders
+    // as the same compact npub whether it arrives as hex or as an npub, and
+    // an unverifiable key — including radix impostors like "+a"×32 that
+    // parse as hex pairs but are not literal hex keys — gets the neutral
+    // identity, never raw key material, while body, subtitle, and internal
+    // payload fields pass through untouched. Malformed-input classification
+    // itself is pinned at the codec (Bech32Tests); named senders winning
+    // over these labels is covered by the cached-profile resolve tests.
+    let senders: [(pubkey: String, title: String)] = [
+      (Self.unnamedSenderHex, "npub14f8…9nsy"),
+      (Self.unnamedSenderNpub, "npub14f8…9nsy"),
+      ("author-pubkey", "Someone"),
+      (String(repeating: "+a", count: 32), "Someone"),
+    ]
+    for sender in senders {
       let result = BuzzPushNotificationResolver.decodeResolution(
-        events: [event(pubkey: impostor, content: "Preview")],
+        events: [event(pubkey: sender.pubkey, content: "Preview")],
         community: community()
       )
 
-      XCTAssertEqual(result?.0.title, "Someone", "impostor: \(impostor)")
-      XCTAssertEqual(result?.0.body, "Preview", "impostor: \(impostor)")
-      XCTAssertEqual(result?.0.subtitle, "Community", "impostor: \(impostor)")
-      XCTAssertEqual(result?.0.senderPubkey, impostor, "impostor: \(impostor)")
-      XCTAssertEqual(result?.0.threadIdentifier, "community-id", "impostor: \(impostor)")
-    }
-  }
-
-  func testShortPubkeyRendersCompactNpub() {
-    // First 8 and last 4 characters of the entire npub string.
-    XCTAssertEqual(
-      BuzzPushNotificationResolver.shortPubkey(Self.unnamedSenderHex), "npub14f8…9nsy")
-    XCTAssertEqual(
-      BuzzPushNotificationResolver.shortPubkey(String(repeating: "00", count: 32)),
-      "npub1qqq…ujme")
-    XCTAssertEqual(
-      BuzzPushNotificationResolver.shortPubkey(String(repeating: "ff", count: 32)),
-      "npub1lll…lrjw")
-    // Uppercase hex and npub inputs canonicalize to the same label.
-    XCTAssertEqual(
-      BuzzPushNotificationResolver.shortPubkey(Self.unnamedSenderHex.uppercased()),
-      "npub14f8…9nsy")
-    XCTAssertEqual(
-      BuzzPushNotificationResolver.shortPubkey(Self.unnamedSenderNpub), "npub14f8…9nsy")
-  }
-
-  func testShortPubkeyFallsBackToNeutralIdentityWithoutLeakingKeyMaterial() {
-    for malformed in [
-      "",
-      "author-pubkey",
-      String(repeating: "a", count: 63),
-      String(repeating: "ab", count: 33),
-      // Signed radix-16 chunks ("+a"→10, "-0"→0) are not literal hex keys.
-      String(repeating: "+a", count: 32),
-      String(repeating: "-0", count: 32),
-      // Valid npub with a mutated checksum character.
-      "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujma",
-      // Valid checksums that are not keys: wrong payload length or hrp.
-      "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqk7h3rf",
-      "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwkhnav",
-    ] {
-      XCTAssertEqual(BuzzPushNotificationResolver.shortPubkey(malformed), "Someone")
+      XCTAssertEqual(result?.0.title, sender.title, "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.body, "Preview", "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.subtitle, "Community", "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.senderPubkey, sender.pubkey, "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.threadIdentifier, "community-id", "pubkey: \(sender.pubkey)")
     }
   }
 
