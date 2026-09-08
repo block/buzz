@@ -1,0 +1,20 @@
+{
+  "date": "2026-09-08",
+  "report_words": 12927,
+  "cordis_chapter_words": 2621,
+  "report_bytes": 109364,
+  "report_characters": 109298,
+  "distinct_cited_urls": 127,
+  "claim_source_records": 128,
+  "new_cordis_records": 48,
+  "repository_anchors_checked": 92,
+  "json_examples_parsed": 1,
+  "markdown_tables": "consistent column counts",
+  "code_fences": "balanced",
+  "independent_review": "findings reconciled; final three requirements made explicit",
+  "runtime_tests": "not run; source/test assertions inspected only",
+  "sha256": "b0f07c787cea90b7f649ffbb3226d50f0679eef48c6ddd9c14a21a4fd8e16051",
+  "failures": [],
+  "source_report_sha256": "c7ea690c4732ca16f52269059f184e1a64c60936a4c9f0573232ee03ebf9b3d6",
+  "repository_copy_note": "Markdown hard breaks use backslashes instead of trailing spaces. Research content unchanged."
+}
