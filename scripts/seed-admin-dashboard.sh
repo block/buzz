@@ -128,27 +128,43 @@ BEGIN
     RAISE EXCEPTION 'local community is missing; run just setup first';
   END IF;
 
+  -- A real channel for the failed-enforcement report below. Kick is only valid
+  -- on `event` reports, and the relay rejects it pre-mutation unless the report
+  -- carries a channel_id (FK into channels). Seeding this channel makes the
+  -- Kick action reachable in the UI and lets the enforcement genuinely run and
+  -- fail, so the Cancel & reopen recovery path is exercisable locally.
+  INSERT INTO channels (community_id, id, name, created_by)
+  VALUES (
+    local_community_id,
+    'c4a11e10-0000-4000-8000-000000000001',
+    'seed-enforcement-channel',
+    decode(repeat('3b', 32), 'hex')
+  )
+  ON CONFLICT (community_id, id) DO UPDATE SET name = EXCLUDED.name;
+
   INSERT INTO moderation_reports (
     community_id, id, report_event_id, reporter_pubkey, target_kind,
-    target_event_id, target_pubkey, target_blob_sha256, report_type, note,
+    target_event_id, target_pubkey, target_blob_sha256, channel_id, report_type, note,
     status, resolved_by, resolved_at, created_at
   ) VALUES
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000001', decode(repeat('01', 32), 'hex'), decode(repeat('11', 32), 'hex'), 'event', decode(repeat('21', 32), 'hex'), NULL, NULL, 'spam', 'Repeated unsolicited promotion across several channels.', 'open', NULL, NULL, now() - interval '8 minutes'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000002', decode(repeat('02', 32), 'hex'), decode(repeat('12', 32), 'hex'), 'pubkey', NULL, decode(repeat('22', 32), 'hex'), NULL, 'impersonation', 'Profile appears to impersonate a community organizer.', 'open', NULL, NULL, now() - interval '25 minutes'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000003', decode(repeat('03', 32), 'hex'), decode(repeat('13', 32), 'hex'), 'blob', NULL, NULL, decode(repeat('23', 32), 'hex'), 'malware', 'Attachment was flagged after download.', 'open', NULL, NULL, now() - interval '50 minutes'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000004', decode(repeat('04', 32), 'hex'), decode(repeat('14', 32), 'hex'), 'event', decode(repeat('24', 32), 'hex'), NULL, NULL, 'illegal', 'Contains material that may require legal review.', 'open', NULL, NULL, now() - interval '2 hours'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000005', decode(repeat('05', 32), 'hex'), decode(repeat('15', 32), 'hex'), 'blob', NULL, NULL, decode(repeat('25', 32), 'hex'), 'nudity', NULL, 'open', NULL, NULL, now() - interval '5 hours'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000006', decode(repeat('06', 32), 'hex'), decode(repeat('16', 32), 'hex'), 'pubkey', NULL, decode(repeat('26', 32), 'hex'), NULL, 'profanity', 'Repeated abusive replies from this account.', 'open', NULL, NULL, now() - interval '12 hours'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000007', decode(repeat('07', 32), 'hex'), decode(repeat('17', 32), 'hex'), 'event', decode(repeat('27', 32), 'hex'), NULL, NULL, 'other', 'Does not fit a standard report category.', 'open', NULL, NULL, now() - interval '1 day'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000008', decode(repeat('08', 32), 'hex'), decode(repeat('18', 32), 'hex'), 'pubkey', NULL, decode(repeat('28', 32), 'hex'), NULL, 'impersonation', 'Escalated while ownership is verified.', 'escalated', decode(repeat('38', 32), 'hex'), now() - interval '1 hour', now() - interval '2 days'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000009', decode(repeat('09', 32), 'hex'), decode(repeat('19', 32), 'hex'), 'blob', NULL, NULL, decode(repeat('29', 32), 'hex'), 'malware', 'Resolved after the attachment was removed.', 'resolved', decode(repeat('39', 32), 'hex'), now() - interval '1 day', now() - interval '3 days'),
-    (local_community_id, 'a11d0000-0000-4000-8000-000000000010', decode(repeat('0a', 32), 'hex'), decode(repeat('1a', 32), 'hex'), 'event', decode(repeat('2a', 32), 'hex'), NULL, NULL, 'other', 'Dismissed after reviewing the surrounding thread.', 'dismissed', decode(repeat('3a', 32), 'hex'), now() - interval '3 days', now() - interval '4 days')
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000001', decode(repeat('01', 32), 'hex'), decode(repeat('11', 32), 'hex'), 'event', decode(repeat('21', 32), 'hex'), NULL, NULL, NULL, 'spam', 'Repeated unsolicited promotion across several channels.', 'open', NULL, NULL, now() - interval '8 minutes'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000002', decode(repeat('02', 32), 'hex'), decode(repeat('12', 32), 'hex'), 'pubkey', NULL, decode(repeat('22', 32), 'hex'), NULL, NULL, 'impersonation', 'Profile appears to impersonate a community organizer.', 'open', NULL, NULL, now() - interval '25 minutes'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000003', decode(repeat('03', 32), 'hex'), decode(repeat('13', 32), 'hex'), 'blob', NULL, NULL, decode(repeat('23', 32), 'hex'), NULL, 'malware', 'Attachment was flagged after download.', 'open', NULL, NULL, now() - interval '50 minutes'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000004', decode(repeat('04', 32), 'hex'), decode(repeat('14', 32), 'hex'), 'event', decode(repeat('24', 32), 'hex'), NULL, NULL, NULL, 'illegal', 'Contains material that may require legal review.', 'open', NULL, NULL, now() - interval '2 hours'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000005', decode(repeat('05', 32), 'hex'), decode(repeat('15', 32), 'hex'), 'blob', NULL, NULL, decode(repeat('25', 32), 'hex'), NULL, 'nudity', NULL, 'open', NULL, NULL, now() - interval '5 hours'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000006', decode(repeat('06', 32), 'hex'), decode(repeat('16', 32), 'hex'), 'pubkey', NULL, decode(repeat('26', 32), 'hex'), NULL, NULL, 'profanity', 'Repeated abusive replies from this account.', 'open', NULL, NULL, now() - interval '12 hours'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000007', decode(repeat('07', 32), 'hex'), decode(repeat('17', 32), 'hex'), 'event', decode(repeat('27', 32), 'hex'), NULL, NULL, NULL, 'other', 'Does not fit a standard report category.', 'open', NULL, NULL, now() - interval '1 day'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000008', decode(repeat('08', 32), 'hex'), decode(repeat('18', 32), 'hex'), 'pubkey', NULL, decode(repeat('28', 32), 'hex'), NULL, NULL, 'impersonation', 'Escalated while ownership is verified.', 'escalated', decode(repeat('38', 32), 'hex'), now() - interval '1 hour', now() - interval '2 days'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000009', decode(repeat('09', 32), 'hex'), decode(repeat('19', 32), 'hex'), 'blob', NULL, NULL, decode(repeat('29', 32), 'hex'), NULL, 'malware', 'Resolved after the attachment was removed.', 'resolved', decode(repeat('39', 32), 'hex'), now() - interval '1 day', now() - interval '3 days'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000010', decode(repeat('0a', 32), 'hex'), decode(repeat('1a', 32), 'hex'), 'event', decode(repeat('2a', 32), 'hex'), NULL, NULL, NULL, 'other', 'Dismissed after reviewing the surrounding thread.', 'dismissed', decode(repeat('3a', 32), 'hex'), now() - interval '3 days', now() - interval '4 days'),
+    (local_community_id, 'a11d0000-0000-4000-8000-000000000011', decode(repeat('0b', 32), 'hex'), decode(repeat('1b', 32), 'hex'), 'event', decode(repeat('2b', 32), 'hex'), NULL, NULL, 'c4a11e10-0000-4000-8000-000000000001', 'spam', 'Event report in a real channel — Kick is offered and the enforcement genuinely runs and fails, exercising the Cancel & reopen recovery path.', 'open', NULL, NULL, now() - interval '3 minutes')
   ON CONFLICT (community_id, report_event_id) DO UPDATE SET
     reporter_pubkey = EXCLUDED.reporter_pubkey,
     target_kind = EXCLUDED.target_kind,
     target_event_id = EXCLUDED.target_event_id,
     target_pubkey = EXCLUDED.target_pubkey,
     target_blob_sha256 = EXCLUDED.target_blob_sha256,
+    channel_id = EXCLUDED.channel_id,
     report_type = EXCLUDED.report_type,
     note = EXCLUDED.note,
     status = EXCLUDED.status,
@@ -191,4 +207,4 @@ sql="${sql//__WORKSPACE_DIAGNOSTICS_SIZE__/$(fixture_size "${workspace_diagnosti
 
 run_psql -v ON_ERROR_STOP=1 -c "${sql}"
 
-echo "Seeded 10 moderation reports, 7 feedback entries, and 5 attachments for the local admin dashboard."
+echo "Seeded 11 moderation reports, 7 feedback entries, and 5 attachments for the local admin dashboard."

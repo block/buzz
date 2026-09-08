@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use auth::{
     admin_role_str, admin_source_str, authorize, require_mutation_principal, require_operator,
-    AdminRole,
+    resolve_admin_principal, AdminRole,
 };
 use axum::{
     body::Bytes,
@@ -205,7 +205,7 @@ async fn reports(
     .await?;
     validate(
         query.status.as_deref(),
-        &["open", "resolved", "dismissed", "escalated"],
+        REPORT_STATUS_ALLOWLIST,
         "invalid_status",
     )?;
     validate(query.scope.as_deref(), &["all"], "invalid_scope")?;
@@ -432,6 +432,11 @@ struct ResolveReportBody {
 /// client error, and the cap keeps `Utc::now() + Duration` well clear of the
 /// chrono/`i64` overflow range so the computation can never panic.
 const MAX_TIMEOUT_SECS: u64 = 365 * 24 * 60 * 60;
+
+/// Allowed explicit `status=` values for the `list_reports` endpoint.
+/// Mutation: remove "processing" here → `report_status_accepts_processing` goes RED.
+const REPORT_STATUS_ALLOWLIST: &[&str] =
+    &["open", "processing", "resolved", "dismissed", "escalated"];
 
 /// Convert an attacker-controlled `expiration_secs` into a future timeout
 /// instant, rejecting zero, the over-cap range, and any value that would
@@ -989,7 +994,7 @@ async fn upsert_operator(
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     body_bytes: Bytes,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<OperatorEntry>, ApiError> {
     let principal_opt = authorize(
         &state,
         &headers,
@@ -1045,9 +1050,22 @@ async fn upsert_operator(
             _ => ApiError::internal(),
         })?;
 
-    Ok(Json(
-        serde_json::json!({"pubkey": canonical_hex, "role": body.role}),
-    ))
+    // Return the effective principal so the response body matches the shape
+    // `list_operators` returns (and the desktop `AdminOperatorDto` type). Re-resolve
+    // through the shared config+DB path rather than constructing the entry inline:
+    // the 409 guard above excludes config-backed keys, so this resolves to the
+    // freshly written DB grant (`sources == ["db"]`), and re-resolving keeps the
+    // contract honest if that guard assumption ever shifts.
+    let target: [u8; 32] = target_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| ApiError::internal())?;
+    let resolved = resolve_admin_principal(&state, target).await?;
+    Ok(Json(OperatorEntry {
+        pubkey: canonical_hex,
+        effective_role: admin_role_str(resolved.role).to_string(),
+        sources: vec![admin_source_str(&resolved.source).to_string()],
+    }))
 }
 
 /// DELETE /operators/{pubkey}
@@ -1546,6 +1564,33 @@ mod postgres_tests {
     fn report_filters_reject_unknown_values() {
         assert!(validate(Some("open"), &["open"], "invalid_status").is_ok());
         assert!(validate(Some("unknown"), &["open"], "invalid_status").is_err());
+    }
+
+    #[test]
+    fn report_status_accepts_processing() {
+        // Wes P2 round-6: explicit status=processing must be accepted by the
+        // allowlist used in list_reports. References the production constant so
+        // removing "processing" from REPORT_STATUS_ALLOWLIST makes this RED
+        // while the omitted-default and scope=all tests stay green.
+        assert!(
+            validate(
+                Some("processing"),
+                REPORT_STATUS_ALLOWLIST,
+                "invalid_status"
+            )
+            .is_ok(),
+            "status=processing must be in the production allowlist"
+        );
+        // Confirm the gate still rejects values outside the set.
+        assert!(
+            validate(
+                Some("unknown_state"),
+                REPORT_STATUS_ALLOWLIST,
+                "invalid_status"
+            )
+            .is_err(),
+            "status=unknown_state must be rejected by the production allowlist"
+        );
     }
 
     #[test]
@@ -4241,6 +4286,95 @@ mod postgres_tests {
                 .await
                 .expect("count roster rows");
         assert_eq!(remaining, 0, "the canonical row must be removed");
+    }
+
+    /// Contract seam: PUT /operators/{pubkey} must return the effective
+    /// `OperatorEntry` (camelCase `effectiveRole` + `sources`), not a bare
+    /// `{pubkey, role}` — the desktop types the result as `AdminOperatorDto`.
+    /// Exercises the real HTTP handler so a regression to inline `json!` would
+    /// drop `effectiveRole`/`sources` and fail here. The uppercase-path PUT pins
+    /// that the echoed pubkey is canonicalized to lowercase.
+    #[tokio::test]
+    #[ignore = "requires Postgres — PUT /operators returns the effective OperatorEntry"]
+    async fn upsert_operator_returns_effective_operator_entry() {
+        let operator_keys = nostr::Keys::generate();
+        let state = nip98_state(vec![operator_keys.public_key().to_hex()]).await;
+
+        let target_keys = nostr::Keys::generate();
+        let lower_hex = target_keys.public_key().to_hex();
+
+        // PUT a moderator grant on a fresh, non-config key.
+        let path = format!("/operators/{lower_hex}");
+        let put_body = r#"{"role":"moderator"}"#.as_bytes();
+        let put = status_for(
+            state.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_put(&operator_keys, &path, put_body),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(put_body.to_vec()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(put.status(), StatusCode::OK, "grant PUT must succeed");
+        let put_json: serde_json::Value = {
+            let bytes = axum::body::to_bytes(put.into_body(), 4096)
+                .await
+                .expect("body");
+            serde_json::from_slice(&bytes).expect("json")
+        };
+        assert_eq!(
+            put_json["pubkey"], lower_hex,
+            "response echoes the canonical lowercase pubkey"
+        );
+        assert_eq!(
+            put_json["effectiveRole"], "moderator",
+            "response carries the effective role"
+        );
+        assert_eq!(
+            put_json["sources"],
+            serde_json::json!(["db"]),
+            "a non-config grant resolves to the db source only"
+        );
+
+        // Idempotent re-PUT through an uppercase path: the echoed pubkey must
+        // still be lowercased even though the path param is uppercase.
+        let upper_path = format!("/operators/{}", lower_hex.to_ascii_uppercase());
+        let upper = status_for(
+            state,
+            Request::builder()
+                .method("PUT")
+                .uri(&upper_path)
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_put(&operator_keys, &upper_path, put_body),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(put_body.to_vec()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            upper.status(),
+            StatusCode::OK,
+            "uppercase-path PUT must succeed"
+        );
+        let upper_json: serde_json::Value = {
+            let bytes = axum::body::to_bytes(upper.into_body(), 4096)
+                .await
+                .expect("body");
+            serde_json::from_slice(&bytes).expect("json")
+        };
+        assert_eq!(
+            upper_json["pubkey"], lower_hex,
+            "uppercase path param must be canonicalized to lowercase in the response"
+        );
     }
 
     #[tokio::test]
