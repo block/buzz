@@ -15,8 +15,6 @@ Conversation → local task + new channel → implementation branch → pull req
 
 ## Canvas data model
 
-The canvas begins with YAML front matter. References use canonical Buzz URIs rather than Markdown links so agents and clients can parse them without interpreting presentation text. The channel containing the canvas is implicit and must not be repeated in the data.
-
 Use this template:
 
 ```yaml
