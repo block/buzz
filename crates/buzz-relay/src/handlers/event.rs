@@ -1456,6 +1456,9 @@ mod tests {
                 CancellationToken::new(),
             ),
             nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            community_control: crate::state::CommunityConnectionControl::new(
+                CancellationToken::new(),
+            ),
         });
 
         super::handle_agent_observer_event(
@@ -2639,6 +2642,7 @@ mod tests {
                 session_deadline: Some(deadline),
                 nip_fi_gate: gate,
                 nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
             });
 
             // Kind:1 TextNote with no #h tag — no DB calls before before_event_ingest.

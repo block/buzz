@@ -142,8 +142,49 @@ impl CommunityConnectionControl {
         *slot = Some(tx);
     }
 
-    /// Terminal transition for the expiry task (and root key-pairing, which
-    /// has a matching race shape).
+    /// Terminal transition for root key-pairing.
+    ///
+    /// Acquires the transition lock, publishes `AuthorizationDenied` via
+    /// first-writer-wins, and — only if this call wins the reason slot —
+    /// enqueues the denial frame on `frame_tx`.  Does NOT cancel; the caller
+    /// is responsible for cancellation after this returns.
+    ///
+    /// Because `disconnect_community` also acquires this lock before its
+    /// `cancel.cancel()`, the losing community cancel cannot fire until this
+    /// call's `try_send` completes, closing the interleaving that let the
+    /// consumer wake on an empty terminal channel.  [FI-TRACE-CANCEL-RACE]
+    pub(crate) fn pairing_deny_terminal(
+        &self,
+        frame_tx: &mpsc::Sender<WsMessage>,
+        route: crate::nip_fi_session::NipFiWsRoute,
+    ) {
+        let _lock = self
+            .terminal_frame_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let won = self.reason_tx.send_if_modified(|current| match current {
+            None => {
+                *current = Some(CommunityDisconnectReason::AuthorizationDenied);
+                true
+            }
+            Some(_) => false,
+        });
+        // Test-only hook: fires after winning reason publication but before
+        // try_send, while the transition lock is held.  Allows a concurrent
+        // disconnect_community to race into its own lock acquisition (where it
+        // blocks in the fixed code) so the test can prove community's cancel
+        // cannot fire before the winning enqueue completes.
+        // Zero-cost in production.  [FI-TRACE-CANCEL-RACE, W_pairing_cancel_race]
+        #[cfg(test)]
+        pairing_race_test_hook::fire_after_reason_win();
+        if won {
+            let _ = frame_tx.try_send(crate::nip_fi_session::authorization_denied_frame(route));
+        }
+        // _lock dropped here — disconnect_community's cancel.cancel() is
+        // unblocked only after the winning enqueue completes.
+    }
+
+    /// Terminal transition for the expiry task.
     ///
     /// Acquires the transition lock, publishes `AuthorizationDenied` via
     /// first-writer-wins, and — only if this call wins the reason slot —
@@ -1776,6 +1817,17 @@ impl std::fmt::Debug for AppState {
     }
 }
 
+/// Shared type for test-only race-witness hook slots.  One alias silences the
+/// `clippy::type_complexity` warning that would fire on each `static HOOK`
+/// declaration in the three hook modules below.  Zero-cost: `#[cfg(test)]`
+/// only, never compiled into production.
+#[cfg(test)]
+type HookSlot =
+    std::sync::OnceLock<std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>>;
+/// Inner lock type for the hook slot (used as the return type of `hook_slot()`).
+#[cfg(test)]
+type HookCell = std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>;
+
 /// Test-only synchronization hook for the cancel-ordering race witness.
 ///
 /// Production code: `#[cfg(test)] cancel_race_test_hook::fire_after_reason_win();`
@@ -1792,13 +1844,12 @@ impl std::fmt::Debug for AppState {
 /// are only compiled under `#[cfg(test)]`. [FI-TRACE-CANCEL-RACE]
 #[cfg(test)]
 pub(crate) mod cancel_race_test_hook {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    static HOOK: std::sync::OnceLock<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>> =
-        std::sync::OnceLock::new();
+    static HOOK: super::HookSlot = std::sync::OnceLock::new();
 
-    fn hook_slot() -> &'static Mutex<Option<Arc<dyn Fn() + Send + Sync>>> {
-        HOOK.get_or_init(|| Mutex::new(None))
+    fn hook_slot() -> &'static super::HookCell {
+        HOOK.get_or_init(|| std::sync::Mutex::new(None))
     }
 
     /// Arm the hook with a callback that runs while the terminal_frame_tx lock
@@ -1832,13 +1883,12 @@ pub(crate) mod cancel_race_test_hook {
 /// Zero-cost in production.  [FI-TRACE-CANCEL-RACE, W_expiry_cancel_race]
 #[cfg(test)]
 pub(crate) mod expiry_race_test_hook {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    static HOOK: std::sync::OnceLock<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>> =
-        std::sync::OnceLock::new();
+    static HOOK: super::HookSlot = std::sync::OnceLock::new();
 
-    fn hook_slot() -> &'static Mutex<Option<Arc<dyn Fn() + Send + Sync>>> {
-        HOOK.get_or_init(|| Mutex::new(None))
+    fn hook_slot() -> &'static super::HookCell {
+        HOOK.get_or_init(|| std::sync::Mutex::new(None))
     }
 
     /// Arm the hook with a callback that runs while the terminal_frame_tx lock
@@ -1853,6 +1903,45 @@ pub(crate) mod expiry_race_test_hook {
     }
 
     /// Called by `expiry_deny_terminal` inside the critical section.
+    /// No-op when not armed.
+    pub(crate) fn fire_after_reason_win() {
+        let cb = hook_slot().lock().unwrap().clone();
+        if let Some(f) = cb {
+            f();
+        }
+    }
+}
+
+/// Test-only synchronization hook for the root-pairing/delete cancel-ordering race witness.
+///
+/// Production code: `#[cfg(test)] pairing_race_test_hook::fire_after_reason_win();`
+/// in `pairing_deny_terminal`, inside the terminal_frame_tx lock, after winning
+/// `send_if_modified` but before `try_send`.
+///
+/// Same shape as `cancel_race_test_hook` but for the root key-pairing path.
+/// Zero-cost in production.  [FI-TRACE-CANCEL-RACE, W_pairing_cancel_race]
+#[cfg(test)]
+pub(crate) mod pairing_race_test_hook {
+    use std::sync::Arc;
+
+    static HOOK: super::HookSlot = std::sync::OnceLock::new();
+
+    fn hook_slot() -> &'static super::HookCell {
+        HOOK.get_or_init(|| std::sync::Mutex::new(None))
+    }
+
+    /// Arm the hook with a callback that runs while the terminal_frame_tx lock
+    /// is held, after root pairing wins reason publication but before its try_send.
+    pub(crate) fn arm(cb: Arc<dyn Fn() + Send + Sync>) {
+        *hook_slot().lock().unwrap() = Some(cb);
+    }
+
+    /// Disarm the hook (call after the test to prevent interference).
+    pub(crate) fn disarm() {
+        *hook_slot().lock().unwrap() = None;
+    }
+
+    /// Called by `pairing_deny_terminal` inside the critical section.
     /// No-op when not armed.
     pub(crate) fn fire_after_reason_win() {
         let cb = hook_slot().lock().unwrap().clone();
@@ -2153,6 +2242,7 @@ pub(crate) mod tests {
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
             nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            community_control: CommunityConnectionControl::new(cancel.clone()),
         };
 
         let mgr = ConnectionManager::new();
@@ -3603,6 +3693,176 @@ pub(crate) mod tests {
         assert!(
             cancel.is_cancelled(),
             "W_expiry_cancel_race: cancel must be set after both calls"
+        );
+    }
+
+    // ── Root key-pairing ordered and race witnesses ───────────────────────────
+    //
+    // These tests cover the root key-pairing path (`pairing_deny_terminal`):
+    //   1. Sequential: pairing wins reason → frame enqueued; losing delete doesn't.
+    //   2. Sequential: delete wins reason → no payload; losing pairing doesn't enqueue.
+    //   3. Concurrent (W_pairing_cancel_race): pairing wins reason, is paused before
+    //      try_send while the lock is held; concurrent disconnect_community must
+    //      block and NOT fire cancel until pairing's try_send completes.
+    //
+    // Mutation evidence for the concurrent test:
+    //   - Remove the lock acquisition from disconnect_community → community's
+    //     cancel fires before pairing's try_send → consumer wakes on empty channel
+    //     → RED.  Restore → PASS.
+
+    #[test]
+    fn pairing_wins_reason_enqueues_frame_then_losing_delete_does_not() {
+        // pairing_deny_terminal fires first → wins AuthorizationDenied.
+        // disconnect_community fires second → loses, queues nothing.
+        let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+
+        // First writer: root pairing path.
+        control.pairing_deny_terminal(&terminal_tx, crate::nip_fi_session::NipFiWsRoute::Root);
+        // Second writer: community delete — must lose.
+        control.disconnect_community();
+
+        assert_eq!(
+            *control.disconnect_reason().borrow(),
+            Some(CommunityDisconnectReason::AuthorizationDenied),
+            "AuthorizationDenied must be retained when pairing wins reason"
+        );
+        let frame = terminal_rx
+            .try_recv()
+            .expect("pairing_deny_terminal must enqueue a denial frame when it wins");
+        let expected = crate::nip_fi_session::authorization_denied_frame(
+            crate::nip_fi_session::NipFiWsRoute::Root,
+        );
+        assert_eq!(
+            frame, expected,
+            "enqueued frame must be the Root denial frame"
+        );
+        assert!(
+            terminal_rx.try_recv().is_err(),
+            "losing disconnect_community must not enqueue a second frame"
+        );
+    }
+
+    #[test]
+    fn delete_wins_reason_losing_pairing_does_not_enqueue_frame() {
+        // disconnect_community fires first → wins CommunityDeleted (payload-less).
+        // pairing_deny_terminal fires second → loses, must NOT enqueue a denial
+        // frame against the CommunityDeleted close.
+        let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+
+        // First writer: community delete wins reason.
+        control.disconnect_community();
+        // Second writer: pairing path loses.
+        control.pairing_deny_terminal(&terminal_tx, crate::nip_fi_session::NipFiWsRoute::Root);
+
+        assert_eq!(
+            *control.disconnect_reason().borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted),
+            "CommunityDeleted must be retained when community wins reason"
+        );
+        assert!(
+            terminal_rx.try_recv().is_err(),
+            "losing pairing_deny_terminal must not enqueue a denial frame when community wins"
+        );
+    }
+
+    // ── W_pairing_cancel_race: root pairing wins reason, concurrent delete cannot
+    //    cancel before the winning enqueue. ─────────────────────────────────────
+    //
+    // Shape mirrors W_cancel_race / W_expiry_cancel_race but for the root pairing
+    // path.  Hook fires inside pairing_deny_terminal after reason-win, while the
+    // lock is held.  Main thread calls disconnect_community, which in the fixed
+    // code blocks on the lock and cannot call cancel.cancel() until pairing's
+    // try_send completes.
+    //
+    // Mutation evidence (executed, not tabled):
+    //   - Revert disconnect_community to unserialized form (remove lock acquisition)
+    //     → community fires cancel before pairing's try_send → consumer wakes on
+    //     empty channel → RED.
+    //   - Restore exact head → PASS.
+    #[test]
+    fn w_pairing_cancel_race_payload_precedes_community_cancel() {
+        use std::sync::{Arc, Barrier};
+
+        let (terminal_tx, terminal_rx) = tokio::sync::mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_for_hook = Arc::clone(&barrier);
+
+        // Arm: fires after pairing wins reason, while the lock is held.
+        pairing_race_test_hook::arm(Arc::new(move || {
+            barrier_for_hook.wait();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }));
+
+        // Consumer: wakes on first cancel, drains terminal channel immediately.
+        let cancel_for_consumer = cancel.clone();
+        let consumer_result: Arc<std::sync::Mutex<Option<Result<WsMessage, _>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let consumer_result_for_thread = Arc::clone(&consumer_result);
+        let mut terminal_rx_for_consumer = terminal_rx;
+        let consumer_thread = std::thread::spawn(move || {
+            while !cancel_for_consumer.is_cancelled() {
+                std::thread::yield_now();
+            }
+            let r = terminal_rx_for_consumer.try_recv();
+            *consumer_result_for_thread.lock().unwrap() = Some(r);
+        });
+
+        // Pairing thread: calls pairing_deny_terminal then cancels.
+        let control_for_pairing = control.clone();
+        let cancel_for_pairing = cancel.clone();
+        let terminal_tx_for_pairing = terminal_tx;
+        let pairing_thread = std::thread::spawn(move || {
+            control_for_pairing.pairing_deny_terminal(
+                &terminal_tx_for_pairing,
+                crate::nip_fi_session::NipFiWsRoute::Root,
+            );
+            // Cancel here (in production, conn.cancel.cancel() follows immediately
+            // after pairing_deny_terminal returns in enforce_nip_fi_key_pairing).
+            cancel_for_pairing.cancel();
+        });
+
+        // Wait for pairing to reach the hook (won reason, lock held).
+        barrier.wait();
+
+        // FIXED: blocks until pairing drops the lock (after try_send).
+        // MUTATION (remove lock from disconnect_community): cancels before try_send.
+        control.disconnect_community();
+
+        pairing_thread
+            .join()
+            .expect("W_pairing_cancel_race: pairing thread panicked");
+        consumer_thread
+            .join()
+            .expect("W_pairing_cancel_race: consumer thread panicked");
+        pairing_race_test_hook::disarm();
+
+        let consumer_saw = consumer_result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("W_pairing_cancel_race: consumer thread must have run");
+
+        let frame = consumer_saw.expect(
+            "W_pairing_cancel_race: consumer must observe the denial payload at the first cancel \
+             signal (proves cancel cannot fire before try_send under the fix)",
+        );
+        let expected = crate::nip_fi_session::authorization_denied_frame(
+            crate::nip_fi_session::NipFiWsRoute::Root,
+        );
+        assert_eq!(
+            frame, expected,
+            "W_pairing_cancel_race: queued frame must be the canonical Root denial frame"
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "W_pairing_cancel_race: cancel must be set after both calls"
         );
     }
 }

@@ -586,6 +586,7 @@ mod tests {
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<WsMessage>(8);
         let (terminal_ctrl_tx, mut terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
         let cancel = CancellationToken::new();
+        let auth_control = crate::state::CommunityConnectionControl::new(cancel.clone());
 
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
@@ -607,7 +608,8 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
-            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            nip_fi_reason_tx: auth_control.disconnect_reason_sender(),
+            community_control: auth_control,
         });
 
         let state = auth_test_state().await;
@@ -708,6 +710,7 @@ mod tests {
         // Pre-cancel the token — simulates the expiry task having already fired.
         let cancel = CancellationToken::new();
         cancel.cancel();
+        let b2_control = crate::state::CommunityConnectionControl::new(cancel.clone());
 
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
@@ -729,7 +732,8 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
-            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            nip_fi_reason_tx: b2_control.disconnect_reason_sender(),
+            community_control: b2_control,
         });
 
         let state = auth_test_state().await;
@@ -807,6 +811,7 @@ mod tests {
         let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
 
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+        let w1_control = crate::state::CommunityConnectionControl::new(cancel.clone());
 
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
@@ -825,7 +830,8 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
-            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            nip_fi_reason_tx: w1_control.disconnect_reason_sender(),
+            community_control: w1_control,
         });
 
         // W1 requires a real DB (ban-check is fail-closed; lazy pool errors → deny before hook).
@@ -938,6 +944,7 @@ mod tests {
         // Use a unique community UUID so this test's deny_set_check_hook slot
         // does not collide with other concurrent tests (audio-active uses Uuid::nil()).
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+        let deny_straddle_control = crate::state::CommunityConnectionControl::new(cancel.clone());
 
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
@@ -956,7 +963,8 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
-            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            nip_fi_reason_tx: deny_straddle_control.disconnect_reason_sender(),
+            community_control: deny_straddle_control,
         });
 
         // Real DB required (ban-check is fail-closed; lazy pool denies before hook).

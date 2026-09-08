@@ -2638,6 +2638,7 @@ mod tests {
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
             nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
 
         let state = crate::state::tests::test_state().await;

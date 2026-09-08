@@ -135,6 +135,13 @@ pub struct ConnectionState {
     /// loop's cancel branch produces a 1008 POLICY close frame instead of a
     /// bare close. [FI-TRACE-CLOSE-CODE]
     pub(crate) nip_fi_reason_tx: tokio::sync::watch::Sender<Option<CommunityDisconnectReason>>,
+
+    /// Shared transition lock for all terminal writers on this connection
+    /// (root key-pairing, expiry, community deletion).  Root pairing calls
+    /// `pairing_deny_terminal` through this control so a concurrent
+    /// `disconnect_community` cannot fire `cancel.cancel()` before the winning
+    /// payload enqueue completes.  [FI-TRACE-CANCEL-RACE]
+    pub(crate) community_control: crate::state::CommunityConnectionControl,
 }
 
 impl ConnectionState {
@@ -353,6 +360,7 @@ async fn handle_active_connection(
         session_deadline,
         nip_fi_gate: nip_fi_gate.clone(),
         nip_fi_reason_tx: nip_fi_reason_tx.clone(),
+        community_control: control.clone(),
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
@@ -894,6 +902,7 @@ pub(crate) mod tests {
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
             nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         };
         (Arc::new(conn), send_rx)
     }
@@ -1544,6 +1553,7 @@ pub(crate) mod tests {
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
             nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
 
         let state = crate::state::tests::test_state().await;

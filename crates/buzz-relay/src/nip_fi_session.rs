@@ -105,24 +105,13 @@ pub(crate) async fn enforce_nip_fi_key_pairing(
                 "NIP-FI key pairing mismatch — closing connection"
             );
             *conn.auth_state.write().await = crate::connection::AuthState::Failed;
-            // Publish reason first-writer-wins: set AuthorizationDenied only
-            // when the slot is still None — a concurrent CommunityDeleted must
-            // not be clobbered, and vice versa. [FI-TRACE-CLOSE-CODE]
-            let _ = conn
-                .nip_fi_reason_tx
-                .send_if_modified(|current| match current {
-                    None => {
-                        *current =
-                            Some(crate::state::CommunityDisconnectReason::AuthorizationDenied);
-                        true
-                    }
-                    Some(_) => false,
-                });
-            // Use the dedicated terminal channel — guaranteed one free slot even
-            // when ctrl_tx (capacity 8) is saturated by ordinary control traffic.
-            let _ = conn
-                .terminal_ctrl_tx
-                .try_send(authorization_denied_frame(NipFiWsRoute::Root));
+            // Serialize through the terminal-transition lock: reason publication +
+            // winner-only frame enqueue happen while the lock is held, so a
+            // concurrent disconnect_community cannot fire cancel.cancel() before
+            // the winning payload is enqueued.  The auth_state write is async and
+            // must complete before acquiring the sync lock.  [FI-TRACE-CANCEL-RACE]
+            conn.community_control
+                .pairing_deny_terminal(&conn.terminal_ctrl_tx, NipFiWsRoute::Root);
             conn.cancel.cancel();
         }
         PairingDenialTarget::Audio {
@@ -287,6 +276,8 @@ mod tests {
             "ctrl_tx must be full before the test exercises the denial path"
         );
 
+        let b3_cancel = CancellationToken::new();
+        let b3_control = crate::state::CommunityConnectionControl::new(b3_cancel.clone());
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(
@@ -301,17 +292,15 @@ mod tests {
             send_tx,
             ctrl_tx,
             terminal_ctrl_tx,
-            cancel: CancellationToken::new(),
+            cancel: b3_cancel.clone(),
             backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             grace_limit: 3,
             nip_fi_assertion: Some(assertion),
             session_deadline: None,
-            nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
-                CancellationToken::new(),
-            ),
-            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
+            nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(b3_cancel.clone()),
+            nip_fi_reason_tx: b3_control.disconnect_reason_sender(),
+            community_control: b3_control,
         });
-
         // Use a different key as the proven pubkey → forced mismatch.
         let wrong_pubkey = Keys::generate().public_key();
         let outcome = enforce_nip_fi_key_pairing(
