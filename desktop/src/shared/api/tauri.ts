@@ -151,6 +151,7 @@ export type RawManagedAgent = {
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
+  key_custody?: ManagedAgent["keyCustody"];
   backend_agent_id: string | null;
   // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
   respond_to?: ManagedAgent["respondTo"];
@@ -665,6 +666,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     startOnAppLaunch: agent.start_on_app_launch,
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
+    keyCustody: agent.key_custody ?? "local",
     backendAgentId: agent.backend_agent_id,
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],

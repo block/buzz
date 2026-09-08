@@ -596,6 +596,7 @@ pub struct ManagedAgentSummary {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,
+    pub key_custody: AgentKeyCustody,
     pub backend_agent_id: Option<String>,
     pub status: String,
     pub pid: Option<u32>,

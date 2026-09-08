@@ -315,6 +315,7 @@ pub fn build_managed_agent_summary(
         restart_diff,
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
+        key_custody: record.key_custody,
         backend_agent_id: record.backend_agent_id.clone(),
         status,
         pid,

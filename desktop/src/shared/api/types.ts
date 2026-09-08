@@ -366,6 +366,7 @@ export type ManagedAgent = {
   startOnAppLaunch: boolean;
   autoRestartOnConfigChange: boolean;
   backend: ManagedAgentBackend;
+  keyCustody: "local" | "provider";
   backendAgentId: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
   respondTo: RespondToMode;

@@ -372,7 +372,9 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
                         }
                     }
                     crate::managed_agents::BackendKind::Provider { id, config }
-                        if record.backend_agent_id.is_some() =>
+                        if record.backend_agent_id.is_some()
+                            && record.key_custody
+                                == crate::managed_agents::AgentKeyCustody::Local =>
                     {
                         // Persist the unacknowledged policy transition in the
                         // same write as the narrowed policy. If the process
@@ -389,6 +391,11 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
                             ),
                         });
                     }
+                    // Provider-custodied identities are re-attested on Start;
+                    // they must never enter the legacy deploy/pending path,
+                    // which requires a local signing key they intentionally do
+                    // not have. The owner-signed relay projection above is the
+                    // complete local response to this inbound edit.
                     crate::managed_agents::BackendKind::Provider { .. } => {}
                 }
             }

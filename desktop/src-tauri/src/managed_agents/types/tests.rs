@@ -762,6 +762,7 @@ fn summary_fixture(
         restart_diff,
         env_vars: Default::default(),
         backend: super::BackendKind::Local,
+        key_custody: super::AgentKeyCustody::Local,
         backend_agent_id: None,
         status: "running".into(),
         pid: Some(4242),
