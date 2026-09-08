@@ -9,7 +9,10 @@ import {
   useUntimeoutMemberMutation,
 } from "@/features/moderation/hooks";
 import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
-import { isTimedOut } from "@/features/moderation/lib/restrictionState";
+import {
+  hasObservableTimeout,
+  isTimedOut,
+} from "@/features/moderation/lib/restrictionState";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -38,14 +41,21 @@ export function useMembersSidebarModeration(open: boolean) {
 
   const [nowMs, setNowMs] = React.useState(() => Date.now());
 
-  // Tick nowMs every second while the sidebar is open — ensures `timedOut`
-  // transitions from true→false reactively as TTLs expire without waiting for
-  // the next query refresh (staleTime: 15_000).
+  // Tick nowMs every second only while there is a live timeout to count down —
+  // ensures `timedOut` transitions from true→false reactively as TTLs expire
+  // without waiting for the next query refresh (staleTime: 15_000). Gating on
+  // an observable timeout keeps a large member list from reconciling every card
+  // at 1 Hz when nothing is expiring. Termination is self-consistent: the last
+  // expiry's next tick advances nowMs past it, `shouldTick` flips false, and
+  // cleanup clears the interval — that same tick is what flips the card to
+  // "not timed out".
+  const shouldTick =
+    open && canModerate && hasObservableTimeout(restrictionsQuery.data, nowMs);
   React.useEffect(() => {
-    if (!open) return;
+    if (!shouldTick) return;
     const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [open]);
+  }, [shouldTick]);
 
   const moderationStateByPubkey = React.useMemo(() => {
     const map = new Map<string, MemberModerationState>();
