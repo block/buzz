@@ -4,7 +4,7 @@ const INBOX_LIST_DEFAULT_WIDTH_PX = 365;
 export const INBOX_COLUMN_MIN_WIDTH_PX = 300;
 export const INBOX_SINGLE_COLUMN_BREAKPOINT_PX = INBOX_COLUMN_MIN_WIDTH_PX * 2;
 const INBOX_LIST_MAX_WIDTH_PX = 520;
-const INBOX_LIST_WIDTH_SESSION_KEY = "buzz.desktop.home-inbox-list-width";
+const INBOX_LIST_WIDTH_STORAGE_KEY = "buzz.desktop.home-inbox-list-width";
 
 function clampInboxListWidth(width: number): number {
   return Math.max(
@@ -19,7 +19,7 @@ function getInitialInboxListWidth(): number {
   }
 
   try {
-    const raw = window.sessionStorage.getItem(INBOX_LIST_WIDTH_SESSION_KEY);
+    const raw = window.localStorage.getItem(INBOX_LIST_WIDTH_STORAGE_KEY);
     if (!raw) {
       return INBOX_LIST_DEFAULT_WIDTH_PX;
     }
@@ -46,8 +46,8 @@ export function useResizableInboxListWidth() {
     }
 
     try {
-      window.sessionStorage.setItem(
-        INBOX_LIST_WIDTH_SESSION_KEY,
+      window.localStorage.setItem(
+        INBOX_LIST_WIDTH_STORAGE_KEY,
         String(inboxListWidthPx),
       );
     } catch {

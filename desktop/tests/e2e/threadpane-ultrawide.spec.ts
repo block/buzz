@@ -144,7 +144,7 @@ test.describe("thread pane on ultrawide monitors", () => {
       Math.round(element.getBoundingClientRect().width),
     );
     const storedWidth = await page.evaluate(() =>
-      Number(window.sessionStorage.getItem("buzz.desktop.thread-panel-width")),
+      Number(window.localStorage.getItem("buzz.desktop.thread-panel-width")),
     );
     const mainWidth = await page
       .getByTestId("channel-drop-zone")

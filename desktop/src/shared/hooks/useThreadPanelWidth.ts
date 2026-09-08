@@ -6,7 +6,7 @@ import {
   getAuxiliaryPanelMaxWidth,
 } from "@/shared/layout/AuxiliaryPanel";
 
-const THREAD_PANEL_WIDTH_SESSION_KEY = "buzz.desktop.thread-panel-width";
+const THREAD_PANEL_WIDTH_STORAGE_KEY = "buzz.desktop.thread-panel-width";
 
 type ThreadPanelWidthOptions = {
   defaultWidthPx?: number;
@@ -43,7 +43,7 @@ function getInitialThreadPanelWidth({
   }
 
   try {
-    const raw = window.sessionStorage.getItem(sessionKey);
+    const raw = window.localStorage.getItem(sessionKey);
     if (!raw) {
       return defaultWidthPx;
     }
@@ -66,7 +66,7 @@ export function useThreadPanelWidth(
   const defaultWidthPx =
     options.defaultWidthPx ?? AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
   const minWidthPx = options.minWidthPx ?? AUXILIARY_PANEL_MIN_WIDTH_PX;
-  const sessionKey = options.sessionKey ?? THREAD_PANEL_WIDTH_SESSION_KEY;
+  const sessionKey = options.sessionKey ?? THREAD_PANEL_WIDTH_STORAGE_KEY;
   const getAvailableWidth = React.useCallback(
     () => availableWidthPx ?? getViewportWidth(),
     [availableWidthPx],
@@ -82,9 +82,9 @@ export function useThreadPanelWidth(
     }
 
     try {
-      window.sessionStorage.setItem(sessionKey, String(widthPx));
+      window.localStorage.setItem(sessionKey, String(widthPx));
     } catch {
-      // Ignore storage failures and keep in-memory width for this session.
+      // Ignore storage failures and keep the chosen width in memory.
     }
   }, [sessionKey, widthPx]);
 

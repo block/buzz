@@ -3037,14 +3037,14 @@ test("opens a single-level thread panel with inline expansion", async ({
   ).toHaveCount(0);
 });
 
-test("thread panel width uses session storage and reset handle", async ({
+test("thread panel width uses local storage and reset handle", async ({
   page,
 }) => {
   const customWidthPx = 520;
   const defaultWidthPx = 380;
 
   await page.addInitScript((width) => {
-    window.sessionStorage.setItem(
+    window.localStorage.setItem(
       "buzz.desktop.thread-panel-width",
       String(width),
     );
