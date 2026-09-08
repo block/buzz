@@ -10,6 +10,10 @@ import {
 import { expectEmojiMartStylesInstalled } from "../helpers/css";
 import { installFakeCamera } from "../helpers/fakeCamera";
 import {
+  addWelcomeCollision,
+  WELCOME_COLLISION,
+} from "../helpers/welcomeCollision";
+import {
   E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
   seedActiveIdentity,
 } from "../helpers/onboarding";
@@ -490,7 +494,7 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   // Make selection intent explicit; do not remove the colliding fixture or
   // relax extraction. The resulting event must tag only our starter identity.
   await input.fill("");
-  await input.fill(content);
+  await input.pressSequentially(content);
   await page.getByTestId(`mention-suggestion-${fizz[0].pubkey}`).click();
   await page.getByTestId("send-message").click();
   await expect.poll(sentRecipients).toEqual([[fizz[0].pubkey]]);
@@ -3349,7 +3353,11 @@ test("finishing onboarding creates starter channels and focuses welcome-everyone
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await installMockBridge(
+    page,
+    { managedAgents: [WELCOME_COLLISION] },
+    { skipOnboardingSeed: true },
+  );
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
@@ -3359,6 +3367,10 @@ test("finishing onboarding creates starter channels and focuses welcome-everyone
   await expect(page.getByTestId("channel-general")).toBeVisible();
   await expectStarterChannels(page);
   await expectWelcomeGuideIntro(page);
+  expect(await commandCount(page, "create_managed_agent")).toBe(3);
+  const channelId = await getWelcomeChannelId(page);
+  if (!channelId) throw new Error("Missing Welcome channel");
+  await addWelcomeCollision(page, channelId);
   await expectWelcomeComposerBannerCompletesAfterPersonaMention(page);
 });
 
