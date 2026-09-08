@@ -17,8 +17,10 @@ use crate::{
     },
     managed_agents::{
         agent_snapshot::{build_snapshot, AgentSnapshot, AgentSnapshotMemoryEntry, MemoryLevel},
-        load_managed_agents, load_personas, load_teams, load_teams_readonly, storage::save_managed_agents_with_new_keys,
-        save_personas, save_teams, AgentDefinition, ManagedAgentRecord, TeamRecord,
+        load_managed_agents, load_personas, load_teams, load_teams_readonly, save_personas,
+        save_teams,
+        storage::save_managed_agents_with_new_keys,
+        AgentDefinition, ManagedAgentRecord, TeamRecord,
     },
     relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,

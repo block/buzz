@@ -5,10 +5,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, current_instance_id, find_managed_agent_mut, load_global_agent_config,
     load_managed_agents, load_personas, managed_agent_runtime_log_path, process_is_running,
-    record_agent_command, resolve_effective_agent_env, storage::save_runtime_metadata_batch, terminate_process,
-    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
-    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
-    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
+    record_agent_command, resolve_effective_agent_env, storage::save_runtime_metadata_batch,
+    terminate_process, terminate_untracked_pair_runtime, write_agent_runtime_receipt,
+    AgentReadiness, BackendKind, ManagedAgentPairRuntime, ManagedAgentRuntimeKey,
+    ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -1033,7 +1033,8 @@ mod stop_scope_tests {
         );
         record.pubkey = pubkey.clone();
         record.updated_at = "before".into();
-        super::super::storage::save_managed_agents_with_new_keys(app.handle(), &[record.clone()]).unwrap();
+        super::super::storage::save_managed_agents_with_new_keys(app.handle(), &[record.clone()])
+            .unwrap();
 
         let stored_key = super::ManagedAgentRuntimeKey::new(&pubkey, stored_relay).unwrap();
         let requested_key = super::ManagedAgentRuntimeKey::new(&pubkey, requested_relay).unwrap();

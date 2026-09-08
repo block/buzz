@@ -143,20 +143,45 @@ fn inline_revocation_during_ordinary_stop_survives_same_host_start() {
             let mut revoked = raw(&fixture);
             revoked.private_key_nsec.clear();
             std::fs::write(&revoked_path, serde_json::to_vec(&[revoked]).unwrap()).unwrap();
-            on_stop(
-                &fixture,
-                &format!(
-                    "/bin/cp \"{}\" \"{}\"; exit 0",
-                    revoked_path.display(),
-                    path.display()
-                ),
-            );
+            // System shell/sleep environments are not observable through the
+            // macOS ownership reader. Exec our existing marked child seam so
+            // the prior-session receipt is genuinely eligible for teardown.
+            let ready = fixture.temp.path().join("revoking-child-ready");
+            let script = std::fs::read_to_string(&fixture.record.acp_command).unwrap();
+            let script = script.replace("exec /bin/sleep 20", &format!(
+                "export BUZZ_TEST_MARKED_CHILD_FIXTURE=1\nexport BUZZ_TEST_MARKED_CHILD_READY='{}'\nexport BUZZ_TEST_MARKED_CHILD_REVOKED_STORE='{}'\nexport BUZZ_TEST_MARKED_CHILD_STORE='{}'\nexec '{}' --exact managed_agents::runtime::test_fixtures::marked_child_process_fixture --nocapture",
+                ready.display(), revoked_path.display(), path.display(),
+                std::env::current_exe().unwrap().display(),
+            ));
+            std::fs::write(&fixture.record.acp_command, script).unwrap();
             assert_eq!(
                 fixture.action(Action::Start, None).await.outcome,
                 Outcome::Running
             );
             fixture.launched("fixture-model|fixture-model");
             let pid = fixture.running().unwrap().0;
+            let _child_guard = agents::runtime::test_fixtures::MarkedProcessGuard::new(pid);
+            for _ in 0..100 {
+                if ready.is_file() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(
+                ready.is_file(),
+                "TERM handler must be ready before teardown"
+            );
+            let receipts = agents::read_all_agent_runtime_receipts(fixture.app.handle());
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].1.pid, pid);
+            assert!(
+                agents::valid_agent_runtime_receipt(
+                    &receipts[0].0,
+                    &receipts[0].1,
+                    &agents::current_instance_id(fixture.app.handle()),
+                ),
+                "synthetic prior-session child must prove production ownership"
+            );
             if launch == "signed-stop" {
                 assert_eq!(fixture.stop().await, StopOutcome::Stopped);
             } else {
@@ -172,8 +197,12 @@ fn inline_revocation_during_ordinary_stop_survives_same_host_start() {
                     .unwrap()
                     .remove(&key)
                     .unwrap();
-                if launch == "local-start" {
-                    assert!(crate::commands::start_local_agent_with_preflight_using(
+                // A previous Desktop's child is reaped by its new parent. Keep
+                // that behavior here: retaining an unreaped Child would turn a
+                // successful TERM into a zombie and falsely fail teardown.
+                let reaper = std::thread::spawn(move || old_runtime.child.wait().unwrap());
+                let refused = if launch == "local-start" {
+                    crate::commands::start_local_agent_with_preflight_using(
                         fixture.app.handle(),
                         &state,
                         &fixture.record.pubkey,
@@ -185,7 +214,7 @@ fn inline_revocation_during_ordinary_stop_survives_same_host_start() {
                         |_, _| async { Ok(()) },
                     )
                     .await
-                    .is_err());
+                    .is_err()
                 } else {
                     agents::restore_with(
                         fixture.app.handle(),
@@ -196,10 +225,17 @@ fn inline_revocation_during_ordinary_stop_survives_same_host_start() {
                     )
                     .await
                     .unwrap();
-                }
-                // Reap the synthetic child even though Desktop no longer tracks it.
-                let _ = agents::terminate_process(old_runtime.child.id());
-                let _ = old_runtime.child.wait();
+                    true
+                };
+                // Observe the actual boundary BEFORE cleanup. Refusal due only
+                // to unsuccessful teardown must not count as key revocation.
+                let exited = !agents::process_is_running(pid);
+                let revoked = raw(&fixture).private_key_nsec.is_empty();
+                let _ = agents::terminate_process(pid);
+                assert!(reaper.join().unwrap().success(), "TERM effect must finish");
+                assert!(exited, "ordinary teardown must reap the prior child");
+                assert!(revoked, "revocation must precede fresh admission");
+                assert!(refused, "post-teardown revoked local Start must refuse");
             }
             assert!(!agents::process_is_running(pid));
             assert!(raw(&fixture).private_key_nsec.is_empty());

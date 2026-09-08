@@ -89,14 +89,20 @@ impl Fixture {
         fixture
     }
     fn persist(&self) {
-        agents::storage::save_managed_agents_with_new_keys(self.app.handle(), &[self.record.clone()]).unwrap();
+        agents::storage::save_managed_agents_with_new_keys(
+            self.app.handle(),
+            &[self.record.clone()],
+        )
+        .unwrap();
     }
     // Simulate an independent destination credential writer, not a metadata edit.
     fn write_raw(&self, record: &ManagedAgentRecord) {
         let path = agents::storage::managed_agents_store_path(self.app.handle()).unwrap();
         agents::storage::atomic_write_json_restricted(
-            &path, &serde_json::to_vec(&[record]).unwrap(),
-        ).unwrap();
+            &path,
+            &serde_json::to_vec(&[record]).unwrap(),
+        )
+        .unwrap();
     }
     fn target(&self) -> StopTarget {
         StopTarget {

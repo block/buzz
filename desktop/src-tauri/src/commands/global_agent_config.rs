@@ -18,8 +18,8 @@ use crate::{
     managed_agents::{
         agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
         load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-        resolve_effective_agent_env, save_global_agent_config, storage::save_runtime_metadata_batch,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
+        resolve_effective_agent_env, save_global_agent_config, stop_managed_agent_process,
+        storage::save_runtime_metadata_batch, sync_managed_agent_processes, validate_global_config,
         AgentReadiness, BackendKind, GlobalAgentConfig,
     },
 };

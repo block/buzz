@@ -505,8 +505,9 @@ async fn restart_single_agent_after_install(
         managed_agents::{
             agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
             load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-            resolve_effective_agent_env, storage::save_runtime_metadata_batch, stop_managed_agent_process,
-            sync_managed_agent_processes, AgentReadiness, BackendKind,
+            resolve_effective_agent_env, stop_managed_agent_process,
+            storage::save_runtime_metadata_batch, sync_managed_agent_processes, AgentReadiness,
+            BackendKind,
         },
     };
     use tauri::Manager;
@@ -644,7 +645,9 @@ fn persist_last_error_on_install(
 ) -> Result<(), String> {
     use crate::{
         app_state::AppState,
-        managed_agents::{find_managed_agent_mut, load_managed_agents, storage::save_runtime_metadata_batch},
+        managed_agents::{
+            find_managed_agent_mut, load_managed_agents, storage::save_runtime_metadata_batch,
+        },
     };
     use tauri::Manager;
     let state = app.state::<AppState>();

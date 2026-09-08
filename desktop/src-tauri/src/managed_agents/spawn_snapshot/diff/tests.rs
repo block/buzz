@@ -8,7 +8,12 @@ const RELAY_WITH_TOKEN: &str = "wss://relay.example/ws?token=SENTINEL";
 /// coverage guard below sees the full serialized key set.
 fn base() -> SpawnConfigSnapshot {
     SpawnConfigSnapshot {
-        runtime_configuration: None,
+        runtime_configuration: Some(
+            crate::managed_agents::runtime_configurations::RuntimeConfigurationRef {
+                id: "fixture-configuration".into(),
+                revision: "fixture-revision".into(),
+            },
+        ),
         acp_command: "buzz-acp".into(),
         command: "goose".into(),
         args: vec!["--mode".into(), "acp".into()],
@@ -51,6 +56,7 @@ type Mutation = (&'static str, fn(&mut SpawnConfigSnapshot));
 
 fn mutations() -> Vec<Mutation> {
     vec![
+        ("runtime_configuration", |s| s.runtime_configuration = None),
         ("acp_command", |s| s.acp_command = "other-acp".into()),
         ("command", |s| s.command = "claude".into()),
         ("args", |s| s.args = vec!["--other".into()]),

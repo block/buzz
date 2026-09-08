@@ -117,6 +117,24 @@ fn marked_child_process_fixture() {
     }
     let ready_path = std::env::var_os(MARKED_CHILD_READY_ENV)
         .expect("marked child fixture requires a readiness path");
+    // Optional lifecycle-fixture mode. Install TERM handling before readiness;
+    // mutate only the explicitly supplied temporary store, then exit normally.
+    // This runs in the dedicated child executable, never the parent test runner.
+    if let Some(source) = std::env::var_os("BUZZ_TEST_MARKED_CHILD_REVOKED_STORE") {
+        let destination = std::env::var_os("BUZZ_TEST_MARKED_CHILD_STORE")
+            .expect("revoking child requires a destination store");
+        let (send, receive) = std::sync::mpsc::channel();
+        ctrlc::set_handler(move || {
+            let _ = send.send(());
+        })
+        .expect("install marked child TERM handler");
+        std::fs::write(ready_path, b"ready").expect("write marked child readiness handshake");
+        receive
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("marked child must be stopped within fixture deadline");
+        std::fs::copy(source, destination).expect("revoke temporary inline credential");
+        return;
+    }
     std::fs::write(ready_path, b"ready").expect("write marked child readiness handshake");
     loop {
         std::thread::park_timeout(std::time::Duration::from_secs(60));

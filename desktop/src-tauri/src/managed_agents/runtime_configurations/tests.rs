@@ -415,8 +415,10 @@ async fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() 
     let mut runtimes = std::collections::HashMap::new();
     let path = agents::storage::managed_agents_store_path(app.handle()).unwrap();
     agents::storage::atomic_write_json_restricted(
-        &path, &serde_json::to_vec(&[record.clone()]).unwrap(),
-    ).unwrap();
+        &path,
+        &serde_json::to_vec(&[record.clone()]).unwrap(),
+    )
+    .unwrap();
     agents::start_managed_agent_process_prepared(
         app.handle(),
         &mut record,
@@ -439,7 +441,9 @@ async fn shared_spawn_registers_exact_plan_and_rejects_edits_or_lost_identity() 
         std::fs::read_to_string(capture).unwrap(),
         format!(
             "fixture-model\nfixture-model\nopenai\nfixture-model\n{}\nprepared team instructions\nchannel\n{}\n\n",
-            temp.path().display(),
+            // The shell reports physical PWD (/private/var on macOS), not
+            // the symlink spelling returned by the temporary directory API.
+            temp.path().canonicalize().unwrap().display(),
             mcp_path.display()
         )
     );
