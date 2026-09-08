@@ -375,7 +375,7 @@ export const MentionHighlightExtension = Extension.create({
             }
 
             // Check if the edit touches a mention boundary. If the changed
-            // ranges contain `@` or `#` (either before or after the edit),
+            // textblocks contain `@` or `#` (before or after the edit),
             // a mention may have been created, modified, or destroyed — do
             // a full rebuild. Otherwise, just map existing decoration
             // positions through the transaction mapping (cheap, no DOM churn).
@@ -611,7 +611,7 @@ export function selectionAfterMentionTrailingSpace(
   // A multi-word name's internal spaces are not trailing separators.
   const lookbehind = Math.min(
     pos,
-    names.reduce((max, name) => Math.max(max, name.length + 2), 80),
+    names.reduce((max, name) => Math.max(max, name.length + 3), 80),
   );
   const before = doc.textBetween(pos - lookbehind, pos, "\n", "\0");
   const lower = before.toLowerCase();
@@ -645,13 +645,18 @@ export function selectionAfterMentionTrailingSpace(
   });
   if (internalSpace) return pos;
   const knownBoundary = names.some((name) => {
-    const start = before.length - name.length - 1;
-    return (
-      start >= 0 &&
-      (start === 0 || /[\s(]/.test(before[start - 1])) &&
-      (before[start] === "@" || before[start] === "#") &&
-      lower.slice(start + 1) === name.toLowerCase()
-    );
+    // Team expansion adds one closing parenthesis outside the literal label.
+    // Match it separately: refreshed registrations contain the exact member
+    // label, not the wrapper, including when the label itself ends in a key.
+    return [name.toLowerCase(), `${name.toLowerCase()})`].some((label) => {
+      const start = before.length - label.length - 1;
+      return (
+        start >= 0 &&
+        (start === 0 || /[\s(]/.test(before[start - 1])) &&
+        (before[start] === "@" || before[start] === "#") &&
+        lower.slice(start + 1) === label
+      );
+    });
   });
   if (!knownBoundary && !/(?:^|[\s(])[@#][^\s]+$/.test(before)) return pos;
   return pos + 1;
@@ -679,64 +684,26 @@ export function findHighlightMatches(
 }
 
 /**
- * Returns true if the transaction's changed ranges touch text that contains
- * `@` or `#` — meaning a mention/channel-link boundary may have been
- * created, modified, or destroyed and we need a full decoration rebuild.
- *
- * We check both the old content (in case a mention was deleted/split) and
- * the new content (in case one was just typed). Uses a simple approach:
- * iterate each step's changed ranges via the first stepMap (sufficient for
- * the single-step transactions a chat composer produces on each keystroke).
+ * A changed textblock containing a trigger may gain or lose a literal match.
+ * Looking only at inserted/deleted characters misses incremental completion:
+ * the final "a" in a registered @Morgarita contains no @ and touches no chip.
+ * Check each step's own documents, including zero-width ranges after deletion.
  */
 function editAffectsMentionBoundary(tr: Transaction): boolean {
-  const mentionChars = /[@#]/;
-
-  // For each step, check old and new text in the changed range.
-  // stepMap.forEach gives (oldFrom, oldTo, newFrom, newTo) where old
-  // positions are in the doc before that step and new positions are in
-  // the doc after that step.
+  const hasTrigger = (doc: ProseMirrorNode, from: number, to: number) => {
+    const start = doc.resolve(from).start();
+    const end = doc.resolve(to).end();
+    return /[@#]/.test(doc.textBetween(start, end, "\n", "\0"));
+  };
   for (let i = 0; i < tr.steps.length; i++) {
-    const map = tr.mapping.maps[i];
-
     let found = false;
-    map.forEach((oldFrom, oldTo, newFrom, newTo) => {
-      if (found) return;
-
-      // Check new doc text in the affected range
-      const clampedNewTo = Math.min(newTo, tr.doc.content.size);
-      const clampedNewFrom = Math.min(newFrom, clampedNewTo);
-      if (clampedNewFrom < clampedNewTo) {
-        const newText = tr.doc.textBetween(
-          clampedNewFrom,
-          clampedNewTo,
-          "\n",
-          "\0",
-        );
-        if (mentionChars.test(newText)) {
-          found = true;
-          return;
-        }
-      }
-
-      // Check old doc text in the affected range
-      const clampedOldTo = Math.min(oldTo, tr.before.content.size);
-      const clampedOldFrom = Math.min(oldFrom, clampedOldTo);
-      if (clampedOldFrom < clampedOldTo) {
-        const oldText = tr.before.textBetween(
-          clampedOldFrom,
-          clampedOldTo,
-          "\n",
-          "\0",
-        );
-        if (mentionChars.test(oldText)) {
-          found = true;
-        }
-      }
+    tr.mapping.maps[i].forEach((oldFrom, oldTo, newFrom, newTo) => {
+      found ||=
+        hasTrigger(tr.docs[i], oldFrom, oldTo) ||
+        hasTrigger(tr.docs[i + 1] ?? tr.doc, newFrom, newTo);
     });
-
     if (found) return true;
   }
-
   return false;
 }
 
