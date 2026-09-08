@@ -341,6 +341,8 @@ type E2eConfig = {
     /** Native-like huddle state seeded from authoritative role-bearing membership. */
     huddle?: MockHuddleSeed;
     agentListDelayMs?: number;
+    /** Hold initial directory reads until explicit test release. */
+    deferAgentList?: boolean;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     addChannelMembersDelayMs?: number;
     /** Sequenced add-member failures. A string fails that call; null succeeds. */
@@ -1453,6 +1455,7 @@ declare global {
       slotId: string;
     }) => unknown;
     __BUZZ_E2E_SEED_MOCK_REMINDERS__?: (reminders: RelayEvent[]) => void;
+    __BUZZ_E2E_RELEASE_AGENT_LIST__?: () => void;
     __BUZZ_E2E_QUERY_CLIENT__?: {
       invalidateQueries: (filters: {
         queryKey: readonly unknown[];
@@ -8247,7 +8250,10 @@ async function handleGetFeed(
   };
 }
 
+let mockAgentListGate: Promise<void> | null = null;
+
 async function delayAgentList(config: E2eConfig | undefined) {
+  await mockAgentListGate;
   const agentListDelayMs = config?.mock?.agentListDelayMs ?? 0;
   if (agentListDelayMs > 0) {
     await new Promise<void>((resolve) => {
@@ -11240,6 +11246,12 @@ export function maybeInstallE2eTauriMocks() {
     : null;
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
+  window.__BUZZ_E2E_RELEASE_AGENT_LIST__?.();
+  mockAgentListGate = config.mock?.deferAgentList
+    ? new Promise<void>((resolve) => {
+        window.__BUZZ_E2E_RELEASE_AGENT_LIST__ = resolve;
+      })
+    : null;
   resetMockManagedAgents(config);
   resetMockPersonas(config);
   resetMockTeams(config);

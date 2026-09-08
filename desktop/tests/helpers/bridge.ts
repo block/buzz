@@ -260,6 +260,8 @@ type MockBridgeOptions = {
   relayAgentListErrors?: (string | null)[];
   /** Delay both managed and relay agent directory reads. */
   agentListDelayMs?: number;
+  /** Hold directory reads until __BUZZ_E2E_RELEASE_AGENT_LIST__. */
+  deferAgentList?: boolean;
   createManagedAgentDelayMs?: number;
   channelTemplates?: ChannelTemplate[];
   addChannelMembersDelayMs?: number;

@@ -2415,7 +2415,7 @@ test("shared agents wait for initial directory authorization", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    agentListDelayMs: 1_000,
+    deferAgentList: true,
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
@@ -2436,6 +2436,11 @@ test("shared agents wait for initial directory authorization", async ({
     page.getByRole("status").filter({ hasText: "Loading mentions" }),
   ).toBeVisible();
   await expect(autocomplete(page).getByText("quinn")).toHaveCount(0);
+  await page.evaluate(() => {
+    const release = window.__BUZZ_E2E_RELEASE_AGENT_LIST__;
+    if (!release) throw new Error("Directory release seam unavailable");
+    release();
+  });
   await expect(autocomplete(page).getByText("quinn")).toBeVisible({
     timeout: 3_000,
   });
