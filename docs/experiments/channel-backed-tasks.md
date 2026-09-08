@@ -20,7 +20,6 @@ Use this template:
 ```markdown
 ---
 buzz_schema: channel-backed-task/v1
-experiment: "https://github.com/block/buzz/blob/jtennant/task-channel-experiment/docs/experiments/channel-backed-tasks.md"
 task:
   title: "<task title>"
   description: "<task description>"
@@ -29,7 +28,7 @@ originating_thread: "buzz://message?channel=<channel UUID>&id=<message event ID>
 branch: null
 ---
 
-[Experimental task](https://github.com/block/buzz/blob/jtennant/task-channel-experiment/docs/experiments/channel-backed-tasks.md): This channel uses the channel-backed task experiment.
+Experimental task: You must read and follow the [channel-backed task experiment](https://github.com/block/buzz/blob/jtennant/task-channel-experiment/docs/experiments/channel-backed-tasks.md) before working in this channel.
 ```
 
 ## Agent decision flow
