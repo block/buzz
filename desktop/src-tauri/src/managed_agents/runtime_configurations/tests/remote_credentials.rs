@@ -547,3 +547,6 @@ async fn post_stop_expiry_persists_truthful_failed_without_second_spawn() {
 
 #[path = "credential_persistence.rs"]
 mod credential_persistence;
+
+#[path = "named_switch_acceptance.rs"]
+mod named_switch_acceptance;
