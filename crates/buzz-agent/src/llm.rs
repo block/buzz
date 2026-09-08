@@ -789,10 +789,12 @@ fn openai_body(
     let tools_json: Vec<Value> = tools
         .iter()
         .map(|t| {
-            json!({
-        "type": "function",
-        "function": { "name": t.name, "description": t.description,
-            "parameters": t.input_schema } })
+            let mut function = json!({ "name": t.name, "description": t.description,
+                "parameters": t.input_schema });
+            if cfg.strict_tools {
+                function["strict"] = json!(true);
+            }
+            json!({ "type": "function", "function": function })
         })
         .collect();
     let mut body = json!({ "model": effective_model, "stream": false,
@@ -905,12 +907,16 @@ fn responses_body(
     let tools_json: Vec<Value> = tools
         .iter()
         .map(|t| {
-            json!({
+            let mut tool = json!({
                 "type": "function",
                 "name": t.name,
                 "description": t.description,
                 "parameters": t.input_schema,
-            })
+            });
+            if cfg.strict_tools {
+                tool["strict"] = json!(true);
+            }
+            tool
         })
         .collect();
 
@@ -2615,6 +2621,7 @@ mod tests {
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,
+            strict_tools: false,
         }
     }
 
@@ -2960,6 +2967,62 @@ mod tests {
             "Responses tool schema is flat"
         );
         assert_eq!(body["tool_choice"], "auto");
+    }
+
+    fn strict_tools_fixture() -> Vec<ToolDef> {
+        vec![ToolDef {
+            name: "dev__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            }),
+        }]
+    }
+
+    #[test]
+    fn tools_are_not_strict_by_default() {
+        let tools = strict_tools_fixture();
+        let history = [HistoryItem::User("hi".into())];
+
+        let body = openai_body(&cfg(Provider::OpenAi), "system", &history, &tools, "model", None);
+        assert!(
+            body["tools"][0]["function"].get("strict").is_none(),
+            "strict must be absent unless BUZZ_AGENT_STRICT_TOOLS is set — some providers \
+             reject unknown request fields"
+        );
+
+        let body = responses_body(&cfg_responses(), "system", &history, &tools, "model", None);
+        assert!(body["tools"][0].get("strict").is_none());
+    }
+
+    #[test]
+    fn strict_tools_marks_every_function_tool() {
+        let tools = strict_tools_fixture();
+        let history = [HistoryItem::User("hi".into())];
+
+        // Chat Completions: `strict` belongs INSIDE the function object.
+        let mut c = cfg(Provider::OpenAi);
+        c.strict_tools = true;
+        let body = openai_body(&c, "system", &history, &tools, "model", None);
+        let sent = body["tools"].as_array().unwrap();
+        assert!(!sent.is_empty());
+        for tool in sent {
+            assert_eq!(tool["function"]["strict"], true);
+            // Marking a tool strict must not disturb the rest of its schema.
+            assert_eq!(tool["function"]["name"], "dev__shell");
+            assert!(tool["function"]["parameters"].is_object());
+        }
+        assert_eq!(body["tool_choice"], "auto");
+
+        // Responses: the function tool is flat, so `strict` sits alongside `name`.
+        let mut c = cfg_responses();
+        c.strict_tools = true;
+        let body = responses_body(&c, "system", &history, &tools, "model", None);
+        for tool in body["tools"].as_array().unwrap() {
+            assert_eq!(tool["strict"], true);
+            assert!(tool.get("function").is_none(), "Responses tool schema is flat");
+        }
     }
 
     #[test]

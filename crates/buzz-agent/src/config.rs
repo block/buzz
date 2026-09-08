@@ -626,6 +626,20 @@ pub struct Config {
     /// Databricks gateway does not auto-cache, so without this the surfaced
     /// `cache_read_input_tokens` is structurally always 0.
     pub prompt_caching: bool,
+    /// Mark every function tool `strict` on OpenAI-compatible routes. Off by default.
+    /// Enable with `BUZZ_AGENT_STRICT_TOOLS=1`.
+    ///
+    /// Some OpenAI-compatible servers attach a tool-call grammar only when a tool opts in.
+    /// vLLM is one: `get_model_structural_tag()` returns `None` for
+    /// `tool_choice: "auto"` unless at least one tool sets `strict`, so the model decodes
+    /// tool calls free-form. When that drifts the reply is still HTTP 200 with
+    /// `finish_reason: "stop"` and `tool_calls: null`, and the malformed call is left in
+    /// `content` — an agent loop reads that as "the model is done" rather than as an error.
+    ///
+    /// Off by default because `strict` implies a JSON-Schema subset (no unconstrained
+    /// `additionalProperties`, every property required) that not every provider or tool
+    /// schema satisfies, and some providers reject unknown request fields outright.
+    pub strict_tools: bool,
 }
 
 impl Config {
@@ -745,6 +759,7 @@ impl Config {
                 env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
             )?,
             prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+            strict_tools: parse_env("BUZZ_AGENT_STRICT_TOOLS", 0u8)? != 0,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -797,6 +812,7 @@ impl Config {
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: false,
+            strict_tools: false,
         }
     }
 
