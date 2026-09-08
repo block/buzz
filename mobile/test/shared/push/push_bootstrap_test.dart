@@ -3,8 +3,29 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/widgets.dart';
 
 void main() {
+  testWidgets('first opt-in starts registration without switching community', (
+    tester,
+  ) async {
+    var registrations = 0;
+    Widget bootstrap(bool enabled) => BuzzPushRegistrationBootstrap(
+      shouldRegister: enabled,
+      attemptKey: 'same-community|same-relay',
+      startRegistration: () async {
+        registrations += 1;
+      },
+      child: const SizedBox(),
+    );
+    await tester.pumpWidget(bootstrap(false));
+    expect(registrations, 0);
+    await tester.pumpWidget(bootstrap(true));
+    expect(registrations, 1);
+    await tester.pumpWidget(bootstrap(true));
+    expect(registrations, 1);
+  });
+
   test(
     'superseded lease acceptance is a retryable publication failure',
     () async {

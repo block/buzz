@@ -90,6 +90,49 @@ bool buzzPushLifecycleEnabled({
   required BuzzPushLeaseDescriptor? descriptor,
 }) => community?.pushNotificationsEnabled == true && descriptor != null;
 
+/// Starts APNs registration when the active community opts in.
+@visibleForTesting
+class BuzzPushRegistrationBootstrap extends HookWidget {
+  const BuzzPushRegistrationBootstrap({
+    required this.shouldRegister,
+    required this.attemptKey,
+    required this.child,
+    this.startRegistration = startBuzzPushRegistration,
+    super.key,
+  });
+
+  final bool shouldRegister;
+  final String attemptKey;
+  final Widget child;
+  final Future<void> Function() startRegistration;
+
+  @override
+  Widget build(BuildContext context) {
+    final attemptGate = useMemoized(BuzzPushAttemptGate.new);
+    final retry = useState(0);
+    useEffect(() => attemptGate.dispose, const []);
+    useEffect(() {
+      if (!shouldRegister || !attemptGate.tryBegin(attemptKey)) return null;
+      unawaited(() async {
+        try {
+          await startRegistration();
+        } catch (error, stack) {
+          attemptGate.failed(
+            attemptKey,
+            retry: () {
+              if (context.mounted) retry.value += 1;
+            },
+          );
+          debugPrint('Push registration bootstrap failed: $error');
+          debugPrintStack(stackTrace: stack);
+        }
+      }());
+      return null;
+    }, [shouldRegister, attemptKey, retry.value]);
+    return child;
+  }
+}
+
 @visibleForTesting
 Future<int> publishBuzzPushLeaseRecoverably({
   required Future<int> Function() reserveGeneration,
@@ -114,10 +157,8 @@ class BuzzPushBootstrap extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(apnsDeviceToken);
-    final registrationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
-    final registrationRetry = useState(0);
     final publicationRetry = useState(0);
     final tombstoneRetry = useState(0);
     final revocationOutbox = ref.watch(buzzPushLeaseRevocationOutboxProvider);
@@ -145,7 +186,6 @@ class BuzzPushBootstrap extends HookConsumerWidget {
 
     useEffect(
       () => () {
-        registrationAttempt.dispose();
         publicationAttempt.dispose();
         tombstoneAttempt.dispose();
       },
@@ -208,48 +248,6 @@ class BuzzPushBootstrap extends HookConsumerWidget {
           '${candidate.id}|${candidate.pushNotificationsEnabled}|'
               '${candidate.pushSubscriptionState.pendingTombstoneGeneration}',
         tombstoneRetry.value,
-      ],
-    );
-
-    useEffect(
-      () {
-        if (!_ready(session, config, community, memberPubkey) ||
-            !buzzPushLifecycleEnabled(
-              community: community,
-              descriptor: descriptor,
-            )) {
-          return null;
-        }
-        final activeCommunity = community!;
-        final activeDescriptor = descriptor!;
-        final attempt = '${activeCommunity.id}|${config.baseUrl}';
-        if (!registrationAttempt.tryBegin(attempt)) return null;
-        unawaited(() async {
-          try {
-            await startBuzzPushRegistrationIfCapable(
-              activeDescriptor,
-              startRegistration: startBuzzPushRegistration,
-            );
-          } catch (error, stack) {
-            registrationAttempt.failed(
-              attempt,
-              retry: () {
-                if (context.mounted) registrationRetry.value += 1;
-              },
-            );
-            debugPrint('Push registration bootstrap failed: $error');
-            debugPrintStack(stackTrace: stack);
-          }
-        }());
-        return null;
-      },
-      [
-        session.status,
-        config.baseUrl,
-        community?.id,
-        memberPubkey,
-        descriptor,
-        registrationRetry.value,
       ],
     );
 
@@ -321,6 +319,7 @@ class BuzzPushBootstrap extends HookConsumerWidget {
         session.status,
         config.baseUrl,
         community?.id,
+        community?.pushNotificationsEnabled,
         community?.pushSubscriptionState,
         memberPubkey,
         descriptor,
@@ -329,7 +328,16 @@ class BuzzPushBootstrap extends HookConsumerWidget {
       ],
     );
 
-    return child;
+    return BuzzPushRegistrationBootstrap(
+      shouldRegister:
+          _ready(session, config, community, memberPubkey) &&
+          buzzPushLifecycleEnabled(
+            community: community,
+            descriptor: descriptor,
+          ),
+      attemptKey: '${community?.id}|${config.baseUrl}',
+      child: child,
+    );
   }
 
   static bool _ready(
