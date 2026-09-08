@@ -358,24 +358,16 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                                 "reason" => "deny_set_post_registration"
                             )
                             .increment(1);
-                            // First-writer-wins: only set when the slot is still None so a
-                            // concurrent CommunityDeleted is not clobbered. Set BEFORE cancel
-                            // so the send loop's cancel branch reads AuthorizationDenied and
-                            // emits 1008. [FI-TRACE-CLOSE-CODE]
-                            let _ =
-                                conn.nip_fi_reason_tx.send_if_modified(|current| match current {
-                                    None => {
-                                        *current = Some(
-                                            crate::state::CommunityDisconnectReason::AuthorizationDenied,
-                                        );
-                                        true
-                                    }
-                                    Some(_) => false,
-                                });
-                            let _ = conn.ctrl_tx.try_send(
-                                crate::nip_fi_session::authorization_denied_frame(
-                                    crate::nip_fi_session::NipFiWsRoute::Root,
-                                ),
+                            // Route through the shared transition primitive: acquires the
+                            // terminal_frame_tx lock, first-writer-wins the reason, enqueues
+                            // the denial frame only if this call wins, then drops the lock.
+                            // Cancellation follows after the primitive returns, ensuring a
+                            // concurrent disconnect_community cannot fire cancel.cancel()
+                            // before the winning payload enqueue completes.
+                            // [FI-TRACE-CLOSE-CODE, FI-TRACE-CANCEL-RACE]
+                            conn.community_control.auth_deny_terminal(
+                                &conn.terminal_ctrl_tx,
+                                crate::nip_fi_session::NipFiWsRoute::Root,
                             );
                             conn.cancel.cancel();
                             return;
@@ -608,7 +600,6 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
-            nip_fi_reason_tx: auth_control.disconnect_reason_sender(),
             community_control: auth_control,
         });
 
@@ -732,7 +723,6 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
-            nip_fi_reason_tx: b2_control.disconnect_reason_sender(),
             community_control: b2_control,
         });
 
@@ -830,7 +820,6 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
-            nip_fi_reason_tx: w1_control.disconnect_reason_sender(),
             community_control: w1_control,
         });
 
@@ -963,7 +952,6 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
-            nip_fi_reason_tx: deny_straddle_control.disconnect_reason_sender(),
             community_control: deny_straddle_control,
         });
 
@@ -1002,13 +990,14 @@ mod tests {
             conn.conn_id,
             conn.send_tx.clone(),
             conn.ctrl_tx.clone(),
+            conn.terminal_ctrl_tx.clone(),
             None, // no restart_tx for this unit-test fixture
             cancel.clone(),
             community,
             Arc::clone(&conn.backpressure_count),
             Arc::clone(&conn.subscriptions),
             conn.grace_limit,
-            tokio::sync::watch::channel(None).0,
+            conn.community_control.clone(),
         );
 
         let relay_url = "ws://test.local";
@@ -1075,27 +1064,29 @@ mod tests {
              (entry inserted between registration and check)"
         );
 
-        // The denial frame must be on the ctrl channel (authorization_denied).
-        // With both the close-scan and the check side firing, there may be 1 or 2
-        // frames on the ctrl channel; drain all and assert at least one is the
-        // exact authorization_denied NOTICE.
-        let mut found_denial = false;
-        while let Ok(ctrl_frame) = ctrl_rx.try_recv() {
-            if let WsMessage::Text(t) = &ctrl_frame {
-                let expected = crate::protocol::RelayMessage::notice(
-                    buzz_auth::DenialClass::AuthorizationDenied.nostr_text(),
-                );
-                assert_eq!(
-                    t.as_str(),
-                    expected.as_str(),
-                    "W_deny_straddle: ctrl frame must be exact authorization_denied NOTICE; got: {t}"
-                );
-                found_denial = true;
-            }
+        // The denial frame must be on the terminal channel (authorization_denied).
+        // Both the close-scan side (manager_disconnect_nip_fi) and the check side
+        // (auth_deny_terminal) enqueue on terminal_ctrl_tx, which has capacity-1
+        // and first-writer-wins semantics — exactly one frame lands there.
+        let terminal_frame = terminal_ctrl_rx
+            .try_recv()
+            .expect("W_deny_straddle: terminal channel must contain the denial frame");
+        if let WsMessage::Text(t) = &terminal_frame {
+            let expected = crate::protocol::RelayMessage::notice(
+                buzz_auth::DenialClass::AuthorizationDenied.nostr_text(),
+            );
+            assert_eq!(
+                t.as_str(),
+                expected.as_str(),
+                "W_deny_straddle: terminal frame must be exact authorization_denied NOTICE; got: {t}"
+            );
+        } else {
+            panic!("W_deny_straddle: terminal frame must be Text(NOTICE); got {terminal_frame:?}");
         }
+        // ctrl channel must be empty — denial goes to terminal only.
         assert!(
-            found_denial,
-            "W_deny_straddle: at least one authorization_denied frame must be on ctrl channel"
+            ctrl_rx.try_recv().is_err(),
+            "W_deny_straddle: ctrl channel must be empty (denial goes to terminal channel)"
         );
 
         // No OK(true) on the data channel.
@@ -1108,12 +1099,5 @@ mod tests {
                 );
             }
         }
-
-        // No terminal frame (denial goes to ctrl, not terminal).
-        assert!(
-            terminal_ctrl_rx.try_recv().is_err(),
-            "W_deny_straddle: terminal channel must be empty (deny-set denial \
-             uses ctrl channel, not terminal)"
-        );
     }
 }

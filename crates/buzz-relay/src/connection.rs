@@ -128,19 +128,12 @@ pub struct ConnectionState {
     /// bounded commits. [FI-TRACE-LEASE-BOUND, one-gate-per-connection]
     pub(crate) nip_fi_gate: std::sync::Arc<crate::nip_fi_gate::SessionAdmissionGate>,
 
-    /// Shared with `ConnEntry::nip_fi_reason_tx` and `CommunityConnectionControl::reason_tx`.
-    ///
-    /// Set to `AuthorizationDenied` before `cancel.cancel()` on all NIP-FI
-    /// denial paths (key-pairing mismatch, deny-set hit, expiry) so the send
-    /// loop's cancel branch produces a 1008 POLICY close frame instead of a
-    /// bare close. [FI-TRACE-CLOSE-CODE]
-    pub(crate) nip_fi_reason_tx: tokio::sync::watch::Sender<Option<CommunityDisconnectReason>>,
-
     /// Shared transition lock for all terminal writers on this connection
-    /// (root key-pairing, expiry, community deletion).  Root pairing calls
-    /// `pairing_deny_terminal` through this control so a concurrent
-    /// `disconnect_community` cannot fire `cancel.cancel()` before the winning
-    /// payload enqueue completes.  [FI-TRACE-CANCEL-RACE]
+    /// (root key-pairing, expiry, community deletion, auth deny-set hit,
+    /// and the connection manager's close scan).  All terminal writers go
+    /// through `CommunityConnectionControl` methods so no independently
+    /// writable reason-sender clone lives outside the primitive.
+    /// [FI-TRACE-CLOSE-CODE, FI-TRACE-CANCEL-RACE]
     pub(crate) community_control: crate::state::CommunityConnectionControl,
 }
 
@@ -271,11 +264,6 @@ async fn handle_active_connection(
 ) {
     let cancel = control.cancellation_token();
     let disconnect_reason = control.disconnect_reason();
-    // Extract the reason sender before control is consumed by the registry.
-    // Shared with ConnEntry::nip_fi_reason_tx and conn.nip_fi_reason_tx so that
-    // NIP-FI denial paths (key-pairing, deny-set, expiry) can set
-    // AuthorizationDenied before cancel() fires. [FI-TRACE-CLOSE-CODE]
-    let nip_fi_reason_tx = control.disconnect_reason_sender();
     // connection_time is threaded in from the HTTP handler (captured immediately
     // before on_upgrade) so the session partition is rooted at the true upgrade
     // instant, not the post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
@@ -359,7 +347,6 @@ async fn handle_active_connection(
         nip_fi_assertion,
         session_deadline,
         nip_fi_gate: nip_fi_gate.clone(),
-        nip_fi_reason_tx: nip_fi_reason_tx.clone(),
         community_control: control.clone(),
     });
 
@@ -389,13 +376,14 @@ async fn handle_active_connection(
         conn_id,
         tx.clone(),
         ctrl_tx.clone(),
+        conn.terminal_ctrl_tx.clone(),
         Some(restart_tx),
         cancel.clone(),
         conn.tenant.community(),
         Arc::clone(&backpressure_count),
         subscriptions,
         state.config.slow_client_grace_limit,
-        nip_fi_reason_tx.clone(),
+        control.clone(),
     );
 
     let (ws_send, ws_recv) = socket.split();
@@ -901,7 +889,6 @@ pub(crate) mod tests {
             nip_fi_assertion: None,
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
-            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         };
         (Arc::new(conn), send_rx)
@@ -1552,7 +1539,6 @@ pub(crate) mod tests {
             nip_fi_assertion: None,
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
-            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
 

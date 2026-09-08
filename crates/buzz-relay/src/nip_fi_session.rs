@@ -298,7 +298,6 @@ mod tests {
             nip_fi_assertion: Some(assertion),
             session_deadline: None,
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(b3_cancel.clone()),
-            nip_fi_reason_tx: b3_control.disconnect_reason_sender(),
             community_control: b3_control,
         });
         // Use a different key as the proven pubkey → forced mismatch.

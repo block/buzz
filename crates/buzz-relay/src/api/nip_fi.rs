@@ -1439,13 +1439,14 @@ mod route_integration_tests {
                     conn_id,
                     tx,
                     ctrl_tx,
+                    mpsc::channel(1).0,
                     None,
                     cancel.clone(),
                     community,
                     bp,
                     std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
                     3,
-                    tokio::sync::watch::channel(None).0,
+                    crate::state::CommunityConnectionControl::new(cancel.clone()),
                 );
                 state
                     .conn_manager

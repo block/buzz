@@ -1455,7 +1455,6 @@ mod tests {
             nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
                 CancellationToken::new(),
             ),
-            nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
             community_control: crate::state::CommunityConnectionControl::new(
                 CancellationToken::new(),
             ),
@@ -1517,13 +1516,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                mpsc::channel(1).0,
                 None,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
-                tokio::sync::watch::channel(None).0,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pubkey) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pubkey);
@@ -2158,13 +2160,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                mpsc::channel(1).0,
                 None,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
-                tokio::sync::watch::channel(None).0,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
@@ -2485,13 +2490,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                mpsc::channel(1).0,
                 None,
                 CancellationToken::new(),
                 community_id,
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
-                tokio::sync::watch::channel(None).0,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
@@ -2641,7 +2649,6 @@ mod tests {
                 nip_fi_assertion: None,
                 session_deadline: Some(deadline),
                 nip_fi_gate: gate,
-                nip_fi_reason_tx: tokio::sync::watch::channel(None).0,
                 community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
             });
 
