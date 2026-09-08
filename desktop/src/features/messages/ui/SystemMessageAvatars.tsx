@@ -86,7 +86,7 @@ export function SystemMessageAvatar({
           <button
             className={cn(
               "shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-              isSingleAgent ? "agent-avatar-squircle" : "rounded-full",
+              isSingleAgent ? "rounded-squircle" : "rounded-full",
             )}
             data-testid="system-message-avatar"
             type="button"
@@ -147,7 +147,7 @@ export function SystemMessageAvatar({
       <button
         className={cn(
           "shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-          isActorAgent ? "agent-avatar-squircle" : "rounded-full",
+          isActorAgent ? "rounded-squircle" : "rounded-full",
         )}
         type="button"
       >

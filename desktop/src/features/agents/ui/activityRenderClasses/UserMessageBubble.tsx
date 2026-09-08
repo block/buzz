@@ -103,7 +103,7 @@ export function UserMessageBubble({
           aria-label={`Open ${authorLabel} profile`}
           className={cn(
             "pointer-events-auto order-last ml-2 mt-1 size-7 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-            authorProfile?.isAgent ? "agent-avatar-squircle" : "rounded-full",
+            authorProfile?.isAgent ? "rounded-squircle" : "rounded-full",
           )}
           onClick={(event) => {
             event.preventDefault();

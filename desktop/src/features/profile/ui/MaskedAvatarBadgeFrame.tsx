@@ -4,8 +4,8 @@ import { motion } from "motion/react";
 
 import { cn } from "@/shared/lib/cn";
 import {
-  AGENT_AVATAR_SQUIRCLE_PATH,
-  sampleAgentAvatarSquircle,
+  ROUNDED_SQUIRCLE_PATH,
+  sampleRoundedSquircle,
 } from "@/shared/ui/AvatarClipPaths";
 
 export type AvatarBadgeCircle = {
@@ -573,7 +573,7 @@ function getShapeCutoutMask(
 ) {
   const path =
     cutoutShape === "squircle"
-      ? AGENT_AVATAR_SQUIRCLE_PATH
+      ? ROUNDED_SQUIRCLE_PATH
       : "M .5 0 A .5 .5 0 1 1 .5 1 A .5 .5 0 1 1 .5 0 Z";
   const cutoutSize = cutout.r * 2;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><mask id="cutout" maskUnits="userSpaceOnUse"><rect width="100%" height="100%" fill="white"/><g transform="translate(${cutout.cx - cutout.r} ${cutout.cy - cutout.r}) scale(${cutoutSize})"><path d="${path}" fill="black"/></g></mask><rect width="100%" height="100%" fill="white" mask="url(#cutout)"/></svg>`;
@@ -581,7 +581,7 @@ function getShapeCutoutMask(
 }
 
 function getSquircleMaskPolygon(size: number, cutout: AvatarBadgeCircle) {
-  const points = sampleAgentAvatarSquircle(size, 32);
+  const points = sampleRoundedSquircle(size, 32);
   const distanceFromCutout = (point: Point) =>
     Math.hypot(point.x - cutout.cx, point.y - cutout.cy);
   const outsideCutout = (point: Point) => distanceFromCutout(point) >= cutout.r;

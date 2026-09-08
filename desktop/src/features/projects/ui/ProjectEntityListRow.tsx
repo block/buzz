@@ -60,7 +60,7 @@ export function ProjectEntityFacepile({
             <button
               className={cn(
                 profiles?.[pubkey]?.isAgent
-                  ? "agent-avatar-squircle"
+                  ? "rounded-squircle"
                   : "rounded-full",
                 index > 0 && "-ml-1.5",
               )}

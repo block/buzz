@@ -11,7 +11,7 @@ type NormalizedCubic = readonly [
   end: NormalizedPoint,
 ];
 
-const AGENT_AVATAR_SQUIRCLE_CUBICS: readonly NormalizedCubic[] = [
+const ROUNDED_SQUIRCLE_CUBICS: readonly NormalizedCubic[] = [
   [
     [0.5, 0],
     [0.93, 0],
@@ -38,12 +38,12 @@ const AGENT_AVATAR_SQUIRCLE_CUBICS: readonly NormalizedCubic[] = [
   ],
 ];
 
-export const AGENT_AVATAR_SQUIRCLE_CLIP_ID = "agent-avatar-squircle-clip";
-export const AGENT_AVATAR_SQUIRCLE_PATH =
+export const ROUNDED_SQUIRCLE_CLIP_ID = "rounded-squircle-clip";
+export const ROUNDED_SQUIRCLE_PATH =
   "M .5 0 C .93 0 1 .07 1 .5 C 1 .93 .93 1 .5 1 C .07 1 0 .93 0 .5 C 0 .07 .07 0 .5 0 Z";
 
 /** Sample the same normalized cubics used by the global avatar clip path. */
-export function sampleAgentAvatarSquircle(
+export function sampleRoundedSquircle(
   size: number,
   segmentsPerCubic = 32,
 ): Array<{ x: number; y: number }> {
@@ -55,7 +55,7 @@ export function sampleAgentAvatarSquircle(
     firstControl,
     secondControl,
     end,
-  ] of AGENT_AVATAR_SQUIRCLE_CUBICS) {
+  ] of ROUNDED_SQUIRCLE_CUBICS) {
     for (let index = 0; index < segments; index += 1) {
       const progress = index / segments;
       const remaining = 1 - progress;
@@ -89,9 +89,9 @@ export function AvatarClipPaths() {
       <defs>
         <clipPath
           clipPathUnits="objectBoundingBox"
-          id={AGENT_AVATAR_SQUIRCLE_CLIP_ID}
+          id={ROUNDED_SQUIRCLE_CLIP_ID}
         >
-          <path d={AGENT_AVATAR_SQUIRCLE_PATH} />
+          <path d={ROUNDED_SQUIRCLE_PATH} />
         </clipPath>
       </defs>
     </svg>

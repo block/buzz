@@ -87,7 +87,7 @@ export function ProjectPeopleStack({
                 aria-label={`View ${label}'s profile`}
                 className={cn(
                   "inline-flex focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                  profile?.isAgent ? "agent-avatar-squircle" : "rounded-full",
+                  profile?.isAgent ? "rounded-squircle" : "rounded-full",
                 )}
                 type="button"
               >

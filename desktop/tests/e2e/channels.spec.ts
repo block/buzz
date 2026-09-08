@@ -2176,7 +2176,7 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(activityAvatar).toHaveCSS("border-radius", "0px");
   await expect(activityAvatar).toHaveCSS(
     "clip-path",
-    'url("#agent-avatar-squircle-clip")',
+    'url("#rounded-squircle-clip")',
   );
   await expect(
     page.getByTestId("bot-activity-composer-trigger"),

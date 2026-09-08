@@ -28,7 +28,7 @@ import { AvatarCustomColorPanel } from "@/features/profile/ui/AvatarCustomColorP
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { AGENT_AVATAR_SQUIRCLE_PATH } from "@/shared/ui/AvatarClipPaths";
+import { ROUNDED_SQUIRCLE_PATH } from "@/shared/ui/AvatarClipPaths";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import {
   Popover,
@@ -719,7 +719,7 @@ export function AgentCreationPreview({
                     ? isCompact
                       ? "rounded-2xl"
                       : "rounded-[2rem]"
-                    : "agent-avatar-squircle",
+                    : "rounded-squircle",
                 )}
                 role="img"
                 style={{ backgroundColor: emojiAvatarPreview.color }}
@@ -931,7 +931,7 @@ export function AgentCreationPreview({
                   {emojiAvatarPreview ? (
                     <div
                       aria-label={`${label} ${assetLabel}`}
-                      className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden agent-avatar-squircle shadow-xs transition-[background-color] duration-200 ease-out"
+                      className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-squircle shadow-xs transition-[background-color] duration-200 ease-out"
                       role="img"
                       style={{
                         backgroundColor: emojiAvatarPreview.color,
@@ -981,7 +981,7 @@ export function AgentCreationPreview({
                             "border-2 border-dashed border-border hover:border-primary/60 hover:bg-primary/5",
                             isCompact ? "rounded-2xl" : "rounded-[2rem]",
                           )
-                        : "agent-avatar-squircle border-0",
+                        : "rounded-squircle border-0",
                       isDragOverAvatar &&
                         !isAvatarMenuOpen &&
                         (isRoundedSquare
@@ -1001,7 +1001,7 @@ export function AgentCreationPreview({
                         viewBox="0 0 1 1"
                       >
                         <path
-                          d={AGENT_AVATAR_SQUIRCLE_PATH}
+                          d={ROUNDED_SQUIRCLE_PATH}
                           fill="none"
                           pathLength="1"
                           stroke="currentColor"

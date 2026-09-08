@@ -60,7 +60,7 @@ function OverviewPerson({
         <span
           className={cn(
             "relative inline-flex ring-2 ring-background",
-            profile?.isAgent ? "agent-avatar-squircle" : "rounded-full",
+            profile?.isAgent ? "rounded-squircle" : "rounded-full",
           )}
           data-overview-person=""
           style={{ zIndex: stackSize - index }}

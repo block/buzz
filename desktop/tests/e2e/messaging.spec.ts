@@ -397,10 +397,10 @@ test("agent avatars use the one normalized SVG clip path", async ({ page }) => {
     .getByTestId("message-row")
     .filter({ hasText: "Hey team — checking in." });
   const avatar = agentMessage.getByTestId("message-avatar");
-  await expect(avatar).toHaveClass(/agent-avatar-squircle/);
+  await expect(avatar).toHaveClass(/rounded-squircle/);
   await expect(avatar).toHaveCSS("border-radius", "0px");
-  await expect(avatar).toHaveCSS("clip-path", /agent-avatar-squircle-clip/);
-  await expect(page.locator("#agent-avatar-squircle-clip")).toHaveCount(1);
+  await expect(avatar).toHaveCSS("clip-path", /rounded-squircle-clip/);
+  await expect(page.locator("#rounded-squircle-clip")).toHaveCount(1);
 
   const avatarBox = await avatar.boundingBox();
   expect(avatarBox).toMatchObject({
@@ -417,14 +417,11 @@ test("agent avatars use the one normalized SVG clip path", async ({ page }) => {
   await agentMessage.getByRole("button", { name: "A" }).first().click();
   const profileAvatar = page
     .getByTestId("user-profile-panel")
-    .locator(".agent-avatar-squircle")
+    .locator(".rounded-squircle")
     .first();
   await expect(profileAvatar).toBeVisible();
   await expect(profileAvatar).toHaveCSS("border-radius", "0px");
-  await expect(profileAvatar).toHaveCSS(
-    "clip-path",
-    /agent-avatar-squircle-clip/,
-  );
+  await expect(profileAvatar).toHaveCSS("clip-path", /rounded-squircle-clip/);
   await expect
     .poll(() =>
       profileAvatar.evaluate((element) => {
@@ -3121,7 +3118,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         (participants) =>
           participants.findIndex(
             (participant, index) =>
-              index > 0 && participant.querySelector(".agent-avatar-squircle"),
+              index > 0 && participant.querySelector(".rounded-squircle"),
           ),
       );
       return foregroundAgentIndex;

@@ -660,19 +660,19 @@ test("team cards use the thread-style overlapping avatar stack", async ({
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineClipPath: 'url("#agent-avatar-squircle-clip")',
+      outlineClipPath: 'url("#rounded-squircle-clip")',
       outlineInset: "-2px",
     },
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineClipPath: 'url("#agent-avatar-squircle-clip")',
+      outlineClipPath: 'url("#rounded-squircle-clip")',
       outlineInset: "-2px",
     },
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineClipPath: 'url("#agent-avatar-squircle-clip")',
+      outlineClipPath: 'url("#rounded-squircle-clip")',
       outlineInset: "-2px",
     },
   ]);
@@ -719,7 +719,7 @@ test("empty team cards draw a squircle-shaped placeholder outline", async ({
   const outline = placeholder.locator("xpath=..");
   await expect(placeholder).toHaveCSS(
     "clip-path",
-    'url("#agent-avatar-squircle-clip")',
+    'url("#rounded-squircle-clip")',
   );
   const styles = await outline.evaluate((element) => {
     const frame = getComputedStyle(element);
@@ -731,7 +731,7 @@ test("empty team cards draw a squircle-shaped placeholder outline", async ({
     };
   });
   expect(styles).toEqual({
-    borderClipPath: 'url("#agent-avatar-squircle-clip")',
+    borderClipPath: 'url("#rounded-squircle-clip")',
     borderWidth: "0px",
     frameClipPath: "none",
   });
