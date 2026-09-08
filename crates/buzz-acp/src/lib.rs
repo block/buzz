@@ -2446,6 +2446,9 @@ mod replay_floor_tests {
 }
 
 pub fn run() -> Result<()> {
+    if pi_launcher::try_run()? {
+        return Ok(());
+    }
     config::propagate_legacy_env_vars();
     tokio_main()
 }
@@ -2528,31 +2531,6 @@ async fn tokio_main() -> Result<()> {
             ),
         )
     };
-    // PI_ACP_PI_COMMAND is Buzz-owned. Strip stale/user-provided copies from
-    // every adapter before optionally installing Buzz's generated Pi launcher.
-    config
-        .persona_env_vars
-        .retain(|(key, _)| !key.eq_ignore_ascii_case(pi_launcher::PI_ACP_PI_COMMAND_ENV));
-    let managed_skills_dir = std::path::Path::new(&cwd).join(".agents/skills");
-    let inherited_pi_command_is_set =
-        std::env::var_os(pi_launcher::PI_ACP_PI_COMMAND_ENV).is_some();
-    let (pi_launch_override, base_prompt) = pi_launcher::PiLaunchOverride::prepare(
-        &config.agent_command,
-        base_prompt,
-        &managed_skills_dir,
-        inherited_pi_command_is_set,
-    )
-    .context("failed to prepare Pi launch overrides")?;
-    if let Some(prepared) = pi_launch_override.as_ref() {
-        config.persona_env_vars.push((
-            pi_launcher::PI_ACP_PI_COMMAND_ENV.to_string(),
-            prepared.launcher_path().to_string_lossy().into_owned(),
-        ));
-        tracing::info!(
-            skills_dir = %managed_skills_dir.display(),
-            "configured Pi to consume Buzz standing context and managed skills through native CLI flags"
-        );
-    }
 
     let observer = config
         .relay_observer
@@ -4165,10 +4143,6 @@ async fn tokio_main() -> Result<()> {
     // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
-
-    // Pi may restore subprocesses throughout the pool lifetime. Remove its
-    // private prompt and launcher only after every adapter has shut down.
-    drop(pi_launch_override);
 
     tracing::info!("buzz-acp stopped");
     Ok(())

@@ -1,99 +1,137 @@
-//! Pi-specific native launcher setup.
-//!
-//! `pi-acp` does not currently consume ACP `session/new.systemPrompt`, but it
-//! does let callers replace the `pi` executable through
-//! `PI_ACP_PI_COMMAND`. For Pi sessions, Buzz points that variable at a
-//! private launcher which adds `--system-prompt <file>` and the canonical Buzz
-//! `--skill <directory>` before forwarding the adapter's RPC/session arguments
-//! unchanged.
+//! Native Pi system prompts. Each ACP process owns a launcher; each session
+//! owns an immutable prompt file, also used when pi-acp restores its subprocess.
+
+mod native;
+#[cfg(test)]
+mod tests;
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-
-#[cfg(unix)]
-use std::ffi::OsStr;
-
+use std::sync::Arc;
 use uuid::Uuid;
 
+pub(crate) use native::try_run;
 pub(crate) const PI_ACP_PI_COMMAND_ENV: &str = "PI_ACP_PI_COMMAND";
+const LAUNCH_MODE: &str = "--internal-pi-launch";
 
-/// Files backing the Pi launcher for one `buzz-acp` process.
-///
-/// The guard must live as long as the ACP pool because `pi-acp` may start or
-/// restore Pi subprocesses after its own initialization.
+/// Private files for one adapter process, never shared across pool workers.
 pub(crate) struct PiLaunchOverride {
     directory: PathBuf,
     launcher: PathBuf,
 }
 
 impl PiLaunchOverride {
-    /// Prepare a Pi launcher when the configured ACP adapter is `pi-acp`.
-    ///
-    /// Returns the prompt that still needs ordinary ACP delivery. For Pi, the
-    /// base prompt moves into Pi's native system role and is therefore removed
-    /// from first-turn user framing. Other adapters receive it unchanged.
-    pub(crate) fn prepare(
-        agent_command: &str,
-        base_prompt: Option<String>,
-        managed_skills_dir: &Path,
-        inherited_pi_command_is_set: bool,
-    ) -> io::Result<(Option<Self>, Option<String>)> {
+    pub(crate) fn prepare(agent_command: &str) -> io::Result<Option<Arc<Self>>> {
         if crate::config::normalize_agent_command_identity(agent_command) != "pi-acp" {
-            return Ok((None, base_prompt));
+            return Ok(None);
         }
-
-        if inherited_pi_command_is_set {
+        if std::env::var_os(PI_ACP_PI_COMMAND_ENV).is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "PI_ACP_PI_COMMAND is managed by Buzz; unset it before starting a managed Pi agent",
             ));
         }
-
-        // Buzz owns PI_ACP_PI_COMMAND and always uses it to point pi-acp at
-        // this generated launcher. The launcher resolves the ordinary `pi`
-        // command from Buzz's effective PATH.
-        let prepared = Self::create("pi", base_prompt.as_deref(), managed_skills_dir)?;
-        Ok((Some(prepared), None))
+        Self::create(&std::env::current_exe()?).map(Some)
     }
 
-    pub(crate) fn launcher_path(&self) -> &Path {
-        &self.launcher
-    }
-
-    fn create(
-        pi_command: &str,
-        prompt: Option<&str>,
-        managed_skills_dir: &Path,
-    ) -> io::Result<Self> {
+    pub(crate) fn create(executable: &Path) -> io::Result<Arc<Self>> {
         let directory = std::env::temp_dir().join(format!(
             "buzz-acp-pi-launcher-{}-{}",
             std::process::id(),
             Uuid::new_v4()
         ));
         create_private_directory(&directory)?;
-
-        let prompt_path = directory.join("SYSTEM.md");
-        let launcher = directory.join(launcher_file_name());
-        // Construct the cleanup guard before either file write. Any later `?`
-        // drops it, so a partial setup cannot strand the private prompt file.
-        let prepared = Self {
+        let prepared = Arc::new(Self {
+            launcher: directory.join(if cfg!(windows) {
+                "pi-with-buzz-context.cmd"
+            } else {
+                "pi-with-buzz-context"
+            }),
             directory,
-            launcher,
+        });
+        // Preserve the buzz-acp personality when current_exe resolves to Sprig.
+        #[cfg(unix)]
+        let executable = {
+            let alias = prepared.directory.join("buzz-acp");
+            std::os::unix::fs::symlink(executable, &alias)?;
+            alias
         };
-
-        if let Some(prompt) = prompt {
-            write_private_file(&prompt_path, prompt.as_bytes(), false)?;
-        }
-
-        let script = launcher_script(
-            pi_command,
-            prompt.map(|_| prompt_path.as_path()),
-            managed_skills_dir,
+        write_private_file(
+            &prepared.launcher,
+            launcher_script(executable.as_ref(), &prepared.directory)?.as_bytes(),
+            true,
         )?;
-        write_private_file(&prepared.launcher, script.as_bytes(), true)?;
-
         Ok(prepared)
+    }
+
+    pub(crate) fn launcher_path(&self) -> &Path {
+        &self.launcher
+    }
+
+    /// Called while the ACP client is exclusively borrowed for session/new.
+    /// The pending pointer is only for new sessions; restores use their ID.
+    pub(crate) fn begin(self: &Arc<Self>, prompt: &str) -> io::Result<PendingSession> {
+        let token = Uuid::new_v4().to_string();
+        let path = self.directory.join(format!("{token}.md"));
+        write_private_file(&path, prompt.as_bytes(), false)?;
+        let snapshot = PiSessionPrompt {
+            _launcher: Arc::clone(self),
+            path,
+            mapping: None,
+        };
+        write_private_file(&self.directory.join("pending"), token.as_bytes(), false)?;
+        Ok(PendingSession {
+            snapshot: Some(snapshot),
+            launcher: Arc::clone(self),
+        })
+    }
+}
+
+/// Keeps the prompt available for reload and restore until Buzz retires the session.
+pub(crate) struct PiSessionPrompt {
+    _launcher: Arc<PiLaunchOverride>,
+    path: PathBuf,
+    mapping: Option<PathBuf>,
+}
+
+pub(crate) struct PendingSession {
+    snapshot: Option<PiSessionPrompt>,
+    launcher: Arc<PiLaunchOverride>,
+}
+
+impl PendingSession {
+    pub(crate) fn finish(mut self, session_id: &str) -> io::Result<PiSessionPrompt> {
+        let id = parse_id(session_id)?;
+        let mut snapshot = self
+            .snapshot
+            .take()
+            .ok_or_else(|| io::Error::other("Pi snapshot already consumed"))?;
+        let token = snapshot
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| io::Error::other("invalid Pi snapshot path"))?;
+        let mapping = self.launcher.directory.join(format!("session-{id}"));
+        write_private_file(&mapping, token.as_bytes(), false)?;
+        snapshot.mapping = Some(mapping);
+        fs::remove_file(self.launcher.directory.join("pending"))?;
+        Ok(snapshot)
+    }
+}
+
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        remove_file(&self.launcher.directory.join("pending"));
+    }
+}
+
+impl Drop for PiSessionPrompt {
+    fn drop(&mut self) {
+        if let Some(mapping) = &self.mapping {
+            remove_file(mapping);
+        }
+        remove_file(&self.path);
     }
 }
 
@@ -101,280 +139,95 @@ impl Drop for PiLaunchOverride {
     fn drop(&mut self) {
         if let Err(error) = fs::remove_dir_all(&self.directory) {
             if error.kind() != io::ErrorKind::NotFound {
-                tracing::warn!(
-                    path = %self.directory.display(),
-                    %error,
-                    "failed to remove temporary Pi launcher"
-                );
+                tracing::warn!(path = %self.directory.display(), %error, "failed to remove temporary Pi launcher");
             }
         }
     }
 }
 
-#[cfg(unix)]
-fn create_private_directory(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let mut builder = fs::DirBuilder::new();
-    builder.mode(0o700).create(path)
+fn remove_file(path: &Path) {
+    if let Err(error) = fs::remove_file(path) {
+        if error.kind() != io::ErrorKind::NotFound {
+            tracing::warn!(path = %path.display(), %error, "failed to remove temporary Pi prompt file");
+        }
+    }
 }
 
-#[cfg(not(unix))]
+fn parse_id(value: &str) -> io::Result<Uuid> {
+    Uuid::parse_str(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Pi session/snapshot ID must be a UUID",
+        )
+    })
+}
+
 fn create_private_directory(path: &Path) -> io::Result<()> {
-    fs::create_dir(path)
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
 }
 
 fn write_private_file(path: &Path, content: &[u8], executable: bool) -> io::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(if executable { 0o700 } else { 0o600 });
     }
-
     #[cfg(not(unix))]
     let _ = executable;
-
     let mut file = options.open(path)?;
-    file.write_all(content)?;
-    file.sync_all()
+    if let Err(error) = file.write_all(content).and_then(|()| file.sync_all()) {
+        drop(file);
+        remove_file(path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
-fn launcher_file_name() -> &'static str {
-    "pi-with-buzz-context"
-}
-
-#[cfg(windows)]
-fn launcher_file_name() -> &'static str {
-    "pi-with-buzz-context.cmd"
-}
-
-#[cfg(not(any(unix, windows)))]
-fn launcher_file_name() -> &'static str {
-    "pi-with-buzz-context"
-}
-
-#[cfg(unix)]
-fn launcher_script(
-    pi_command: &str,
-    prompt_path: Option<&Path>,
-    managed_skills_dir: &Path,
-) -> io::Result<String> {
-    let system_prompt_arg = match prompt_path {
-        Some(prompt_path) => format!(" --system-prompt {}", shell_quote(prompt_path.as_os_str())?),
-        None => String::new(),
-    };
+fn launcher_script(executable: &Path, directory: &Path) -> io::Result<String> {
+    fn quote(path: &Path) -> io::Result<String> {
+        let value = path
+            .to_str()
+            .ok_or_else(|| io::Error::other("Pi launcher paths must be valid UTF-8"))?;
+        Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
+    }
     Ok(format!(
-        "#!/bin/sh\nexec {}{} --skill {} \"$@\"\n",
-        shell_quote(OsStr::new(pi_command))?,
-        system_prompt_arg,
-        shell_quote(managed_skills_dir.as_os_str())?,
-    ))
-}
-
-#[cfg(unix)]
-fn shell_quote(value: &OsStr) -> io::Result<String> {
-    let value = value.to_str().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Pi launcher paths must be valid UTF-8",
-        )
-    })?;
-    Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
-}
-
-#[cfg(windows)]
-fn launcher_script(
-    pi_command: &str,
-    prompt_path: Option<&Path>,
-    managed_skills_dir: &Path,
-) -> io::Result<String> {
-    let system_prompt_arg = match prompt_path {
-        Some(prompt_path) => {
-            let prompt_path = prompt_path.to_str().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Pi launcher paths must be valid UTF-8",
-                )
-            })?;
-            format!(" --system-prompt \"{}\"", batch_escape(prompt_path))
-        }
-        None => String::new(),
-    };
-    let managed_skills_dir = managed_skills_dir.to_str().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Pi skill paths must be valid UTF-8",
-        )
-    })?;
-    Ok(format!(
-        "@echo off\r\n\"{}\"{} --skill \"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
-        batch_escape(pi_command),
-        system_prompt_arg,
-        batch_escape(managed_skills_dir),
+        "#!/bin/sh\nexec {} {LAUNCH_MODE} {} \"$@\"\n",
+        quote(executable)?,
+        quote(directory)?
     ))
 }
 
 #[cfg(windows)]
-fn batch_escape(value: &str) -> String {
-    value.replace('%', "%%").replace('"', "\"\"")
+fn launcher_script(executable: &Path, directory: &Path) -> io::Result<String> {
+    fn quote(path: &Path) -> io::Result<String> {
+        let value = path
+            .to_str()
+            .ok_or_else(|| io::Error::other("Pi launcher paths must be valid UTF-8"))?;
+        Ok(format!(
+            "\"{}\"",
+            value.replace('%', "%%").replace('"', "\"\"")
+        ))
+    }
+    Ok(format!(
+        "@echo off\r\n{} {LAUNCH_MODE} {} %*\r\nexit /b %ERRORLEVEL%\r\n",
+        quote(executable)?,
+        quote(directory)?
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn launcher_script(
-    _pi_command: &str,
-    _prompt_path: Option<&Path>,
-    _managed_skills_dir: &Path,
-) -> io::Result<String> {
+fn launcher_script(_: &Path, _: &Path) -> io::Result<String> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "Pi launch overrides are unsupported on this platform",
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn non_pi_adapter_keeps_base_prompt_for_acp_delivery() {
-        let base = Some("Buzz base".to_string());
-        let (prepared, remaining) =
-            PiLaunchOverride::prepare("goose", base.clone(), Path::new("/unused/skills"), true)
-                .expect("prepare");
-        assert!(prepared.is_none());
-        assert_eq!(remaining, base);
-    }
-
-    #[test]
-    fn pi_adapter_rejects_inherited_pi_command() {
-        let error = PiLaunchOverride::prepare(
-            "pi-acp",
-            Some("Buzz base".to_string()),
-            Path::new("/unused/skills"),
-            true,
-        )
-        .err()
-        .expect("inherited PI_ACP_PI_COMMAND must be rejected");
-
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert!(error.to_string().contains("managed by Buzz"));
-    }
-
-    #[test]
-    fn disabled_base_prompt_still_creates_pi_skills_launcher() {
-        let (prepared, remaining) =
-            PiLaunchOverride::prepare("pi-acp", None, Path::new("/unused/skills"), false)
-                .expect("prepare");
-        let prepared = prepared.expect("Pi skills launcher");
-        assert!(remaining.is_none());
-        assert!(!prepared.directory.join("SYSTEM.md").exists());
-
-        #[cfg(unix)]
-        assert!(fs::read_to_string(prepared.launcher_path())
-            .expect("read launcher")
-            .contains("--skill '/unused/skills'"));
-    }
-
-    #[test]
-    fn pi_adapter_moves_buzz_base_out_of_ordinary_acp_delivery() {
-        let base = crate::scope::SessionPolicy::Thread
-            .append_session_model(include_str!("base_prompt.md"));
-        let (prepared, remaining) = PiLaunchOverride::prepare(
-            "/opt/bin/pi-acp",
-            Some(base.clone()),
-            Path::new("/buzz/.agents/skills"),
-            false,
-        )
-        .expect("prepare");
-        let prepared = prepared.expect("Pi launcher");
-
-        assert!(remaining.is_none());
-        assert_eq!(
-            fs::read_to_string(prepared.directory.join("SYSTEM.md")).expect("read prompt"),
-            base
-        );
-        assert!(base.contains("each thread gets its own"));
-
-        #[cfg(unix)]
-        assert!(fs::read_to_string(prepared.launcher_path())
-            .expect("read launcher")
-            .contains("exec 'pi'"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn pi_launcher_replaces_system_prompt_and_forwards_adapter_args() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::process::Command;
-
-        let fixture_dir =
-            std::env::temp_dir().join(format!("buzz-acp-pi-system-prompt-test-{}", Uuid::new_v4()));
-        create_private_directory(&fixture_dir).expect("create fixture dir");
-        let capture_path = fixture_dir.join("args.txt");
-        let fake_pi = fixture_dir.join("fake-pi");
-        let managed_skills_dir = fixture_dir.join("managed skills");
-        let fake_script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
-            shell_quote(capture_path.as_os_str()).expect("quote capture path")
-        );
-        write_private_file(&fake_pi, fake_script.as_bytes(), true).expect("write fake pi");
-
-        let prepared = PiLaunchOverride::create(
-            fake_pi.to_str().expect("UTF-8 fake Pi path"),
-            Some("Buzz base\n\n## Session Model\nThread scoped"),
-            &managed_skills_dir,
-        )
-        .expect("prepare Pi launcher");
-        let prompt_path = prepared.directory.join("SYSTEM.md");
-
-        let status = Command::new(prepared.launcher_path())
-            .args(["--mode", "rpc", "--session", "/tmp/session.jsonl"])
-            .status()
-            .expect("run launcher");
-        assert!(status.success());
-        assert_eq!(
-            fs::read_to_string(&capture_path).expect("read captured args"),
-            format!(
-                "--system-prompt\n{}\n--skill\n{}\n--mode\nrpc\n--session\n/tmp/session.jsonl\n",
-                prompt_path.display(),
-                managed_skills_dir.display(),
-            )
-        );
-        assert_eq!(
-            fs::read_to_string(&prompt_path).expect("read system prompt"),
-            "Buzz base\n\n## Session Model\nThread scoped"
-        );
-        assert_eq!(
-            fs::metadata(&prompt_path)
-                .expect("prompt metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-        assert_eq!(
-            fs::metadata(prepared.launcher_path())
-                .expect("launcher metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(&prepared.directory)
-                .expect("directory metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-
-        drop(prepared);
-        assert!(!prompt_path.exists());
-        fs::remove_dir_all(fixture_dir).expect("remove fixture dir");
-    }
 }

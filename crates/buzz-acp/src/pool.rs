@@ -118,6 +118,8 @@ pub struct ChannelDeliveryState {
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
+    /// Immutable native Pi prompts, released with the corresponding session.
+    pi_prompts: HashMap<String, crate::pi_launcher::PiSessionPrompt>,
     /// session scope → session_id
     pub sessions: HashMap<SessionScope, String>,
     pub heartbeat_session: Option<String>,
@@ -160,6 +162,9 @@ impl SessionState {
                 self.invalidate_scope(scope);
             }
             PromptSource::Heartbeat => {
+                if let Some(id) = &self.heartbeat_session {
+                    self.pi_prompts.remove(id);
+                }
                 self.heartbeat_session = None;
                 self.heartbeat_turn_count = 0;
                 self.heartbeat_standing_context_sent = false;
@@ -175,7 +180,12 @@ impl SessionState {
         self.canvas_sections.remove(scope);
         self.deliveries.remove(scope);
         self.scope_owner_generations.remove(scope);
-        self.sessions.remove(scope).is_some()
+        if let Some(id) = self.sessions.remove(scope) {
+            self.pi_prompts.remove(&id);
+            true
+        } else {
+            false
+        }
     }
 
     /// Invalidate every session scope belonging to `channel_id` (channel-wide
@@ -206,6 +216,7 @@ impl SessionState {
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
     pub fn invalidate_all(&mut self) {
+        self.pi_prompts.clear();
         self.sessions.clear();
         self.turn_counts.clear();
         self.heartbeat_session = None;
@@ -323,11 +334,12 @@ fn session_new_system_prompt<'a>(
 
 impl OwnedAgent {
     pub(crate) fn has_system_prompt_support(&self) -> bool {
-        has_system_prompt_support(
-            self.protocol_version,
-            &self.agent_name,
-            self.goose_system_prompt_supported,
-        )
+        self.acp.has_pi_system_prompt_transport()
+            || has_system_prompt_support(
+                self.protocol_version,
+                &self.agent_name,
+                self.goose_system_prompt_supported,
+            )
     }
 }
 
@@ -1507,19 +1519,21 @@ async fn create_session_and_apply_model(
         ctx.session_title.as_deref(),
     );
 
-    let resp = agent
-        .acp
-        .session_new_full(
-            &ctx.cwd,
-            mcp_servers,
-            session_new_system_prompt(
-                is_goose,
-                agent.protocol_version,
-                &agent.agent_name,
-                combined_system_prompt.as_deref(),
-            ),
-            session_title.as_deref(),
+    let transport = if agent.acp.has_pi_system_prompt_transport() {
+        combined_system_prompt
+            .as_deref()
+            .map(SystemPromptTransport::Field)
+    } else {
+        session_new_system_prompt(
+            is_goose,
+            agent.protocol_version,
+            &agent.agent_name,
+            combined_system_prompt.as_deref(),
         )
+    };
+    let mut resp = agent
+        .acp
+        .session_new_full(&ctx.cwd, mcp_servers, transport, session_title.as_deref())
         .await?;
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
@@ -1726,6 +1740,12 @@ async fn create_session_and_apply_model(
         apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
     }
 
+    if let Some(prompt) = resp.pi_prompt.take() {
+        agent
+            .state
+            .pi_prompts
+            .insert(resp.session_id.clone(), prompt);
+    }
     Ok(resp.session_id)
 }
 
@@ -10258,6 +10278,10 @@ done"#
         server.abort();
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "pool/pi_prompt_tests.rs"]
+mod pi_prompt_tests;
 
 #[cfg(test)]
 mod startup_effort_tests {

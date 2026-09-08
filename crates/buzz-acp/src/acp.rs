@@ -4,7 +4,7 @@
 //! # Lifecycle
 //! 1. [`AcpClient::spawn`] — launch agent binary as subprocess
 //! 2. [`AcpClient::initialize`] — protocol version negotiation
-//! 3. [`AcpClient::session_new`] — create session with MCP server config
+//! 3. [`AcpClient::session_new_full`] — create session with MCP server config
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
@@ -137,8 +137,9 @@ fn build_initialize_params() -> serde_json::Value {
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
-/// same client via repeated calls to [`session_new`](AcpClient::session_new).
+/// same client via repeated calls to [`session_new_full`](AcpClient::session_new_full).
 pub struct AcpClient {
+    pi_launcher: Option<std::sync::Arc<crate::pi_launcher::PiLaunchOverride>>,
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
     /// Write end of the agent's stdin pipe.
@@ -504,6 +505,9 @@ impl AcpClient {
         }
 
         for (key, value) in extra_env {
+            if key.eq_ignore_ascii_case(crate::pi_launcher::PI_ACP_PI_COMMAND_ENV) {
+                continue;
+            }
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
@@ -534,6 +538,13 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
+        let pi_launcher = crate::pi_launcher::PiLaunchOverride::prepare(command)?;
+        if let Some(launcher) = &pi_launcher {
+            cmd.env(
+                crate::pi_launcher::PI_ACP_PI_COMMAND_ENV,
+                launcher.launcher_path(),
+            );
+        }
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -546,6 +557,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            pi_launcher,
             child,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
@@ -564,6 +576,10 @@ impl AcpClient {
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
         })
+    }
+
+    pub(crate) fn has_pi_system_prompt_transport(&self) -> bool {
+        self.pi_launcher.is_some()
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -648,6 +664,8 @@ impl AcpClient {
     ///
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
+    /// For managed Pi, prompt text uses the native launcher instead of the wire
+    /// field. Retain the returned `pi_prompt` for the lifetime of the session.
     pub async fn session_new_full(
         &mut self,
         cwd: &str,
@@ -655,11 +673,22 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        let native_prompt = if let Some(launcher) = &self.pi_launcher {
+            let text = match &system_prompt {
+                Some(
+                    SystemPromptTransport::Field(text) | SystemPromptTransport::ClaudeMeta(text),
+                ) => *text,
+                None => "",
+            };
+            Some(launcher.begin(text)?)
+        } else {
+            None
+        };
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
-        match system_prompt {
+        match system_prompt.filter(|_| native_prompt.is_none()) {
             Some(SystemPromptTransport::Field(sp)) => {
                 params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
             }
@@ -673,33 +702,42 @@ impl AcpClient {
             // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
-        let result = self.send_request("session/new", params).await?;
-        let session_id = result["sessionId"]
-            .as_str()
-            .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
-            .to_owned();
+        let response = async {
+            let result = self.send_request("session/new", params).await?;
+            let session_id = result["sessionId"]
+                .as_str()
+                .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
+                .to_owned();
+            Ok::<_, AcpError>((result, session_id))
+        }
+        .await;
+        let (result, session_id) = match response {
+            Ok(response) => response,
+            Err(error) => {
+                // A timed-out request may still start Pi later. Kill this adapter
+                // before clearing its pending pointer or accepting another create.
+                if native_prompt.is_some() {
+                    self.shutdown().await;
+                }
+                return Err(error);
+            }
+        };
+        let pi_prompt = match native_prompt
+            .map(|pending| pending.finish(&session_id))
+            .transpose()
+        {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                self.shutdown().await;
+                return Err(error.into());
+            }
+        };
         tracing::info!(target: "acp::session", "session created: {session_id}");
         Ok(SessionNewResponse {
+            pi_prompt,
             session_id,
             raw: result,
         })
-    }
-
-    /// Send `session/new` and return only the `sessionId` string.
-    ///
-    /// Convenience wrapper around [`session_new_full`].
-    #[allow(dead_code)] // Public API — callers outside the harness may use this.
-    pub async fn session_new(
-        &mut self,
-        cwd: &str,
-        mcp_servers: Vec<McpServer>,
-        system_prompt: Option<SystemPromptTransport<'_>>,
-        session_title: Option<&str>,
-    ) -> Result<String, AcpError> {
-        Ok(self
-            .session_new_full(cwd, mcp_servers, system_prompt, session_title)
-            .await?
-            .session_id)
     }
 
     /// Replace Goose's native system prompt after `session/new`.
@@ -2124,6 +2162,8 @@ fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
 ///
 /// Callers use the extractor helpers to pull model info from `raw`.
 pub struct SessionNewResponse {
+    /// Native prompt lifetime; the pool retains it with its session state.
+    pub(crate) pi_prompt: Option<crate::pi_launcher::PiSessionPrompt>,
     pub session_id: String,
     /// The full `result` value from the JSON-RPC response.
     pub raw: serde_json::Value,
