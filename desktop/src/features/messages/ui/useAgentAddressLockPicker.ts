@@ -91,6 +91,10 @@ export function useAgentAddressLockPicker({
     () => new Set(audience.pubkeys),
     [audience.pubkeys],
   );
+  // A retained callback belongs to one audience visit, including A -> B -> A.
+  const scopeOwner = React.useMemo(() => ({ audienceScope }), [audienceScope]);
+  const currentAudience = React.useRef({ scopeOwner, lockedAgentPubkeys });
+  currentAudience.current = { scopeOwner, lockedAgentPubkeys };
   const unpinnedAgentPubkeysRef = React.useRef(new Set<string>());
   const unpinnedAudienceScopeRef = React.useRef(audienceScope);
   if (unpinnedAudienceScopeRef.current !== audienceScope) {
@@ -246,14 +250,21 @@ export function useAgentAddressLockPicker({
   const toggleAlwaysAddressAgent = React.useCallback(
     (suggestion: MentionSuggestion) => {
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
-      if (!audienceScope || !pubkey || !suggestion.isAgent) return;
+      if (
+        !audienceScope ||
+        !pubkey ||
+        !suggestion.isAgent ||
+        currentAudience.current.scopeOwner !== scopeOwner
+      )
+        return;
 
-      if (lockedAgentPubkeys.has(pubkey)) {
+      if (currentAudience.current.lockedAgentPubkeys.has(pubkey)) {
         removeAddressedAgentMentions(pubkey);
         setAnnouncement(
           `Stopped automatically mentioning ${suggestion.displayName}`,
         );
       } else {
+        if (!mentions.canSelectMention(suggestion)) return;
         unpinnedAgentPubkeysRef.current.delete(pubkey);
         const label =
           mentions.registerMentionPubkey(suggestion.displayName, pubkey, {
@@ -320,13 +331,14 @@ export function useAgentAddressLockPicker({
       applyAutocompleteEdit,
       audience.addPubkey,
       audienceScope,
-      lockedAgentPubkeys,
       mentions.getDraftMentionRefs,
       mentions.isInlineMentionSelection,
       mentions.isMentionOpen,
       mentions.mentionStartIndex,
       mentions.openMentionPicker,
       mentions.registerMentionPubkey,
+      mentions.canSelectMention,
+      scopeOwner,
       onAddressAgentMention,
       onImplicitPrefixInserted,
       onPulseAddressLock,
@@ -338,14 +350,19 @@ export function useAgentAddressLockPicker({
 
   const selectMentionSuggestion = React.useCallback(
     (suggestion: MentionSuggestion) => {
+      if (currentAudience.current.scopeOwner !== scopeOwner) return;
+      const { cursor } = richText.getPlainTextAndCursor();
+      const wasInlineSelection = mentions.isInlineMentionSelection();
+      const edit = mentions.insertMention(suggestion, cursor);
+      // Rejected stale selections must not establish automatic audience intent.
+      if (!edit.insertText) return;
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
       if (suggestion.isAgent && pubkey && audienceScope) {
-        const { cursor } = richText.getPlainTextAndCursor();
         const wasUnpinned =
           !lockedAgentPubkeys.has(pubkey) &&
           unpinnedAgentPubkeysRef.current.has(pubkey);
-        if (mentions.isInlineMentionSelection() || wasUnpinned) {
-          applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
+        if (wasInlineSelection || wasUnpinned) {
+          applyAutocompleteEdit(edit);
           trackMentionAddressedAgent(pubkey);
           onAutoPinAgentMention?.(suggestion, {
             reinstateExcluded: !wasUnpinned,
@@ -353,7 +370,7 @@ export function useAgentAddressLockPicker({
           return;
         }
 
-        applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
+        applyAutocompleteEdit(edit);
         if (!lockedAgentPubkeys.has(pubkey)) {
           trackMentionAddressedAgent(pubkey);
           if (onAddressAgentMention) {
@@ -369,8 +386,7 @@ export function useAgentAddressLockPicker({
         return;
       }
 
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
+      applyAutocompleteEdit(edit);
     },
     [
       applyAutocompleteEdit,
@@ -379,6 +395,7 @@ export function useAgentAddressLockPicker({
       lockedAgentPubkeys,
       mentions.isInlineMentionSelection,
       mentions.insertMention,
+      scopeOwner,
       onAddressAgentMention,
       onAutoPinAgentMention,
       onPulseAddressLock,

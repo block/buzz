@@ -1,3 +1,4 @@
+import type { MentionAction } from "./mentionPresentation";
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import type {
   AgentPersona,
@@ -5,7 +6,7 @@ import type {
   ChannelRole,
   UserSearchResult,
 } from "@/shared/api/types";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 export function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
@@ -33,6 +34,7 @@ export type TeamMentionMember = {
 };
 
 export type MentionCandidate = {
+  action?: MentionAction;
   kind: "identity" | "persona" | "team";
   pubkey?: string;
   personaId?: string;
@@ -156,4 +158,21 @@ export function formatTeamMention(
   members: readonly TeamMentionMember[],
 ) {
   return `${teamName}(${members.map((member) => `@${member.displayName}`).join(" ")}) `;
+}
+
+/** Compare exact team recipient sets; duplicate members and presentation order are irrelevant. */
+export function sameTeamMentionRecipients(
+  selected: readonly TeamMentionMember[],
+  current: readonly TeamMentionMember[] = [],
+): boolean {
+  const identity = (member: TeamMentionMember) =>
+    member.pubkey
+      ? `key:${normalizePubkey(member.pubkey)}`
+      : `persona:${member.personaId}`;
+  const selectedSet = new Set(selected.map(identity));
+  const currentSet = new Set(current.map(identity));
+  return (
+    selectedSet.size === currentSet.size &&
+    [...selectedSet].every((key) => currentSet.has(key))
+  );
 }

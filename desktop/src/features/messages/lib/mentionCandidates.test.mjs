@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildTeamMentionCandidates,
   formatTeamMention,
+  sameTeamMentionRecipients,
 } from "./mentionCandidates.ts";
 
 function persona(id, displayName, isActive = true) {
@@ -170,4 +171,28 @@ test("teams with identity and persona display-name collisions are not suggested"
     ),
     [],
   );
+});
+
+test("team recipient equality ignores multiplicity, order and names, not exact identity", () => {
+  const a = { kind: "identity", displayName: "A", pubkey: "ab".repeat(32) };
+  const b = { ...a, pubkey: "cd".repeat(32) };
+  const p = { kind: "persona", displayName: "A", personaId: "a" };
+  for (const [left, right, equal] of [
+    [[], [], true],
+    [[a], [], false],
+    [[], [a], false],
+    [[a, a], [a, b], false],
+    [[a, b], [a, a], false],
+    [[a, a], [a], true],
+    [[a], [a, a], true],
+    [
+      [a, b],
+      [b, { ...a, displayName: "Renamed", pubkey: a.pubkey.toUpperCase() }],
+      true,
+    ],
+    [[p, p], [p], true],
+    [[p], [{ ...p, personaId: "b" }], false],
+    [[p], [{ ...p, pubkey: a.pubkey }], false],
+  ])
+    assert.equal(sameTeamMentionRecipients(left, right), equal);
 });

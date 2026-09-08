@@ -1,3 +1,4 @@
+import type { MentionAction } from "@/features/messages/lib/mentionPresentation";
 import * as React from "react";
 import { Bot, ChevronRight, Pin, Users } from "lucide-react";
 import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
@@ -20,6 +21,7 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 import { getPlatformKeysById } from "@/shared/lib/keyboard-shortcuts";
 
 export type MentionSuggestion = {
+  action?: MentionAction;
   pubkey?: string;
   personaId?: string;
   teamId?: string;
