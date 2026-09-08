@@ -78,6 +78,7 @@ The same work can have multiple valid representations: sibling tasks, a parent a
 
 ## Future experiments
 
+- Automatically resolve or create a home channel when a branch is created: reuse an appropriate task channel when one exists, otherwise create a new channel.
 - Start with a bare channel, then add a task or branch view.
 - Start with a branch channel, then add a task view.
 - Render a client-side "Task created" transition in an originating conversation when a task canvas references it through `originating_thread`.
