@@ -115,6 +115,7 @@ const invoke = async (command, args) => {
   if (command === "sync_agents_to_active_huddle") return null;
   if (command === "list_relay_agents") {
     state.directoryCalls += 1;
+    if (state.heldDirectory) return state.heldDirectory;
     if (state.failDirectory) throw new Error("Directory unavailable");
     return state.missingDirectory ? [] : [rawAgent()];
   }
@@ -228,7 +229,8 @@ async function setup(overrides = {}) {
     [["teams"], []],
     [["archivedIdentities"], { archived: [] }],
   ])
-    client.setQueryData(key, data);
+    if (!(state.heldDirectory && key[0] === "relay-agents"))
+      client.setQueryData(key, data);
   const container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -281,6 +283,11 @@ for (const change of [
       "old actionable row must not establish intent",
     );
     assert.deepEqual(mention.knownNames, []);
+    assert.equal(
+      mention.isAgentPubkey(AGENT),
+      true,
+      "directory removal never turns a known agent into a human",
+    );
   });
 }
 
@@ -567,12 +574,12 @@ test("background membership/search updates leave visible same-name rows and Tab 
     client.invalidateQueries({ queryKey: ["user-search"] }),
   );
   await settle();
-  assert.equal(mention.suggestions, displayed);
+  assert.deepEqual(mention.suggestions, displayed);
   let outcome, edit;
   await act(async () => {
     outcome = mention.handleMentionKeyDown(keyboard("Tab"));
   });
-  assert.equal(outcome.suggestion, selected);
+  assert.deepEqual(outcome.suggestion, selected);
   await act(async () => {
     edit = mention.insertMention(outcome.suggestion, 6);
   });
@@ -618,7 +625,7 @@ test("text changes load a new request; superseded and closed responses cannot in
     releaseOld({ users: [person(VIEWER, "Old")], next_cursor: null }),
   );
   await settle();
-  assert.equal(mention.suggestions, displayed);
+  assert.deepEqual(mention.suggestions, displayed);
   await act(async () => mention.updateMentionQuery("@closed", 7));
   await settle();
   await act(async () => mention.cancelMentionAutocomplete());
@@ -666,5 +673,130 @@ test("Space completes an exact name but remains literal for partial and same-nam
   assert.equal(
     mention.handleMentionKeyDown(keyboard("Tab")).suggestion.pubkey,
     mention.suggestions[0].pubkey,
+  );
+});
+
+for (const condition of ["denied", "missing", "failed"]) {
+  test(`disabled ${condition} member rejects pointer, keyboard and new pin intent`, async () => {
+    await setup({
+      owner: OTHER,
+      visible: true,
+      directoryVisible: true,
+      policy: condition === "denied" ? "owner-only" : "anyone",
+      missingDirectory: condition === "missing",
+      failDirectory: condition === "failed",
+    });
+    const row = rows()[0];
+    assert.equal(mention.canSelectMention(row), false);
+    await act(async () => {
+      picker.selectMentionSuggestion(row);
+      picker.toggleAlwaysAddressAgent(row);
+      mention.handleMentionKeyDown(keyboard("ArrowDown"));
+    });
+    for (const key of ["Tab", "Enter", " "]) {
+      let outcome;
+      await act(async () => {
+        outcome = mention.handleMentionKeyDown(keyboard(key));
+      });
+      assert.equal(outcome.suggestion, undefined);
+    }
+    assert.deepEqual(effects, []);
+    assert.deepEqual(mention.knownNames, []);
+  });
+}
+
+test("checking resolves and retry refreshes without moving the selected identity", async () => {
+  await setup({
+    owner: OTHER,
+    visible: true,
+    directoryVisible: true,
+    missingDirectory: true,
+  });
+  const identity = rows()[0].pubkey;
+  assert.equal(rows()[0].action, "checking");
+  state.missingDirectory = false;
+  await act(async () =>
+    client.invalidateQueries({ queryKey: ["relay-agents"] }),
+  );
+  await settle();
+  assert.equal(rows()[0].pubkey, identity);
+  assert.equal(mention.mentionSelectedIndex, 0);
+  assert.equal(rows()[0].action, "mention");
+  assert.equal(mention.canSelectMention(rows()[0]), true);
+  state.failDirectory = true;
+  await act(async () =>
+    client.invalidateQueries({ queryKey: ["relay-agents"] }),
+  );
+  await settle();
+  assert.equal(rows()[0].action, "unavailable");
+  assert.equal(mention.canSelectMention(rows()[0]), false);
+  state.failDirectory = false;
+  await act(async () => rows()[0].onRetry());
+  await settle();
+  assert.equal(rows()[0].pubkey, identity);
+  assert.equal(rows()[0].action, "mention");
+});
+
+test("verification expiry never installs an unfinished people search", async () => {
+  await setup();
+  let release;
+  state.pendingSearch = {
+    slow: new Promise((resolve) => {
+      release = resolve;
+    }),
+  };
+  await act(async () => mention.updateMentionQuery("@slow", 5));
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 5100)));
+  assert.equal(mention.isMentionLoading, true);
+  assert.deepEqual(mention.suggestions, []);
+  await act(async () =>
+    release({ users: [person(OTHER, "Slow")], next_cursor: null }),
+  );
+  await settle();
+  assert.equal(mention.isMentionLoading, false);
+  assert.equal(mention.suggestions[0].pubkey, OTHER);
+});
+
+test("cold directory expiry waits for required people search before installing choices", async () => {
+  let releaseDirectory, releaseSearch;
+  await setup({
+    heldDirectory: new Promise((resolve) => {
+      releaseDirectory = resolve;
+    }),
+    pendingSearch: {
+      slow: new Promise((resolve) => {
+        releaseSearch = resolve;
+      }),
+    },
+  });
+  await act(async () => mention.updateMentionQuery("@Slow", 5));
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 5100)));
+  assert.equal(
+    mention.isMentionLoading,
+    true,
+    "directory expiry cannot complete a not-yet-enabled search",
+  );
+  assert.deepEqual(mention.suggestions, []);
+  state.heldDirectory = null;
+  await act(async () => releaseDirectory([]));
+  await settle();
+  assert.equal(
+    mention.isMentionLoading,
+    true,
+    "enabling search is not settlement",
+  );
+  assert.deepEqual(mention.suggestions, []);
+  await act(async () =>
+    releaseSearch({ users: [person(OTHER, "Slow Person")], next_cursor: null }),
+  );
+  await settle();
+  assert.equal(mention.isMentionLoading, false);
+  assert.deepEqual(
+    mention.suggestions.map((row) => row.pubkey),
+    [OTHER],
+  );
+  assert.equal(
+    mention.handleMentionKeyDown(keyboard("Tab")).suggestion.pubkey,
+    OTHER,
   );
 });

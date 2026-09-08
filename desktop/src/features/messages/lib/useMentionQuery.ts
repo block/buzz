@@ -101,6 +101,9 @@ export function useMentionQuery(
   return {
     request: request?.scope === scope ? request : null,
     cancel,
+    refresh: React.useCallback(() => {
+      if (current.current) publish({ ...current.current });
+    }, [publish]),
     update,
     open,
     read,

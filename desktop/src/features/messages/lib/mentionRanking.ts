@@ -1,7 +1,9 @@
+import { isMentionActionable, type MentionAction } from "./mentionPresentation";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 export type MentionCandidateForRanking = {
   displayName: string | null;
+  action?: MentionAction;
   isAgent: boolean;
   isActiveAgent?: boolean;
   isMember: boolean;
@@ -24,6 +26,7 @@ function getMentionCandidateGroupRank(
   candidate: MentionCandidateForRanking,
   activePersonaIds: ReadonlySet<string>,
 ) {
+  if (!isMentionActionable(candidate)) return 4;
   if (candidate.isMember) return 0;
 
   const isRunnablePersona =
@@ -65,7 +68,12 @@ export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
   );
   return (
     candidates
-      .filter((candidate) => candidate.isAgent && Boolean(candidate.pubkey))
+      .filter(
+        (candidate) =>
+          candidate.isAgent &&
+          Boolean(candidate.pubkey) &&
+          isMentionActionable(candidate),
+      )
       .sort((left, right) => {
         const leftRecentRank = left.pubkey
           ? recentMentionRankByPubkey.get(normalizePubkey(left.pubkey))
