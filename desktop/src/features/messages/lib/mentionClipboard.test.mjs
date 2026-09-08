@@ -449,7 +449,6 @@ test("whole compact mention labels are restored only for their declared exact ke
   // form re-binds; nothing else does.
   const npubCompact = "Scout (npub1z59…zwkg) 2";
   const legacyCompact = "Scout (150b20bd…15dc) 2";
-  assert.notEqual(npubCompact, legacyCompact);
 
   for (const compact of [npubCompact, legacyCompact]) {
     assert.equal(matchChipTextToLabel(compact, label, "@", key), "truncated");

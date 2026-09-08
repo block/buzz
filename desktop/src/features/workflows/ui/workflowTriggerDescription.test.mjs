@@ -170,26 +170,25 @@ test("describes selected trigger conditions on the workflow canvas", () => {
     ),
     "👾 reaction added by Carl to “hey yourself”",
   );
-});
 
-test("an unresolved author renders the compact npub while a referenced message keeps its event-id hex", () => {
-  const author = "deadbeef".repeat(8);
+  // Without a resolved label, an author renders its compact npub while the
+  // referenced message keeps the generic hex truncation — an event id, not
+  // a pubkey identity.
+  const unresolvedAuthor = "deadbeef".repeat(8);
   assert.equal(
     workflowTriggerDescription({
       on: "message_posted",
-      filter: `trigger_author == "${author}"`,
+      filter: `trigger_author == "${unresolvedAuthor}"`,
     }),
     "Message posted by npub1m6k…zuz0",
   );
   assert.equal(
     workflowTriggerDescription({
       on: "message_posted",
-      filter: `trigger_author != "${author}"`,
+      filter: `trigger_author != "${unresolvedAuthor}"`,
     }),
     "Message posted by anyone except npub1m6k…zuz0",
   );
-  // The referenced message is an event id, not a pubkey identity: the
-  // generic hex truncation stays.
   assert.equal(
     workflowTriggerDescription({
       on: "reaction_added",
@@ -197,11 +196,10 @@ test("an unresolved author renders the compact npub while a referenced message k
     }),
     "Reaction added to bbbbbbbb…bbbb",
   );
-  // Both references in one trigger keep their own form.
   assert.equal(
     workflowTriggerDescription({
       on: "reaction_added",
-      filter: `trigger_emoji == "👾" && trigger_author == "${author}" && trigger_message_id == "${"b".repeat(64)}"`,
+      filter: `trigger_emoji == "👾" && trigger_author == "${unresolvedAuthor}" && trigger_message_id == "${"b".repeat(64)}"`,
     }),
     "👾 reaction added by npub1m6k…zuz0 to bbbbbbbb…bbbb",
   );

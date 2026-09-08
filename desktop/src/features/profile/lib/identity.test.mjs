@@ -23,12 +23,27 @@ const summary = (over = {}) => ({
   ...over,
 });
 
-test("formatOwnerLabel resolves a known owner's display name", () => {
+test("formatOwnerLabel prefers the owner’s authored labels over the compact npub", () => {
+  // The label ladder: display name first, then a NIP-05 handle, then the
+  // key’s compact npub — never raw hex.
   assert.equal(
     formatOwnerLabel(OWNER_PUBKEY, null, {
       [OWNER_PUBKEY]: summary({ displayName: "baxen" }),
     }),
     "baxen",
+  );
+  assert.equal(
+    formatOwnerLabel(OWNER_PUBKEY, "c".repeat(64), {
+      [OWNER_PUBKEY]: summary({
+        nip05Handle: "baxen@relay",
+        displayName: null,
+      }),
+    }),
+    "baxen@relay",
+  );
+  assert.equal(
+    formatOwnerLabel(OWNER_PUBKEY, "c".repeat(64), {}),
+    OWNER_NPUB_COMPACT,
   );
 });
 
@@ -62,23 +77,6 @@ test("resolveUserLabel falls back to the key’s compact npub, never raw hex", (
       profiles: { [OWNER_PUBKEY]: summary({ displayName: "baxen" }) },
     }),
     "baxen",
-  );
-});
-
-test("formatOwnerLabel falls back to the owner’s compact npub", () => {
-  assert.equal(
-    formatOwnerLabel(OWNER_PUBKEY, "c".repeat(64), {}),
-    OWNER_NPUB_COMPACT,
-  );
-  // A NIP-05 handle still wins over the key form.
-  assert.equal(
-    formatOwnerLabel(OWNER_PUBKEY, "c".repeat(64), {
-      [OWNER_PUBKEY]: summary({
-        nip05Handle: "baxen@relay",
-        displayName: null,
-      }),
-    }),
-    "baxen@relay",
   );
 });
 

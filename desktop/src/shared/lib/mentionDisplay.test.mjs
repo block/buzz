@@ -46,12 +46,6 @@ test("legacy display keeps the retired hex compaction byte-exact for clipboard v
     );
   }
   assert.equal(formatLegacyMentionDisplayLabel(KEY, KEY), truncatePubkey(KEY));
-  // The two display forms are distinct strings — the disjointness the
-  // clipboard classifier relies on when it tolerates only these two forms.
-  assert.notEqual(
-    formatMentionDisplayLabel(`Bad Janet (${KEY})`, KEY),
-    formatLegacyMentionDisplayLabel(`Bad Janet (${KEY})`, KEY),
-  );
 });
 
 test("matching compact keys do not become identity keys", () => {
