@@ -58,6 +58,7 @@ import {
 } from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
+import { TaskChannelWorkspace } from "@/features/channels/ui/TaskChannelWorkspace";
 import { useSearchHighlightProps } from "@/features/channels/ui/useSearchHighlightProps";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
@@ -621,6 +622,8 @@ export const ChannelPane = React.memo(function ChannelPane({
               <ThreadRepliesErrorCard onRetry={onRetryHuddleThreadReplies} />
             </div>
           ) : null}
+          {/* biome-ignore format: keep the existing timeline subtree unchanged */}
+          <TaskChannelWorkspace channelId={activeChannelId} key={activeChannelId}>
           <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col">
             <MessageTimeline
               ref={messageTimelineRef}
@@ -814,6 +817,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               <DropZoneOverlay className="z-50 rounded-2xl bg-primary/20 backdrop-blur-sm" />
             ) : null}
           </div>
+          </TaskChannelWorkspace>
         </section>
       ) : null}
       {/* Serialize replacements so focus drawers keep one travel direction. */}

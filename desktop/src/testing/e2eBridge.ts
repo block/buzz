@@ -371,6 +371,7 @@ type E2eConfig = {
     deepHistoryMessageCount?: number;
     feedReadError?: string;
     canvasReadError?: string;
+    canvasContent?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
     applyCommunityDelayMs?: number;
@@ -14751,7 +14752,11 @@ export function maybeInstallE2eTauriMocks() {
           throw new Error(canvasReadError);
         }
         // Return the no-canvas success shape — content null means no canvas set.
-        return { content: null, updated_at: null, author: null };
+        return {
+          content: activeConfig?.mock?.canvasContent ?? null,
+          updated_at: null,
+          author: null,
+        };
       }
       // ── Local-save archive ──────────────────────────────────────────────
       // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests
