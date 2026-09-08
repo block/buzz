@@ -68,7 +68,7 @@ public struct BuzzCommunicationNotificationDescriptor: Equatable, Sendable {
     ) throws -> UNNotificationContent
 
     private let donate: Donation
-    private let deleteAllInteractions: InteractionDeletion
+    private let interactionDeletionDeadline: BuzzInteractionDeletionDeadline
     private let updateContent: ContentUpdate
 
     public convenience init() {
@@ -88,10 +88,17 @@ public struct BuzzCommunicationNotificationDescriptor: Equatable, Sendable {
     public init(
       donate: @escaping Donation,
       deleteAllInteractions: @escaping InteractionDeletion,
-      updateContent: @escaping ContentUpdate
+      updateContent: @escaping ContentUpdate,
+      scheduleDeletionTimeout: @escaping BuzzInteractionDeletionDeadline.ScheduleTimeout = { delay, action in
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay, execute: action)
+      }
     ) {
       self.donate = donate
-      self.deleteAllInteractions = deleteAllInteractions
+      self.interactionDeletionDeadline = BuzzInteractionDeletionDeadline(
+        timeout: 5,
+        deleteAllInteractions: deleteAllInteractions,
+        scheduleTimeout: scheduleDeletionTimeout
+      )
       self.updateContent = updateContent
     }
 
@@ -112,13 +119,13 @@ public struct BuzzCommunicationNotificationDescriptor: Equatable, Sendable {
       let intent = Self.makeIntent(descriptor)
       let interaction = INInteraction(intent: intent, response: nil)
       interaction.direction = .incoming
-      donate(interaction) { [deleteAllInteractions, updateContent] error in
+      donate(interaction) { [interactionDeletionDeadline, updateContent] error in
         guard error == nil else {
           completion(ordinaryContent)
           return
         }
         guard isStillAllowed() else {
-          deleteAllInteractions { error in
+          interactionDeletionDeadline.deleteAll { error in
             if let error {
               onDeletionFailure(error)
             }
