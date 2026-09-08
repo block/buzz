@@ -9,6 +9,10 @@ for encoded in ${DART_DEFINES:-}; do
   decoded=$(printf '%s' "$encoded" | base64 --decode 2>/dev/null || printf '%s' "$encoded" | base64 -D 2>/dev/null || true)
   case "$decoded" in
     BUZZ_PUSH_GATEWAY_URL=*)
+      if [ "$has_dart_define" = true ]; then
+        echo "error: BUZZ_PUSH_GATEWAY_URL must be supplied at most once." >&2
+        exit 1
+      fi
       has_dart_define=true
       gateway_origin=${decoded#BUZZ_PUSH_GATEWAY_URL=}
       ;;
@@ -23,9 +27,9 @@ if [ "$has_dart_define" = false ] && [ -n "${BUZZ_PUSH_GATEWAY_URL:-}" ]; then
   export DART_DEFINES
 fi
 
-if [ -z "$gateway_origin" ]; then
-  echo "error: BUZZ_PUSH_GATEWAY_URL must be supplied as a Dart define or Xcode build setting for every mobile build." >&2
-  exit 1
+if [ "$has_dart_define" = false ] && [ -z "$gateway_origin" ]; then
+  # An unconfigured artifact deliberately has no push capability.
+  return 0 2>/dev/null || exit 0
 fi
 
 if [ -n "${SRCROOT:-}" ]; then

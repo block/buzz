@@ -88,7 +88,10 @@ String buzzPushPublicationAttemptKey({
 bool buzzPushLifecycleEnabled({
   required Community? community,
   required BuzzPushLeaseDescriptor? descriptor,
-}) => community?.pushNotificationsEnabled == true && descriptor != null;
+}) =>
+    Env.pushGatewayConfigured &&
+    community?.pushNotificationsEnabled == true &&
+    descriptor != null;
 
 /// Starts APNs registration when the active community opts in.
 @visibleForTesting

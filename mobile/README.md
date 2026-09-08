@@ -70,7 +70,7 @@ For direct Xcode / Android Studio / `flutter run` development, run
 switch to refresh the display label (the install identity never changes);
 the persisted files are then picked up by any subsequent build. In the main
 checkout the script is a no-op that removes stale override files, restoring
-the plain `Buzz` identity. Direct Xcode builds and Runner tests also require a
+the plain `Buzz` identity. To enable push in direct Xcode builds and Runner tests, supply a
 `BUZZ_PUSH_GATEWAY_URL` build setting in the gitignored
 `mobile/ios/Flutter/AppOverrides.xcconfig`; the build phase validates and
 passes it through as a Flutter Dart define. Since `//` begins an xcconfig
@@ -109,14 +109,19 @@ enrollment, or lease publication, so a later user opt-in can display pushes
 without rebuilding transport authority. An absent, malformed, or unreachable
 descriptor leaves push inactive without partial enrollment.
 
-Every mobile build must supply the gateway origin explicitly:
+Mobile builds without a gateway origin succeed with push unavailable. To enable
+push, supply the gateway origin explicitly:
 
 ```bash
 flutter build ios --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 flutter build apk --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
-The iOS and Android build gates fail when the define is absent. Enrollment
+The iOS and Android build gates validate any supplied define, rejecting empty or
+malformed values. Release/profile builds require an HTTPS origin without an
+explicit port. An absent define disables permission requests, APNs registration,
+gateway enrollment, and lease publication; Settings shows push as unavailable.
+No production gateway is selected implicitly. Enrollment
 grants and crash-recovery journals are scoped to this origin. Push has not
 shipped to existing users, so there is no legacy-state or cross-gateway
 migration. Changing gateways requires fresh enrollment; old installations

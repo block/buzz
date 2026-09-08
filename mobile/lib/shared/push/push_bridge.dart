@@ -140,7 +140,10 @@ Future<void> syncPendingBuzzPushNotificationResponse() async {
 /// requests. Display authorization is intentionally not returned or persisted:
 /// APNs registration and enrollment remain valid while display is denied.
 Future<void> startBuzzPushRegistration() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (!Env.pushGatewayConfigured ||
+      defaultTargetPlatform != TargetPlatform.iOS) {
+    return;
+  }
   try {
     await _channel.invokeMethod<void>('startRegistration');
   } on MissingPluginException {
@@ -188,7 +191,10 @@ class BuzzPushEndpointGrant {
 }
 
 Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return const [];
+  if (!Env.pushGatewayConfigured ||
+      defaultTargetPlatform != TargetPlatform.iOS) {
+    return const [];
+  }
   try {
     final raw = await _channel.invokeListMethod<dynamic>('endpointGrants', {
       'gatewayUrl': Env.pushGatewayUrl,

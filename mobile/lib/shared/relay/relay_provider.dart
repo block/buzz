@@ -71,7 +71,12 @@ class Env {
     'BUZZ_RELAY_URL',
     defaultValue: 'http://localhost:3000',
   );
+
+  /// Optional gateway origin. Without it this artifact has no push capability.
   static const pushGatewayUrl = String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL');
+
+  /// Whether this artifact can offer push notification enrollment.
+  static const pushGatewayConfigured = pushGatewayUrl != '';
 }
 
 class RelayConfigNotifier extends Notifier<RelayConfig> {

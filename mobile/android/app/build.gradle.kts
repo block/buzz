@@ -47,14 +47,15 @@ tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
     doFirst {
         val requireHttps = !name.endsWith("Debug", ignoreCase = true)
         val hasValidPushGatewayOrigin =
-            pushGatewayOrigins.size == 1 &&
-                isValidPushGatewayOrigin(pushGatewayOrigins.single(), requireHttps)
+            pushGatewayOrigins.isEmpty() ||
+                (pushGatewayOrigins.size == 1 &&
+                    isValidPushGatewayOrigin(pushGatewayOrigins.single(), requireHttps))
         if (!hasValidPushGatewayOrigin) {
             throw GradleException(
-                "BUZZ_PUSH_GATEWAY_URL must be supplied as an " +
+                "When supplied, BUZZ_PUSH_GATEWAY_URL must be an " +
                     (if (requireHttps) "HTTPS" else "HTTP(S)") +
                     " origin without " + (if (requireHttps) "an explicit port, " else "") +
-                    "credentials, path, query, or fragment for every mobile build.",
+                    "credentials, path, query, or fragment.",
             )
         }
     }
