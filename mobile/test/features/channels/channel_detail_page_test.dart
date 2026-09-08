@@ -619,6 +619,44 @@ void main() {
       expect(_dmHeaderAvatarInitial(tester), 'A');
     });
 
+    testWidgets('keys DM header fallback avatars to the non-self counterpart', (
+      tester,
+    ) async {
+      // Member order does not guarantee the counterpart is listed first:
+      // the current user (self, from the fake profile) comes FIRST, so an
+      // avatar keyed to the first participant would render the current
+      // user's initial while the header label names the counterpart.
+      const b0b =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: ['Self', shortPubkey(b0b)],
+        participantPubkeys: const ['self', b0b],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], channel: dmChannel),
+      );
+      await tester.pumpAndSettle();
+
+      // Label and avatar agree on the counterpart's key: the compact npub
+      // names the unnamed counterpart, and the avatar initial is keyed to
+      // that same hex key — never the current user's `S`.
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
+        shortPubkey(b0b),
+      );
+      expect(_dmHeaderAvatarInitial(tester), 'B');
+    });
+
     testWidgets('uses a fallback squircle for bot-role DM participants', (
       tester,
     ) async {

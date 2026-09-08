@@ -54,18 +54,42 @@ String resolveDmChannelDisplayLabel(Channel channel, {String? currentPubkey}) {
       : channel.name;
 }
 
-/// Avatar initial for the channel's first DM participant label.
+/// Avatar initial for the DM's visible counterpart.
+///
+/// Mirrors [resolveDmChannelDisplayLabel]'s participant selection: the
+/// first participant that is not [currentPubkey] (falling back to the first
+/// participant when every participant is the current user), since member
+/// order does not guarantee the counterpart is listed first — otherwise the
+/// avatar could identify the current user while the label beside it
+/// identifies the counterpart.
 ///
 /// A resolved display name keeps its name-derived initial. A label that
 /// fell back to the compact npub form of the participant's key is keyed to
 /// the hex public key instead — the npub form starts with `npub1`, so every
 /// unnamed participant would otherwise render `N`.
-String dmAvatarInitial(Channel channel) {
-  if (channel.participants.isEmpty) return '?';
-  final label = channel.participants.first;
-  final pubkey = channel.participantPubkeys.isNotEmpty
-      ? channel.participantPubkeys.first
-      : '';
+String dmAvatarInitial(Channel channel, {String? currentPubkey}) {
+  final normalizedCurrent = currentPubkey?.toLowerCase();
+  var index = 0;
+  while (normalizedCurrent != null &&
+      index < channel.participantPubkeys.length &&
+      channel.participantPubkeys[index].toLowerCase() == normalizedCurrent) {
+    index++;
+  }
+
+  // No participant pubkeys (labels only) or every pubkey is the current
+  // user: fall back to the first participant label, like the channel label
+  // does when the non-self list is empty.
+  if (index >= channel.participantPubkeys.length) {
+    final label = channel.participants.isNotEmpty
+        ? channel.participants.first
+        : '';
+    return label.isNotEmpty ? label[0].toUpperCase() : '?';
+  }
+
+  final pubkey = channel.participantPubkeys[index];
+  final label = index < channel.participants.length
+      ? channel.participants[index]
+      : shortPubkey(pubkey);
   if (pubkey.isNotEmpty && label == shortPubkey(pubkey)) {
     return pubkey[0].toUpperCase();
   }

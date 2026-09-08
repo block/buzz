@@ -240,8 +240,12 @@ class _DmAppBarTitle extends ConsumerWidget {
     final animatedAvatar = parseAnimatedAvatarUrl(avatarUrl);
     // Keyed to the hex public key when the participant is unnamed and the
     // profile isn't cached — the compact-npub participant label would
-    // otherwise render `N` for every unnamed DM counterpart.
-    final initial = profile?.initial ?? dmAvatarInitial(channel);
+    // otherwise render `N` for every unnamed DM counterpart. Selection skips
+    // the current user like the header label does, so the initial always
+    // identifies the same counterpart the label names.
+    final initial =
+        profile?.initial ??
+        dmAvatarInitial(channel, currentPubkey: currentPubkey);
     final presenceLabel = switch (presence) {
       'online' => 'Online',
       'away' => 'Away',

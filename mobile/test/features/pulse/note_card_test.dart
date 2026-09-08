@@ -201,6 +201,27 @@ void main() {
               npubLabelCount: 0,
               avatarInitial: 'C',
             ),
+            // Cached blank display names (empty or whitespace-only — relay
+            // profiles can carry both) must fall back to the compact npub
+            // for the label instead of rendering an empty author row.
+            (
+              id: 'cached-blank-name-author',
+              tags: const [],
+              users: {b0b: const UserProfile(pubkey: b0b, displayName: '')},
+              authorLabel: 'npub1kzc\u2026uyv8',
+              replyLabel: null,
+              npubLabelCount: 1,
+              avatarInitial: 'B',
+            ),
+            (
+              id: 'cached-whitespace-name-author',
+              tags: const [],
+              users: {b0b: const UserProfile(pubkey: b0b, displayName: '   ')},
+              authorLabel: 'npub1kzc\u2026uyv8',
+              replyLabel: null,
+              npubLabelCount: 1,
+              avatarInitial: 'B',
+            ),
           ];
 
       for (final scenario in scenarios) {

@@ -250,6 +250,63 @@ void main() {
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
   });
 
+  testWidgets('keys DM tile fallback avatars to the non-self counterpart', (
+    tester,
+  ) async {
+    // Valid fixture keys whose npub encodings were verified against the
+    // NIP-19 codec independently of the code under test. The current user
+    // (aabb, from the fake profile) is listed FIRST — member order does
+    // not guarantee the counterpart is first — so an avatar that keys off
+    // the first participant would identify the current user while the
+    // label beside it identifies the counterpart.
+    const b0b =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+    final selfFirstUnnamedDm = Channel(
+      id: 'dm-self-first-unnamed',
+      name: 'DM',
+      channelType: 'dm',
+      visibility: 'open',
+      description: 'Direct message',
+      createdBy: 'aabb',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      participants: ['Test', shortPubkey(b0b)],
+      participantPubkeys: const ['aabb', b0b],
+      isMember: true,
+    );
+    final selfFirstNamedDm = Channel(
+      id: 'dm-self-first-named',
+      name: 'DM',
+      channelType: 'dm',
+      visibility: 'open',
+      description: 'Direct message',
+      createdBy: 'aabb',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      participants: const ['Test', 'Bob'],
+      participantPubkeys: const ['aabb', b0b],
+      isMember: true,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier([selfFirstUnnamedDm, selfFirstNamedDm]),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Label and avatar agree on the counterpart's key: the compact npub
+    // names the unnamed counterpart, and the avatar initial is keyed to
+    // that same hex key — never the current user's `A`.
+    expect(find.text(shortPubkey(b0b)), findsOneWidget);
+    expect(_dmTileAvatarInitial(tester, shortPubkey(b0b)), 'B');
+    // A named counterpart listed second keeps its authored initial too.
+    expect(_dmTileAvatarInitial(tester, 'Bob'), 'B');
+  });
+
   testWidgets('sizes the community header for accessible text', (tester) async {
     await tester.pumpWidget(
       buildTestable(

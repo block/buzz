@@ -34,7 +34,15 @@ class UserProfile {
   );
 
   /// Short label: display name, or the compact npub form of the public key.
-  String get label => displayName ?? shortPubkey(pubkey);
+  ///
+  /// Blank display names (empty or whitespace-only) fall back to the compact
+  /// npub too — relay profiles can carry them — so a valid identity never
+  /// renders an empty label. Mirrors [initial], which already rejects blank
+  /// names.
+  String get label {
+    final name = displayName?.trim();
+    return name != null && name.isNotEmpty ? name : shortPubkey(pubkey);
+  }
 
   /// First letter for fallback avatar.
   String get initial {
