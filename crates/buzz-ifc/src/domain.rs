@@ -441,6 +441,11 @@ impl ExecutionDomain {
         })
     }
 
+    /// Return the label describing who may receive this domain's output.
+    pub fn audience(&self) -> &ConfidentialityLabel {
+        &self.audience
+    }
+
     /// Hash every domain field into a stable key for session lookup.
     ///
     /// Changing any field changes the key. The broker must use this complete key
