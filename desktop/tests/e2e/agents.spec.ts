@@ -701,6 +701,42 @@ test("team cards use the thread-style overlapping avatar stack", async ({
   ]);
 });
 
+test("empty team cards draw a squircle-shaped placeholder outline", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    teams: [
+      {
+        name: "Empty crew",
+        personaIds: [],
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const placeholder = page.locator('[data-team-empty-avatar="avatar"]').first();
+  const outline = placeholder.locator("xpath=..");
+  await expect(placeholder).toHaveCSS(
+    "clip-path",
+    'url("#agent-avatar-squircle-clip")',
+  );
+  const styles = await outline.evaluate((element) => {
+    const frame = getComputedStyle(element);
+    const border = getComputedStyle(element, "::before");
+    return {
+      borderClipPath: border.clipPath,
+      borderWidth: frame.borderWidth,
+      frameClipPath: frame.clipPath,
+    };
+  });
+  expect(styles).toEqual({
+    borderClipPath: 'url("#agent-avatar-squircle-clip")',
+    borderWidth: "0px",
+    frameClipPath: "none",
+  });
+});
+
 test("agent defaults stays in the header without an actions menu", async ({
   page,
 }) => {

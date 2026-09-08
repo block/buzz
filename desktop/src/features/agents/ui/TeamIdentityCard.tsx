@@ -120,8 +120,13 @@ function TeamAvatarRow({
   if (visiblePersonas.length === 0 && overflowCount === 0) {
     return (
       <div className="absolute inset-x-4 top-0 bottom-12 flex items-center justify-center">
-        <div className="flex h-24 w-24 items-center justify-center agent-avatar-squircle border border-border/65 bg-background/80 text-muted-foreground shadow-xs">
-          <Users className="h-9 w-9" />
+        <div className="relative h-24 w-24 agent-avatar-squircle-border before:absolute before:-inset-px before:bg-border/65 before:content-['']">
+          <div
+            className="relative z-10 flex h-full w-full items-center justify-center agent-avatar-squircle bg-background/80 text-muted-foreground shadow-xs"
+            data-team-empty-avatar="avatar"
+          >
+            <Users className="h-9 w-9" />
+          </div>
         </div>
       </div>
     );
