@@ -234,6 +234,9 @@ export function useSidebarRelayConnectionCard(
 
   return {
     hasRelayUnreachableError,
+    // The relay client's own backoff loop is mid-retry. The card uses this to
+    // say so instead of implying the user has to click something.
+    isRelayAutoReconnecting: relayConnectionState === "reconnecting",
     isRelayConnectionSuccess,
     isRelayReconnectPending,
     isWaitingOnReconnectHook,
