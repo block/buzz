@@ -294,7 +294,7 @@ test("mergeStores: a fresh at-capacity unmute defeats an older remote mute", () 
       { muted: true, updatedAt: index + 1 },
     ]),
   );
-  channels["unmuted"] = { muted: false, updatedAt: 9999 };
+  channels.unmuted = { muted: false, updatedAt: 9999 };
   const bounded = boundMuteStore({ version: 1, channels });
 
   const result = mergeStores(bounded, {
