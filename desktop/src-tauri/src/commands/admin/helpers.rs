@@ -52,7 +52,7 @@ pub(super) async fn post_admin_json(
     cap: u64,
     state: &tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<Vec<u8>, AdminMutationError> {
-    mutation_admin_json(reqwest::Method::POST, url, body, cap, state).await
+    mutation_admin_json(reqwest::Method::POST, url, Some(body), cap, state).await
 }
 
 /// PATCH a JSON body with NIP-98 auth (payload sha256), one 401-retry, size cap.
@@ -62,7 +62,7 @@ pub(super) async fn patch_admin_json(
     cap: u64,
     state: &tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<Vec<u8>, AdminMutationError> {
-    mutation_admin_json(reqwest::Method::PATCH, url, body, cap, state).await
+    mutation_admin_json(reqwest::Method::PATCH, url, Some(body), cap, state).await
 }
 
 /// PUT a JSON body with NIP-98 auth (payload sha256), one 401-retry, size cap.
@@ -72,49 +72,29 @@ pub(super) async fn put_admin_json(
     cap: u64,
     state: &tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<Vec<u8>, AdminMutationError> {
-    mutation_admin_json(reqwest::Method::PUT, url, body, cap, state).await
+    mutation_admin_json(reqwest::Method::PUT, url, Some(body), cap, state).await
 }
 
 /// DELETE with NIP-98 auth (no body), one 401-retry, size cap.
+///
+/// A thin wrapper over [`mutation_admin_json`] with `body: None`, so a config-
+/// backed 409 arrives as an authoritative [`AdminMutationError`] the UI can act
+/// on — not an opaque `String`.
 pub(super) async fn delete_admin_json(
     url: &str,
     cap: u64,
     state: &tauri::State<'_, crate::app_state::AppState>,
-) -> Result<Vec<u8>, String> {
-    use crate::relay::build_nip98_auth_header_for_keys;
-
-    let keys = state.signing_keys()?;
-    let http_client = client::ADMIN_CLIENT
-        .get()
-        .ok_or_else(|| "admin client not initialised".to_string())?;
-
-    let auth_header = build_nip98_auth_header_for_keys(&keys, &reqwest::Method::DELETE, url, &[])
-        .map_err(|e| format!("nip98 build failed: {e}"))?;
-
-    let resp = http_client
-        .delete(url)
-        .header(reqwest::header::AUTHORIZATION, &auth_header)
-        .send()
-        .await
-        .map_err(|e| crate::relay::classify_request_error(&e))?;
-
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let auth_header2 =
-            build_nip98_auth_header_for_keys(&keys, &reqwest::Method::DELETE, url, &[])
-                .map_err(|e| format!("nip98 build failed on retry: {e}"))?;
-        let resp2 = http_client
-            .delete(url)
-            .header(reqwest::header::AUTHORIZATION, auth_header2)
-            .send()
-            .await
-            .map_err(|e| crate::relay::classify_request_error(&e))?;
-        return read_admin_response(resp2, cap, ERROR_BODY_CAP).await;
-    }
-
-    read_admin_response(resp, cap, ERROR_BODY_CAP).await
+) -> Result<Vec<u8>, AdminMutationError> {
+    mutation_admin_json(reqwest::Method::DELETE, url, None, cap, state).await
 }
 
-/// Shared implementation for POST/PATCH/PUT with NIP-98 payload sha256 binding.
+/// Shared implementation for POST/PATCH/PUT and bodyless DELETE.
+///
+/// `body` is `Some(bytes)` for a JSON-bearing request (NIP-98 §4 `payload` tag
+/// over the SHA-256 of the exact bytes, `Content-Type: application/json`, those
+/// bytes on the wire) and `None` for a bodyless request (signed over `&[]` with
+/// no `payload` tag, and NO wire body or `Content-Type` header — byte-identical
+/// to a bare DELETE the relay expects).
 ///
 /// Returns a typed [`AdminMutationError`] so the caller can distinguish a
 /// relay-authoritative failure (a status was received) from a transport or
@@ -124,45 +104,70 @@ pub(super) async fn delete_admin_json(
 pub(super) async fn mutation_admin_json(
     method: reqwest::Method,
     url: &str,
-    body: &[u8],
+    body: Option<&[u8]>,
     cap: u64,
     state: &tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<Vec<u8>, AdminMutationError> {
-    use crate::relay::build_nip98_auth_header_for_keys;
-
     let keys = state.signing_keys()?;
     let http_client = client::ADMIN_CLIENT
         .get()
         .ok_or_else(|| "admin client not initialised".to_string())?;
 
-    // NIP-98 §4: for body-bearing requests, include a `payload` tag over the
-    // SHA-256 of the exact request body bytes.
-    let auth_header = build_nip98_auth_header_for_keys(&keys, &method, url, body)
-        .map_err(|e| format!("nip98 build failed: {e}"))?;
-
-    let send_request = |auth: String| {
-        http_client
-            .request(method.clone(), url)
-            .header(reqwest::header::AUTHORIZATION, auth)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec())
-            .send()
-    };
-
-    let resp = send_request(auth_header)
+    let resp = build_admin_mutation_request(http_client, &keys, &method, url, body)?
+        .send()
         .await
         .map_err(|e| crate::relay::classify_request_error(&e))?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let auth_header2 = build_nip98_auth_header_for_keys(&keys, &method, url, body)
-            .map_err(|e| format!("nip98 build failed on retry: {e}"))?;
-        let resp2 = send_request(auth_header2)
+        // Retry once with a freshly signed request — each build mints a new
+        // NIP-98 nonce, so this is a distinct event, not a replay of the first.
+        let resp2 = build_admin_mutation_request(http_client, &keys, &method, url, body)?
+            .send()
             .await
             .map_err(|e| crate::relay::classify_request_error(&e))?;
         return read_admin_mutation_response(resp2, cap, ERROR_BODY_CAP).await;
     }
 
     read_admin_mutation_response(resp, cap, ERROR_BODY_CAP).await
+}
+
+/// Build a NIP-98-authorized admin mutation request for `method`/`url`.
+///
+/// `body` is `Some(bytes)` for a JSON-bearing request (POST/PUT/PATCH): a
+/// `payload` tag over sha256(bytes), a `Content-Type: application/json` header,
+/// and those bytes on the wire. `body` is `None` for a bodyless request
+/// (DELETE): signed over `&[]` — the same empty-payload NIP-98 event the bare
+/// DELETE carried — with NO `Content-Type` or wire body, so it is byte-identical
+/// on the wire. Each call mints a fresh nonce (see
+/// [`crate::relay::build_nip98_auth_header_for_keys`]), which is why the
+/// 401-retry re-invokes this rather than resending the first request.
+///
+/// State-free (`&Client` + `&Keys`) so the wire shape is unit-testable without
+/// a running Tauri app.
+pub(super) fn build_admin_mutation_request(
+    http_client: &reqwest::Client,
+    keys: &nostr::Keys,
+    method: &reqwest::Method,
+    url: &str,
+    body: Option<&[u8]>,
+) -> Result<reqwest::RequestBuilder, String> {
+    let auth_header =
+        crate::relay::build_nip98_auth_header_for_keys(keys, method, url, body.unwrap_or(&[]))
+            .map_err(|e| format!("nip98 build failed: {e}"))?;
+
+    let mut req = http_client
+        .request(method.clone(), url)
+        .header(reqwest::header::AUTHORIZATION, auth_header);
+
+    // Only a body-bearing request sets a wire body and Content-Type; a bodyless
+    // request sends neither, matching the bare DELETE contract.
+    if let Some(bytes) = body {
+        req = req
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(bytes.to_vec());
+    }
+
+    Ok(req)
 }
 
 /// Stream and validate an attachment response, enforcing Content-Type, size,

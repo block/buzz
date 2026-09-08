@@ -969,3 +969,160 @@ async fn dot_localhost_origin_parses_and_probe_inner_reaches_loopback_via_nip98(
         );
     }
 }
+
+// ── build_admin_mutation_request wire shape (N8: typed bodyless DELETE) ────────
+
+/// Decode the NIP-98 event embedded in a `Nostr <base64>` Authorization value.
+fn decode_nip98_event(auth_value: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = auth_value
+        .strip_prefix("Nostr ")
+        .expect("authorization header must be a NIP-98 `Nostr <base64>` value");
+    let json = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .expect("NIP-98 payload must be valid base64");
+    serde_json::from_slice(&json).expect("NIP-98 payload must be a JSON event")
+}
+
+/// First value of the NIP-98 tag named `name`, if present.
+fn nip98_tag<'a>(event: &'a serde_json::Value, name: &str) -> Option<&'a str> {
+    event["tags"].as_array()?.iter().find_map(|t| {
+        let arr = t.as_array()?;
+        if arr.first()?.as_str()? == name {
+            arr.get(1)?.as_str()
+        } else {
+            None
+        }
+    })
+}
+
+/// A bodyless DELETE built through the shared mutation helper must go on the
+/// wire with NO `Content-Type` and NO body, and be NIP-98-signed over the empty
+/// payload — byte-identical to the bare DELETE the relay verified before this
+/// consolidation routed DELETE through `mutation_admin_json`.
+///
+/// Mutation evidence: setting `Content-Type`/a body on the `None` branch of
+/// `build_admin_mutation_request`, or signing over anything but `&[]`, flips one
+/// of the three wire assertions RED. The request is sent through the production
+/// `ADMIN_CLIENT`, so a reqwest default header injection would also be caught.
+#[tokio::test]
+async fn bodyless_delete_wire_is_bare_and_signs_empty_payload() {
+    use sha2::{Digest, Sha256};
+    use std::sync::{Arc, Mutex};
+
+    client::init_admin_client().expect("client builds");
+    let http_client = client::ADMIN_CLIENT.get().unwrap();
+
+    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = Arc::clone(&captured);
+    let addr = serve_sequence_inspect(
+        vec![("200 OK", "Content-Type: application/json\r\n", "{}")],
+        Some(Arc::new(move |_idx, bytes: &[u8]| {
+            *cap.lock().unwrap() = bytes.to_vec();
+        })),
+    )
+    .await;
+
+    let keys = nostr::Keys::generate();
+    let url = format!(
+        "http://127.0.0.1:{}/api/admin/v1/operators/{}",
+        addr.port(),
+        "0".repeat(64)
+    );
+    let resp = helpers::build_admin_mutation_request(
+        http_client,
+        &keys,
+        &reqwest::Method::DELETE,
+        &url,
+        None,
+    )
+    .expect("bodyless request builds")
+    .send()
+    .await
+    .expect("request reaches the loopback listener");
+    assert!(resp.status().is_success());
+
+    let raw = captured.lock().unwrap().clone();
+    let text = std::str::from_utf8(&raw).expect("request is valid UTF-8");
+    let (headers, body) = text.split_once("\r\n\r\n").unwrap_or((text, ""));
+
+    assert!(
+        headers.starts_with("DELETE "),
+        "request must be a DELETE; got:\n{headers}"
+    );
+    assert!(
+        !headers.to_lowercase().contains("content-type"),
+        "a bodyless DELETE must carry no Content-Type on the wire; got:\n{headers}"
+    );
+    assert!(
+        body.is_empty(),
+        "a bodyless DELETE must carry no wire body; got body {body:?}"
+    );
+
+    let auth_value = headers
+        .lines()
+        .find(|l| l.to_lowercase().starts_with("authorization:"))
+        .and_then(|l| l.split_once(':'))
+        .map(|(_, v)| v.trim())
+        .expect("NIP-98 Authorization header present");
+    let event = decode_nip98_event(auth_value);
+    assert_eq!(nip98_tag(&event, "method"), Some("DELETE"));
+    assert_eq!(nip98_tag(&event, "u"), Some(url.as_str()));
+    assert_eq!(
+        nip98_tag(&event, "payload"),
+        Some(hex::encode(Sha256::digest(b"")).as_str()),
+        "bodyless request must sign over the empty payload"
+    );
+}
+
+/// The body-bearing branch of the same helper must instead declare
+/// `application/json`, send the exact JSON bytes, and bind the NIP-98 `payload`
+/// tag to the sha256 of those bytes — the contrast that makes the `Some`/`None`
+/// split in `build_admin_mutation_request` falsifiable in both directions.
+#[tokio::test]
+async fn body_bearing_put_sets_content_type_and_signs_body() {
+    use sha2::{Digest, Sha256};
+
+    client::init_admin_client().expect("client builds");
+    let http_client = client::ADMIN_CLIENT.get().unwrap();
+    let keys = nostr::Keys::generate();
+    let url = "https://admin.example.com/api/admin/v1/operators/0000000000000000000000000000000000000000000000000000000000000001";
+    let body: &[u8] = br#"{"role":"moderator"}"#;
+
+    let req = helpers::build_admin_mutation_request(
+        http_client,
+        &keys,
+        &reqwest::Method::PUT,
+        url,
+        Some(body),
+    )
+    .expect("body-bearing request builds")
+    .build()
+    .expect("request is well-formed");
+
+    assert_eq!(req.method(), reqwest::Method::PUT);
+    assert_eq!(
+        req.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "a body-bearing mutation must declare application/json"
+    );
+    assert_eq!(
+        req.body().and_then(reqwest::Body::as_bytes),
+        Some(body),
+        "the exact JSON bytes must reach the wire"
+    );
+
+    let auth_value = req
+        .headers()
+        .get(reqwest::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .expect("NIP-98 Authorization header present");
+    let event = decode_nip98_event(auth_value);
+    assert_eq!(
+        nip98_tag(&event, "payload"),
+        Some(hex::encode(Sha256::digest(body)).as_str()),
+        "body-bearing request must sign over the sha256 of the exact body"
+    );
+}

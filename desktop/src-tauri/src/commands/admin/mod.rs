@@ -671,7 +671,7 @@ pub async fn admin_delete_operator(
     origin: String,
     pubkey: String,
     state: tauri::State<'_, crate::app_state::AppState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AdminMutationError> {
     let origin = origin::AdminOrigin::parse(&origin)?;
     let pubkey =
         routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
@@ -680,7 +680,7 @@ pub async fn admin_delete_operator(
         &routes::AdminQuery::default(),
     );
     let bytes = delete_admin_json(&url, SUCCESS_JSON_CAP, &state).await?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON from relay: {e}"))
+    serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON from relay: {e}").into())
 }
 
 /// Fetch a feedback attachment by SHA-256 hash.
