@@ -1,0 +1,64 @@
+id: codex-buzz
+display_name: Codex for Buzz agents
+description: Codex CLI with gateway-managed OAuth access-token refresh
+category: agent
+inference_capable: true
+credentials:
+  - name: access_token
+    description: Short-lived Codex OAuth access token managed by the gateway
+    env_vars: [CODEX_AUTH_ACCESS_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+    refresh:
+      strategy: oauth2_refresh_token
+      token_url: https://auth.openai.com/oauth/token
+      refresh_before_seconds: 300
+      max_lifetime_seconds: 3600
+      material:
+        - name: client_id
+          description: Public Codex OAuth client ID
+          required: true
+        - name: refresh_token
+          description: Codex OAuth refresh token
+          required: true
+          secret: true
+  - name: account_id
+    description: Codex account identifier
+    env_vars: [CODEX_AUTH_ACCOUNT_ID]
+    required: true
+discovery:
+  credentials: [access_token, account_id]
+endpoints:
+  - host: api.openai.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: auth.openai.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: chatgpt.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: ab.chatgpt.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: files.openai.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/bin/codex
+  - /usr/local/bin/codex
+  - /usr/bin/node
+  - /usr/local/bin/node
+  - /usr/lib/node_modules/@openai/**
+  - /usr/local/lib/node_modules/@openai/**
