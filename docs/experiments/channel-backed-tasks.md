@@ -11,8 +11,9 @@ Conversation → local task + new channel → implementation branch → pull req
 - The task's mutable data lives in the channel canvas.
 - No native Buzz task is created.
 - The task has zero or one implementation branch.
-- Each implementation branch has one home channel. Creating a branch from an appropriate task channel binds it to that channel instead of creating another one.
-- A branch created without an appropriate current channel gets a new channel. Rebinding an established branch is for correcting mistakes, not routine restructuring.
+- Each implementation branch should ultimately have one home channel. Creating a branch through this workflow reuses an appropriate task channel instead of creating another one.
+- A branch created outside this workflow can remain unbound temporarily and should be flagged for resolution. A person or agent can attach it to an appropriate channel or create a new one.
+- Rebinding an established branch is for correcting mistakes, not routine restructuring.
 - The branch, pull request, CI, and review use the task's channel.
 
 ## Canvas data model
@@ -76,9 +77,16 @@ I've created the task in [#<channel name>](buzz://channel/<channel UUID>).
 
 The same work can have multiple valid representations: sibling tasks, a parent and subtask, or an umbrella task with children. Task relationships should reflect how people understand the work and do not need to be predicted when the first task is created.
 
+## Open questions
+
+- How should Buzz detect and surface a branch created outside the task workflow without a home channel?
+- How should an agent tell the branch-creation API which channel it is currently working in?
+- Where should people resolve an unbound branch, and who has permission to bind it?
+- Should a branch binding become fixed after the channel is used, or remain editable for corrections?
+
 ## Future experiments
 
-- Automatically resolve or create a home channel when a branch is created: reuse an appropriate task channel when one exists, otherwise create a new channel.
+- Detect branches without a home channel and surface an action to attach them to an appropriate channel or create a new one.
 - Start with a bare channel, then add a task or branch view.
 - Start with a branch channel, then add a task view.
 - Render a client-side "Task created" transition in an originating conversation when a task canvas references it through `originating_thread`.
