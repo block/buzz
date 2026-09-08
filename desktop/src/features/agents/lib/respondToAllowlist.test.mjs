@@ -29,32 +29,15 @@ test("parsePubkeyInput surfaces invalid entries separately", () => {
   assert.deepEqual(result.invalid, ["notgood", "z".repeat(64)]);
 });
 
-test("parsePubkeyInput accepts npub entries and normalizes to hex", () => {
-  const result = parsePubkeyInput(HEX_NPUB);
-  assert.deepEqual(result.valid, [HEX]);
-  assert.deepEqual(result.invalid, []);
-});
-
-test("parsePubkeyInput dedupes npub and hex spellings of one key", () => {
-  const result = parsePubkeyInput(`${HEX_NPUB} ${HEX} ${HEX.toUpperCase()}`);
-  assert.deepEqual(result.valid, [HEX]);
-  assert.deepEqual(result.invalid, []);
-});
-
-test("parsePubkeyInput rejects corrupted-checksum npubs", () => {
-  // Valid bech32 shape, corrupted checksum: must not bind as an identity.
+test("parsePubkeyInput accepts npub entries, normalizes to hex, and dedupes across spellings", () => {
+  // One invalid npub-shaped token proves classification at this seam; the
+  // full codec negative matrix lives at the shared parser (nostrUtils).
   const corrupt = `${HEX_NPUB.slice(0, -2)}qq`;
-  const result = parsePubkeyInput(corrupt);
-  assert.deepEqual(result.valid, []);
+  const result = parsePubkeyInput(
+    `${HEX_NPUB} ${HEX} ${HEX.toUpperCase()} ${corrupt}`,
+  );
+  assert.deepEqual(result.valid, [HEX]);
   assert.deepEqual(result.invalid, [corrupt]);
-});
-
-test("parsePubkeyInput rejects degenerate npubs and short hex", () => {
-  // Checksum-valid bech32 whose payload is not a 64-char identity key —
-  // npubEncode('deadbeef') — never binds as an identity.
-  const result = parsePubkeyInput("npub1m6kmamcvty5gd deadbeef");
-  assert.deepEqual(result.valid, []);
-  assert.deepEqual(result.invalid, ["npub1m6kmamcvty5gd", "deadbeef"]);
 });
 
 test("parsePubkeyInput rejects wrong-length entries", () => {
@@ -86,10 +69,7 @@ test("mergeAllowlist skips invalid additions silently", () => {
   assert.deepEqual(merged, [HEX_A, HEX_B]);
 });
 
-test("mergeAllowlist normalizes npub additions to canonical hex", () => {
+test("mergeAllowlist normalizes npub additions to canonical hex and dedupes", () => {
   assert.deepEqual(mergeAllowlist([HEX_A], [HEX_NPUB]), [HEX_A, HEX]);
-});
-
-test("mergeAllowlist dedupes an npub addition already present as hex", () => {
   assert.deepEqual(mergeAllowlist([HEX], [HEX_NPUB]), [HEX]);
 });

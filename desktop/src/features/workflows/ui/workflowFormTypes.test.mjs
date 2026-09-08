@@ -334,7 +334,7 @@ steps: [{ id: s1, action: send_dm, to: ${KEY_HEX}, text: hi }, { id: s2, action:
   assert.equal(parsed.state.steps[1].from, KEY_NPUB);
 });
 
-test("exact npub to/from keys serialize back to canonical hex", () => {
+test("npub to/from keys serialize to canonical hex; other spellings pass through", () => {
   const dm = formStateToYaml({
     ...DEFAULT_FORM_STATE,
     name: "Keys",
@@ -351,15 +351,24 @@ test("exact npub to/from keys serialize back to canonical hex", () => {
     ],
   });
   assert.match(approval, new RegExp(`from: ${KEY_HEX}`));
-});
 
-test("hex to/from keys pass through unchanged on serialize", () => {
-  const dm = formStateToYaml({
+  // A hex spelling serializes unchanged, and a corrupted-checksum npub is
+  // never bound as an identity — it stays exactly as the author wrote it
+  // for the YAML editor to surface.
+  const hexDm = formStateToYaml({
     ...DEFAULT_FORM_STATE,
     name: "Keys",
     steps: [{ id: "s1", action: "send_dm", to: KEY_HEX, text: "hi" }],
   });
-  assert.match(dm, new RegExp(`to: ${KEY_HEX}`));
+  assert.match(hexDm, new RegExp(`to: ${KEY_HEX}`));
+
+  const corrupt = `${KEY_NPUB.slice(0, -2)}qq`;
+  const corruptDm = formStateToYaml({
+    ...DEFAULT_FORM_STATE,
+    name: "Keys",
+    steps: [{ id: "s1", action: "send_dm", to: corrupt, text: "hi" }],
+  });
+  assert.match(corruptDm, new RegExp(`to: ${corrupt.replace(/\./g, "\\.")}`));
 });
 
 test("templates and roles pass through both directions untouched", () => {
@@ -376,16 +385,4 @@ steps: [{ id: s1, action: send_dm, to: "{{trigger.author}}", text: hi }, { id: s
   const reserialized = formStateToYaml(parsed.state);
   assert.match(reserialized, /to: "\{\{trigger\.author\}\}"/);
   assert.match(reserialized, /from: manager/);
-});
-
-test("invalid npub-shaped to/from values pass through untouched", () => {
-  // A corrupted-checksum npub is never bound as an identity — it stays exactly
-  // as the author wrote it for the YAML editor to surface.
-  const corrupt = `${KEY_NPUB.slice(0, -2)}qq`;
-  const dm = formStateToYaml({
-    ...DEFAULT_FORM_STATE,
-    name: "Keys",
-    steps: [{ id: "s1", action: "send_dm", to: corrupt, text: "hi" }],
-  });
-  assert.match(dm, new RegExp(`to: ${corrupt.replace(/\./g, "\\.")}`));
 });
