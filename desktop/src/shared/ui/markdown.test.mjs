@@ -1400,6 +1400,8 @@ test("resolved human mentions replace the authored at-sign with the shared icon"
   );
 
   assert.match(html, /data-mention=""/);
+  assert.match(html, /fragmentable-inline-chip/);
+  assert.doesNotMatch(html, /\bwrapping-inline-chip\b/);
   assert.match(
     html,
     /inline-chip-leading-fragment[^>]*inline-chip-icon-human[^>]*>alice<\/span>/,
@@ -1462,6 +1464,7 @@ test("renderEntityLinkAnchor renders Buzz entity links as chips", () => {
   assert.match(html, /role="button"/);
   assert.match(html, /tabindex="0"/);
   assert.match(html, /data-buzz-link-kind="pr"/);
+  assert.match(html, /fragmentable-inline-chip/);
   assert.match(html, /wrapping-inline-chip/);
   assert.match(html, /inline-chip-leading-fragment[^>]*>buzz-</);
   assert.doesNotMatch(html, /\btruncate\b/);

@@ -87,17 +87,29 @@
   color: hsl(var(--primary));
 }
 
-.message-markdown .mention-chip.wrapping-inline-chip {
+.message-markdown .mention-chip.fragmentable-inline-chip {
   display: inline;
+  overflow-wrap: anywhere;
+  text-align: left;
+  white-space: normal;
+}
+
+.message-markdown .mention-chip.wrapping-inline-chip {
   line-height: calc(
     1em +
     var(--inline-chip-padding-block-start) +
     var(--inline-chip-padding-block-end) +
     0.25rem
   );
-  overflow-wrap: anywhere;
-  text-align: left;
-  white-space: normal;
+}
+
+/* Mention fragments fill one conversation line, including their block padding. */
+.message-markdown [data-mention].fragmentable-inline-chip {
+  line-height: calc(
+    var(--conversation-message-line-height) -
+    var(--inline-chip-padding-block-start) -
+    var(--inline-chip-padding-block-end)
+  );
 }
 
 .message-markdown .mention-chip.buzz-link-unavailable,
@@ -188,11 +200,11 @@
   transform: translateY(-50%);
 }
 
-.message-markdown .wrapping-inline-chip.inline-chip-with-icon {
+.message-markdown .fragmentable-inline-chip.inline-chip-with-icon {
   padding-left: var(--inline-chip-padding-inline);
 }
 
-.message-markdown .wrapping-inline-chip.inline-chip-with-icon::before {
+.message-markdown .fragmentable-inline-chip.inline-chip-with-icon::before {
   display: none;
 }
 
