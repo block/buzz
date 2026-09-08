@@ -33,7 +33,9 @@ branch: null
 
 Whenever an agent creates a task channel, it replies where the creation was triggered with a link to the new channel:
 
-> I've created the task in [#channel-name](buzz://channel/00000000-0000-0000-0000-000000000000).
+```markdown
+I've created the task in [#<channel name>](buzz://channel/<channel UUID>).
+```
 
 ### When asked to create a task
 
