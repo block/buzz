@@ -1696,35 +1696,50 @@ async fn create_session_and_apply_model(
         }
         opts
     };
+    // Apply before capture. A successful RPC returns the authoritative option
+    // snapshot; never synthesize an effective mode from the requested value.
+    let permission_result = apply_startup_permission_mode(
+        &mut agent.acp,
+        &resp.session_id,
+        &ctx.permission_mode,
+        &resp.raw,
+    )
+    .await?;
+    let config_options_for_cache = permission_result
+        .as_ref()
+        .map(|result| {
+            result
+                .get("configOptions")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        })
+        .unwrap_or(config_options_for_cache);
+    let modes_for_cache = match &permission_result {
+        Some(result) => result
+            .get("modes")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        None => resp
+            .raw
+            .get("modes")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    };
     agent.acp.observe(
         "session_config_captured",
         serde_json::json!({
             "configOptions": config_options_for_cache,
-            "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
-            // `models` must come from the SAME snapshot as configOptions — the
-            // post-switch snapshot on a successful switch, session/new otherwise.
-            // Taking it from `resp.raw` here would emit the target model's option
-            // set alongside the pre-switch model identity, so the desktop panel
-            // would report the old model as live after an applied switch. When a
-            // successful target response omits `models`, this emits Null rather
-            // than falling back to the pre-switch `resp.raw.models`.
-            "models": effort_snapshot.get("models").cloned().unwrap_or(serde_json::Value::Null),
+            "modes": modes_for_cache,
+            // Keep models and options from the same snapshot. Missing fields
+            // after a successful mutation are unknown, not the pre-set state.
+            "models": permission_result.as_ref().unwrap_or(effort_snapshot)
+                .get("models").cloned().unwrap_or(serde_json::Value::Null),
             "modelOverridden": agent.model_overridden && switch_succeeded,
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
             "relayUrl": ctx.relay_url,
         }),
     );
-
-    // Apply permission mode if not the agent's built-in default AND the agent
-    // advertises the requested mode in session/new. Agents that don't support
-    // the mode (e.g., goose crashes on unrecognized set_config_option values)
-    // are safely skipped — the harness auto-approves via handle_permission_request.
-    if !ctx.permission_mode.is_default()
-        && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
-    {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
-    }
 
     Ok(resp.session_id)
 }
@@ -1970,13 +1985,7 @@ fn patch_config_option_current_value(
     }
 }
 
-/// Set the session permission mode via `session/set_config_option`.
-///
-/// Non-fatal for most errors: logs and proceeds. The agent falls back
-/// to its default permission mode (`"default"`), which still works via
-/// Check if the agent's `session/new` response advertises a given mode ID
-/// in `result.modes.availableModes[].id`. Returns `false` if the modes
-/// field is absent or the mode isn't listed.
+/// Check exact advertised wire IDs; unsupported requests must not mutate policy.
 fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) -> bool {
     session_new_result
         .get("modes")
@@ -1990,59 +1999,76 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
         .unwrap_or(false)
 }
 
-/// per-tool auto-approval in `handle_permission_request`.
-///
-/// **Fatal exception:** if the agent process exits (e.g., goose crashes on
-/// unrecognized methods), returns `Err(AgentExited)` so the caller can respawn.
-async fn apply_permission_mode(
+/// Apply only an explicitly advertised mode and record the outcome on every path.
+/// These are adapter reports, not evidence of the provider's sandbox or reviewer.
+/// Transport failures remain fatal; application rejection preserves existing behavior.
+async fn apply_startup_permission_mode(
     acp: &mut AcpClient,
     session_id: &str,
     mode: &PermissionMode,
-) -> Result<(), AcpError> {
+    initial: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, AcpError> {
     let wire = mode.as_wire_str();
-    let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
-        acp.session_set_config_option(session_id, "mode", wire)
-            .await
-    })
+    let advertised: Vec<&str> = initial["modes"]["availableModes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|mode| mode["id"].as_str())
+        .collect();
+    let report = |acp: &AcpClient, outcome: &str, result: Option<&serde_json::Value>| {
+        tracing::info!(target: "pool::permission", session_id, requested_mode = wire,
+            advertised_modes = ?advertised, outcome, "startup permission mode outcome");
+        acp.observe(
+            "startup_permission_mode_outcome",
+            serde_json::json!({
+                "sessionId": session_id,
+                "requestedMode": wire,
+                "advertisedModes": advertised,
+                "outcome": outcome,
+                "requestSource": "PromptContext.permission_mode",
+                "returnedConfigOptions": result.and_then(|v| v.get("configOptions")),
+                "returnedModes": result.and_then(|v| v.get("modes")),
+                "providerPolicyVerified": false,
+            }),
+        );
+    };
+    if mode.is_default() {
+        report(acp, "default", None);
+        return Ok(None);
+    }
+    if !agent_supports_mode(initial, wire) {
+        report(acp, "skipped_unsupported", None);
+        return Ok(None);
+    }
+    let result = tokio::time::timeout(
+        PERMISSION_MODE_TIMEOUT,
+        acp.session_set_config_option(session_id, "mode", wire),
+    )
     .await;
-
     match result {
-        Ok(Ok(_)) => {
-            tracing::info!(
-                target: "pool::permission",
-                "applied permission mode {wire:?} on session {session_id}"
-            );
+        Ok(Ok(snapshot)) => {
+            report(acp, "applied", Some(&snapshot));
+            Ok(Some(snapshot))
         }
-        // Transport-class errors may have corrupted the stdio stream — propagate
-        // so the caller can respawn the agent.
         Ok(Err(e @ AcpError::Io(_)))
         | Ok(Err(e @ AcpError::WriteTimeout(_)))
         | Ok(Err(e @ AcpError::Timeout(_)))
         | Ok(Err(e @ AcpError::Protocol(_)))
         | Ok(Err(e @ AcpError::AgentExited)) => {
-            tracing::error!(
-                target: "pool::permission",
-                "fatal error setting permission mode {wire:?}: {e}"
-            );
-            return Err(e);
+            report(acp, "failed_transport", None);
+            Err(e)
         }
-        // Application-level errors — agent is fine, just uses default permission mode.
         Ok(Err(e)) => {
-            tracing::warn!(
-                target: "pool::permission",
-                "failed to set permission mode {wire:?}: {e} — falling back to per-tool auto-approval"
-            );
+            report(acp, "rejected", None);
+            tracing::warn!(target: "pool::permission", error = %e,
+                "permission mode rejected; effective provider policy is not verified");
+            Ok(None)
         }
         Err(_) => {
-            // Outer timeout fired — stream may be in unknown state.
-            tracing::error!(
-                target: "pool::permission",
-                "permission mode set timed out ({PERMISSION_MODE_TIMEOUT:?}) — treating as fatal"
-            );
-            return Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT));
+            report(acp, "timed_out", None);
+            Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT))
         }
     }
-    Ok(())
 }
 
 /// Prepend a legacy agent's standing context to a user-message body.
@@ -10263,6 +10289,7 @@ done"#
 mod startup_effort_tests {
     use super::*;
     use crate::acp::AcpClient;
+    use serde_json::json;
     use tests::make_prompt_context_no_owner;
 
     /// Build a protocol-v2, non-goose agent whose only ACP requests will be
@@ -10290,13 +10317,21 @@ mod startup_effort_tests {
     /// (request #2) with `effort_reply` (a JSON-RPC `result`/`error` body, minus
     /// the id which is filled in). Any later request gets `{"ok":true}`.
     async fn spawn_effort_acp(session_new_config_options: &str, effort_reply: &str) -> AcpClient {
+        spawn_startup_acp(
+            &format!(r#"{{"sessionId":"sess-1","configOptions":{session_new_config_options}}}"#),
+            effort_reply,
+        )
+        .await
+    }
+
+    async fn spawn_startup_acp(initial: &str, effort_reply: &str) -> AcpClient {
         let script = format!(
             r#"count=0
 while IFS= read -r line; do
   count=$((count + 1))
   id=$((count - 1))
   if [ "$count" -eq 1 ]; then
-    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configOptions":{session_new_config_options}}}}}'
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{initial}}}'
   elif [ "$count" -eq 2 ]; then
     printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',{effort_reply}}}'
   else
@@ -10307,6 +10342,151 @@ done"#
         AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
             .await
             .expect("spawn effort ACP script")
+    }
+
+    async fn run_permission_startup(
+        initial: serde_json::Value,
+        reply: &str,
+        mode: PermissionMode,
+    ) -> observer::ObserverHandle {
+        let acp = spawn_startup_acp(&initial.to_string(), reply).await;
+        let mut agent = effort_agent(acp, None);
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.permission_mode = mode;
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect("session created");
+        obs
+    }
+
+    fn permission_outcome(obs: &observer::ObserverHandle) -> serde_json::Value {
+        obs.snapshot()
+            .into_iter()
+            .find(|e| e.kind == "startup_permission_mode_outcome")
+            .expect("permission outcome emitted")
+            .payload
+    }
+
+    #[tokio::test]
+    async fn unsupported_codex_permission_request_sends_no_mutation() {
+        let obs = run_permission_startup(
+            json!({
+                "sessionId": "sess-1", "configOptions": [],
+                "modes": {"currentModeId": "agent", "availableModes": [
+                    {"id": "read-only"}, {"id": "agent"}, {"id": "agent-full-access"}
+                ]}
+            }),
+            r#""error":{"code":-32602,"message":"must not send mutation"}"#,
+            PermissionMode::BypassPermissions,
+        )
+        .await;
+        assert_eq!(permission_outcome(&obs)["outcome"], "skipped_unsupported");
+        assert_eq!(
+            permission_outcome(&obs)["requestedMode"],
+            "bypassPermissions"
+        );
+        assert_eq!(
+            permission_outcome(&obs)["advertisedModes"],
+            json!(["read-only", "agent", "agent-full-access"])
+        );
+        assert!(!obs
+            .snapshot()
+            .iter()
+            .any(|e| e.kind == "acp_write" && e.payload["method"] == "session/set_config_option"));
+    }
+
+    #[tokio::test]
+    async fn permission_capture_uses_returned_options_and_never_guesses_modes() {
+        let obs = run_permission_startup(
+            json!({
+                "sessionId": "sess-1", "configOptions": [{"id": "mode", "currentValue": "default"}],
+                "modes": {"currentModeId": "default", "availableModes": [{"id": "auto"}]}
+            }),
+            r#""result":{"configOptions":[{"id":"mode","currentValue":"adapter-reported"}],"models":{"currentModelId":"returned-model"}}"#,
+            PermissionMode::Auto,
+        )
+        .await;
+        assert_eq!(permission_outcome(&obs)["outcome"], "applied");
+        assert_eq!(
+            captured_config_options(&obs)[0]["currentValue"],
+            "adapter-reported"
+        );
+        let capture = obs
+            .snapshot()
+            .into_iter()
+            .find(|e| e.kind == "session_config_captured")
+            .unwrap();
+        assert!(capture.payload["modes"].is_null());
+        assert_eq!(
+            capture.payload["models"]["currentModelId"],
+            "returned-model"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_permission_is_not_reported_applied() {
+        let obs = run_permission_startup(
+            json!({
+                "sessionId": "sess-1", "configOptions": [{"id": "mode", "currentValue": "default"}],
+                "modes": {"availableModes": [{"id": "auto"}]}
+            }),
+            r#""error":{"code":-32602,"message":"rejected"}"#,
+            PermissionMode::Auto,
+        )
+        .await;
+        assert_eq!(permission_outcome(&obs)["outcome"], "rejected");
+        assert_eq!(captured_config_options(&obs)[0]["currentValue"], "default");
+    }
+
+    #[tokio::test]
+    async fn default_permission_is_reported_without_mutation() {
+        let obs = run_permission_startup(
+            json!({"sessionId": "sess-1", "configOptions": []}),
+            r#""result":{}"#,
+            PermissionMode::Default,
+        )
+        .await;
+        assert_eq!(permission_outcome(&obs)["outcome"], "default");
+        assert!(!obs
+            .snapshot()
+            .iter()
+            .any(|e| e.kind == "acp_write" && e.payload["method"] == "session/set_config_option"));
+    }
+
+    #[tokio::test]
+    async fn permission_transport_failure_is_fatal_and_recorded() {
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &["-c".into(), "read line; exit 0".into()],
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        let obs = observer::ObserverHandle::in_process();
+        acp.set_observer(Some(obs.clone()), 0);
+        let result = apply_startup_permission_mode(
+            &mut acp,
+            "sess-1",
+            &PermissionMode::Auto,
+            &json!({"modes": {"availableModes": [{"id": "auto"}]}}),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(permission_outcome(&obs)["outcome"], "failed_transport");
     }
 
     fn captured_config_options(obs: &observer::ObserverHandle) -> serde_json::Value {
