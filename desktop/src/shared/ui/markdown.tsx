@@ -22,7 +22,7 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
-import { MarkdownMention } from "./markdown/MarkdownMention";
+import { createMarkdownMention } from "./markdown/MarkdownMention";
 import { LinkPreviewList } from "@/shared/ui/link-preview-list";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import {
@@ -1563,21 +1563,19 @@ export function createMarkdownComponents(
     ),
     table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
     td: ({ children }) => (
-      <td className="border-t border-border/70 px-3 py-2 align-top">
+      <td className="min-w-24 border-t border-border/70 px-3 py-2 align-top">
         {children}
       </td>
     ),
     th: ({ children }) => (
-      <th className="bg-muted/60 px-3 py-2 font-semibold text-foreground">
+      <th className="min-w-24 bg-muted/60 px-3 py-2 align-top font-semibold text-foreground">
         {children}
       </th>
     ),
     ul: ({ children }) => (
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
-    mention: ({ children }: { children?: React.ReactNode }) => (
-      <MarkdownMention interactive={interactive}>{children}</MarkdownMention>
-    ),
+    mention: createMarkdownMention(interactive),
     emoji: ({ src, alt }: { src?: string; alt?: string }) => {
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!resolvedSrc) {

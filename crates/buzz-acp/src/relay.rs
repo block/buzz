@@ -2267,6 +2267,36 @@ async fn handle_ws_message(
                     subscription_id,
                     event,
                 } => {
+                    // Relay and storage responses are untrusted. Verify before
+                    // any event field can affect routing, replay state, or the
+                    // harness queues.
+                    let event_id = event.id.to_hex();
+                    let event = match tokio::task::spawn_blocking(move || {
+                        buzz_core::verify_event(&event).map(|()| event)
+                    })
+                    .await
+                    {
+                        Ok(Ok(event)) => event,
+                        Ok(Err(error)) => {
+                            warn!(
+                                subscription_id,
+                                event_id,
+                                error = %error,
+                                "relay event failed NIP-01 verification — dropping"
+                            );
+                            return true;
+                        }
+                        Err(error) => {
+                            warn!(
+                                subscription_id,
+                                event_id,
+                                error = %error,
+                                "relay event verification task failed — dropping"
+                            );
+                            return true;
+                        }
+                    };
+
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
                         match observer_control_tx.try_send(*event) {
                             Ok(()) => {}
@@ -4772,6 +4802,237 @@ mod tests {
             .expect("read test websocket frame");
         serde_json::from_str(message.to_text().expect("expected text frame"))
             .expect("parse test websocket frame")
+    }
+
+    fn make_signed_channel_event(keys: &Keys, content: &str, created_at_secs: u64) -> Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags([])
+            .custom_created_at(nostr::Timestamp::from(created_at_secs))
+            .sign_with_keys(keys)
+            .expect("sign channel event")
+    }
+
+    fn replace_event_field(event: &Event, field: &str, replacement: Value) -> Event {
+        let mut value = serde_json::to_value(event).expect("serialize event");
+        value[field] = replacement;
+        serde_json::from_value(value).expect("deserialize tampered event")
+    }
+
+    fn recompute_event_id(event: &Event) -> Event {
+        let id = nostr::EventId::new(
+            &event.pubkey,
+            &event.created_at,
+            &event.kind,
+            &event.tags,
+            &event.content,
+        );
+        replace_event_field(event, "id", json!(id.to_hex()))
+    }
+
+    async fn handle_test_relay_event(
+        ws: &mut WsStream,
+        event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+        observer_control_tx: &mpsc::Sender<Event>,
+        state: &mut BgState,
+        subscription_id: &str,
+        event: &Event,
+    ) -> bool {
+        let keys = Keys::generate();
+        let agent_pubkey_hex = keys.public_key().to_hex();
+        let text = serde_json::to_string(&json!(["EVENT", subscription_id, event]))
+            .expect("serialize relay frame");
+        handle_ws_message(
+            Message::Text(text.into()),
+            ws,
+            event_tx,
+            observer_control_tx,
+            state,
+            &keys,
+            "wss://relay.example.com",
+            &agent_pubkey_hex,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn verified_channel_event_is_recorded_and_forwarded() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let event = make_signed_channel_event(&Keys::generate(), "hello", 2_000);
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &channel_sub_id(channel_id),
+                &event,
+            )
+            .await
+        );
+
+        let received = event_rx.try_recv().expect("verified event was forwarded");
+        let received = received.expect("event channel should not contain shutdown marker");
+        assert_eq!(received.channel_id, channel_id);
+        assert_eq!(received.event.id, event.id);
+        assert_eq!(state.last_seen.get(&channel_id), Some(&2_000));
+        assert!(state.seen_ids.contains(&event.id.to_hex()));
+        assert!(matches!(
+            observer_control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tampered_channel_events_are_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let owner_event = make_signed_channel_event(&Keys::generate(), "status", 2_000);
+        let other_event = make_signed_channel_event(&Keys::generate(), "other", 3_000);
+        let other = serde_json::to_value(&other_event).expect("serialize other event");
+        let owner_command = recompute_event_id(&replace_event_field(
+            &owner_event,
+            "content",
+            json!("!shutdown"),
+        ));
+
+        let cases = [
+            (
+                "changed content",
+                replace_event_field(&owner_event, "content", json!("tampered")),
+            ),
+            ("forged owner command with a matching id", owner_command),
+            (
+                "changed event id",
+                replace_event_field(&owner_event, "id", other["id"].clone()),
+            ),
+            (
+                "changed signature",
+                replace_event_field(&owner_event, "sig", other["sig"].clone()),
+            ),
+            (
+                "changed author pubkey",
+                replace_event_field(&owner_event, "pubkey", other["pubkey"].clone()),
+            ),
+            (
+                "changed tags",
+                replace_event_field(
+                    &owner_event,
+                    "tags",
+                    json!([["h", Uuid::new_v4().to_string()]]),
+                ),
+            ),
+            (
+                "changed timestamp",
+                replace_event_field(&owner_event, "created_at", json!(4_000)),
+            ),
+        ];
+
+        for (case, event) in cases {
+            assert!(
+                handle_test_relay_event(
+                    &mut client,
+                    &event_tx,
+                    &observer_control_tx,
+                    &mut state,
+                    &channel_sub_id(channel_id),
+                    &event,
+                )
+                .await,
+                "{case} should not close the connection"
+            );
+            assert!(
+                matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{case} reached the harness event queue"
+            );
+        }
+
+        assert!(state.last_seen.is_empty());
+        assert!(state.seen_ids.current.is_empty());
+        assert!(state.seen_ids.previous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forged_membership_notification_is_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let attacker_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16),
+            "membership changed",
+        )
+        .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+        .custom_created_at(nostr::Timestamp::from(2_000))
+        .sign_with_keys(&attacker_keys)
+        .expect("sign membership event");
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "pubkey",
+            json!(owner_keys.public_key().to_hex()),
+        ));
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                MEMBERSHIP_NOTIF_SUB_ID,
+                &forged,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(state.membership_last_seen, None);
+        assert!(state.seen_ids.current.is_empty());
+        assert!(state.seen_ids.previous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forged_observer_control_is_dropped_before_control_queue() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let event = make_signed_channel_event(&Keys::generate(), "control", 2_000);
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "content",
+            json!("tampered control"),
+        ));
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                OBSERVER_CONTROL_SUB_ID,
+                &forged,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            observer_control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     fn test_channel_filter() -> ChannelFilter {

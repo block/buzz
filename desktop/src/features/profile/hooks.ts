@@ -297,6 +297,14 @@ export const usersBatchEntryKey = (pubkey: string) => [
 ];
 
 /**
+ * How long a per-pubkey entry answers without a refetch. Exported so readers
+ * outside this hook (the clipboard's paste-side identity check) apply the same
+ * freshness rule rather than trusting an entry this hook already considers
+ * stale.
+ */
+export const USERS_BATCH_ENTRY_FRESH_MS = 10 * 60_000;
+
+/**
  * Drop the per-pubkey delta-fetch entries so the next `useUsersBatchQuery`
  * run re-fetches these profiles from the relay. Must be called anywhere a
  * specific profile (or a containing `users-batch` query) is invalidated —
@@ -352,7 +360,7 @@ export function useUsersBatchQuery(
         const entry = queryClient.getQueryData<UsersBatchEntry>(
           usersBatchEntryKey(pubkey),
         );
-        if (entry && now - entry.fetchedAt < 10 * 60_000) {
+        if (entry && now - entry.fetchedAt < USERS_BATCH_ENTRY_FRESH_MS) {
           if (entry.summary) profiles[pubkey] = entry.summary;
           else missing.push(pubkey);
         } else {
@@ -385,7 +393,7 @@ export function useUsersBatchQuery(
         relayUrl,
         normalizedPubkeys,
       ),
-    staleTime: 10 * 60_000,
+    staleTime: USERS_BATCH_ENTRY_FRESH_MS,
     gcTime: 5 * 60 * 1_000,
     // Override the global defaults: a cold channel needs profiles to render
     // correctly, so a single failed attempt must not leave raw npubs/broken

@@ -460,8 +460,48 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
     throw new Error("Could not measure the Welcome composer");
   }
 
-  await page.getByTestId("message-input").fill("Thanks @Fizz");
+  // The fixture has a seeded Fizz and this new member's starter Fizz. A
+  // manually typed name cannot choose between them or complete onboarding.
+  const input = page.getByTestId("message-input");
+  const content = "Thanks @Fizz";
+  const sentRecipients = () =>
+    page.evaluate(
+      (content) =>
+        (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
+          .filter((event) => event.content.trim() === content)
+          .map((event) =>
+            event.tags.filter((tag) => tag[0] === "p").map((tag) => tag[1]),
+          ),
+      content,
+    );
+  await input.fill(content);
+  await input.press("Escape");
   await page.getByTestId("send-message").click();
+  await expect(
+    page.getByText("The mention @Fizz is ambiguous.", { exact: false }),
+  ).toBeVisible();
+  await expect(input).toHaveText(content);
+  await expect(banner).toHaveAttribute("data-state", "prompt");
+  expect(await sentRecipients()).toEqual([]);
+
+  const agents = await invokeMockCommand<
+    Array<{ pubkey: string; persona_id: string | null; status: string }>
+  >(page, "list_managed_agents");
+  const sameNameAgents = agents.filter(
+    (agent) => agent.persona_id === "builtin:fizz",
+  );
+  expect(sameNameAgents).toHaveLength(2);
+  // Onboarding starts the new member's starter; the pre-existing mock stays
+  // stopped. This identifies the fixture key, not a production routing rule.
+  const fizz = sameNameAgents.filter((agent) => agent.status === "running");
+  expect(fizz).toHaveLength(1);
+  // Make selection intent explicit; do not remove the colliding fixture or
+  // relax extraction. The resulting event must tag only our starter identity.
+  await input.fill("");
+  await input.fill(content);
+  await page.getByTestId(`mention-suggestion-${fizz[0].pubkey}`).click();
+  await page.getByTestId("send-message").click();
+  await expect.poll(sentRecipients).toEqual([[fizz[0].pubkey]]);
 
   await expect(banner).toHaveAttribute("data-state", "complete");
   await expect(banner).toHaveAttribute("data-tone", "success");
