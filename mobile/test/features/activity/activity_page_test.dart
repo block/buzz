@@ -32,7 +32,7 @@ void main() {
   final testMention = FeedItem(
     id: 'm1',
     kind: 9,
-    pubkey: 'alice_pk',
+    pubkey: 'a11ce00000000000000000000000000000000000000000000000000000000000',
     content: 'Hey check this out',
     createdAt: now - 120,
     channelId: 'ch1',
@@ -101,11 +101,13 @@ void main() {
   ];
 
   final testUsers = <String, UserProfile>{
-    'alice_pk': const UserProfile(
-      pubkey: 'alice_pk',
-      displayName: 'Alice',
-      nip05Handle: 'alice@example.com',
-    ),
+    'a11ce00000000000000000000000000000000000000000000000000000000000':
+        const UserProfile(
+          pubkey:
+              'a11ce00000000000000000000000000000000000000000000000000000000000',
+          displayName: 'Alice',
+          nip05Handle: 'alice@example.com',
+        ),
     'bob_pk': const UserProfile(pubkey: 'bob_pk', displayName: 'Bob'),
     'agent_pk': const UserProfile(pubkey: 'agent_pk', displayName: 'Scout'),
   };
@@ -407,7 +409,8 @@ void main() {
         eventId: 'm1',
         channelId: 'ch1',
         preview: 'Follow up',
-        authorPubkey: 'alice_pk',
+        authorPubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
       ),
       note: null,
       createdAt: now - 60,
@@ -574,7 +577,8 @@ void main() {
     FeedItem dmMessage(String id, int age) => FeedItem(
       id: id,
       kind: 9,
-      pubkey: 'alice_pk',
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
       content: 'dm body $id',
       createdAt: now - age,
       channelId: 'dm1',
@@ -678,7 +682,8 @@ void main() {
     final threadMention = FeedItem(
       id: 'reply-event',
       kind: 9,
-      pubkey: 'alice_pk',
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
       content: 'Reply in a thread',
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       channelId: 'ch1',
@@ -931,14 +936,20 @@ void main() {
     );
   });
 
-  testWidgets('falls back to short pubkey when user not cached', (
+  testWidgets('falls back to a compact npub when user is not cached', (
     tester,
   ) async {
     await tester.pumpWidget(await buildTestable(users: const {}));
     await tester.pumpAndSettle();
 
-    // Sender label falls back to the (short) pubkey.
-    expect(find.text('alice_pk'), findsOneWidget);
+    // Sender label falls back to the compact npub of the author's key.
+    expect(
+      find.text(
+        'a11ce00000000000000000000000000000000000000000000000000000000000',
+      ),
+      findsNothing,
+    );
+    expect(find.text('npub15yw\u2026ccpw'), findsOneWidget);
     expect(find.text('Alice'), findsNothing);
   });
 }

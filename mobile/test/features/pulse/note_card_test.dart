@@ -127,4 +127,100 @@ void main() {
     expect(find.text('2m'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('replying-to shows the parent author as a compact npub', (
+    tester,
+  ) async {
+    const authorPubkey =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+    const parentAuthorPubkey =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    final note = UserNote(
+      id: 'note-reply-author',
+      pubkey: authorPubkey,
+      createdAt: DateTime.utc(2025, 9, 30, 12).millisecondsSinceEpoch ~/ 1000,
+      content: 'A reply',
+      tags: const [
+        ['e', 'parent-event-1', '', 'reply'],
+        ['p', parentAuthorPubkey],
+      ],
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier(const {}),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: NoteCard(
+              note: note,
+              reaction: const PulseReactionState(
+                count: 0,
+                reactedByCurrentUser: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The known parent author renders as a compact npub.
+    expect(find.text('Replying to npub15yw\u2026ccpw'), findsOneWidget);
+    // The note author itself falls back to the compact npub label.
+    expect(find.text('npub1kzc\u2026uyv8'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('replying-to keeps event ids hex-truncated, never npub', (
+    tester,
+  ) async {
+    const authorPubkey =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+    const parentEventId =
+        'feedbeef00000000000000000000000000000000000000000000000000000000';
+    final note = UserNote(
+      id: 'note-reply-event',
+      pubkey: authorPubkey,
+      createdAt: DateTime.utc(2025, 9, 30, 12).millisecondsSinceEpoch ~/ 1000,
+      content: 'A reply',
+      tags: const [
+        // No `p` tag — the parent author is unknown, so the reply target
+        // falls back to the parent event id, which is not a public key.
+        ['e', parentEventId, '', 'reply'],
+      ],
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier(const {}),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: NoteCard(
+              note: note,
+              reaction: const PulseReactionState(
+                count: 0,
+                reactedByCurrentUser: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Event ids stay in their hex truncation — outside the npub contract.
+    expect(find.text('Replying to feedbeef\u2026'), findsOneWidget);
+    expect(find.textContaining('npub'), findsNWidgets(1)); // only the author
+    expect(tester.takeException(), isNull);
+  });
 }

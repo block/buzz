@@ -81,6 +81,76 @@ void main() {
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
   });
 
+  group('identity labels', () {
+    // Valid fixture keys whose npub encodings were verified against the
+    // NIP-19 codec independently of the code under test.
+    const alicePubkey =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    const bobPubkey =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+
+    test('member labels fall back to a compact npub and honor "You"', () {
+      final member = ChannelMember(
+        pubkey: alicePubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(0),
+      );
+
+      expect(member.labelFor(null), 'npub15yw…ccpw');
+      expect(member.labelFor(alicePubkey), 'You');
+      expect(member.labelFor(alicePubkey.toUpperCase()), 'You');
+      expect(
+        member.labelFor(bobPubkey),
+        'npub15yw…ccpw', // never the caller's key
+      );
+    });
+
+    test('member labels keep authored display names', () {
+      final member = ChannelMember(
+        pubkey: alicePubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        displayName: '  Alice  ',
+      );
+
+      expect(member.labelFor(bobPubkey), 'Alice');
+    });
+
+    test(
+      'unnamed directory users show one compact npub line, distinct initials',
+      () {
+        final unnamed = DirectoryUser(pubkey: alicePubkey);
+        final alsoUnnamed = DirectoryUser(pubkey: bobPubkey);
+
+        expect(unnamed.label, 'npub15yw…ccpw');
+        // No name or NIP-05: the primary label is already the compact key, so a
+        // second key-shaped line would only duplicate it.
+        expect(unnamed.secondaryLabel, '');
+        // Initials stay hex-derived — a compact npub would render `N` for all.
+        expect(unnamed.initial, 'A');
+        expect(alsoUnnamed.initial, 'B');
+      },
+    );
+
+    test('named directory users keep their name with the key as secondary', () {
+      final named = DirectoryUser(
+        pubkey: alicePubkey,
+        displayName: 'Alice',
+        nip05Handle: 'alice@example.com',
+      );
+
+      expect(named.label, 'Alice');
+      expect(named.secondaryLabel, 'alice@example.com');
+      expect(named.initial, 'A');
+    });
+
+    test('add-members failures identify the member by compact npub', () {
+      const failure = AddMembersException({alicePubkey: 'not a member'});
+
+      expect(failure.message, 'npub15yw…ccpw: not a member');
+    });
+  });
+
   test('propagates archived state from kind:39000 archived tag', () {
     // Regression: previously this mapping ignored the `archived` tag, so
     // `Channel.mergeDetails` would clear the archived flag the list provider

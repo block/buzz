@@ -10,6 +10,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/message_content.dart';
 import '../profile/profile_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/utils/string_utils.dart';
 import 'note_card.dart';
 import 'pulse_actions.dart';
 import 'pulse_models.dart';
@@ -166,7 +167,7 @@ class _ReplyContext extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pubkey])) ??
         ref.read(userCacheProvider.notifier).get(pubkey);
-    final displayName = profile?.label ?? _shortPubkey(pubkey);
+    final displayName = profile?.label ?? shortPubkey(pubkey);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xs, Grid.gutter, 0),
@@ -260,7 +261,4 @@ class _ReplyContext extends ConsumerWidget {
       ),
     );
   }
-
-  String _shortPubkey(String pubkey) =>
-      pubkey.length >= 8 ? '${pubkey.substring(0, 8)}...' : pubkey;
 }

@@ -7,6 +7,7 @@ import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -106,7 +107,8 @@ void main() {
     expect(content, {'about': 'Building Buzz'});
     final profile = container.read(profileProvider).requireValue!;
     expect(profile.displayName, isNull);
-    expect(profile.label, '${keys.public.substring(0, 8)}...');
+    expect(profile.label, shortPubkey(keys.public));
+    expect(profile.label, matches(RegExp(r'^npub1[a-z0-9]{3}…[a-z0-9]{4}$')));
   });
 
   test('malformed profile metadata can be repaired by an edit', () async {

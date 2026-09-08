@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../utils/string_utils.dart';
+
 @immutable
 class UserProfile {
   final String pubkey;
@@ -31,15 +33,17 @@ class UserProfile {
     nip05Handle: json['nip05_handle'] as String?,
   );
 
-  /// Short label: display name, or first 8 chars of pubkey.
-  String get label =>
-      displayName ??
-      '${pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey}...';
+  /// Short label: display name, or the compact npub form of the public key.
+  String get label => displayName ?? shortPubkey(pubkey);
 
   /// First letter for fallback avatar.
-  String get initial =>
-      (displayName?.isNotEmpty == true ? displayName! : pubkey)[0]
-          .toUpperCase();
+  String get initial {
+    final name = displayName?.trim();
+    if (name != null && name.isNotEmpty) return name[0].toUpperCase();
+    // Hex-derived (not npub-derived) so unnamed identities keep distinct
+    // initials instead of every npub rendering `N`.
+    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
+  }
 }
 
 /// Optional profile handle shown beside a message author's display name.

@@ -5287,11 +5287,12 @@ void main() {
       expect(find.text('Alice'), findsNWidgets(2));
     });
 
-    testWidgets('shows pubkey fallback when no profile', (tester) async {
+    testWidgets('shows compact npub fallback when no profile', (tester) async {
       final messages = [
         _textMsg(
           id: 'msg1',
-          pubkey: 'abcdef1234567890',
+          pubkey:
+              'abcdef0000000000000000000000000000000000000000000000000000000000',
           content: 'Hi',
           createdAt: 1000,
         ),
@@ -5301,8 +5302,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(findRichText('Hi'), findsOneWidget);
-      // Should show first 8 chars of pubkey + ellipsis
-      expect(find.text('abcdef12…'), findsOneWidget);
+      // Should show the compact npub form of the author's public key
+      expect(find.text('npub140x…etzk'), findsOneWidget);
     });
   });
 
@@ -8363,6 +8364,23 @@ void main() {
     testWidgets('opens a profile sheet from a membership system avatar', (
       tester,
     ) async {
+      const alicePubkey =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      const bobPubkey =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
+      final clipboardTexts = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboardTexts.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
       await tester.pumpWidget(
         _buildTestable(
           messages: [
@@ -8370,14 +8388,17 @@ void main() {
               id: 'sys-membership-avatar',
               payload: {
                 'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'bob',
+                'actor': alicePubkey,
+                'target': bobPubkey,
               },
             ),
           ],
           users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            alicePubkey: const UserProfile(
+              pubkey: alicePubkey,
+              displayName: 'Alice',
+            ),
+            bobPubkey: const UserProfile(pubkey: bobPubkey, displayName: 'Bob'),
           },
         ),
       );
@@ -8387,15 +8408,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
-      expect(find.text('alice'), findsNothing);
+      // The full hex key is never rendered in the sheet.
+      expect(find.text(alicePubkey), findsNothing);
+      expect(find.text(bobPubkey), findsNothing);
       expect(find.byType(UserProfileSheet), findsOneWidget);
 
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
-      addTearDown(
-        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(SystemChannels.platform, null),
-      );
       await tester.ensureVisible(find.text('Copy public key'));
       await tester.pumpAndSettle();
       final copyAction = find
@@ -8408,11 +8425,101 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.text('Public key copied'), findsOneWidget);
+      // The clipboard receives the full canonical npub — never the raw hex.
+      expect(clipboardTexts, [
+        'npub1kzcqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0euyv8',
+      ]);
 
       await tester.tap(find.byTooltip('Close sheet'));
       await tester.pumpAndSettle();
       await tester.pump(const Duration(seconds: 2));
 
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('disables copy public key for an invalid identity', (
+      tester,
+    ) async {
+      const actorPubkey =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      // Not a valid hex public key — the sheet must surface a neutral label
+      // and refuse to copy it rather than leaking the raw string.
+      const invalidPubkey = 'bob-not-a-real-pubkey';
+      final clipboardTexts = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboardTexts.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys-membership-invalid-avatar',
+              payload: {
+                'type': 'member_joined',
+                'actor': actorPubkey,
+                'target': invalidPubkey,
+              },
+            ),
+          ],
+          users: {
+            actorPubkey: const UserProfile(
+              pubkey: actorPubkey,
+              displayName: 'Alice',
+            ),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      // Malformed identity → neutral label, never truncated raw input.
+      expect(
+        find.descendant(
+          of: find.byType(UserProfileSheet),
+          matching: find.text('Unknown identity'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text(invalidPubkey), findsNothing);
+      // The copy tile is disabled and exposes no tap handler.
+      final copyAction = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(GestureDetector),
+          )
+          .last;
+      expect(tester.widget<GestureDetector>(copyAction).onTap, isNull);
+      final copySemantics = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(Semantics),
+          )
+          .first;
+      expect(
+        tester.widget<Semantics>(copySemantics).properties.enabled,
+        isFalse,
+      );
+
+      await tester.tap(copyAction, warnIfMissed: false);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Public key copied'), findsNothing);
+      expect(clipboardTexts, isEmpty);
+
+      await tester.tap(find.byTooltip('Close sheet'));
+      await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     });
 
