@@ -6,6 +6,7 @@ class _ChannelsBody extends StatelessWidget {
   final bool showError;
   final SessionStatus sessionStatus;
   final bool showConnectionSkeleton;
+  final bool showConnectionWait;
   final String? currentPubkey;
   final double topSectionHeight;
   final bool usesPinnedGradient;
@@ -19,6 +20,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.showError,
     required this.sessionStatus,
     required this.showConnectionSkeleton,
+    required this.showConnectionWait,
     required this.currentPubkey,
     required this.topSectionHeight,
     required this.usesPinnedGradient,
@@ -32,8 +34,14 @@ class _ChannelsBody extends StatelessWidget {
     final barHeight = topSectionHeight;
     final loadedChannels = channels;
     final loading =
-        showConnectionSkeleton || (loadedChannels == null && !showError);
-    final content = showError && channelsAsync.hasError
+        !showConnectionWait &&
+        (showConnectionSkeleton || (loadedChannels == null && !showError));
+    final content = showConnectionWait
+        ? Padding(
+            padding: EdgeInsets.only(top: barHeight),
+            child: _ConnectionWaitView(onRetry: onRefresh),
+          )
+        : showError && channelsAsync.hasError
         ? Padding(
             padding: EdgeInsets.only(top: barHeight),
             child: _ErrorView(error: channelsAsync.error!, onRetry: onRefresh),

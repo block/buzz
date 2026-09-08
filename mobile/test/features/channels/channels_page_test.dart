@@ -731,6 +731,86 @@ void main() {
           .label,
       'Loading',
     );
+    await tester.pump(const Duration(seconds: 12));
+    expect(find.text('Connection unavailable'), findsNothing);
+  });
+
+  for (final manualRetry in [false, true]) {
+    testWidgets(
+      'initial connection wait recovers ${manualRetry ? 'after Retry' : 'automatically'}',
+      (tester) async {
+        final relaySession = _ReconnectingRelaySession(
+          initialStatus: SessionStatus.connecting,
+        );
+        final channels = _LoadingNotifier();
+        await tester.pumpWidget(
+          buildTestable(
+            overrides: [
+              channelsProvider.overrideWith(() => channels),
+              relaySessionProvider.overrideWith(() => relaySession),
+            ],
+          ),
+        );
+        await tester.pump(const Duration(seconds: 4));
+        expect(find.text('Connection unavailable'), findsNothing);
+        relaySession.setReconnecting();
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('Connection unavailable'), findsOneWidget);
+        expect(find.text('Retry').hitTestable(), findsOneWidget);
+        expect(
+          tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+          isFalse,
+        );
+
+        if (manualRetry) {
+          await tester.tap(find.text('Retry'));
+          await tester.pump();
+          expect(relaySession.resumeCount, 1);
+          expect(channels.refreshCount, 0);
+          expect(find.text('Connection unavailable'), findsOneWidget);
+        }
+
+        relaySession.connect();
+        channels.complete(testChannels);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('Connection unavailable'), findsNothing);
+        expect(find.text('general').hitTestable(), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('connection recovery stays usable in a narrow short window', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 480);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    final relaySession = _ReconnectingRelaySession(
+      initialStatus: SessionStatus.disconnected,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        textScaler: const TextScaler.linear(1.8),
+        overrides: [
+          channelsProvider.overrideWith(_LoadingNotifier.new),
+          relaySessionProvider.overrideWith(() => relaySession),
+        ],
+      ),
+    );
+    await tester.pump(const Duration(seconds: 9));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Connection unavailable'), findsOneWidget);
+    await tester.ensureVisible(find.text('Retry'));
+    await tester.pump();
+    await tester.tap(find.text('Retry'));
+    expect(relaySession.resumeCount, 1);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('opens the settings page supplied by the app layer', (
@@ -2482,8 +2562,16 @@ class _ErrorNotifier extends ChannelsNotifier {
 }
 
 class _LoadingNotifier extends ChannelsNotifier {
+  final _completion = Completer<List<Channel>>();
+  int refreshCount = 0;
+
   @override
-  Future<List<Channel>> build() => Completer<List<Channel>>().future;
+  Future<List<Channel>> build() => _completion.future;
+
+  void complete(List<Channel> channels) => _completion.complete(channels);
+
+  @override
+  Future<void> refresh({bool fetchDirectory = false}) async => refreshCount++;
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
@@ -2491,8 +2579,16 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 
   _ReconnectingRelaySession({this.initialStatus = SessionStatus.reconnecting});
 
+  int resumeCount = 0;
+
   @override
   SessionState build() => SessionState(status: initialStatus);
+
+  @override
+  void onAppResumed() {
+    resumeCount++;
+    state = const SessionState(status: SessionStatus.connecting);
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(

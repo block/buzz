@@ -84,3 +84,51 @@ class _ErrorView extends StatelessWidget {
     );
   }
 }
+
+class _ConnectionWaitView extends StatelessWidget {
+  const _ConnectionWaitView({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    key: const Key('channels-connection-wait'),
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.all(Grid.gutter),
+      child: Semantics(
+        liveRegion: true,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              LucideIcons.wifiOff,
+              size: Grid.xl,
+              color: context.colors.onSurfaceVariant,
+            ),
+            const SizedBox(height: Grid.sm),
+            Text(
+              'Connection unavailable',
+              textAlign: TextAlign.center,
+              style: context.textTheme.titleMedium,
+            ),
+            const SizedBox(height: Grid.xxs),
+            Text(
+              'Buzz could not connect to your community. '
+              'Check your connection, then try again.',
+              textAlign: TextAlign.center,
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: Grid.sm),
+            FilledButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(LucideIcons.refreshCw),
+              label: const Text('Retry'),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}

@@ -284,6 +284,31 @@ class ChannelsPage extends HookConsumerWidget {
       return timer.cancel;
     }, [canSurfaceError]);
 
+    // The first directory load waits for an authenticated relay connection.
+    // Without a network that wait does not fail, so give it a visible recovery
+    // state instead of leaving the initial skeleton on screen indefinitely.
+    final waitingForFirstConnection =
+        channels == null && sessionState.status != SessionStatus.connected;
+    final connectionWaitExpired = useState(false);
+    useEffect(() {
+      connectionWaitExpired.value = false;
+      if (!waitingForFirstConnection) return null;
+      final timer = Timer(const Duration(seconds: 8), () {
+        connectionWaitExpired.value = true;
+      });
+      return timer.cancel;
+    }, [waitingForFirstConnection, activeCommunityId]);
+
+    Future<void> retryLoadingChannels() async {
+      if (ref.read(relaySessionProvider).status == SessionStatus.connected) {
+        await ref.read(channelsProvider.notifier).refresh();
+      } else {
+        // Use foreground recovery to cancel any pending backoff and replace
+        // an in-flight connection attempt. Refresh alone is a no-op offline.
+        ref.read(relaySessionProvider.notifier).onAppResumed();
+      }
+    }
+
     // Keep cached content steady through brief socket flaps. A sustained
     // reconnect swaps to element-shaped skeletons that match desktop.
     final showConnectionSkeleton = useState(false);
@@ -370,11 +395,12 @@ class ChannelsPage extends HookConsumerWidget {
         showError: showError.value,
         sessionStatus: sessionState.status,
         showConnectionSkeleton: showConnectionSkeleton.value,
+        showConnectionWait: connectionWaitExpired.value && !showError.value,
         currentPubkey: currentPubkey,
         topSectionHeight: topSectionHeight,
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
-        onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
+        onRefresh: retryLoadingChannels,
         onSelectChannel: openChannel,
       ),
     );
