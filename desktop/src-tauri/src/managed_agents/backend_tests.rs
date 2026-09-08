@@ -388,7 +388,11 @@ esac"#,
     );
     provider_attest(
         &provider,
-        &serde_json::json!({"pubkey": registered.pubkey, "auth_tag": "tag"}),
+        &serde_json::json!({
+            "pubkey": registered.pubkey,
+            "auth_tag": "tag",
+            "community_url": "wss://community.example",
+        }),
         &serde_json::json!({}),
     )
     .unwrap();

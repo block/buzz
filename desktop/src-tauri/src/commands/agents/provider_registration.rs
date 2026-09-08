@@ -9,6 +9,7 @@ use crate::{
         provider_register, resolve_provider_binary, save_managed_agents, AgentKeyCustody,
         ProviderRegistration,
     },
+    relay::ScopedWorkspaceRelay,
     util::now_iso,
 };
 
@@ -87,15 +88,37 @@ pub(super) async fn register(
         .map_err(|error| format!("provider register failed: {error}"))
 }
 
-/// Attest the saved record and persist a visible error if activation fails.
+fn attestation_agent(
+    pubkey: &str,
+    auth_tag: &str,
+    community_relay: &ScopedWorkspaceRelay,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pubkey": pubkey,
+        "auth_tag": auth_tag,
+        "community_url": community_relay.as_str(),
+    })
+}
+
+fn attestation_pending_after(was_pending: bool, succeeded: bool) -> bool {
+    was_pending && !succeeded
+}
+
+/// Attest the saved record in one community and persist a visible error if
+/// activation or enrollment fails.
+///
+/// The provider operation is deliberately idempotent: creation uses it for the
+/// first community, and every later community-scoped start repeats it so the
+/// same provider-custodied identity can enroll wherever its owner is a member.
 pub(super) async fn attest(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
     provider_id: &str,
     provider_config: &serde_json::Value,
+    community_relay: &ScopedWorkspaceRelay,
 ) -> Result<(), String> {
-    let auth_tag = {
+    let (auth_tag, was_pending) = {
         let _guard = state
             .managed_agents_store_lock
             .lock()
@@ -105,16 +128,19 @@ pub(super) async fn attest(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        record
-            .auth_tag
-            .clone()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("agent {pubkey} has no auth tag"))?
+        (
+            record
+                .auth_tag
+                .clone()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("agent {pubkey} has no auth tag"))?,
+            record.provider_attestation_pending,
+        )
     };
 
     let binary = resolve_provider_binary(provider_id)?;
     let config = provider_config.clone();
-    let agent = serde_json::json!({ "pubkey": pubkey, "auth_tag": auth_tag });
+    let agent = attestation_agent(pubkey, &auth_tag, community_relay);
     let result = tokio::task::spawn_blocking(move || provider_attest(&binary, &agent, &config))
         .await
         .map_err(|error| format!("spawn_blocking failed: {error}"))?
@@ -128,7 +154,10 @@ pub(super) async fn attest(
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     record.updated_at = now_iso();
     record.last_error = result.as_ref().err().cloned();
-    record.provider_attestation_pending = result.is_err();
+    // A failed first attest leaves activation pending. A later community's
+    // enrollment failure must not make an already activated agent globally
+    // undeployed; the scoped Start call still returns the failure to its caller.
+    record.provider_attestation_pending = attestation_pending_after(was_pending, result.is_ok());
     save_managed_agents(app, &records)?;
     result
 }
@@ -136,6 +165,33 @@ pub(super) async fn attest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relay::bind_expected_relay_scope;
+
+    #[test]
+    fn attestation_payload_binds_the_target_community() {
+        let community = bind_expected_relay_scope(
+            Some("wss://community.example"),
+            "wss://community.example".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            attestation_agent("agent-pubkey", "owner-auth", &community),
+            serde_json::json!({
+                "pubkey": "agent-pubkey",
+                "auth_tag": "owner-auth",
+                "community_url": "wss://community.example",
+            })
+        );
+    }
+
+    #[test]
+    fn later_community_failure_does_not_reopen_global_attestation() {
+        assert!(attestation_pending_after(true, false));
+        assert!(!attestation_pending_after(true, true));
+        assert!(!attestation_pending_after(false, false));
+        assert!(!attestation_pending_after(false, true));
+    }
 
     #[test]
     fn custody_validation_returns_the_command_path_token_only_for_an_exact_match() {

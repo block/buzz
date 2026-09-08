@@ -344,6 +344,17 @@ pub async fn create_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CreateManagedAgentResponse, String> {
+    // Snapshot relay and owner under the workspace transaction fence before
+    // provider negotiation or registration can await. A workspace switch
+    // writes those values separately; reading without the fence could pair one
+    // community with another community's owner authorization.
+    let (attestation_relay, owner_keys) = {
+        let _workspace_guard = state.workspace_apply_lock.lock().await;
+        (
+            crate::relay::bind_expected_relay_scope(None, relay_ws_url_with_override(&state))?,
+            state.signing_keys()?,
+        )
+    };
     let name = input.name.trim().to_string();
     let requested_persona_id = input
         .persona_id
@@ -456,7 +467,6 @@ pub async fn create_managed_agent(
     // pubkey before registration. Registration is an external side effect; a
     // bad owner key, missing team, unreadable persona store, or invalid
     // definition default must not leave an identity that Desktop cannot save.
-    let owner_keys = state.signing_keys()?;
     let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
         .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
     {
@@ -857,7 +867,7 @@ pub async fn create_managed_agent(
         let BackendKind::Provider { ref id, ref config } = input.backend else {
             return Err("registration selected without a provider backend".to_string());
         };
-        provider_registration::attest(&app, &state, &pubkey, id, config)
+        provider_registration::attest(&app, &state, &pubkey, id, config, &attestation_relay)
             .await
             .err()
             .or(spawn_error)
@@ -1043,7 +1053,8 @@ pub async fn start_managed_agent(
             // the create-time network call, so a process exit in that window
             // leaves no reliable local success marker. Registration providers
             // must therefore make attest idempotent.
-            provider_registration::attest(&app, &state, &pubkey, &id, &config).await?;
+            provider_registration::attest(&app, &state, &pubkey, &id, &config, &reconcile_relay)
+                .await?;
 
             let _store_guard = state
                 .managed_agents_store_lock
