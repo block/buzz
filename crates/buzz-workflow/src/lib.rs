@@ -53,6 +53,9 @@ use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+const SCHEDULER_TICK_SECS: u64 = 60;
+const MAX_SCHEDULE_FIRES_PER_TICK: usize = 100;
+
 /// Runtime configuration for the workflow engine.
 #[derive(Clone, Debug)]
 pub struct WorkflowConfig {
@@ -144,7 +147,9 @@ impl WorkflowEngine {
     ///   `admin` role.
     ///
     /// Any lookup error denies (fail-closed): a removed owner must never keep
-    /// exfiltration authority because a membership read happened to fail.
+    /// exfiltration authority because a membership read happened to fail. The
+    /// error remains distinguishable from confirmed ineligibility so durable
+    /// schedulers do not consume due work during an infrastructure outage.
     pub async fn check_owner_authority(
         &self,
         community_id: CommunityId,
@@ -156,11 +161,7 @@ impl WorkflowEngine {
             .db
             .get_member_role(community_id, channel_id, owner_pubkey)
             .await
-            .map_err(|e| {
-                WorkflowError::Unauthorized(format!(
-                    "owner authority lookup failed (fail-closed): {e}"
-                ))
-            })?;
+            .map_err(|e| WorkflowError::Database(format!("owner authority lookup failed: {e}")))?;
         if owner_authority_allows(role.as_deref(), def.requires_elevated_authority()) {
             Ok(())
         } else {
@@ -476,8 +477,10 @@ impl WorkflowEngine {
     /// trigger, checks whether the cron expression or interval has elapsed
     /// and spawns execution if so.
     ///
-    /// Uses window-based matching for cron expressions to handle tick drift:
-    /// `schedule.after(&(now - 60s)).next() <= now` instead of `includes(now)`.
+    /// Cron catch-up is anchored on a distinct durable evaluated-through cursor.
+    /// Existing/newly enabled workflows seed that cursor at transition time, so
+    /// inactive history is never replayed. Catch-up is globally bounded to 100
+    /// fires per tick; fire claims remain the cross-pod at-most-once boundary.
     ///
     /// Interval tracking is anchored on the durable scheduled-fire claim:
     /// `last_fired` is an in-memory pre-filter, but the
@@ -490,130 +493,183 @@ impl WorkflowEngine {
         tracing::info!("WorkflowEngine cron loop started (60s tick)");
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(SCHEDULER_TICK_SECS)).await;
+            self.run_scheduled_tick(Utc::now()).await;
+        }
+    }
 
-            let now = Utc::now();
+    async fn run_scheduled_tick(self: &Arc<Self>, now: DateTime<Utc>) {
+        let workflows = match self.db.list_all_enabled_workflows().await {
+            Ok(wf) => wf,
+            Err(e) => {
+                tracing::error!("Cron tick: failed to load workflows: {e}");
+                return;
+            }
+        };
 
-            let workflows = match self.db.list_all_enabled_workflows().await {
-                Ok(wf) => wf,
+        let mut remaining_tick_budget = MAX_SCHEDULE_FIRES_PER_TICK;
+
+        for workflow in &workflows {
+            if remaining_tick_budget == 0 {
+                tracing::warn!(
+                    limit = MAX_SCHEDULE_FIRES_PER_TICK,
+                    "Cron tick: global schedule fire budget exhausted"
+                );
+                break;
+            }
+            // The same workflow UUID may exist in another community; carry
+            // the row's owning community through fire-tracking, run creation,
+            // and execution so a fire/run never crosses tenants.
+            let community_id = workflow.community_id;
+            let def: schema::WorkflowDef = match serde_json::from_value(workflow.definition.clone())
+            {
+                Ok(d) => d,
                 Err(e) => {
-                    tracing::error!("Cron tick: failed to load workflows: {e}");
+                    tracing::warn!(
+                        workflow_id = %workflow.id,
+                        "Cron tick: failed to parse workflow definition: {e}"
+                    );
                     continue;
                 }
             };
 
-            for workflow in &workflows {
-                // The same workflow UUID may exist in another community; carry
-                // the row's owning community through fire-tracking, run creation,
-                // and execution so a fire/run never crosses tenants.
-                let community_id = workflow.community_id;
-                let def: schema::WorkflowDef =
-                    match serde_json::from_value(workflow.definition.clone()) {
-                        Ok(d) => d,
+            if !def.enabled {
+                continue;
+            }
+
+            // Fix 2: skip workflows with no channel_id — an empty channel_id
+            // causes silent downstream failures when the run tries to act on a channel.
+            let Some(channel_id) = workflow.channel_id else {
+                tracing::warn!(
+                    workflow_id = %workflow.id,
+                    "Cron tick: skipping schedule workflow with no channel_id"
+                );
+                continue;
+            };
+
+            // Resolve the *deterministic* schedule instant this tick is
+            // firing for. `scheduled_for` is computed identically on every
+            // pod (cron's own scheduled time, or the interval bucket
+            // boundary) so all pods collide on a single durable claim —
+            // never `now`, which is per-pod and would let every pod fire.
+            let (scheduled_fires, trigger_type, cron_cursor, scan_through) = match &def.trigger {
+                schema::TriggerDef::Schedule {
+                    cron: Some(expr),
+                    interval: None,
+                } => {
+                    let cursor = match self
+                        .db
+                        .get_or_seed_workflow_schedule_cursor(community_id, workflow.id, now)
+                        .await
+                    {
+                        Ok(Some(cursor)) => cursor,
+                        Ok(None) => continue,
                         Err(e) => {
-                            tracing::warn!(
+                            tracing::error!(
+                                community_id = %community_id,
                                 workflow_id = %workflow.id,
-                                "Cron tick: failed to parse workflow definition: {e}"
+                                "Cron tick: failed to read catch-up anchor: {e}"
                             );
                             continue;
                         }
                     };
-
-                if !def.enabled {
-                    continue;
+                    let scan =
+                        cron_fire_instants(expr, cursor, now, remaining_tick_budget, workflow.id);
+                    (
+                        scan.fires,
+                        "cron",
+                        Some(cursor),
+                        Some(scan.evaluated_through),
+                    )
                 }
-
-                // Fix 2: skip workflows with no channel_id — an empty channel_id
-                // causes silent downstream failures when the run tries to act on a channel.
-                let Some(channel_id) = workflow.channel_id else {
-                    tracing::warn!(
-                        workflow_id = %workflow.id,
-                        "Cron tick: skipping schedule workflow with no channel_id"
-                    );
-                    continue;
-                };
-
-                // Resolve the *deterministic* schedule instant this tick is
-                // firing for. `scheduled_for` is computed identically on every
-                // pod (cron's own scheduled time, or the interval bucket
-                // boundary) so all pods collide on a single durable claim —
-                // never `now`, which is per-pod and would let every pod fire.
-                let (scheduled_for, trigger_type) = match &def.trigger {
-                    schema::TriggerDef::Schedule {
-                        cron: Some(expr),
-                        interval: None,
-                    } => match cron_fire_instant(expr, now, 60, workflow.id) {
-                        Some(instant) => (instant, "cron"),
-                        None => continue,
-                    },
-                    schema::TriggerDef::Schedule {
-                        cron: None,
-                        interval: Some(dur),
-                    } => {
-                        // Cheap pre-filter: skip the claim attempt when the
-                        // in-memory clock says we're clearly mid-interval. The
-                        // durable claim below is the real at-most-once boundary;
-                        // this only avoids a DB write every tick. Seed the
-                        // anchor from the DB on the first tick after restart so
-                        // a process bounce can't double-fire within an interval.
-                        let last = match self.last_fired.get(&(community_id, workflow.id)) {
-                            Some(t) => Some(*t),
-                            None => match self
-                                .db
-                                .latest_scheduled_workflow_fire(community_id, workflow.id)
-                                .await
-                            {
-                                Ok(anchor) => anchor,
-                                Err(e) => {
-                                    // Fail closed: a missing anchor reads as
-                                    // last_fired = now in interval_should_fire,
-                                    // so this tick is suppressed and the next
-                                    // tick retries. Surface the read failure so
-                                    // a persistently-unreadable anchor is visible
-                                    // rather than silently stalling the schedule.
-                                    tracing::warn!(
-                                        community_id = %community_id,
-                                        workflow_id = %workflow.id,
-                                        "Cron tick: failed to read interval restart anchor, \
-                                         suppressing this tick: {e}"
-                                    );
-                                    None
-                                }
-                            },
-                        };
-                        if !self.interval_prefilter_should_fire(
-                            community_id,
-                            workflow.id,
-                            dur,
-                            last,
-                            now,
-                        ) {
-                            continue;
-                        }
-                        match interval_fire_instant(dur, now, workflow.id) {
-                            Some(instant) => (instant, "interval"),
-                            None => continue,
-                        }
+                schema::TriggerDef::Schedule {
+                    cron: None,
+                    interval: Some(dur),
+                } => {
+                    // Cheap pre-filter: skip the claim attempt when the
+                    // in-memory clock says we're clearly mid-interval. The
+                    // durable claim below is the real at-most-once boundary;
+                    // this only avoids a DB write every tick. Seed the
+                    // anchor from the DB on the first tick after restart so
+                    // a process bounce can't double-fire within an interval.
+                    let last = match self.last_fired.get(&(community_id, workflow.id)) {
+                        Some(t) => Some(*t),
+                        None => match self
+                            .db
+                            .latest_scheduled_workflow_fire(community_id, workflow.id)
+                            .await
+                        {
+                            Ok(anchor) => anchor,
+                            Err(e) => {
+                                // Fail closed: a missing anchor reads as
+                                // last_fired = now in interval_should_fire,
+                                // so this tick is suppressed and the next
+                                // tick retries. Surface the read failure so
+                                // a persistently-unreadable anchor is visible
+                                // rather than silently stalling the schedule.
+                                tracing::warn!(
+                                    community_id = %community_id,
+                                    workflow_id = %workflow.id,
+                                    "Cron tick: failed to read interval restart anchor, \
+                                     suppressing this tick: {e}"
+                                );
+                                None
+                            }
+                        },
+                    };
+                    if !self.interval_prefilter_should_fire(
+                        community_id,
+                        workflow.id,
+                        dur,
+                        last,
+                        now,
+                    ) {
+                        continue;
                     }
-                    _ => continue, // Non-schedule triggers handled by on_event()
-                };
-
-                // SEC-006: recheck the owner's current channel authority
-                // BEFORE the durable claim. Placing the gate after the claim
-                // would let a revoked owner's workflow consume the
-                // at-most-once fire slot (claims are never re-fired), turning
-                // revocation into a denial-of-fire for a later re-enable.
-                if let Err(e) = self
-                    .check_owner_authority(community_id, channel_id, &workflow.owner_pubkey, &def)
-                    .await
-                {
-                    tracing::warn!(
-                        workflow_id = %workflow.id,
-                        "Cron tick: skipping workflow — owner authority check failed: {e}"
-                    );
-                    continue;
+                    match interval_fire_instant(dur, now, workflow.id) {
+                        Some(instant) => (vec![instant], "interval", None, None),
+                        None => continue,
+                    }
                 }
+                _ => continue, // Non-schedule triggers handled by on_event()
+            };
 
+            // SEC-006: recheck the owner's current channel authority
+            // BEFORE the durable claim. Placing the gate after the claim
+            // would let a revoked owner's workflow consume the
+            // at-most-once fire slot (claims are never re-fired), turning
+            // revocation into a denial-of-fire for a later re-enable.
+            if let Err(e) = self
+                .check_owner_authority(community_id, channel_id, &workflow.owner_pubkey, &def)
+                .await
+            {
+                tracing::warn!(
+                    workflow_id = %workflow.id,
+                    "Cron tick: skipping workflow — owner authority check failed: {e}"
+                );
+                // Confirmed ineligibility consumes the inactive period so it
+                // cannot replay after authority is restored. Infrastructure
+                // failures preserve the cursor for a later catch-up tick.
+                if let (WorkflowError::Unauthorized(_), Some(cursor)) = (&e, cron_cursor) {
+                    if let Err(cursor_error) = self
+                        .db
+                        .advance_workflow_schedule_cursor(community_id, workflow.id, cursor, now)
+                        .await
+                    {
+                        tracing::error!(
+                            community_id = %community_id,
+                            workflow_id = %workflow.id,
+                            "Cron tick: failed to advance ineligible workflow cursor: {cursor_error}"
+                        );
+                    }
+                }
+                continue;
+            }
+
+            let planned_fire_count = scheduled_fires.len();
+            let mut evaluated_through = cron_cursor;
+            let mut processed_fire_count = 0usize;
+            for scheduled_for in scheduled_fires {
                 // Durable at-most-once claim — the cross-pod fire boundary.
                 // The loser receives `None` and skips BEFORE any run creation or
                 // side effect. `community_id` is the workflow row's own
@@ -635,6 +691,9 @@ impl WorkflowEngine {
                         if trigger_type == "interval" {
                             self.last_fired.insert((community_id, workflow.id), now);
                         }
+                        evaluated_through = Some(scheduled_for);
+                        processed_fire_count += 1;
+                        remaining_tick_budget -= 1;
                         continue;
                     }
                     Err(e) => {
@@ -642,15 +701,23 @@ impl WorkflowEngine {
                             workflow_id = %workflow.id,
                             "Cron tick: scheduled-fire claim failed: {e}"
                         );
-                        continue;
+                        // Preserve chronological recovery. Claiming a later
+                        // instant after this failure would advance the
+                        // durable MAX(scheduled_for) anchor past the failed
+                        // instant and make it permanently unreachable.
+                        break;
                     }
                 }
+
+                evaluated_through = Some(scheduled_for);
+                processed_fire_count += 1;
+                remaining_tick_budget -= 1;
 
                 // Fix 5: handle serialization errors explicitly rather than silently
                 // dropping the trigger context with .ok().
                 let trigger_ctx = executor::TriggerContext {
                     channel_id: channel_id.to_string(),
-                    timestamp: now.timestamp().to_string(),
+                    timestamp: scheduled_for.timestamp().to_string(),
                     ..Default::default()
                 };
                 let trigger_ctx_json = match serde_json::to_value(&trigger_ctx) {
@@ -738,48 +805,90 @@ impl WorkflowEngine {
                 });
             }
 
-            // Fix 1: prune stale last_fired entries for workflows that are no longer
-            // active/enabled. Without this the DashMap grows monotonically as
-            // workflows are deleted or disabled. Keyed by `(community_id, id)` so
-            // entries are matched to the same scope they were inserted under.
-            let active_ids: std::collections::HashSet<(CommunityId, Uuid)> =
-                workflows.iter().map(|w| (w.community_id, w.id)).collect();
-            self.last_fired.retain(|key, _| active_ids.contains(key));
+            if let (Some(cursor), Some(progress)) = (cron_cursor, evaluated_through) {
+                let target = if processed_fire_count == planned_fire_count {
+                    scan_through.unwrap_or(progress)
+                } else {
+                    progress
+                };
+                if let Err(e) = self
+                    .db
+                    .advance_workflow_schedule_cursor(community_id, workflow.id, cursor, target)
+                    .await
+                {
+                    tracing::error!(
+                        community_id = %community_id,
+                        workflow_id = %workflow.id,
+                        "Cron tick: failed to advance schedule cursor: {e}"
+                    );
+                }
+            }
         }
+
+        // Fix 1: prune stale last_fired entries for workflows that are no longer
+        // active/enabled. Without this the DashMap grows monotonically as
+        // workflows are deleted or disabled. Keyed by `(community_id, id)` so
+        // entries are matched to the same scope they were inserted under.
+        let active_ids: std::collections::HashSet<(CommunityId, Uuid)> =
+            workflows.iter().map(|w| (w.community_id, w.id)).collect();
+        self.last_fired.retain(|key, _| active_ids.contains(key));
     }
 }
 
-/// Find the cron schedule instant that fired within the `window_secs`-wide
-/// window ending at `now`, if any.
+struct CronScan {
+    fires: Vec<DateTime<Utc>>,
+    evaluated_through: DateTime<Utc>,
+}
+
+/// Return the cron instants strictly after `cursor` and at or before `now`.
 ///
-/// Uses window-based matching: finds the next scheduled time after
-/// `(now - window_secs)` and returns it when it falls at or before `now`.
-/// This tolerates tick drift gracefully — a 61s tick won't miss a
-/// minute-granularity cron expression. The returned instant is the cron's own
-/// scheduled time (not `now`), so every pod evaluating the same expression in
-/// the same window computes the *same* value — making it a safe, deterministic
-/// claim anchor for cross-pod at-most-once firing.
-///
-/// Returns `None` (and logs a warning) if the expression is invalid or nothing
-/// is due in the window.
-fn cron_fire_instant(
+/// Results are chronological and capped at `limit`, so recovery cannot create
+/// an unbounded burst. Each returned schedule instant is deterministic across
+/// pods and is therefore safe to use as the durable claim key.
+fn cron_fire_instants(
     expr: &str,
+    cursor: DateTime<Utc>,
     now: DateTime<Utc>,
-    window_secs: i64,
+    limit: usize,
     workflow_id: Uuid,
-) -> Option<DateTime<Utc>> {
+) -> CronScan {
+    if limit == 0 || cursor >= now {
+        return CronScan {
+            fires: Vec::new(),
+            evaluated_through: cursor,
+        };
+    }
     let normalized = schema::normalize_cron(expr);
     match normalized.parse::<cron::Schedule>() {
         Ok(sched) => {
-            let window_start = now - chrono::Duration::seconds(window_secs);
-            sched.after(&window_start).next().filter(|t| *t <= now)
+            let mut fires: Vec<_> = sched
+                .after(&cursor)
+                .take_while(|instant| *instant <= now)
+                .take(limit + 1)
+                .collect();
+            let truncated = fires.len() > limit;
+            if truncated {
+                fires.truncate(limit);
+            }
+            let evaluated_through = if truncated {
+                fires.last().copied().unwrap_or(cursor)
+            } else {
+                now
+            };
+            CronScan {
+                fires,
+                evaluated_through,
+            }
         }
         Err(e) => {
             tracing::warn!(
                 workflow_id = %workflow_id,
                 "Cron tick: invalid cron expression '{expr}': {e}"
             );
-            None
+            CronScan {
+                fires: Vec::new(),
+                evaluated_through: cursor,
+            }
         }
     }
 }
@@ -1051,20 +1160,17 @@ mod postgres_tests {
     use super::*;
 
     #[test]
-    fn cron_fire_instant_matches_within_window() {
-        // "every minute" cron — should always fire within a 60s window.
+    fn cron_fire_instants_matches_after_cursor() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T12:00:30Z")
             .unwrap()
             .with_timezone(&Utc);
+        let cursor = now - chrono::Duration::seconds(60);
         let wf_id = Uuid::new_v4();
-        // The matched instant is the minute boundary 12:00:00, NOT `now`.
         assert_eq!(
-            cron_fire_instant("* * * * *", now, 60, wf_id),
-            Some(
-                chrono::DateTime::parse_from_rfc3339("2026-06-15T12:00:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc)
-            ),
+            cron_fire_instants("* * * * *", cursor, now, 100, wf_id).fires,
+            vec![chrono::DateTime::parse_from_rfc3339("2026-06-15T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)],
             "every-minute cron should return the minute boundary as the anchor"
         );
     }
@@ -1074,8 +1180,16 @@ mod postgres_tests {
         let now = Utc::now();
         let wf_id = Uuid::new_v4();
         assert!(
-            cron_fire_instant("not-a-cron", now, 60, wf_id).is_none(),
-            "invalid cron should return None"
+            cron_fire_instants(
+                "not-a-cron",
+                now - chrono::Duration::minutes(1),
+                now,
+                100,
+                wf_id
+            )
+            .fires
+            .is_empty(),
+            "invalid cron should return no instants"
         );
     }
 
@@ -1088,7 +1202,15 @@ mod postgres_tests {
         let wf_id = Uuid::new_v4();
         // "0 0 1 1 *" = midnight on Jan 1 only — June 15 is definitely outside.
         assert!(
-            cron_fire_instant("0 0 1 1 *", now, 60, wf_id).is_none(),
+            cron_fire_instants(
+                "0 0 1 1 *",
+                now - chrono::Duration::seconds(60),
+                now,
+                100,
+                wf_id
+            )
+            .fires
+            .is_empty(),
             "Jan-1-only cron should not fire on June 15"
         );
     }
@@ -1102,8 +1224,15 @@ mod postgres_tests {
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
         assert_eq!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id),
-            Some(now),
+            cron_fire_instants(
+                "0 9 * * *",
+                now - chrono::Duration::seconds(60),
+                now,
+                100,
+                wf_id
+            )
+            .fires,
+            vec![now],
             "cron should fire at exact minute boundary, anchored on 09:00:00"
         );
     }
@@ -1119,28 +1248,70 @@ mod postgres_tests {
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
         assert_eq!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id),
-            Some(
-                chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc)
-            ),
+            cron_fire_instants(
+                "0 9 * * *",
+                now - chrono::Duration::seconds(60),
+                now,
+                100,
+                wf_id
+            )
+            .fires,
+            vec![chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)],
             "cron anchor must be the scheduled instant, stable across pod tick drift"
         );
     }
 
     #[test]
-    fn cron_fire_instant_returns_none_just_outside_window() {
-        // Fixed time: 09:01:01 UTC. Cron "0 9 * * *" fires at 09:00:00.
-        // Window [09:00:01, 09:01:01] does NOT contain 09:00:00.
+    fn cron_fire_instants_catches_up_after_more_than_one_minute() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:01:01Z")
             .unwrap()
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
-        assert!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id).is_none(),
-            "cron should not fire 61s after the scheduled time"
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            cron_fire_instants(
+                "0 9 * * *",
+                now - chrono::Duration::minutes(10),
+                now,
+                100,
+                wf_id
+            )
+            .fires,
+            vec![expected],
+            "a scheduler delay over 60 seconds must not skip the due instant"
         );
+    }
+
+    #[test]
+    fn cron_fire_instants_resumes_after_durable_evaluation_cursor() {
+        let cursor = chrono::DateTime::parse_from_rfc3339("2026-06-15T08:58:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:03:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let scan = cron_fire_instants("* * * * *", cursor, now, 100, Uuid::new_v4());
+        assert_eq!(scan.fires.len(), 5);
+        assert_eq!(scan.fires[0].timestamp(), cursor.timestamp() + 60);
+        assert_eq!(scan.fires[4].timestamp(), cursor.timestamp() + 300);
+        assert_eq!(scan.evaluated_through, now);
+    }
+
+    #[test]
+    fn cron_fire_instants_bounds_backlog() {
+        let cursor = chrono::DateTime::parse_from_rfc3339("2026-06-15T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = cursor + chrono::Duration::hours(2);
+        let scan = cron_fire_instants("* * * * *", cursor, now, 10, Uuid::new_v4());
+        assert_eq!(scan.fires.len(), 10);
+        assert_eq!(scan.fires[0].timestamp(), cursor.timestamp() + 60);
+        assert_eq!(scan.fires[9].timestamp(), cursor.timestamp() + 600);
+        assert_eq!(scan.evaluated_through, scan.fires[9]);
     }
 
     #[test]
@@ -2085,6 +2256,231 @@ steps:
             owner_runs.len(),
             1,
             "channel owner's call_webhook workflow fires"
+        );
+    }
+
+    async fn create_minutely_schedule(
+        db: &buzz_db::Db,
+        community: CommunityId,
+        channel_id: Uuid,
+        owner: &[u8],
+    ) -> Uuid {
+        let def_json = serde_json::json!({
+            "name": "scheduler-catch-up",
+            "trigger": {"on": "schedule", "cron": "* * * * *"},
+            "steps": [{"id": "s1", "action": "send_message", "text": "tick"}],
+            "enabled": true,
+        })
+        .to_string();
+        db.create_workflow(
+            community,
+            Some(channel_id),
+            owner,
+            "scheduler-catch-up",
+            &def_json,
+            &[2u8; 32],
+        )
+        .await
+        .expect("create scheduled workflow")
+    }
+
+    async fn scheduler_postgres_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
+    fn just_before_next_minute(cursor: DateTime<Utc>) -> DateTime<Utc> {
+        let next = cron_fire_instants(
+            "* * * * *",
+            cursor,
+            cursor + chrono::Duration::minutes(2),
+            1,
+            Uuid::nil(),
+        )
+        .fires[0];
+        next - chrono::Duration::milliseconds(1)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scheduled_tick_catches_up_after_restart_without_duplicate_multi_pod_runs() {
+        let _guard = scheduler_postgres_test_guard().await;
+        let db = setup_db().await;
+        let owner = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &owner, &member).await;
+        let workflow_id = create_minutely_schedule(&db, community, channel_id, &owner).await;
+        let cursor = db
+            .get_or_seed_workflow_schedule_cursor(community, workflow_id, Utc::now())
+            .await
+            .expect("read cursor")
+            .expect("creation trigger seeded cursor");
+        let tick_at = cursor + chrono::Duration::seconds(125);
+        let expected_fires = cron_fire_instants("* * * * *", cursor, tick_at, 100, workflow_id)
+            .fires
+            .len();
+
+        let first_pod = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        let second_pod = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        tokio::join!(
+            first_pod.run_scheduled_tick(tick_at),
+            second_pod.run_scheduled_tick(tick_at)
+        );
+
+        let runs = db
+            .list_workflow_runs(community, workflow_id, 10)
+            .await
+            .expect("list catch-up runs");
+        assert_eq!(
+            runs.len(),
+            expected_fires,
+            "all missed minute boundaries fire once each across competing pods"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scheduled_tick_does_not_replay_pre_seed_or_disabled_history() {
+        let _guard = scheduler_postgres_test_guard().await;
+        let db = setup_db().await;
+        let owner = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &owner, &member).await;
+        let workflow_id = create_minutely_schedule(&db, community, channel_id, &owner).await;
+
+        db.set_workflow_enabled(community, workflow_id, false)
+            .await
+            .expect("disable workflow");
+        db.set_workflow_enabled(community, workflow_id, true)
+            .await
+            .expect("re-enable workflow");
+        let cursor = db
+            .get_or_seed_workflow_schedule_cursor(community, workflow_id, Utc::now())
+            .await
+            .expect("read reset cursor")
+            .expect("transition trigger reset cursor");
+
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        engine
+            .run_scheduled_tick(just_before_next_minute(cursor))
+            .await;
+        let runs = db
+            .list_workflow_runs(community, workflow_id, 10)
+            .await
+            .expect("list runs");
+        assert!(
+            runs.is_empty(),
+            "cursor seeding and re-enable reset must not replay historical minutes"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scheduled_tick_advances_cursor_while_owner_is_revoked() {
+        let _guard = scheduler_postgres_test_guard().await;
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let owner = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &owner).await;
+        let workflow_id = create_minutely_schedule(&db, community, channel_id, &owner).await;
+        let cursor = db
+            .get_or_seed_workflow_schedule_cursor(community, workflow_id, Utc::now())
+            .await
+            .expect("read cursor")
+            .expect("creation trigger seeded cursor");
+        let revoked_tick = cursor + chrono::Duration::minutes(5);
+
+        db.remove_member(community, channel_id, &owner, &creator)
+            .await
+            .expect("remove workflow owner");
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        engine.run_scheduled_tick(revoked_tick).await;
+        db.add_member(
+            community,
+            channel_id,
+            &owner,
+            buzz_db::channel::MemberRole::Member,
+            Some(&creator),
+        )
+        .await
+        .expect("restore workflow owner");
+        engine
+            .run_scheduled_tick(just_before_next_minute(revoked_tick))
+            .await;
+
+        let runs = db
+            .list_workflow_runs(community, workflow_id, 10)
+            .await
+            .expect("list runs after authority restoration");
+        assert!(
+            runs.is_empty(),
+            "schedule instants while authority was revoked must never replay"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scheduled_tick_retries_after_authority_lookup_failure() {
+        let _guard = scheduler_postgres_test_guard().await;
+        let db = setup_db().await;
+        let owner = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &owner, &member).await;
+        let workflow_id = create_minutely_schedule(&db, community, channel_id, &owner).await;
+        let cursor = db
+            .get_or_seed_workflow_schedule_cursor(community, workflow_id, Utc::now())
+            .await
+            .expect("read cursor")
+            .expect("creation trigger seeded cursor");
+        let catch_up_tick = cursor + chrono::Duration::seconds(125);
+        let expected_fires =
+            cron_fire_instants("* * * * *", cursor, catch_up_tick, 100, workflow_id)
+                .fires
+                .len();
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| {
+                "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned() // sadscan:disable np.postgres.1
+            });
+        let fault_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect fault-injection pool");
+        sqlx::query("ALTER TABLE channel_members RENAME TO channel_members_unavailable_test")
+            .execute(&fault_pool)
+            .await
+            .expect("inject membership-read failure");
+
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        engine.run_scheduled_tick(catch_up_tick).await;
+
+        sqlx::query("ALTER TABLE channel_members_unavailable_test RENAME TO channel_members")
+            .execute(&fault_pool)
+            .await
+            .expect("restore membership reads");
+        let cursor_after_failure = db
+            .get_or_seed_workflow_schedule_cursor(community, workflow_id, catch_up_tick)
+            .await
+            .expect("read cursor after authority failure")
+            .expect("cursor remains present");
+        assert_eq!(
+            cursor_after_failure, cursor,
+            "authority infrastructure failure must preserve the catch-up cursor"
+        );
+
+        engine.run_scheduled_tick(catch_up_tick).await;
+        let runs = db
+            .list_workflow_runs(community, workflow_id, 10)
+            .await
+            .expect("list recovered runs");
+        assert_eq!(
+            runs.len(),
+            expected_fires,
+            "missed instants must execute once after membership reads recover"
         );
     }
 }
