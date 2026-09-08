@@ -5,7 +5,7 @@
  * AdminConsoleFeedbackTab.tsx, and AdminConsoleStaffingTab.tsx.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AlertCircle, LoaderCircle } from "lucide-react";
 import { formatRelativeTime } from "../forum/lib/time";
@@ -336,7 +336,7 @@ export function groupByCommunity<
 export function CommunityGroupedList<
   T extends { communityId: string | null; communityHost: string | null },
 >({ items, renderItem }: { items: T[]; renderItem: (item: T) => ReactNode }) {
-  const groups = groupByCommunity(items);
+  const groups = useMemo(() => groupByCommunity(items), [items]);
   if (groups.length <= 1) {
     return <ul className="space-y-1">{items.map(renderItem)}</ul>;
   }

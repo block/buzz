@@ -334,6 +334,14 @@ export type AdminReportResolution = {
  * The caller must generate a UUID `requestId` per resolution attempt and
  * reuse the **same** UUID on retry after a lost response. A different
  * `requestId` against a `processing` report yields 409.
+ *
+ * Beyond 401/403/409, enforcement can fail synchronously with
+ * `422 enforcement_failed`. Its retry classification follows
+ * `preserveRequestIdOnError`: an authoritative 422 (full body read) is a
+ * definitive pre-commit rejection and RESETS the `requestId`, so the next
+ * attempt is a genuinely new command; a truncated 422 (body incomplete,
+ * outcome unknown) PRESERVES the id so the relay can dedupe against a commit
+ * that may have landed.
  */
 export async function resolveAdminReport(
   origin: string,
