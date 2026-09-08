@@ -155,7 +155,7 @@ impl ConnectionState {
                 if count >= self.grace_limit {
                     warn!(conn_id = %self.conn_id, count, "sustained backpressure — closing slow client");
                     metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
-                    self.cancel.cancel();
+                    self.community_control.lifecycle_cancel();
                 } else {
                     warn!(conn_id = %self.conn_id, count, grace = self.grace_limit, "send buffer full — grace {count}/{}", self.grace_limit);
                 }
@@ -400,15 +400,15 @@ async fn handle_active_connection(
     ));
 
     let missed_pongs = Arc::new(AtomicU8::new(0));
-    let heartbeat_cancel = cancel.clone();
     let heartbeat_task = tokio::spawn(heartbeat_loop(
         ctrl_tx,
         Arc::clone(&missed_pongs),
-        heartbeat_cancel,
+        control.clone(),
     ));
 
     let auth_timeout_conn = Arc::clone(&conn);
     let auth_timeout_cancel = cancel.clone();
+    let auth_timeout_control = control.clone();
     let auth_timeout_task = tokio::spawn(async move {
         tokio::select! {
             _ = tokio::time::sleep(AUTH_TIMEOUT) => {
@@ -423,7 +423,7 @@ async fn handle_active_connection(
                         "NIP-42 auth timeout — closing connection"
                     );
                     metrics::counter!("buzz_ws_auth_timeouts_total").increment(1);
-                    auth_timeout_cancel.cancel();
+                    auth_timeout_control.lifecycle_cancel();
                 }
             }
             _ = auth_timeout_cancel.cancelled() => {}
@@ -454,7 +454,7 @@ async fn handle_active_connection(
     )
     .await;
 
-    cancel.cancel();
+    control.lifecycle_cancel();
     let _ = send_task.await;
     let _ = heartbeat_task.await;
     let _ = auth_timeout_task.await;
@@ -628,10 +628,11 @@ async fn send_loop_inner<S>(
 async fn heartbeat_loop(
     ctrl_tx: mpsc::Sender<WsMessage>,
     missed_pongs: Arc<AtomicU8>,
-    cancel: CancellationToken,
+    control: CommunityConnectionControl,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
+        let cancelled = control.cancellation_token();
         tokio::select! {
             _ = interval.tick() => {
                 // fetch_add returns the *previous* value before incrementing:
@@ -641,16 +642,16 @@ async fn heartbeat_loop(
                 let missed = missed_pongs.fetch_add(1, Ordering::Relaxed);
                 if missed >= 2 {
                     warn!("3 missed pongs — closing connection");
-                    cancel.cancel();
+                    control.lifecycle_cancel();
                     break;
                 }
                 if ctrl_tx.try_send(WsMessage::Ping(axum::body::Bytes::new())).is_err() {
                     warn!("control channel full — cannot send Ping, closing");
-                    cancel.cancel();
+                    control.lifecycle_cancel();
                     break;
                 }
             }
-            _ = cancel.cancelled() => break,
+            _ = cancelled.cancelled() => break,
         }
     }
 }

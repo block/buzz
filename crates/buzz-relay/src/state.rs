@@ -329,6 +329,34 @@ impl CommunityConnectionControl {
         self.cancel.cancel();
     }
 
+    /// Cancel this connection's lifecycle without enqueuing any terminal frame.
+    ///
+    /// Acquires the transition lock before calling `cancel.cancel()`.  Because
+    /// every terminal-payload writer (`disconnect_nip_fi`, `pairing_deny_terminal`,
+    /// `auth_deny_terminal`, `expiry_deny_terminal`, `manager_disconnect_nip_fi`)
+    /// holds this same lock across reason-win + `try_send`, calling
+    /// `lifecycle_cancel` from any other path (graceful drain, heartbeat failure,
+    /// backpressure eviction, recv-loop teardown) is guaranteed to observe a
+    /// fully-enqueued terminal frame before firing the cancel token.
+    ///
+    /// Without this lock, an external cancel arriving between a terminal writer's
+    /// reason-win and its `try_send` would wake the send loop's `cancelled()`
+    /// branch while the terminal channel was still empty, producing a close-only
+    /// `1008 authorization denied` with no preceding NOTICE.
+    /// [FI-TRACE-CANCEL-RACE]
+    pub(crate) fn lifecycle_cancel(&self) {
+        let _lock = self
+            .terminal_frame_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // No reason assignment — lifecycle paths (drain, heartbeat, backpressure)
+        // do not own a disconnect reason; the first-writer from the terminal set
+        // already holds or will hold it.  Acquiring the lock is sufficient to
+        // block until any in-progress terminal enqueue completes.
+        drop(_lock);
+        self.cancel.cancel();
+    }
+
     fn disconnect_nip_fi(&self) {
         // Atomically: win the reason slot and, only if we win, enqueue the
         // denial payload.  Both operations are performed while holding the
@@ -592,7 +620,7 @@ impl ConnectionManager {
         ctrl_tx: mpsc::Sender<WsMessage>,
         terminal_ctrl_tx: mpsc::Sender<WsMessage>,
         restart_tx: Option<mpsc::Sender<RestartClose>>,
-        cancel: CancellationToken,
+        _cancel: CancellationToken,
         community_id: CommunityId,
         backpressure_count: Arc<AtomicU8>,
         subscriptions: ConnectionSubscriptions,
@@ -600,7 +628,7 @@ impl ConnectionManager {
         community_control: CommunityConnectionControl,
     ) {
         let drain_ctrl_tx = ctrl_tx.clone();
-        let drain_cancel = cancel.clone();
+        let drain_control = community_control.clone();
         self.connections.insert(
             conn_id,
             ConnEntry {
@@ -626,7 +654,7 @@ impl ConnectionManager {
         // were already established, not late arrivals.
         if self.draining.load(Ordering::SeqCst) {
             let _ = drain_ctrl_tx.try_send(Self::restart_close_frame());
-            drain_cancel.cancel();
+            drain_control.lifecycle_cancel();
         }
     }
 
@@ -718,7 +746,7 @@ impl ConnectionManager {
                 let _ = entry
                     .ctrl_tx
                     .try_send(WsMessage::Text(frame.clone().into()));
-                entry.community_control.cancellation_token().cancel();
+                entry.community_control.lifecycle_cancel();
                 closed += 1;
             }
         }
@@ -800,7 +828,7 @@ impl ConnectionManager {
         let mut closed = 0usize;
         for entry in self.connections.iter() {
             let _ = entry.ctrl_tx.try_send(frame.clone());
-            entry.community_control.cancellation_token().cancel();
+            entry.community_control.lifecycle_cancel();
             closed += 1;
         }
         closed
@@ -850,14 +878,14 @@ impl ConnectionManager {
             .map(|entry| {
                 let ctrl_tx = entry.ctrl_tx.clone();
                 let restart_tx = entry.restart_tx.clone();
-                let cancel = entry.community_control.cancellation_token();
+                let control = entry.community_control.clone();
                 let delay_ms = 1 + rand::random::<u64>() % jitter_ms;
                 async move {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     let Some(restart_tx) = restart_tx else {
                         // Unit-only registrations do not own a writer task.
                         let _ = ctrl_tx.try_send(Self::restart_close_frame());
-                        cancel.cancel();
+                        control.lifecycle_cancel();
                         return;
                     };
                     let (flushed_tx, flushed_rx) = tokio::sync::oneshot::channel();
@@ -867,12 +895,12 @@ impl ConnectionManager {
                         })
                         .is_err()
                     {
-                        cancel.cancel();
+                        control.lifecycle_cancel();
                         return;
                     }
                     let flushed = tokio::time::timeout(RESTART_CLOSE_ACK_TIMEOUT, flushed_rx).await;
                     if !matches!(flushed, Ok(Ok(true))) {
-                        cancel.cancel();
+                        control.lifecycle_cancel();
                     }
                 }
             })
@@ -978,7 +1006,7 @@ impl ConnectionManager {
                     if count >= conn.grace_limit {
                         tracing::warn!(conn_id = %conn_id, count, "fan-out: sustained backpressure — cancelling slow client");
                         metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
-                        conn.community_control.cancellation_token().cancel();
+                        conn.community_control.lifecycle_cancel();
                     } else {
                         tracing::warn!(conn_id = %conn_id, count, grace = conn.grace_limit, "fan-out: send buffer full — grace {count}/{}", conn.grace_limit);
                     }
@@ -3216,7 +3244,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
-            CommunityConnectionControl::new(CancellationToken::new()),
+            CommunityConnectionControl::new(cancel.clone()),
         );
 
         assert!(
@@ -3335,7 +3363,7 @@ pub(crate) mod tests {
             Arc::new(AtomicU8::new(0)),
             Arc::new(Mutex::new(HashMap::new())),
             3,
-            CommunityConnectionControl::new(CancellationToken::new()),
+            CommunityConnectionControl::new(late_cancel.clone()),
         );
         assert!(
             late_cancel.is_cancelled(),
@@ -4348,6 +4376,127 @@ pub(crate) mod tests {
         assert!(
             cancel.is_cancelled(),
             "W_manager_cancel_race: cancel must be set after both calls"
+        );
+    }
+
+    // ── lifecycle_cancel ordered and race witness ─────────────────────────────
+
+    #[test]
+    fn lifecycle_cancel_does_not_enqueue_frame_but_cancels_token() {
+        // lifecycle_cancel must: (a) NOT enqueue any frame (no reason to win);
+        // (b) cancel the token so the send loop exits.
+        let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel::<WsMessage>(1);
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        let _ = terminal_tx; // keep alive — not relevant to this path
+        control.lifecycle_cancel();
+        assert!(
+            cancel.is_cancelled(),
+            "lifecycle_cancel must cancel the token"
+        );
+        assert!(
+            terminal_rx.try_recv().is_err(),
+            "lifecycle_cancel must not enqueue any terminal frame"
+        );
+        assert_eq!(
+            *control.disconnect_reason().borrow(),
+            None,
+            "lifecycle_cancel must not write a disconnect reason"
+        );
+    }
+
+    // ── W_lifecycle_cancel_race: lifecycle cancel cannot fire before the winning
+    //    terminal enqueue — proves lifecycle_cancel acquires the transition lock.
+    //
+    // Pattern: arm manager_race_test_hook to pause manager_disconnect_nip_fi
+    // after reason-win while holding the lock.  Main thread concurrently calls
+    // lifecycle_cancel() — under the fix it blocks on the lock; under mutation
+    // (lifecycle_cancel removed) it fires cancel immediately before the
+    // try_send runs, producing Empty at the consumer.
+    //
+    // Mutation evidence: revert lifecycle_cancel to bare cancel.cancel() →
+    // consumer wakes before manager's try_send → try_recv() returns Err(Empty) → RED.
+    // Restore → PASS.
+    #[test]
+    fn w_lifecycle_cancel_race_payload_precedes_lifecycle_cancel() {
+        use std::sync::{Arc, Barrier};
+
+        let (terminal_tx, terminal_rx) = tokio::sync::mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_for_hook = Arc::clone(&barrier);
+
+        manager_race_test_hook::arm(Arc::new(move || {
+            // Rendez-vous with main thread so lifecycle_cancel races immediately.
+            barrier_for_hook.wait();
+            // Hold the lock for a brief window — main's lifecycle_cancel must
+            // block here (under the fix) or fire cancel prematurely (under
+            // mutation).
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }));
+
+        // Consumer: busy-waits for the first cancel signal, then drains.
+        let cancel_for_consumer = cancel.clone();
+        let consumer_result: Arc<std::sync::Mutex<Option<Result<WsMessage, _>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let consumer_result_for_thread = Arc::clone(&consumer_result);
+        let mut terminal_rx_for_consumer = terminal_rx;
+        let consumer_thread = std::thread::spawn(move || {
+            while !cancel_for_consumer.is_cancelled() {
+                std::thread::yield_now();
+            }
+            let r = terminal_rx_for_consumer.try_recv();
+            *consumer_result_for_thread.lock().unwrap() = Some(r);
+        });
+
+        // Manager thread: wins reason, fires hook (pauses), try_send, drops lock,
+        // cancels.  The hook pause creates the race window.
+        let control_for_manager = control.clone();
+        let terminal_tx_for_manager = terminal_tx;
+        let manager_thread = std::thread::spawn(move || {
+            control_for_manager.manager_disconnect_nip_fi(&terminal_tx_for_manager);
+        });
+
+        // Rendez-vous: manager has won reason and is paused inside the hook.
+        barrier.wait();
+
+        // FIXED: lifecycle_cancel acquires the lock — blocks until manager drops
+        // it after try_send, so the consumer never sees an empty channel.
+        // MUTATION: lifecycle_cancel calls cancel.cancel() without the lock —
+        // consumer wakes before manager's try_send, sees Err(Empty).
+        control.lifecycle_cancel();
+
+        manager_thread
+            .join()
+            .expect("W_lifecycle_cancel_race: manager thread panicked");
+        consumer_thread
+            .join()
+            .expect("W_lifecycle_cancel_race: consumer thread panicked");
+
+        manager_race_test_hook::disarm();
+
+        let consumer_saw = consumer_result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("W_lifecycle_cancel_race: consumer thread must have run");
+
+        let frame = consumer_saw.expect(
+            "W_lifecycle_cancel_race: consumer must observe the denial payload at the first \
+             cancel signal (proves lifecycle_cancel cannot fire cancel before try_send)",
+        );
+        let expected = crate::nip_fi_session::authorization_denied_frame(
+            crate::nip_fi_session::NipFiWsRoute::Root,
+        );
+        assert_eq!(
+            frame, expected,
+            "W_lifecycle_cancel_race: queued frame must be the canonical Root denial frame"
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "W_lifecycle_cancel_race: cancel must be set after both calls"
         );
     }
 }
