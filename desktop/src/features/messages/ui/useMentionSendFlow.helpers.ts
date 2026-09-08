@@ -1,4 +1,7 @@
-import type { MentionRevalidationOptions } from "@/features/messages/lib/agentMentionRevalidation";
+import {
+  AgentMentionAuthorizationError,
+  type MentionRevalidationOptions,
+} from "@/features/messages/lib/agentMentionRevalidation";
 import type { ManagedAgent } from "@/shared/api/types";
 import {
   type ImetaMedia,
@@ -108,6 +111,13 @@ export function getErrorMessage(error: unknown, fallback: string) {
 
 export function formatMessageSendError(error: unknown) {
   return `Message failed to send: ${getErrorMessage(error, "Unknown error")}`;
+}
+
+/** Preserve actionable authorization errors without the generic send-failure prefix. */
+export function formatMentionSendError(error: unknown) {
+  return error instanceof AgentMentionAuthorizationError
+    ? error.message
+    : formatMessageSendError(error);
 }
 
 export function uniqueNormalizedPubkeys(pubkeys: Iterable<string>) {

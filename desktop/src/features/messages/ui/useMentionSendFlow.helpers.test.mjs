@@ -3,10 +3,30 @@ import test from "node:test";
 
 import {
   formatMessageSendError,
+  formatMentionSendError,
   getErrorMessage,
   mergeMentionRecipients,
   mentionRevalidationOptions,
 } from "./useMentionSendFlow.helpers.ts";
+
+import { AgentMentionAuthorizationError } from "../lib/agentMentionRevalidation.ts";
+
+test("mention send errors preserve authorization guidance and generic failure details", () => {
+  const denied = new AgentMentionAuthorizationError();
+  assert.equal(formatMentionSendError(denied), denied.message);
+  assert.equal(
+    formatMentionSendError(new Error("relay rejected")),
+    "Message failed to send: relay rejected",
+  );
+  assert.equal(
+    formatMentionSendError("upload rejected"),
+    "Message failed to send: upload rejected",
+  );
+  assert.equal(
+    formatMentionSendError({}),
+    "Message failed to send: Unknown error",
+  );
+});
 
 test("formatMessageSendError preserves the publication failure", () => {
   assert.equal(
