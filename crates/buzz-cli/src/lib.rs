@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod error;
 mod links;
+mod schedule;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -389,6 +390,11 @@ pub enum MessagesCmd {
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
+        /// ISO8601 / RFC 3339 timestamp (e.g. 2026-08-09T09:00:00Z) for future
+        /// delivery. Enqueues a durable scheduled delivery instead of sending
+        /// now; deliver with `buzz messages scheduled run`.
+        #[arg(long)]
+        scheduled_at: Option<String>,
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
@@ -530,6 +536,43 @@ pub enum MessagesCmd {
         /// Vote direction: "up" or "down"
         #[arg(long)]
         direction: String,
+    },
+    /// Manage scheduled (deliver-later) messages
+    #[command(subcommand)]
+    Scheduled(MessagesScheduledCmd),
+}
+
+/// Commands for inspecting and delivering the local scheduled-message queue.
+#[derive(Subcommand)]
+pub enum MessagesScheduledCmd {
+    /// List pending scheduled messages
+    #[command(after_help = "Examples:\n  buzz messages scheduled list")]
+    List {
+        /// Override the scheduled-messages store path (testing/debugging)
+        #[arg(long)]
+        queue_file: Option<String>,
+    },
+    /// Cancel a pending scheduled message before delivery
+    #[command(after_help = "Examples:\n  buzz messages scheduled cancel --id <scheduled-id>")]
+    Cancel {
+        /// Scheduled message ID (from 'buzz messages scheduled list')
+        #[arg(long)]
+        id: String,
+        /// Override the scheduled-messages store path (testing/debugging)
+        #[arg(long)]
+        queue_file: Option<String>,
+    },
+    /// Deliver scheduled messages that are due now, then exit
+    #[command(
+        after_help = "Examples:\n  buzz messages scheduled run\n  buzz messages scheduled run --watch"
+    )]
+    Run {
+        /// Keep running and deliver messages as they come due
+        #[arg(long, default_value_t = false)]
+        watch: bool,
+        /// Override the scheduled-messages store path (testing/debugging)
+        #[arg(long)]
+        queue_file: Option<String>,
     },
 }
 
@@ -2332,6 +2375,7 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "scheduled",
                 "search",
                 "send",
                 "send-diff",
@@ -2470,7 +2514,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
