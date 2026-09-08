@@ -6,9 +6,13 @@
  * rendered text per variant, and that an unencodable identity — including
  * degenerate-length hex and short-payload npubs whose npubEncode outputs
  * carry valid checksums — renders the neutral label with no copy affordance,
- * never a fake npub. Static rendering does not exercise the clipboard
- * write behind the copy affordance or the popover the widget can open;
- * those interactions are outside this suite's scope.
+ * never a fake npub. The clipboard write behind the copy affordance and the
+ * popover the widget opens are real-bridge interactions owned by the E2E
+ * regressions: the full variant's copy is pinned by the new-DM recipient
+ * verification flow (tests/e2e/pubkey-display-screenshots.spec.ts) and the
+ * compact variant's by the agent-access owner hint
+ * (tests/e2e/agent-access-warning.spec.ts); both drive CopyRow through the
+ * mock bridge into the actual browser clipboard.
  */
 import assert from "node:assert/strict";
 import { after, afterEach, before, test } from "node:test";
