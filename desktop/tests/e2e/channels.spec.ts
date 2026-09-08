@@ -4177,8 +4177,9 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   expect(await memberRows.count()).toBeLessThan(50);
 
   // Generated members have no display name, so the roster sorts them by
-  // their npub fallback label: these sequential pubkeys share a `npub1qqq…`
-  // prefix and order by the checksum tail, not their numeric value. Resolve
+  // their full canonical npub: these sequential pubkeys share an
+  // `npub1qqq…` head and diverge mid-key, while the compact label's
+  // checksum tail is display-only and decides nothing. Resolve
   // a generated member from the rows the initial window actually rendered
   // instead of assuming `pubkeys[0]` sorts into that window.
   const generatedPubkeySet = new Set(pubkeys);

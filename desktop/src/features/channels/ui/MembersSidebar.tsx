@@ -16,7 +16,10 @@ import {
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
-import { formatMemberName } from "@/features/channels/lib/memberUtils";
+import {
+  compareMemberNames,
+  formatMemberName,
+} from "@/features/channels/lib/memberUtils";
 import {
   canAddChannelMembers,
   PRIVATE_CHANNEL_ADD_DENIED_MESSAGE,
@@ -120,7 +123,7 @@ function compareMembersForModal(
   if (currentPubkey && left.pubkey === currentPubkey) return -1;
   if (currentPubkey && right.pubkey === currentPubkey) return 1;
 
-  return formatMemberName(left).localeCompare(formatMemberName(right));
+  return compareMemberNames(left, right);
 }
 
 type MembersSidebarProps = {
