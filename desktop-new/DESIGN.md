@@ -103,7 +103,7 @@ Nine roles. Sans: `text-display` 32, `text-title` 24, `text-heading` 16/600,
 
 ## Colour structure
 
-Two layers, and only the role layer is used when building a screen.
+Two public layers, plus components: screens normally write a palette step, and use a role only for a decision a step cannot express.
 
 | Layer | Example | What it is |
 |---|---|---|
@@ -372,13 +372,14 @@ it is the rule a generated theme is measured against.
 
 Need something the system doesn't have? **Add it, mark it `proposed`, keep working.** There is no gate and no separate mechanism for one-offs — the moment the legal path is slower than writing a raw value, the system starts being bypassed.
 
-1. Search the role list by intent, not by colour.
-2. A state of an existing role — add the `-hover`, `-selected`, or `-disabled` sibling with both values.
-3. A material variant — add the `-glass` sibling with both values and its blur token.
-4. A new role using existing words — add the name, both values, a one-sentence description, and an owner.
-5. A new hue — generate its ramp, add roles pointing at steps. Never a literal.
-6. A new vocabulary word — allowed, but it is the thing the audit reports on its own line, so use an existing word if one fits.
-7. **Never write a raw value.** If nothing above applies, say so rather than reaching for a literal.
+1. Search the component list, then the role list, by intent — not by colour.
+2. If the decision is one ramp step in both modes, write that step directly. `bg-purple-3`, `text-red-12`, `border-purple-8`: the steps are public and mode-aware.
+3. A state of an existing role — add the `-hover`, `-selected`, or `-disabled` sibling with both values, only if that state cannot be one step in both modes.
+4. A material variant — add a named utility that carries its inseparable parts together. Glass is the example: its fill is deliberately not reachable alone, because fill without blur, rim, and lift is not glass.
+5. A new role using existing words — only where one step cannot express both modes, or where the name enforces a rule. Add the name, both values, a one-sentence description, and an owner.
+6. A new hue — generate its ramp. Never write a raw literal in a component; the palette is where literals live.
+7. A new vocabulary word — allowed, but it is the thing the audit reports on its own line, so use an existing word if one fits.
+8. **If none fit, stop and ask.** The answer is a proposed decision, not a raw value or an undocumented local exception.
 
 Every addition lands in `src/shared/tokens/registry.ts` in the same change that needed it. Promotion from `proposed` to `core` is a metadata change, not a rename.
 
