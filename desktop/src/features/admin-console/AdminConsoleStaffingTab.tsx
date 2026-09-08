@@ -36,6 +36,8 @@ import {
   type AdminOperatorDto,
 } from "./api";
 import {
+  adminErrorMessage,
+  adminMutationRelayStatus,
   type AsyncState,
   ErrorMessage,
   LoadingSpinner,
@@ -187,12 +189,13 @@ export function StaffingTab({
       setAddPubkey("");
       setListGen((g) => g + 1);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // 409 = config-backed key; surface clearly
+      // 409 = config-backed key; surface clearly. A typed AdminMutationError
+      // carries the relay's status, so classify on it rather than string-matching
+      // the message — the native transport layer never embeds "409" in the text.
       setAddError(
-        msg.includes("409")
+        adminMutationRelayStatus(e) === 409
           ? "This pubkey is config-backed and cannot be changed via the API."
-          : msg,
+          : adminErrorMessage(e),
       );
     } finally {
       setIsAdding(false);
@@ -210,11 +213,10 @@ export function StaffingTab({
       await putAdminOperator(origin, op.pubkey, newRole);
       setListGen((g) => g + 1);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
       setActionError(
-        msg.includes("409")
+        adminMutationRelayStatus(e) === 409
           ? `Cannot change ${truncatePubkey(op.pubkey)}: config-backed key.`
-          : msg,
+          : adminErrorMessage(e),
       );
     } finally {
       setWorkingPubkey(null);
@@ -231,11 +233,10 @@ export function StaffingTab({
       await deleteAdminOperator(origin, op.pubkey);
       setListGen((g) => g + 1);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
       setActionError(
-        msg.includes("409")
+        adminMutationRelayStatus(e) === 409
           ? `Cannot remove ${truncatePubkey(op.pubkey)}: config-backed key.`
-          : msg,
+          : adminErrorMessage(e),
       );
     } finally {
       setWorkingPubkey(null);

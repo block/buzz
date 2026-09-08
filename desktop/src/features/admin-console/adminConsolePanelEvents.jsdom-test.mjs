@@ -6186,6 +6186,12 @@ test("staffing-role-change-success: role selector change calls putAdminOperator 
 test("staffing-role-change-409: a 409 conflict from putAdminOperator surfaces the config-backed copy", async () => {
   // Verifies that a 409 response to a role change is surfaced as a clear
   // config-backed error message, not a raw error string.
+  //
+  // The handler classifies on the typed AdminMutationError's `relayStatus`
+  // (adminMutationRelayStatus), NOT by string-matching "409" in the message.
+  // Rejecting with the typed wire shape (mutationReject) is what proves the
+  // typed path: a bare `new Error("409: …")` would carry no relayStatus and so
+  // would fall through to adminErrorMessage — the very defect this guards.
   const origin = "https://admin-staffing-role-reject.example.com";
   const pubkey = "07".repeat(32);
   const opPubkey = "18".repeat(32);
@@ -6196,8 +6202,12 @@ test("staffing-role-change-409: a 409 conflict from putAdminOperator surfaces th
       { pubkey: opPubkey, effectiveRole: "moderator", sources: ["db"] },
     ]),
   );
+  // The message deliberately omits "409" and "config" — this reproduces a
+  // native-transport AdminMutationError whose text carries no HTTP status. Only
+  // the typed `relayStatus` reveals the 409, so a string-match on the message
+  // would misclassify and fall through, making this test falsifiable.
   setIpcHandler("admin_put_operator", () =>
-    Promise.reject(new Error("409: config-backed operator")),
+    mutationReject("transport error: operator entry is immutable", 409),
   );
 
   const { container, doRender, unmount } = mountPanel({
@@ -6232,8 +6242,201 @@ test("staffing-role-change-409: a 409 conflict from putAdminOperator surfaces th
       "an error message element must appear after rejected role change",
     );
     assert.ok(
-      errEls.some((el) => el.textContent.toLowerCase().includes("config")),
+      errEls.some((el) =>
+        el.textContent.toLowerCase().includes("config-backed"),
+      ),
       `error must mention config-backed key; got: ${errEls.map((e) => e.textContent).join(", ")}`,
+    );
+    // The raw transport message must never leak — only the typed-branch copy.
+    assert.ok(
+      !errEls.some((el) => el.textContent.includes("transport error")),
+      "raw transport message must not render when relayStatus is 409",
+    );
+  } finally {
+    await unmount();
+  }
+});
+
+test("staffing-add-409: a typed 409 from putAdminOperator surfaces the config-backed copy; a non-409 renders adminErrorMessage", async () => {
+  // handleAdd classifies on the typed AdminMutationError's `relayStatus`
+  // (adminMutationRelayStatus), not by string-matching "409" on the message.
+  // A 409 → config-backed copy; any other rejection → adminErrorMessage's
+  // parsed envelope message, never the raw serialized error.
+  const origin = "https://admin-staffing-add-reject.example.com";
+  const pubkey = "07".repeat(32);
+  const newPubkey = "19".repeat(32);
+
+  // The 409 message omits "409"/"config" so only the typed `relayStatus`
+  // classifies it — a string-match on the message would misclassify, making
+  // Case 1 falsifiable against the pre-fix code.
+  let putResult = () =>
+    mutationReject("transport error: operator entry is immutable", 409);
+  setIpcHandler("admin_list_reports", () => Promise.resolve([]));
+  setIpcHandler("admin_list_operators", () => Promise.resolve([]));
+  setIpcHandler("admin_put_operator", () => putResult());
+
+  const { container, doRender, unmount } = mountPanel({
+    origin,
+    pubkey,
+    canMutate: true,
+    role: "operator",
+    initialTab: "staffing",
+  });
+  await doRender();
+  await settle(30);
+
+  try {
+    const pubkeyInput = container.querySelector(
+      "[data-testid='staffing-add-pubkey-input']",
+    );
+    assert.ok(pubkeyInput, "pubkey input must be present");
+    const addBtn = container.querySelector("[data-testid='staffing-add-btn']");
+    assert.ok(addBtn, "Add button must be present");
+
+    // ── Case 1: typed 409 → config-backed copy ──
+    await act(async () => {
+      fireEvent.change(pubkeyInput, { target: { value: newPubkey } });
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    await act(async () => {
+      fireEvent.click(addBtn);
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    let errEls = Array.from(
+      container.querySelectorAll(
+        "[data-testid='staffing-tab'] .text-destructive",
+      ),
+    );
+    assert.ok(
+      errEls.some((el) =>
+        el.textContent.toLowerCase().includes("config-backed"),
+      ),
+      `409 add must surface config-backed copy; got: ${errEls.map((e) => e.textContent).join(", ")}`,
+    );
+
+    // ── Case 2: non-409 typed failure → adminErrorMessage's envelope text ──
+    putResult = () =>
+      mutationReject(
+        'admin API error: {"error":{"code":"forbidden","message":"pubkey not permitted"}}',
+        403,
+      );
+    await act(async () => {
+      fireEvent.change(pubkeyInput, { target: { value: newPubkey } });
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    await act(async () => {
+      fireEvent.click(addBtn);
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    errEls = Array.from(
+      container.querySelectorAll(
+        "[data-testid='staffing-tab'] .text-destructive",
+      ),
+    );
+    assert.ok(
+      errEls.some((el) => el.textContent.includes("pubkey not permitted")),
+      `non-409 add must surface adminErrorMessage envelope text; got: ${errEls.map((e) => e.textContent).join(", ")}`,
+    );
+    assert.ok(
+      !errEls.some((el) => el.textContent.includes("admin API error")),
+      "non-409 add must not render the raw serialized error prefix",
+    );
+  } finally {
+    await unmount();
+  }
+});
+
+test("staffing-remove-409: a typed 409 from deleteAdminOperator surfaces the config-backed copy; a non-409 renders adminErrorMessage", async () => {
+  // handleConfirmRemove classifies on the typed AdminMutationError's
+  // `relayStatus` (adminMutationRelayStatus), matching add/role-change. A 409
+  // → config-backed copy; any other rejection → adminErrorMessage's envelope
+  // message, never the raw serialized error.
+  const origin = "https://admin-staffing-remove-reject.example.com";
+  const pubkey = "07".repeat(32);
+  const opPubkey = "1a".repeat(32);
+
+  // The 409 message omits "409"/"config" so only the typed `relayStatus`
+  // classifies it — a string-match on the message would misclassify, making
+  // Case 1 falsifiable against the pre-fix code.
+  let deleteResult = () =>
+    mutationReject("transport error: operator entry is immutable", 409);
+  setIpcHandler("admin_list_reports", () => Promise.resolve([]));
+  setIpcHandler("admin_list_operators", () =>
+    Promise.resolve([
+      { pubkey: opPubkey, effectiveRole: "moderator", sources: ["db"] },
+    ]),
+  );
+  setIpcHandler("admin_delete_operator", () => deleteResult());
+
+  const { container, doRender, unmount } = mountPanel({
+    origin,
+    pubkey,
+    canMutate: true,
+    role: "operator",
+    initialTab: "staffing",
+  });
+  await doRender();
+  await settle(30);
+
+  const confirmRemove = async () => {
+    const removeBtn = container.querySelector(
+      `[data-testid='staffing-remove-btn-${opPubkey}']`,
+    );
+    assert.ok(removeBtn !== null, "remove button must be present");
+    await act(async () => {
+      fireEvent.click(removeBtn);
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    const confirmBtn = document.body.querySelector(
+      "[data-testid='staffing-remove-confirm']",
+    );
+    assert.ok(confirmBtn !== null, "confirm button must be present in dialog");
+    await act(async () => {
+      fireEvent.click(confirmBtn);
+      await new Promise((r) => setTimeout(r, 30));
+    });
+  };
+
+  try {
+    // ── Case 1: typed 409 → config-backed copy ──
+    await confirmRemove();
+
+    let errEls = Array.from(
+      container.querySelectorAll(
+        "[data-testid='staffing-tab'] [class*='destructive']",
+      ),
+    );
+    assert.ok(
+      errEls.some((el) =>
+        el.textContent.toLowerCase().includes("config-backed"),
+      ),
+      `409 remove must surface config-backed copy; got: ${errEls.map((e) => e.textContent).join(", ")}`,
+    );
+
+    // ── Case 2: non-409 typed failure → adminErrorMessage's envelope text ──
+    deleteResult = () =>
+      mutationReject(
+        'admin API error: {"error":{"code":"internal","message":"operator store unavailable"}}',
+        500,
+      );
+    await confirmRemove();
+
+    errEls = Array.from(
+      container.querySelectorAll(
+        "[data-testid='staffing-tab'] [class*='destructive']",
+      ),
+    );
+    assert.ok(
+      errEls.some((el) =>
+        el.textContent.includes("operator store unavailable"),
+      ),
+      `non-409 remove must surface adminErrorMessage envelope text; got: ${errEls.map((e) => e.textContent).join(", ")}`,
+    );
+    assert.ok(
+      !errEls.some((el) => el.textContent.includes("admin API error")),
+      "non-409 remove must not render the raw serialized error prefix",
     );
   } finally {
     await unmount();
