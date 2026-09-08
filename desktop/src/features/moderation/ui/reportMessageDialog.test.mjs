@@ -43,3 +43,10 @@ test("fallback-non-error: non-Error input returns generic string", () => {
 test("fallback-empty-error-message: Error with empty message returns generic string", () => {
   assert.equal(reportErrorMessage(new Error("")), "Failed to submit report");
 });
+
+test("preserves-non-status-numeric-prefix: only 4xx/5xx prefixes strip, others survive verbatim", () => {
+  // "1234: rule id" is not an HTTP status prefix — keep it intact.
+  assert.equal(reportErrorMessage(new Error("1234: rule id")), "1234: rule id");
+  // "200: ok" is a numeric prefix but not a 4xx/5xx rejection — keep it intact.
+  assert.equal(reportErrorMessage(new Error("200: ok")), "200: ok");
+});

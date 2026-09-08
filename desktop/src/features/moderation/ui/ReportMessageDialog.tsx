@@ -38,7 +38,7 @@ export function reportErrorMessage(error: unknown): string {
     const msg = error.message;
     // Surface the relay's own reason verbatim. Strip any raw status prefix
     // (e.g. "400: ") so the copy reads naturally in a toast.
-    const stripped = msg.replace(/^\d{3}:\s*/, "").trim();
+    const stripped = msg.replace(/^[45]\d\d:\s?/, "").trim();
     return stripped || "Failed to submit report";
   }
   return "Failed to submit report";
