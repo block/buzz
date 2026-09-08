@@ -517,6 +517,16 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,
 
+    /// Recycle an idle worker after this many seconds, releasing cached CLI
+    /// sessions and their MCP children. 0 disables the idle bound.
+    #[arg(long, env = "BUZZ_ACP_WORKER_IDLE_TTL", default_value_t = 300)]
+    pub worker_idle_ttl: u64,
+
+    /// Recycle a worker between turns after this many session creations.
+    /// Counts rotated/invalidated sessions too. 0 disables the session bound.
+    #[arg(long, env = "BUZZ_ACP_WORKER_MAX_SESSIONS", default_value_t = 4)]
+    pub worker_max_sessions: u32,
+
     /// Unix-seconds replay floor for the startup watermark. A publish-first
     /// mention send publishes the triggering message and then spawns this
     /// harness, passing the send timestamp here so the first REQ replays past
@@ -614,6 +624,8 @@ pub struct Config {
     /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
     /// Only meaningful when `lazy_pool` is true.
     pub idle_pool_sleep_secs: u64,
+    pub worker_idle_ttl_secs: u64,
+    pub worker_max_sessions: u32,
     /// Optional unix-seconds replay floor for the startup watermark
     /// (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`), set by a publish-first
     /// mention send so the first REQ replays past the already-published
@@ -1200,6 +1212,8 @@ impl Config {
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
+            worker_idle_ttl_secs: args.worker_idle_ttl,
+            worker_max_sessions: args.worker_max_sessions,
             replay_floor_unix: args.replay_floor,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
@@ -1576,6 +1590,8 @@ mod tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            worker_idle_ttl_secs: 300,
+            worker_max_sessions: 4,
             replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,

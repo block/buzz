@@ -975,6 +975,7 @@ impl AgentPool {
 
     /// Return an agent to its slot after a task completes.
     pub fn return_agent(&mut self, mut agent: OwnedAgent) {
+        agent.acp.retention.mark_idle(std::time::Instant::now());
         let stale_scopes: Vec<SessionScope> = agent
             .state
             .sessions
@@ -1007,6 +1008,29 @@ impl AgentPool {
             );
         }
         self.agents[idx] = Some(agent);
+    }
+
+    /// Take only idle workers whose retained provider resources reached a
+    /// bound. Checked-out workers and queued messages are never touched.
+    pub fn take_expired_workers(
+        &mut self,
+        idle_ttl: Duration,
+        max_sessions: u32,
+    ) -> Vec<OwnedAgent> {
+        let now = std::time::Instant::now();
+        let mut expired = Vec::new();
+        for slot in &mut self.agents {
+            if slot
+                .as_ref()
+                .is_some_and(|a| a.acp.retention.expired(now, idle_ttl, max_sessions))
+            {
+                let agent = slot.take().unwrap();
+                self.session_owners
+                    .retain(|_, owner| owner.agent_index != agent.index);
+                expired.push(agent);
+            }
+        }
+        expired
     }
 
     /// Whether any agent is currently idle (sitting in its slot).

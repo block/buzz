@@ -15,6 +15,7 @@ mod relay;
 mod scope;
 mod setup_mode;
 mod usage;
+mod worker_retention;
 
 pub use usage::TurnUsage;
 
@@ -1935,6 +1936,8 @@ struct SlotCircuit {
     /// Prevents duplicate spawns from maintenance ticks that fire before the
     /// previous spawn_and_init completes.
     respawn_in_flight: bool,
+    /// Keep live model choices across failed planned replacement attempts.
+    model_state: Option<WorkerModelState>,
 }
 
 /// Result of [`SlotCircuit::record_crash`].
@@ -2319,6 +2322,7 @@ mod idle_pool_sleep_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight,
+            model_state: None,
         }
     }
 
@@ -2909,6 +2913,7 @@ async fn tokio_main() -> Result<()> {
     // starved by the biased select. Slot refill spawns background tasks so
     // spawn_and_init never blocks the main loop.
     let maintenance_interval = Duration::from_secs(30);
+    let mut maintenance_wake = tokio::time::interval(maintenance_interval);
     let mut last_maintenance = std::time::Instant::now();
 
     // Channel for background respawn tasks to return completed agents.
@@ -2993,6 +2998,7 @@ async fn tokio_main() -> Result<()> {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         })
         .collect();
 
@@ -3048,6 +3054,14 @@ async fn tokio_main() -> Result<()> {
         if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
+            recycle_idle_workers(
+                &mut pool,
+                &config,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                observer.clone(),
+            );
 
             // Slot refill: spawn background tasks for empty slots whose
             // circuit breaker allows it. spawn_and_init runs off the main
@@ -3110,6 +3124,10 @@ async fn tokio_main() -> Result<()> {
                         goose_system_prompt_supported: None,
                         protocol_version,
                     };
+                    let mut agent = agent;
+                    if let Some(model_state) = crash_history[rr.index].model_state.take() {
+                        model_state.restore(&mut agent);
+                    }
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
                     respawn_collected = true;
@@ -3153,6 +3171,7 @@ async fn tokio_main() -> Result<()> {
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
                 biased;
+                _ = maintenance_wake.tick() => None,
                 // recv() returning None means all senders dropped (pool was torn down).
                 // Break cleanly instead of panicking.
                 r = result_rx.recv(), if pool_ready => match r {
@@ -5009,13 +5028,7 @@ fn handle_prompt_result(
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {
-            let is_transport_error = matches!(
-                e,
-                acp::AcpError::Io(_)
-                    | acp::AcpError::WriteTimeout(_)
-                    | acp::AcpError::Timeout(_)
-                    | acp::AcpError::Protocol(_)
-            );
+            let is_transport_error = e.requires_respawn();
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
                 _ => None,
@@ -5039,7 +5052,7 @@ fn handle_prompt_result(
                     slot_history,
                     respawn_tx,
                     respawn_tasks,
-                    observer,
+                    observer.clone(),
                 ) && pool.live_count() == 0
                     && !any_respawn_in_flight(crash_history)
                 {
@@ -5060,6 +5073,14 @@ fn handle_prompt_result(
             }
         }
     }
+    recycle_idle_workers(
+        pool,
+        config,
+        crash_history,
+        respawn_tx,
+        respawn_tasks,
+        observer,
+    );
     LoopAction::Continue
 }
 
@@ -5356,6 +5377,71 @@ fn default_heartbeat_prompt() -> String {
          Do not run `buzz channels list` or `buzz messages search` unless you have a specific reason.\n\
          Do not invent work — only act on items surfaced by the feed commands."
     )
+}
+
+/// Live model choices must survive routine resource reclamation.
+struct WorkerModelState {
+    desired_model: Option<String>,
+    overridden: bool,
+    request_id: Option<String>,
+    pending_ack: bool,
+    effort: Option<String>,
+}
+
+impl WorkerModelState {
+    fn take(agent: &mut OwnedAgent) -> Self {
+        Self {
+            desired_model: agent.desired_model.take(),
+            overridden: agent.model_overridden,
+            request_id: agent.desired_model_request_id.take(),
+            pending_ack: agent.desired_model_pending_ack,
+            effort: agent.startup_effort.take(),
+        }
+    }
+    fn restore(self, agent: &mut OwnedAgent) {
+        agent.desired_model = self.desired_model;
+        agent.model_overridden = self.overridden;
+        agent.desired_model_request_id = self.request_id;
+        agent.desired_model_pending_ack = self.pending_ack;
+        agent.startup_effort = self.effort;
+    }
+}
+
+/// Reclaim provider sessions (including ones removed from the session registry)
+/// and MCP descendants without disconnecting from the relay or losing its queue.
+/// Only idle slots are eligible. Shutdown and initialization run off the relay loop.
+fn recycle_idle_workers(
+    pool: &mut AgentPool,
+    config: &Config,
+    slots: &mut [SlotCircuit],
+    respawn_tx: &mpsc::Sender<RespawnResult>,
+    tasks: &mut tokio::task::JoinSet<()>,
+    observer: Option<observer::ObserverHandle>,
+) {
+    for mut old in pool.take_expired_workers(
+        Duration::from_secs(config.worker_idle_ttl_secs),
+        config.worker_max_sessions,
+    ) {
+        let index = old.index;
+        slots[index].respawn_in_flight = true;
+        // Planned maintenance is not a crash and must not trip the breaker.
+        let guard = RespawnGuard::new(index, respawn_tx.clone());
+        slots[index].model_state = Some(WorkerModelState::take(&mut old));
+        let cmd = config.agent_command.clone();
+        let args = config.agent_args.clone();
+        let env = config.persona_env_vars.clone();
+        let has_codex = config.has_generated_codex_config;
+        let observer = observer.clone();
+        tracing::info!(
+            agent = index,
+            "recycling idle worker to release retained sessions"
+        );
+        tasks.spawn(async move {
+            old.acp.shutdown().await;
+            drop(old);
+            guard.send(spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await);
+        });
+    }
 }
 
 /// Spawn a background respawn task for a crashed agent slot.
@@ -9178,6 +9264,8 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            worker_idle_ttl_secs: 300,
+            worker_max_sessions: 4,
             replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
@@ -9404,6 +9492,8 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            worker_idle_ttl_secs: 300,
+            worker_max_sessions: 4,
             replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
@@ -9449,6 +9539,140 @@ mod error_outcome_emission_tests {
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn nested_cli_death_replaces_worker_and_preserves_failed_message() {
+        for (code, message) in [
+            (1001, "Codex process has exited with code 0: startup warning"),
+            (-32603, "Internal error: The Claude Agent process exited unexpectedly. Please start a new session."),
+        ] {
+            let channel_id = Uuid::new_v4();
+            let scope = scope::SessionScope::Conversation { channel_id };
+            let event = EventBuilder::new(Kind::Custom(9), "keep this request")
+                .sign_with_keys(&Keys::generate()).unwrap();
+            let batch = FlushBatch {
+                channel_id, scope: scope.clone(),
+                events: vec![BatchEvent { event, prompt_tag: "test".into(), received_at: std::time::Instant::now() }],
+                cancelled_events: vec![], cancel_reason: None,
+            };
+            let mut pool = AgentPool::from_slots(vec![None]);
+            let task_id = pool.join_set.spawn(async {}).id();
+            pool.task_map_mut().insert(task_id, crate::pool::TaskMeta {
+                agent_index: 0, channel_id: Some(channel_id), scope: Some(scope.clone()),
+                turn_id: "test".into(), recoverable_batch: None, control_tx: None,
+                steer_tx: None, successful_steer_deliveries: HashSet::new(),
+            });
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            let mut circuits = vec![SlotCircuit { crash_times: vec![], open_until: None, respawn_in_flight: false, model_state: None }];
+            let (tx, _rx) = mpsc::channel(1);
+            let mut tasks = tokio::task::JoinSet::new();
+            handle_prompt_result(&mut pool, &mut queue, &test_config(), PromptResult {
+                agent: dummy_agent(0).await, source: PromptSource::Channel(scope),
+                turn_id: "test".into(), outcome: PromptOutcome::Error(acp::AcpError::AgentError { code, message: message.into() }), batch: Some(batch),
+            }, &mut false, &HashSet::new(), &mut circuits, &tx, &mut tasks, None, None);
+            assert!(!pool.any_idle(), "dead adapter must not be returned for reuse");
+            assert!(circuits[0].respawn_in_flight);
+            assert_eq!(queue.queued_event_count(channel_id), 1);
+            tasks.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn retention_never_takes_checked_out_workers_or_churns_unused_slots() {
+        let mut busy = dummy_agent(0).await;
+        busy.acp.retention.session_created();
+        let unused = dummy_agent(1).await;
+        let mut pool = AgentPool::from_slots(vec![Some(busy), Some(unused)]);
+        let checked_out = pool.try_claim(None).unwrap();
+        assert!(pool.take_expired_workers(Duration::ZERO, 1).is_empty());
+        pool.return_agent(checked_out);
+        let mut expired = pool.take_expired_workers(Duration::ZERO, 1);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].index, 0);
+        assert!(pool.any_idle(), "unused worker remains available");
+        expired[0].acp.shutdown().await;
+        shutdown_agent_pool(&mut pool).await;
+    }
+
+    #[tokio::test]
+    async fn planned_recycle_initializes_replacement_and_preserves_live_model() {
+        let mut agent = dummy_agent(0).await;
+        agent.acp.retention.session_created();
+        agent.desired_model = Some("live-override".into());
+        agent.model_overridden = true;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        pool.return_agent(agent);
+        let mut config = test_config();
+        config.worker_max_sessions = 1;
+        config.agent_command = "sh".into();
+        config.agent_args = vec!["-c".into(),
+            r#"read line; echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"test-adapter"}}}'; cat"#.into()];
+        let mut circuits = vec![SlotCircuit {
+            crash_times: vec![],
+            open_until: None,
+            respawn_in_flight: false,
+            model_state: None,
+        }];
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut tasks = tokio::task::JoinSet::new();
+        recycle_idle_workers(&mut pool, &config, &mut circuits, &tx, &mut tasks, None);
+        let rr = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (mut acp, version, name) = rr.result.unwrap();
+        assert_eq!(rr.index, 0);
+        assert_eq!(version, 1);
+        assert_eq!(name, "test-adapter");
+        assert!(!acp
+            .retention
+            .expired(std::time::Instant::now(), Duration::ZERO, 1));
+        let mut replacement = dummy_agent(0).await;
+        circuits[0]
+            .model_state
+            .take()
+            .unwrap()
+            .restore(&mut replacement);
+        assert_eq!(replacement.desired_model.as_deref(), Some("live-override"));
+        assert!(replacement.model_overridden);
+        assert!(circuits[0].crash_times.is_empty());
+        acp.shutdown().await;
+        replacement.acp.shutdown().await;
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn planned_recycle_preserves_queue_and_does_not_count_as_crash() {
+        let mut agent = dummy_agent(0).await;
+        agent.acp.retention.session_created();
+        agent.desired_model = Some("custom-model".into());
+        agent.model_overridden = true;
+        agent.startup_effort = Some("high".into());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        pool.return_agent(agent);
+        let mut config = test_config();
+        config.worker_max_sessions = 1;
+        let mut circuits = vec![SlotCircuit {
+            crash_times: vec![],
+            open_until: None,
+            respawn_in_flight: false,
+            model_state: None,
+        }];
+        let (tx, _rx) = mpsc::channel(1);
+        let mut tasks = tokio::task::JoinSet::new();
+        recycle_idle_workers(&mut pool, &config, &mut circuits, &tx, &mut tasks, None);
+        assert!(!pool.any_idle());
+        assert!(circuits[0].respawn_in_flight);
+        assert!(circuits[0].crash_times.is_empty());
+        let saved = circuits[0].model_state.as_ref().unwrap();
+        assert_eq!(saved.desired_model.as_deref(), Some("custom-model"));
+        assert!(saved.overridden);
+        assert_eq!(saved.effort.as_deref(), Some("high"));
+        // Failed initialization must not discard the live model override.
+        circuits[0].mark_spawn_failed();
+        assert!(circuits[0].model_state.is_some());
+        tasks.shutdown().await;
     }
 
     fn bind_agent_scope_owner(
@@ -9508,6 +9732,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -9588,6 +9813,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -9709,6 +9935,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -9774,6 +10001,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -9858,6 +10086,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -9951,6 +10180,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: Some(std::time::Instant::now() + Duration::from_secs(3600)),
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10044,6 +10274,7 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                model_state: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10141,6 +10372,7 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                model_state: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10249,6 +10481,7 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                model_state: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10327,6 +10560,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10423,6 +10657,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10555,6 +10790,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10686,6 +10922,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10820,6 +11057,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -10975,6 +11213,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -11063,6 +11302,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            model_state: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
