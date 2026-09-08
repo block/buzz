@@ -286,12 +286,15 @@ export function prepareBackgroundLinkPreviews(
     skip,
   });
 
+  const preparations = external.map((candidate) =>
+    prepareLinkPreview(candidate),
+  );
   const pending = external.some(
     (candidate) => !jobs.get(candidate.href)?.settled,
   );
   if (!pending) {
     return preparedSend(
-      Promise.all(external.map(prepareLinkPreview)).then((tags) => ({
+      Promise.all(preparations).then((tags) => ({
         status: "ready" as const,
         tags: tags.filter((tag): tag is string[] => tag !== null),
       })),
@@ -347,7 +350,7 @@ export function prepareBackgroundLinkPreviews(
     () => complete({ status: "ready", tags: availableTags() }, true),
     timeoutMs,
   );
-  void Promise.all(external.map(prepareLinkPreview)).then((tags) => {
+  void Promise.all(preparations).then((tags) => {
     complete({
       status: "ready",
       tags: tags.filter((tag): tag is string[] => tag !== null),
