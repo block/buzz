@@ -57,7 +57,8 @@ Whenever an agent creates a task channel, it replies where the creation was trig
 - Start with a bare channel, then add a task or branch view.
 - Start with a branch channel, then add a task view.
 - Represent work requiring multiple implementation branches as a parent task with branch-backed subtasks.
-- Have the task-creation API record the originating conversation and automatically post a link to the new task channel there.
+- Render a client-side "Task created" transition in an originating conversation when a task canvas references it through `originating_thread`.
+- Have the task-creation API record the originating conversation as a native relationship so clients can render the transition without requiring a stored message.
 - Turn this decision flow into an API so agents declare their intent and Buzz creates or reuses the correct channel and bindings.
 
 We will update this document with what each experiment teaches us and which behavior requires native client or relay support.
