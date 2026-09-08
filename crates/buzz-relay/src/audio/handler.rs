@@ -1371,9 +1371,8 @@ pub(crate) async fn handle_active_audio_connection(
         disconnect_reason,
     ));
 
-    let hb_cancel = cancel.clone();
     let hb_missed = Arc::clone(&missed_pongs);
-    let heartbeat_task = tokio::spawn(heartbeat_loop(ctrl_tx.clone(), hb_missed, hb_cancel));
+    let heartbeat_task = tokio::spawn(heartbeat_loop(ctrl_tx.clone(), hb_missed, control.clone()));
 
     let fwd_cancel = cancel.child_token();
     let forward_task = tokio::spawn(audio_forward_loop(
@@ -1382,7 +1381,7 @@ pub(crate) async fn handle_active_audio_connection(
         data_tx,
         ctrl_tx.clone(),
         fwd_cancel,
-        cancel.clone(),
+        control.clone(),
     ));
 
     // NIP-FI session-lifetime enforcement task was armed before admission
@@ -1401,6 +1400,7 @@ pub(crate) async fn handle_active_audio_connection(
     //     `UnregisterPeer` + `Goodbye(SessionEnded)` so the owner drops us.
     let reader_task = remote_stream.map(|mut stream| {
         let reader_cancel = cancel.clone();
+        let reader_control = control.clone();
         let fence = remote_fence.expect("remote_fence set whenever remote_stream is");
         let fenced = remote_session
             .as_ref()
@@ -1425,7 +1425,7 @@ pub(crate) async fn handle_active_audio_connection(
                     roster_revision,
                     &roster_ctrl_tx,
                 ) => {
-                    teardown_remote_huddle(cause, channel_id, &reader_cancel, &fence);
+                    teardown_remote_huddle(cause, channel_id, &reader_control, &fence);
                 }
                 _ = reader_cancel.cancelled() => {
                     crate::audio::join::send_clean_close(&mut stream, fenced, &pubkey).await;
@@ -1447,6 +1447,7 @@ pub(crate) async fn handle_active_audio_connection(
                 .audio_fence,
         );
         let owner_cancel = cancel.clone();
+        let owner_control = control.clone();
         Some(tokio::spawn(async move {
             let lost_fired = async {
                 match &owner_lost {
@@ -1466,7 +1467,7 @@ pub(crate) async fn handle_active_audio_connection(
                         channel_id = %channel_id,
                         "huddle owner is draining — closing local client for rejoin"
                     );
-                    owner_cancel.cancel();
+                    owner_control.lifecycle_cancel();
                     fence.forget(channel_id);
                 }
                 _ = lost_fired => {
@@ -1474,7 +1475,7 @@ pub(crate) async fn handle_active_audio_connection(
                         channel_id = %channel_id,
                         "huddle owner lost its lease — closing local client for rejoin"
                     );
-                    owner_cancel.cancel();
+                    owner_control.lifecycle_cancel();
                     fence.forget(channel_id);
                 }
                 _ = owner_cancel.cancelled() => {}
@@ -1496,7 +1497,7 @@ pub(crate) async fn handle_active_audio_connection(
     )
     .await;
 
-    cancel.cancel();
+    control.lifecycle_cancel();
     let _ = send_task.await;
     let _ = heartbeat_task.await;
     let _ = forward_task.await;
@@ -1641,7 +1642,7 @@ pub(crate) async fn handle_active_audio_connection(
 fn teardown_remote_huddle(
     cause: crate::audio::join::HuddleTeardownCause,
     channel_id: Uuid,
-    cancel: &CancellationToken,
+    control: &CommunityConnectionControl,
     fence: &crate::audio::mesh::GenerationFloor,
 ) {
     info!(
@@ -1649,7 +1650,7 @@ fn teardown_remote_huddle(
         ?cause,
         "owner tore down cross-pod huddle session — closing client for rejoin"
     );
-    cancel.cancel();
+    control.lifecycle_cancel();
     fence.forget(channel_id);
 }
 
@@ -1867,7 +1868,7 @@ async fn audio_forward_loop(
     data_tx: mpsc::Sender<WsMessage>,
     ctrl_tx: mpsc::Sender<WsMessage>,
     cancel: CancellationToken,
-    connection_cancel: CancellationToken,
+    connection_control: CommunityConnectionControl,
 ) {
     loop {
         tokio::select! {
@@ -1881,12 +1882,12 @@ async fn audio_forward_loop(
                             // State-bearing roster control may not be dropped.
                             // Closing the connection forces admission to replay
                             // a fresh authoritative snapshot.
-                            connection_cancel.cancel();
+                            connection_control.lifecycle_cancel();
                             break;
                         }
                     }
                     Some(PeerCtrl::Close) | None => {
-                        connection_cancel.cancel();
+                        connection_control.lifecycle_cancel();
                         break;
                     }
                 }
@@ -1906,25 +1907,26 @@ async fn audio_forward_loop(
 async fn heartbeat_loop(
     ws_tx: mpsc::Sender<WsMessage>,
     missed_pongs: Arc<AtomicU8>,
-    cancel: CancellationToken,
+    control: CommunityConnectionControl,
 ) {
     let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
     loop {
+        let cancelled = control.cancellation_token();
         tokio::select! {
             _ = interval.tick() => {
                 // fetch_add returns the previous value; +1 gives the current count.
                 let missed = missed_pongs.fetch_add(1, Ordering::Relaxed) + 1;
                 if missed >= MAX_MISSED_PONGS {
                     warn!("audio: {missed} missed pongs — closing connection");
-                    cancel.cancel();
+                    control.lifecycle_cancel();
                     break;
                 }
                 if ws_tx.try_send(WsMessage::Ping(axum::body::Bytes::new())).is_err() {
-                    cancel.cancel();
+                    control.lifecycle_cancel();
                     break;
                 }
             }
-            _ = cancel.cancelled() => break,
+            _ = cancelled.cancelled() => break,
         }
     }
 }
@@ -2731,6 +2733,8 @@ mod tests {
             .expect("queue state-bearing control");
         let task_cancel = CancellationToken::new();
         let connection_cancel = CancellationToken::new();
+        let connection_control =
+            crate::state::CommunityConnectionControl::new(connection_cancel.clone());
 
         audio_forward_loop(
             audio_rx,
@@ -2738,7 +2742,7 @@ mod tests {
             data_tx,
             ctrl_tx,
             task_cancel,
-            connection_cancel.clone(),
+            connection_control,
         )
         .await;
 
@@ -2756,6 +2760,8 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
         let task_cancel = CancellationToken::new();
         let connection_cancel = CancellationToken::new();
+        let connection_control =
+            crate::state::CommunityConnectionControl::new(connection_cancel.clone());
 
         let forward = tokio::spawn(audio_forward_loop(
             audio_rx,
@@ -2763,7 +2769,7 @@ mod tests {
             data_tx,
             ctrl_tx,
             task_cancel,
-            connection_cancel.clone(),
+            connection_control,
         ));
         drop(peer_ctrl_tx);
 

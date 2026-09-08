@@ -4499,4 +4499,255 @@ pub(crate) mod tests {
             "W_lifecycle_cancel_race: cancel must be set after both calls"
         );
     }
+
+    // ── W_root_manager_drain_race: production-wiring witness ─────────────────
+    //
+    // Proves that a real `ConnectionManager::disconnect_nip_fi()` denial payload
+    // is visible to the consumer before `drain_all()`'s `lifecycle_cancel()` fires
+    // the cancellation token, using actual `ConnectionManager::register()` wiring.
+    //
+    // The current `w_lifecycle_cancel_race` calls the primitives directly on a
+    // bare control; this witness exercises the full production call path:
+    //   manager.set_authenticated_pubkey → manager.disconnect_nip_fi() → [hook]
+    //   → manager.drain_all() calls lifecycle_cancel() on the same entry.
+    //
+    // Setup:
+    //   1. Register one connection with a known pubkey via `ConnectionManager::register`.
+    //   2. Call `set_authenticated_pubkey` so `disconnect_nip_fi` matches it.
+    //   3. Arm `manager_race_test_hook`: after reason-win, rendezvous + hold lock.
+    //   4. Consumer thread: busy-wait for cancel, then drain terminal channel.
+    //   5. Deny thread: `manager.disconnect_nip_fi(&pubkey)`.
+    //   6. Main thread: rendezvous (deny holds lock), then `manager.drain_all()`
+    //      (under the fix, blocks on the lock; under mutation, cancels immediately).
+    //   7. Verify consumer saw the denial payload.
+    //
+    // Mutation evidence (executed):
+    //   Revert `lifecycle_cancel` to bare `cancel.cancel()` →
+    //   `drain_all`'s cancel fires before `disconnect_nip_fi`'s `try_send` →
+    //   consumer wakes on empty terminal channel → `try_recv()` returns `Err` → RED.
+    //   Restore → PASS.
+    #[test]
+    fn w_root_manager_drain_race_payload_precedes_drain_lifecycle_cancel() {
+        use std::sync::{Arc, Barrier};
+
+        let mgr = Arc::new(ConnectionManager::new());
+        let conn_id = Uuid::new_v4();
+        let pubkey = vec![0xdeu8; 32];
+
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let (terminal_ctrl_tx, terminal_ctrl_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        // Root connections use terminal_ctrl_tx passed to register(), not
+        // control.terminal_frame_tx (which is the audio-path slot).  No
+        // set_terminal_frame_sender call needed here.
+
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            terminal_ctrl_tx,
+            None,
+            cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+            control,
+        );
+        mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
+
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_for_hook = Arc::clone(&barrier);
+
+        // Arm: fires after reason-win, while terminal_frame_tx lock is held by
+        // manager_disconnect_nip_fi.
+        manager_race_test_hook::arm(Arc::new(move || {
+            barrier_for_hook.wait();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }));
+
+        let cancel_for_consumer = cancel.clone();
+        let consumer_result: Arc<std::sync::Mutex<Option<Result<WsMessage, _>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let consumer_result_for_thread = Arc::clone(&consumer_result);
+        let mut terminal_rx_for_consumer = terminal_ctrl_rx;
+        let consumer_thread = std::thread::spawn(move || {
+            while !cancel_for_consumer.is_cancelled() {
+                std::thread::yield_now();
+            }
+            let r = terminal_rx_for_consumer.try_recv();
+            *consumer_result_for_thread.lock().unwrap() = Some(r);
+        });
+
+        // Deny thread: real production path through ConnectionManager.
+        let mgr_for_deny = Arc::clone(&mgr);
+        let pubkey_for_deny = pubkey.clone();
+        let deny_thread = std::thread::spawn(move || {
+            mgr_for_deny.disconnect_nip_fi(&pubkey_for_deny);
+        });
+
+        // Rendezvous: deny has won reason and holds the lock.
+        barrier.wait();
+
+        // FIXED: lifecycle_cancel acquires the lock → blocks until deny's try_send
+        // completes → consumer always sees the frame.
+        // MUTATION: lifecycle_cancel calls cancel.cancel() bare → fires before
+        // deny's try_send → consumer wakes on empty terminal channel → RED.
+        mgr.drain_all();
+
+        deny_thread
+            .join()
+            .expect("W_root_manager_drain_race: deny thread panicked");
+        consumer_thread
+            .join()
+            .expect("W_root_manager_drain_race: consumer thread panicked");
+
+        manager_race_test_hook::disarm();
+
+        let consumer_saw = consumer_result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("W_root_manager_drain_race: consumer thread must have run");
+
+        let frame = consumer_saw.expect(
+            "W_root_manager_drain_race: consumer must observe the denial payload at the first \
+             cancel signal (proves drain_all lifecycle_cancel cannot fire before try_send)",
+        );
+        let expected = crate::nip_fi_session::authorization_denied_frame(
+            crate::nip_fi_session::NipFiWsRoute::Root,
+        );
+        assert_eq!(
+            frame, expected,
+            "W_root_manager_drain_race: queued frame must be the canonical Root denial frame"
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "W_root_manager_drain_race: cancel must be set after both calls"
+        );
+    }
+
+    // ── W_audio_registry_lifecycle_cancel_race: production-wiring witness ────
+    //
+    // Proves that a real `CommunityConnectionRegistry::disconnect_nip_fi()` denial
+    // payload is visible to the consumer before a concurrent audio `lifecycle_cancel()`
+    // (as called by heartbeat, forwarding, owner-loss, recv-loop, teardown) fires the
+    // cancellation token, using actual `CommunityConnectionRegistry::register()` wiring.
+    //
+    // This is the audio-specific counterpart to `w_lifecycle_cancel_race`: it uses
+    // the audio registry (`community_connections`) and the `cancel_race_test_hook`
+    // (armed inside `CommunityConnectionControl::disconnect_nip_fi`), then fires
+    // `control.lifecycle_cancel()` on the racing side — the exact call made by
+    // every converted audio teardown path (heartbeat, forwarding, recv-loop, owner-loss).
+    //
+    // Setup:
+    //   1. Register one connection in `CommunityConnectionRegistry` with proven pubkey
+    //      and terminal sender set.
+    //   2. Arm `cancel_race_test_hook`: pauses `disconnect_nip_fi` after reason-win
+    //      while holding the lock.
+    //   3. Consumer: busy-waits for cancel, drains terminal channel.
+    //   4. Deny thread: `registry.disconnect_nip_fi(&pubkey)` → wins reason → hook fires.
+    //   5. Main thread: rendezvous, then `control.lifecycle_cancel()` (audio teardown path).
+    //   6. Verify consumer saw the denial payload.
+    //
+    // Mutation evidence (executed):
+    //   Revert `lifecycle_cancel` to bare `cancel.cancel()` →
+    //   audio teardown cancel fires before `disconnect_nip_fi`'s `try_send` →
+    //   consumer sees `Err(Empty)` → RED.
+    //   Restore → PASS.
+    #[test]
+    fn w_audio_registry_lifecycle_cancel_race_payload_precedes_audio_teardown_cancel() {
+        use std::sync::{Arc, Barrier};
+
+        let registry = Arc::new(CommunityConnectionRegistry::new());
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xae));
+        let target_pubkey = vec![0xaeu8; 32];
+
+        let (terminal_tx, terminal_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        // Mirror what audio_post_auth_register + set_terminal_frame_sender do in
+        // handle_active_audio_connection: register proven pubkey and terminal sender.
+        control.set_proven_pubkey(target_pubkey.clone());
+        control.set_terminal_frame_sender(terminal_tx);
+
+        // Keep guard alive for the duration of the test — drop deregisters.
+        let _guard = registry.register(Uuid::new_v4(), community, control.clone());
+
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_for_hook = Arc::clone(&barrier);
+
+        // Arm cancel_race_test_hook: fires inside disconnect_nip_fi after reason-win,
+        // while terminal_frame_tx lock is held.
+        cancel_race_test_hook::arm(Arc::new(move || {
+            barrier_for_hook.wait();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }));
+
+        // Consumer: wakes on first cancel, immediately drains terminal channel.
+        let cancel_for_consumer = cancel.clone();
+        let consumer_result: Arc<std::sync::Mutex<Option<Result<WsMessage, _>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let consumer_result_for_thread = Arc::clone(&consumer_result);
+        let mut terminal_rx_for_consumer = terminal_rx;
+        let consumer_thread = std::thread::spawn(move || {
+            while !cancel_for_consumer.is_cancelled() {
+                std::thread::yield_now();
+            }
+            let r = terminal_rx_for_consumer.try_recv();
+            *consumer_result_for_thread.lock().unwrap() = Some(r);
+        });
+
+        // Deny thread: real audio registry path.
+        let deny_thread = std::thread::spawn({
+            let registry = Arc::clone(&registry);
+            let target_pubkey = target_pubkey.clone();
+            move || {
+                registry.disconnect_nip_fi(&target_pubkey);
+            }
+        });
+
+        // Rendezvous: deny has won reason and is paused inside the hook.
+        barrier.wait();
+
+        // FIXED: lifecycle_cancel acquires the lock → blocks until deny's try_send
+        // completes → consumer always sees the frame.
+        // MUTATION: lifecycle_cancel calls cancel.cancel() bare → audio teardown
+        // fires cancel before deny's try_send → consumer sees Err(Empty) → RED.
+        control.lifecycle_cancel();
+
+        deny_thread
+            .join()
+            .expect("W_audio_registry_lifecycle_cancel_race: deny thread panicked");
+        consumer_thread
+            .join()
+            .expect("W_audio_registry_lifecycle_cancel_race: consumer thread panicked");
+
+        cancel_race_test_hook::disarm();
+
+        let consumer_saw = consumer_result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("W_audio_registry_lifecycle_cancel_race: consumer thread must have run");
+
+        let frame = consumer_saw.expect(
+            "W_audio_registry_lifecycle_cancel_race: consumer must observe the denial payload \
+             at the first cancel signal (proves audio lifecycle_cancel cannot fire before \
+             deny's try_send under the fix)",
+        );
+        let expected = crate::nip_fi_session::authorization_denied_frame(
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+        );
+        assert_eq!(
+            frame, expected,
+            "W_audio_registry_lifecycle_cancel_race: frame must be the canonical Audio denial frame"
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "W_audio_registry_lifecycle_cancel_race: cancel must be set after both calls"
+        );
+    }
 }
