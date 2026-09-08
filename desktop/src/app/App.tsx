@@ -61,8 +61,10 @@ import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
+import { seedProjectSnapshot } from "@/features/projects/projectSnapshot";
 import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
+import { hydrateChannelHeads } from "@/features/messages/lib/channelHeadCache";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
@@ -213,8 +215,31 @@ function CommunitySwitchGate() {
   );
 }
 
-function CommunityQueryProvider({ children }: { children: ReactNode }) {
-  const [queryClient] = useState(createBuzzQueryClient);
+function CommunityQueryProvider({
+  children,
+  pubkey,
+  relayUrl,
+}: {
+  children: ReactNode;
+  pubkey: string | null;
+  relayUrl: string | null;
+}) {
+  // Seeding persisted channel heads is part of constructing the client, not a
+  // gate in front of the app: the splash, AppReady, and relay preconnect mount
+  // immediately, and only the channel query waits on the cache load (see
+  // channelHeadHydration). It must start here rather than in an effect —
+  // React Query fires a child's queryFn when it subscribes, before any parent
+  // effect runs — and StrictMode's dev-only double initializer just issues one
+  // redundant read on a discarded client. The provider is keyed on the
+  // community, so one client maps to one {pubkey, relayUrl} scope.
+  const [queryClient] = useState(() => {
+    const client = createBuzzQueryClient();
+    if (pubkey && relayUrl) {
+      seedProjectSnapshot(client, { pubkey, relayUrl });
+      void hydrateChannelHeads(client, { pubkey, relayUrl });
+    }
+    return client;
+  });
 
   useEffect(() => setAvatarProfileSyncQueryClient(queryClient), [queryClient]);
 
@@ -601,7 +626,11 @@ function CommunityApp({
   }, [communityApplied]);
   if (appContent === null && (!transaction || isEnteringCurtain)) {
     appContent = communityApplied ? (
-      <CommunityQueryProvider key={communityKey}>
+      <CommunityQueryProvider
+        key={communityKey}
+        pubkey={community.identityPubkey}
+        relayUrl={activeCommunity?.relayUrl ?? null}
+      >
         <CommunityIdentityReplacementSentinel
           onIdentityReplaced={bumpSignerEpoch}
         />

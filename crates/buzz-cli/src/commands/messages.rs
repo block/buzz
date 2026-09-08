@@ -698,15 +698,43 @@ pub async fn cmd_send_message(
             )
             .map_err(|e| CliError::Other(format!("build_forum_comment failed: {e}")))?
         }
-        None | Some(9) => buzz_sdk::build_message(
-            channel_uuid,
-            &final_content,
-            thread_ref.as_ref(),
-            &mention_refs,
-            p.broadcast,
-            &media_tags,
-        )
-        .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?,
+        None | Some(9) => {
+            // Scan final_content for `:shortcode:` patterns and attach NIP-30
+            // emoji tags for any that resolve in the workspace palette.
+            // Palette resolution is scoped to kind 9: forum builders (45001,
+            // 45003) do not accept emoji_tags, so resolving early would pay
+            // the relay query and immediately discard the result.
+            // The fetch is skipped entirely when content has no `:`, keeping
+            // plain sends at zero extra RTTs.  Palette resolution is
+            // decorative enrichment — a fetch or parse failure must not block
+            // delivery of a valid message; on error, degrade to no emoji tags
+            // and log a diagnostic to stderr.
+            let emoji_tags = if final_content.contains(':') {
+                match crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content)
+                    .await
+                {
+                    Ok(tags) => tags,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: emoji palette fetch failed ({e}); sending without emoji tags"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            buzz_sdk::build_message(
+                channel_uuid,
+                &final_content,
+                thread_ref.as_ref(),
+                &mention_refs,
+                p.broadcast,
+                &media_tags,
+                &emoji_tags,
+            )
+            .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?
+        }
         Some(k) => {
             return Err(CliError::Usage(format!(
                 "--kind {k} is not supported (use 9, 45001, or 45003)"
@@ -1056,11 +1084,11 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
+        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1077,6 +1105,33 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn compact_event_format_remains_the_three_key_contract() {
+        let normalized = serde_json::json!([{
+            "id": ID_A,
+            "pubkey": PUBKEY,
+            "kind": 9,
+            "content": "compact content",
+            "created_at": 1_787_754_972_u64,
+            "tags": [["h", "channel-id"]],
+            "sig": "d".repeat(128),
+        }])
+        .to_string();
+
+        let output: Vec<serde_json::Value> =
+            serde_json::from_str(&format_events(&normalized, &crate::OutputFormat::Compact))
+                .unwrap();
+
+        assert_eq!(
+            output[0],
+            serde_json::json!({
+                "id": ID_A,
+                "content": "compact content",
+                "created_at": 1_787_754_972_u64,
+            })
+        );
+    }
 
     #[tokio::test]
     async fn malformed_channel_is_rejected_before_thread_fetch() {
@@ -1542,5 +1597,295 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    // ── cmd_send_message — emoji-tag binding seam ─────────────────────────
+    //
+    // These tests drive `cmd_send_message` through a minimal fake relay
+    // serving `/query` (emoji palette) and `/events` (event submission).
+    //
+    // Content with no `@` and no explicit mentions bypasses member-resolution
+    // relay calls, so the only relay traffic is:
+    //   1. POST /query  — emoji palette fetch (when content has `:`)
+    //   2. POST /events — signed event submission
+    //
+    // Removing the resolver call at messages.rs:687-691 or passing &[] at
+    // :718 would cause the emoji-tag assertions below to fail.
+
+    use axum::body::Bytes as AxumBytes;
+    use axum::extract::State as AxumState;
+    use axum::http::{HeaderMap as AxumHeaderMap, StatusCode as AxumStatusCode};
+    use axum::routing::post as axum_post;
+    use axum::Router as AxumRouter;
+    use std::net::SocketAddr as StdSocketAddr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc as StdArc;
+    use tokio::net::TcpListener as TokioTcpListener;
+
+    /// Captured body of a POST /events call.
+    #[derive(Clone, Default)]
+    struct CapturedEvent {
+        body: String,
+    }
+
+    /// Minimal fake relay for send-path tests.
+    ///
+    /// - `/query` returns the given `query_body` on every call and increments
+    ///   `query_count`.
+    /// - `/events` returns `{"event_id":"fake","accepted":true}` and records
+    ///   the raw event JSON in `captured_event`.
+    async fn fake_send_relay(
+        query_body: String,
+    ) -> (
+        String,
+        StdArc<AtomicU32>,
+        StdArc<std::sync::Mutex<Option<CapturedEvent>>>,
+    ) {
+        let query_count = StdArc::new(AtomicU32::new(0));
+        let captured_event: StdArc<std::sync::Mutex<Option<CapturedEvent>>> =
+            StdArc::new(std::sync::Mutex::new(None));
+
+        type S = (
+            StdArc<AtomicU32>,
+            String,
+            StdArc<std::sync::Mutex<Option<CapturedEvent>>>,
+        );
+        let state: S = (query_count.clone(), query_body, captured_event.clone());
+
+        let app = AxumRouter::new()
+            .route(
+                "/query",
+                axum_post(
+                    |AxumState((count, body, _)): AxumState<S>,
+                     _headers: AxumHeaderMap,
+                     _req: AxumBytes| async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            body,
+                        )
+                    },
+                ),
+            )
+            .route(
+                "/events",
+                axum_post(
+                    |AxumState((_, _, cap)): AxumState<S>,
+                     _headers: AxumHeaderMap,
+                     body: AxumBytes| async move {
+                        let body_str = String::from_utf8_lossy(&body).to_string();
+                        *cap.lock().unwrap() = Some(CapturedEvent { body: body_str });
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake0000","accepted":true}"#,
+                        )
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), query_count, captured_event)
+    }
+
+    /// Palette JSON with one emoji: `wave` → some URL.
+    fn send_palette_response() -> String {
+        serde_json::json!([{
+            "created_at": 100,
+            "tags": [
+                ["d", "buzz:custom-emoji"],
+                ["emoji", "wave", "https://cdn.example.com/wave.png"],
+                ["emoji", "sweatblob", "https://cdn.example.com/sweatblob.gif"]
+            ]
+        }])
+        .to_string()
+    }
+
+    /// A valid channel UUID used across send-path tests.
+    const SEND_TEST_CHANNEL: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    fn send_params(content: &str) -> super::SendMessageParams {
+        super::SendMessageParams {
+            channel_id: SEND_TEST_CHANNEL.to_string(),
+            content: content.to_string(),
+            kind: None,
+            reply_to: None,
+            broadcast: false,
+            files: vec![],
+            mentions: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_attaches_emoji_tags_for_known_shortcodes() {
+        // Content contains `:wave:` which resolves in the palette.
+        // The submitted event must carry an `emoji` tag for `wave`.
+        let (url, query_count, captured_event) = fake_send_relay(send_palette_response()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        cmd_send_message(&client, send_params("hello :wave: everyone"))
+            .await
+            .unwrap();
+
+        // Palette was queried at least once (short-circuit was NOT triggered).
+        assert!(
+            query_count.load(Ordering::Relaxed) >= 1,
+            "palette must be queried when content has a colon"
+        );
+
+        // Submitted event must contain an emoji tag for `wave`.
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        let tags: Vec<Vec<String>> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .collect();
+        let emoji_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("emoji"))
+            .collect();
+        assert!(
+            emoji_tags
+                .iter()
+                .any(|t| t.get(1).map(|s| s.as_str()) == Some("wave")),
+            "submitted event must have an emoji tag for `wave`, got tags: {tags:?}"
+        );
+        // Unknown shortcodes must not produce tags.
+        assert!(
+            !emoji_tags
+                .iter()
+                .any(|t| t.get(1).map(|s| s.as_str()) == Some("notreal")),
+            "unknown shortcodes must not produce emoji tags"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_skips_palette_query_when_no_colon_in_content() {
+        // Content has no `:` at all — the palette query must be skipped
+        // entirely (zero RTTs), and the submitted event must have no emoji tags.
+        let (url, query_count, captured_event) = fake_send_relay(send_palette_response()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        cmd_send_message(&client, send_params("plain message no colons"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            query_count.load(Ordering::Relaxed),
+            0,
+            "palette must NOT be queried when content has no colon"
+        );
+
+        // Submitted event must have no emoji tags.
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        let tags: Vec<Vec<String>> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .collect();
+        let emoji_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("emoji"))
+            .collect();
+        assert!(
+            emoji_tags.is_empty(),
+            "no-colon content must produce no emoji tags, got: {emoji_tags:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_succeeds_when_palette_query_errors() {
+        // Palette enrichment is decorative — a 500 from the `/query` endpoint
+        // must not abort delivery; the message must still be sent with zero
+        // emoji tags, and a diagnostic must be emitted to stderr.
+
+        // Fake relay: `/query` returns 500, `/events` accepts and captures.
+        let captured_event: StdArc<std::sync::Mutex<Option<CapturedEvent>>> =
+            StdArc::new(std::sync::Mutex::new(None));
+        let cap = captured_event.clone();
+        let app = AxumRouter::new()
+            .route(
+                "/query",
+                axum_post(|_headers: AxumHeaderMap, _req: AxumBytes| async move {
+                    (
+                        AxumStatusCode::INTERNAL_SERVER_ERROR,
+                        [("content-type", "application/json")],
+                        r#"{"error":"unavailable"}"#,
+                    )
+                }),
+            )
+            .route(
+                "/events",
+                axum_post(move |_headers: AxumHeaderMap, body: AxumBytes| {
+                    let cap = cap.clone();
+                    async move {
+                        let body_str = String::from_utf8_lossy(&body).to_string();
+                        *cap.lock().unwrap() = Some(CapturedEvent { body: body_str });
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake0001","accepted":true}"#,
+                        )
+                    }
+                }),
+            );
+
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url = format!("http://{addr}");
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        // Must not return Err — a palette failure is a soft warning.
+        cmd_send_message(&client, send_params(":wave: message with emoji candidate"))
+            .await
+            .expect("send must succeed even when palette query returns 500");
+
+        // Submitted event must have zero emoji tags (fallback to empty).
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        let tags: Vec<Vec<String>> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .collect();
+        let emoji_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("emoji"))
+            .collect();
+        assert!(
+            emoji_tags.is_empty(),
+            "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
+        );
     }
 }

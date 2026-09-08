@@ -1,3 +1,4 @@
+import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import {
   Activity,
   Ban,
@@ -18,7 +19,7 @@ import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import {
@@ -74,7 +75,7 @@ type MembersSidebarMemberCardProps = {
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
-  showOtherSetupMarker?: boolean;
+  profileOwnerPubkey?: string | null;
   viewerIsOwner: boolean;
 };
 
@@ -143,7 +144,7 @@ export function MembersSidebarMemberCard({
   onViewActivity,
   presenceStatus,
   profileAvatarUrl,
-  showOtherSetupMarker = false,
+  profileOwnerPubkey,
   viewerIsOwner,
 }: MembersSidebarMemberCardProps) {
   const roleLabel = formatRoleLabel(member, memberIsBot);
@@ -168,6 +169,7 @@ export function MembersSidebarMemberCard({
           className="h-8 w-8 text-xs shadow-none"
           iconClassName="h-4 w-4"
           label={memberAvatarLabel}
+          shape={memberIsBot ? "squircle" : "circle"}
         />
         {presenceStatus ? (
           <span
@@ -197,11 +199,11 @@ export function MembersSidebarMemberCard({
                 </span>
               </span>
             </div>
-            {showOtherSetupMarker ? (
-              <OtherSetupAgentMarker
-                testId={`sidebar-member-agent-provenance-${member.pubkey}`}
-              />
-            ) : null}
+            <AgentManagementMarker
+              pubkey={member.pubkey}
+              ownerPubkey={profileOwnerPubkey}
+              testId={`sidebar-member-agent-provenance-${member.pubkey}`}
+            />
           </div>
         ) : (
           <div className="flex min-w-0 items-center gap-2">
@@ -292,6 +294,7 @@ export function MembersSidebarMemberCard({
           onUntimeout={onUntimeout}
           onViewActivity={onViewActivity}
           pairAction={pairAction}
+          availability={presenceStatus ?? undefined}
         />
       ) : null}
     </div>
@@ -301,6 +304,7 @@ export function MembersSidebarMemberCard({
 const PEOPLE_ROLES = ["admin", "member", "guest"] as const;
 
 function MemberActionsMenu({
+  availability,
   canChangeRole,
   canModerateMember,
   canRemoveMember,
@@ -322,6 +326,7 @@ function MemberActionsMenu({
   pairAction,
 }: {
   canChangeRole: boolean;
+  availability: PresenceStatus | undefined;
   canModerateMember: boolean;
   canRemoveMember: boolean;
   canViewActivity: boolean;
@@ -345,6 +350,13 @@ function MemberActionsMenu({
     canChangeRole && !memberIsBot && member.role !== "owner";
   const isBanned = moderationState?.banned ?? false;
   const isTimedOut = moderationState?.timedOut ?? false;
+
+  const startBlockReason = managedAgent
+    ? agentPresenceStartBlockReason(
+        pairAction ? pairAction === "stop" : isManagedAgentActive(managedAgent),
+        availability,
+      )
+    : undefined;
 
   return (
     <DropdownMenu modal={false}>
@@ -375,8 +387,11 @@ function MemberActionsMenu({
             {canViewActivity ? <DropdownMenuSeparator /> : null}
             <DropdownMenuItem
               data-testid={`sidebar-agent-action-${member.pubkey}`}
-              disabled={disabled}
-              onClick={() => onManagedAgentAction(managedAgent)}
+              disabled={disabled || Boolean(startBlockReason)}
+              title={startBlockReason}
+              onClick={() => {
+                if (!startBlockReason) onManagedAgentAction(managedAgent);
+              }}
             >
               {pairAction
                 ? getPairActionIcon(pairAction)

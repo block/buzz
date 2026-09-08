@@ -12,6 +12,35 @@ final _huddleParticipantProfileUpdatesProvider = NotifierProvider.autoDispose
       _HuddleParticipantProfileUpdates.new,
     );
 
+final _huddleLogicalParticipantPubkeysProvider = Provider.autoDispose
+    .family<List<String>, String>((ref, channelId) {
+      // Select only roster-relevant fields. Watching the whole session would
+      // recompute at the 50 ms speaker-level flush cadence, restarting the
+      // downstream profile subscription ~20x/sec while anyone is speaking.
+      final session = ref.watch(
+        huddleSessionProvider.select(
+          (state) => (
+            ephemeralChannelId: state.ephemeralChannelId,
+            currentPubkey: state.currentPubkey,
+            participantPubkeys: state.participantPubkeys,
+            wasAdmitted: state.wasAdmitted,
+          ),
+        ),
+      );
+      final backingMembers =
+          ref.watch(channelMembersProvider(channelId)).value ??
+          const <ChannelMember>[];
+      return _huddleParticipantPubkeys(
+        sessionParticipantPubkeys: session.ephemeralChannelId == channelId
+            ? session.participantPubkeys
+            : const [],
+        currentPubkey: session.currentPubkey,
+        members: session.wasAdmitted
+            ? backingMembers.where((member) => member.isBot)
+            : backingMembers,
+      );
+    });
+
 class _HuddleParticipantProfileUpdates extends Notifier<int> {
   _HuddleParticipantProfileUpdates(this.channelId);
 
@@ -21,27 +50,9 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
 
   @override
   int build() {
-    final session = ref.watch(
-      huddleSessionProvider.select(
-        (state) => (
-          ephemeralChannelId: state.ephemeralChannelId,
-          currentPubkey: state.currentPubkey,
-          participantPubkeys: state.participantPubkeys,
-          wasAdmitted: state.wasAdmitted,
-        ),
-      ),
-    );
-    final members = session.wasAdmitted
-        ? const <ChannelMember>[]
-        : ref.watch(channelMembersProvider(channelId)).value ??
-              const <ChannelMember>[];
     final relayState = ref.watch(relaySessionProvider);
-    final participantPubkeys = _huddleParticipantPubkeys(
-      sessionParticipantPubkeys: session.ephemeralChannelId == channelId
-          ? session.participantPubkeys
-          : const [],
-      currentPubkey: session.currentPubkey,
-      members: members,
+    final participantPubkeys = ref.watch(
+      _huddleLogicalParticipantPubkeysProvider(channelId),
     );
     final subscriptionVersion = ++_subscriptionVersion;
     _clearSubscription();
@@ -547,13 +558,11 @@ class _MobileHuddleCallPage extends ConsumerWidget {
         !unavailable &&
         session.microphonePermissionRequired;
     final localPubkey = session.currentPubkey?.toLowerCase();
-    final backingMembers =
-        ref.watch(channelMembersProvider(invite.ephemeralChannelId)).value ??
-        const <ChannelMember>[];
-    final participantPubkeys = _huddleParticipantPubkeys(
-      sessionParticipantPubkeys: session.participantPubkeys,
-      currentPubkey: localPubkey,
-      members: session.wasAdmitted ? const [] : backingMembers,
+    // Audio peers remain authoritative for humans after admission. Agents are
+    // logical Huddle participants as soon as their bot membership is published,
+    // before their send-only audio connection starts speaking.
+    final participantPubkeys = ref.watch(
+      _huddleLogicalParticipantPubkeysProvider(invite.ephemeralChannelId),
     );
     final remotePubkeys = participantPubkeys
         .where((pubkey) => pubkey != localPubkey)
@@ -564,6 +573,29 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     );
     final profiles = ref.watch(userCacheProvider);
     final directoryDisplayNames = ref.watch(agentDirectoryDisplayNamesProvider);
+    final huddleTypingEntries = ref.watch(
+      channelTypingProvider(invite.ephemeralChannelId),
+    );
+    final parentAgentPubkeys = ref.watch(
+      agentMentionPubkeysProvider(invite.parentChannelId),
+    );
+    // Ephemeral Huddle bot membership is authoritative for native enrollment;
+    // parent classification is only best-effort and may miss a valid Huddle
+    // bot. Union both so a Huddle-only agent still enters the preparing state.
+    final huddleBotPubkeys = <String>{
+      for (final member
+          in ref
+                  .watch(channelMembersProvider(invite.ephemeralChannelId))
+                  .value ??
+              const <ChannelMember>[])
+        if (member.isBot) member.pubkey.trim().toLowerCase(),
+    };
+    final workingAgentPubkeys = <String>{
+      for (final entry in huddleTypingEntries)
+        if (parentAgentPubkeys.contains(entry.pubkey.toLowerCase()) ||
+            huddleBotPubkeys.contains(entry.pubkey.toLowerCase()))
+          entry.pubkey.toLowerCase(),
+    };
     final reactionSenderName = _huddleReactionSenderName(
       localPubkey: localPubkey,
       profile: localPubkey == null ? null : profiles[localPubkey],
@@ -651,6 +683,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                     localPubkey: localPubkey,
                     activeSpeakerPubkeys: session.activeSpeakerPubkeys,
                     speakerLevels: session.speakerLevels,
+                    workingAgentPubkeys: workingAgentPubkeys,
                     retryTooltip: retryTooltip,
                     retryIcon: retryIcon,
                     onRetry: onRetry,
@@ -658,12 +691,15 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                       final isSelf = pubkey == localPubkey || pubkey.isEmpty;
                       _showHuddleParticipantSpotlight(
                         context: context,
+                        ephemeralChannelId: invite.ephemeralChannelId,
                         pubkey: pubkey,
                         isSelf: isSelf,
                       );
                     },
-                    onOverflowTap: () =>
-                        _showHuddleParticipantRoster(context: context),
+                    onOverflowTap: () => _showHuddleParticipantRoster(
+                      context: context,
+                      ephemeralChannelId: invite.ephemeralChannelId,
+                    ),
                   ),
                 ),
                 if (connected)

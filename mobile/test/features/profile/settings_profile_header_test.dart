@@ -13,6 +13,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -38,6 +39,31 @@ void main() {
       find.byKey(const ValueKey('settings-profile-header')),
     );
     expect((header.padding as EdgeInsets).bottom, Grid.twelve);
+  });
+
+  testWidgets('shows the display name directly beneath the avatar', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          presenceProvider.overrideWith(() => _FakePresenceNotifier('online')),
+          userStatusProvider.overrideWith(() => _FakeUserStatusNotifier(null)),
+          customEmojiListProvider.overrideWithValue(const []),
+        ],
+        child: const SettingsProfileHeader(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final avatar = find.byKey(const ValueKey('settings-profile-avatar'));
+    final name = find.text('Test');
+    expect(name, findsOneWidget);
+    expect(
+      tester.getTopLeft(name).dy,
+      greaterThan(tester.getBottomLeft(avatar).dy),
+    );
   });
 
   testWidgets('shows the poster until the animated avatar is ready', (
@@ -99,7 +125,6 @@ void main() {
           .map((image) => image.url),
       containsAll([posterUrl, animationUrl]),
     );
-
     animationResponse.complete(http.Response.bytes(_transparentPng, 200));
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 50)),
@@ -143,6 +168,78 @@ void main() {
     );
   });
 
+  testWidgets('warms and clears a paused animated-avatar handoff', (
+    tester,
+  ) async {
+    const posterUrl = 'https://relay.example/media/poster.png';
+    const animationUrl = 'https://relay.example/media/animation.png';
+    final profileUrl =
+        '$posterUrl#buzz-anim=${Uri.encodeComponent(animationUrl)}';
+    final posterResponse = Completer<http.Response>();
+    final animationResponse = Completer<http.Response>();
+    final client = http_testing.MockClient(
+      (request) => switch (request.url.toString()) {
+        posterUrl => posterResponse.future,
+        animationUrl => animationResponse.future,
+        _ => Future.value(http.Response.bytes(_transparentPng, 200)),
+      },
+    );
+    addTearDown(client.close);
+    final container = ProviderContainer(
+      overrides: [
+        profileProvider.overrideWith(
+          () => _FakeProfileNotifier(avatarUrl: profileUrl),
+        ),
+        presenceProvider.overrideWith(() => _FakePresenceNotifier('online')),
+        userStatusProvider.overrideWith(() => _FakeUserStatusNotifier(null)),
+        customEmojiListProvider.overrideWithValue(const []),
+        mediaGetAuthServiceProvider.overrideWithValue(
+          MediaGetAuthService(baseUrl: 'https://relay.example', nsec: null),
+        ),
+        mediaHttpClientProvider.overrideWithValue(client),
+      ],
+    );
+    addTearDown(container.dispose);
+    container
+        .read(profileAvatarHandoffProvider.notifier)
+        .show(
+          ProfileAvatarHandoff(
+            avatarUrl: profileUrl,
+            animation: _transparentPng,
+            poster: _transparentPng,
+          ),
+        );
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const Scaffold(body: SettingsProfileHeader()),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('settings-profile-avatar')));
+    await tester.pump();
+
+    expect(
+      find.byKey(
+        ValueKey('settings-profile-paused-handoff-$profileUrl'),
+        skipOffstage: false,
+      ),
+      findsOneWidget,
+    );
+    expect(container.read(profileAvatarHandoffProvider), isNotNull);
+
+    posterResponse.complete(http.Response.bytes(_transparentPng, 200));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(container.read(profileAvatarHandoffProvider), isNull);
+  });
   testWidgets('uses a bounded icon for an unresolved status shortcode', (
     tester,
   ) async {

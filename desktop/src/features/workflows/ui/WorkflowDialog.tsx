@@ -557,6 +557,13 @@ export function WorkflowDialog({
         <DialogContent
           className="flex h-[88vh] max-h-[88vh] w-[calc(100vw-2rem)] max-w-6xl flex-col gap-0 overflow-hidden p-0"
           onEscapeKeyDown={(event) => {
+            if (
+              event.target instanceof HTMLElement &&
+              event.target.closest("[data-workflow-filter-picker-search]")
+            ) {
+              event.preventDefault();
+              return;
+            }
             if (formBuilderRef.current?.closeInspector()) {
               event.preventDefault();
               event.stopPropagation();

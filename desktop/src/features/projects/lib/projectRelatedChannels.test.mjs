@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  collapseProjectRelatedChannelRows,
   collectProjectRelatedChannelRows,
+  listProjectBoundChannels,
+  listProjectChildChannels,
   projectRelatedChannelRowKey,
   uniqueProjectRelatedChannelCount,
 } from "./projectRelatedChannels.ts";
@@ -104,6 +107,37 @@ test("collects one row per repository channel binding", () => {
   );
 });
 
+test("collapses repositories sharing one project channel", () => {
+  const rows = collectProjectRelatedChannelRows([
+    makeProject({
+      repositories: [
+        makeRepository({ name: "web" }),
+        makeRepository({ id: "repo-mobile", name: "mobile" }),
+        makeRepository({
+          channelId: CHANNEL_B,
+          id: "repo-relay",
+          name: "relay",
+        }),
+      ],
+    }),
+  ]);
+
+  assert.deepEqual(collapseProjectRelatedChannelRows(rows), [
+    {
+      channelId: CHANNEL_A,
+      projectId: "project-buzz",
+      projectName: "buzz",
+      repositoryNames: ["web", "mobile"],
+    },
+    {
+      channelId: CHANNEL_B,
+      projectId: "project-buzz",
+      projectName: "buzz",
+      repositoryNames: ["relay"],
+    },
+  ]);
+});
+
 test("keeps a project channel only when no repository in that project shares it", () => {
   assert.deepEqual(
     collectProjectRelatedChannelRows([
@@ -181,5 +215,137 @@ test("row keys distinguish project-level bindings from repository bindings", () 
       repositoryName: "buzz",
     }),
     `${CHANNEL_A}:project-buzz:repo-buzz`,
+  );
+});
+
+test("listProjectBoundChannels puts the home channel first", () => {
+  assert.deepEqual(
+    listProjectBoundChannels(
+      makeProject({
+        projectChannelId: CHANNEL_B,
+        repositories: [
+          makeRepository({ channelId: CHANNEL_A }),
+          makeRepository({
+            id: "repo-relay",
+            name: "relay-tools",
+            channelId: CHANNEL_A,
+          }),
+        ],
+      }),
+    ),
+    [
+      {
+        channelId: CHANNEL_B,
+        repositoryId: null,
+        role: "home",
+      },
+      {
+        channelId: CHANNEL_A,
+        repositoryId: "repo-buzz",
+        role: "related",
+      },
+    ],
+  );
+});
+
+test("listProjectBoundChannels omits a repository channel that is the home channel", () => {
+  assert.deepEqual(
+    listProjectBoundChannels(
+      makeProject({
+        projectChannelId: CHANNEL_A,
+        repositories: [makeRepository({ channelId: CHANNEL_A })],
+      }),
+    ),
+    [
+      {
+        channelId: CHANNEL_A,
+        repositoryId: null,
+        role: "home",
+      },
+    ],
+  );
+});
+
+test("listProjectBoundChannels is empty when nothing is bound", () => {
+  assert.deepEqual(listProjectBoundChannels(makeProject()), []);
+});
+
+test("listProjectBoundChannels includes extra related channels after home", () => {
+  const related = "33333333-3333-4333-8333-333333333333";
+  assert.deepEqual(
+    listProjectBoundChannels(
+      makeProject({
+        projectChannelId: CHANNEL_B,
+        relatedChannelIds: [related],
+        repositories: [makeRepository({ channelId: CHANNEL_A })],
+      }),
+    ),
+    [
+      {
+        channelId: CHANNEL_B,
+        repositoryId: null,
+        role: "home",
+      },
+      {
+        channelId: related,
+        repositoryId: null,
+        role: "related",
+      },
+      {
+        channelId: CHANNEL_A,
+        repositoryId: "repo-buzz",
+        role: "related",
+      },
+    ],
+  );
+});
+
+test("listProjectChildChannels omits the home channel", () => {
+  const related = "33333333-3333-4333-8333-333333333333";
+  assert.deepEqual(
+    listProjectChildChannels(
+      makeProject({
+        projectChannelId: CHANNEL_B,
+        relatedChannelIds: [related],
+        repositories: [makeRepository({ channelId: CHANNEL_A })],
+      }),
+    ),
+    [
+      {
+        channelId: related,
+        repositoryId: null,
+        role: "related",
+      },
+      {
+        channelId: CHANNEL_A,
+        repositoryId: "repo-buzz",
+        role: "related",
+      },
+    ],
+  );
+});
+
+test("collectProjectRelatedChannelRows includes extra related channels", () => {
+  const related = "33333333-3333-4333-8333-333333333333";
+  const rows = collectProjectRelatedChannelRows([
+    makeProject({
+      projectChannelId: CHANNEL_B,
+      relatedChannelIds: [related, CHANNEL_A],
+      repositories: [makeRepository()],
+    }),
+  ]);
+  assert.equal(
+    rows.some((row) => row.channelId === related && row.repositoryId == null),
+    true,
+  );
+  assert.equal(
+    uniqueProjectRelatedChannelCount([
+      makeProject({
+        projectChannelId: CHANNEL_B,
+        relatedChannelIds: [related],
+        repositories: [makeRepository()],
+      }),
+    ]),
+    3,
   );
 });

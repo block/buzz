@@ -7,6 +7,7 @@ import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelConte
 type UseChannelProfilePanelOptions = {
   closeAgentSession: () => void;
   openProfilePanel: (pubkey: string, options?: ProfilePanelOpenOptions) => void;
+  requireThreadEditResolution: () => boolean;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
   setOpenThreadHeadId: (value: string | null) => void;
@@ -18,6 +19,7 @@ type UseChannelProfilePanelOptions = {
 export function useChannelProfilePanel({
   closeAgentSession,
   openProfilePanel,
+  requireThreadEditResolution,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
   setOpenThreadHeadId,
@@ -30,6 +32,7 @@ export function useChannelProfilePanel({
 
   const handleOpenProfilePanel = React.useCallback(
     (pubkey: string, options?: ProfilePanelOpenOptions) => {
+      if (!requireThreadEditResolution()) return;
       setOpenThreadHeadId(null);
       setExpandedThreadReplyIds(new Set());
       setThreadScrollTargetId(null);
@@ -41,6 +44,7 @@ export function useChannelProfilePanel({
     [
       closeAgentSession,
       openProfilePanel,
+      requireThreadEditResolution,
       setChannelManagementOpen,
       setExpandedThreadReplyIds,
       setOpenThreadHeadId,

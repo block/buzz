@@ -10,6 +10,7 @@ export const PROJECT_REPOSITORY_SEARCH_KEYS = [
   "issueId",
   "pullRequestId",
   "commitHash",
+  "filePath",
 ] as const;
 
 export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
@@ -24,6 +25,7 @@ export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
 export type ProjectDetailScreenProps = {
   commitHash?: string;
   entityNavigationId?: string;
+  filePath?: string;
   projectId: string;
   pullRequestId?: string;
   issueId?: string;

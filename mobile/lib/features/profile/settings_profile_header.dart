@@ -8,6 +8,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/animated_avatar.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/relay/media_image.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
@@ -34,6 +35,11 @@ class SettingsProfileHeader extends HookConsumerWidget {
     final hasStatus = status != null && !status.isEmpty;
     final presence = ref.watch(presenceProvider).value ?? 'offline';
     final animatedAvatar = parseAnimatedAvatarUrl(profile?.avatarUrl);
+    final animatedPosterUrl = animatedAvatar?.posterUrl;
+    final handoff = ref.watch(profileAvatarHandoffProvider);
+    final activeHandoff = handoff?.avatarUrl == profile?.avatarUrl
+        ? handoff
+        : null;
     final stoppedAnimationUrl = useState<String?>(null);
     final avatarUrl = animatedAvatar == null
         ? profile?.avatarUrl
@@ -71,10 +77,62 @@ class SettingsProfileHeader extends HookConsumerWidget {
                         key: ValueKey(animatedAvatar.animationUrl),
                         descriptor: animatedAvatar,
                         fallback: _AvatarFallback(initial: profile?.initial),
+                        loadingImage: activeHandoff == null
+                            ? null
+                            : MemoryImage(activeHandoff.animation),
+                        onAnimationReady: activeHandoff == null
+                            ? null
+                            : () => ref
+                                  .read(profileAvatarHandoffProvider.notifier)
+                                  .clear(activeHandoff.avatarUrl),
                       )
-                    : AvatarImageContent(
+                    : activeHandoff == null || animatedPosterUrl == null
+                    ? AvatarImageContent(
                         imageUrl: avatarUrl,
                         fallback: _AvatarFallback(initial: profile?.initial),
+                      )
+                    : Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image(
+                            image: MemoryImage(activeHandoff.poster),
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                          ),
+                          Offstage(
+                            offstage: true,
+                            child: MediaImage(
+                              key: ValueKey(
+                                'settings-profile-paused-handoff-${activeHandoff.avatarUrl}',
+                              ),
+                              url: animatedPosterUrl,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) =>
+                                  const SizedBox.shrink(),
+                              frameBuilder:
+                                  (
+                                    context,
+                                    child,
+                                    frame,
+                                    wasSynchronouslyLoaded,
+                                  ) {
+                                    if (wasSynchronouslyLoaded ||
+                                        frame != null) {
+                                      WidgetsBinding.instance
+                                          .addPostFrameCallback((_) {
+                                            ref
+                                                .read(
+                                                  profileAvatarHandoffProvider
+                                                      .notifier,
+                                                )
+                                                .clear(activeHandoff.avatarUrl);
+                                          });
+                                    }
+                                    return child;
+                                  },
+                            ),
+                          ),
+                        ],
                       ),
               ),
             ),

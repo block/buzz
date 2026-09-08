@@ -32,7 +32,7 @@ export type OverviewContextStatIcon =
   | "merged";
 
 export type OverviewContextAction = {
-  kind: "project" | "issue" | "pullRequest";
+  kind: "channel" | "issue" | "project" | "pullRequest" | "repository";
   label: string;
   testId: string;
 } | null;
@@ -55,8 +55,10 @@ export type OverviewContextPresentation = {
 type OverviewContextInput = {
   filter: ProjectsFilter;
   issues: ProjectIssue[];
+  projectReadModels?: Project[];
   projects: Project[];
   pullRequests: ProjectPullRequest[];
+  repositorySummaries?: Record<string, ProjectActivitySummary>;
   summaries?: Record<string, ProjectActivitySummary>;
 };
 
@@ -193,12 +195,15 @@ function overviewContextPeople({
   issues,
   projects,
   pullRequests,
+  repositorySummaries,
   summaries,
 }: OverviewContextInput) {
   const counts = workspaceActorCounts(issues, pullRequests);
   const commitAuthors = uniquePubkeys([
     ...peopleWithKind(counts, "commits"),
-    ...latestCommitAuthors(summaries),
+    ...latestCommitAuthors(
+      filter === "repositories" ? repositorySummaries : summaries,
+    ),
   ]);
 
   if (filter === "issues") return peopleWithKind(counts, "tasks");
@@ -215,17 +220,29 @@ function overviewContextPeople({
 export function projectsOverviewContext(
   input: OverviewContextInput,
 ): OverviewContextPresentation {
-  const { filter, issues, projects, pullRequests, summaries } = input;
+  const {
+    filter,
+    issues,
+    projectReadModels,
+    projects,
+    pullRequests,
+    summaries,
+  } = input;
+  const readModels = projectReadModels ?? projects;
   const summaryCounts = summaryWorkItemCounts(projects, summaries);
   const tasks = resolvedTaskActivity(issues, summaryCounts.issues);
   const reviews = resolvedReviewActivity(pullRequests, summaryCounts.prs);
-  const channelCount = uniqueProjectRelatedChannelCount(projects);
-  const repositories = repositoryCount(projects);
+  const channelCount = uniqueProjectRelatedChannelCount(readModels);
+  const repositories = repositoryCount(readModels);
   const people = overviewContextPeople(input);
 
   if (filter === "repositories") {
     return {
-      action: null,
+      action: {
+        kind: "repository",
+        label: "Add repository",
+        testId: "projects-overview-add-repository",
+      },
       detailsTitle: "Repository activity",
       people,
       stats: [
@@ -254,7 +271,11 @@ export function projectsOverviewContext(
 
   if (filter === "channels") {
     return {
-      action: null,
+      action: {
+        kind: "channel",
+        label: "Add channel",
+        testId: "projects-overview-add-channel",
+      },
       detailsTitle: "Details",
       people,
       stats: [
@@ -349,7 +370,7 @@ export function projectsOverviewContext(
 
   if (filter === "all") {
     return {
-      action: createProjectAction(),
+      action: null,
       detailsTitle: "Details",
       people,
       stats: [
@@ -384,7 +405,7 @@ export function projectsOverviewContext(
           section: "prs",
         },
       ],
-      title: "Projects",
+      title: "Activity",
     };
   }
 

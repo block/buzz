@@ -462,6 +462,7 @@ class _ReactorTile extends StatelessWidget {
         initial:
             profile?.initial ??
             (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?'),
+        isAgent: profile?.isAgent == true,
       ),
       title: Text(
         displayName,
@@ -488,8 +489,13 @@ class _ReactorTile extends StatelessWidget {
 class _ReactorAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
+  final bool isAgent;
 
-  const _ReactorAvatar({required this.avatarUrl, required this.initial});
+  const _ReactorAvatar({
+    required this.avatarUrl,
+    required this.initial,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -497,6 +503,7 @@ class _ReactorAvatar extends StatelessWidget {
       imageUrl: avatarUrl,
       radius: 20,
       fallback: Text(initial),
+      isAgent: isAgent,
     );
   }
 }

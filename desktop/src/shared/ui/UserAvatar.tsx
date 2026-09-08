@@ -37,8 +37,10 @@ type UserAvatarProps = {
   displayName: string;
   size?: UserAvatarSize;
   accent?: boolean;
+  shape?: "circle" | "squircle";
   className?: string;
   fallbackDelayMs?: number;
+  imageDraggable?: boolean;
   testId?: string;
 };
 
@@ -47,8 +49,10 @@ export function UserAvatar({
   displayName,
   size = "md",
   accent = false,
+  shape,
   className,
   fallbackDelayMs = 200,
+  imageDraggable,
   testId,
 }: UserAvatarProps) {
   const initials = getInitials(displayName);
@@ -61,12 +65,21 @@ export function UserAvatar({
     : avatarUrl
       ? rewriteRelayUrl(avatarUrl)
       : null;
+  const resolvedShape = shape ?? "circle";
+  const radiusClass =
+    resolvedShape === "squircle" ? "rounded-[30%]" : "rounded-full";
 
   return (
     <Avatar
       // Animated avatars carry their own backdrop disc and transparent
       // surroundings — any container fill would flatten the pop-out.
-      className={cn(sizeClasses[size], !animated && "shadow-xs", className)}
+      className={cn(
+        sizeClasses[size],
+        radiusClass,
+        !animated && "shadow-xs",
+        className,
+      )}
+      data-testid={testId}
       onMouseEnter={animated ? () => setIsHovered(true) : undefined}
       onMouseLeave={animated ? () => setIsHovered(false) : undefined}
     >
@@ -75,6 +88,7 @@ export function UserAvatar({
           alt={`${displayName} avatar`}
           className={cn("object-cover", !animated && "bg-secondary")}
           data-testid={testId ? `${testId}-image` : undefined}
+          draggable={imageDraggable}
           referrerPolicy="no-referrer"
           src={src}
         />

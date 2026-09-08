@@ -223,9 +223,9 @@ pub enum TracerInit {
     Enabled(SdkTracerProvider),
     /// `OTEL_EXPORTER_OTLP_ENDPOINT` was unset — no-op, no connection.
     Disabled,
-    /// Endpoint was set but the exporter failed to build.  The inner error
-    /// string is suitable for a `tracing::warn!` call made by the caller
-    /// **after** `tracing_subscriber::registry()…init()`.
+    /// Endpoint was set but the exporter failed to build. The inner error is
+    /// diagnostic data only and must not be logged: exporter errors can
+    /// include credential-bearing endpoint URLs.
     ExporterBuildFailed(String),
 }
 
@@ -234,7 +234,8 @@ pub enum TracerInit {
 ///
 /// Deliberately does **not** call `tracing::warn!` internally — the subscriber
 /// may not be installed yet at call time, which would silently drop the event.
-/// Callers are responsible for logging [`TracerInit::ExporterBuildFailed`].
+/// Callers may log a fixed, credential-free message for
+/// [`TracerInit::ExporterBuildFailed`], but must not log its inner error.
 pub fn try_init_tracer(resource: Resource) -> TracerInit {
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_err() {
         return TracerInit::Disabled;

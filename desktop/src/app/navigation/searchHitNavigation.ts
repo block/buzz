@@ -1,21 +1,28 @@
 import { resolveSearchHitDestination } from "@/app/navigation/resolveSearchHitDestination";
+import { createSearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import type { SearchHit } from "@/shared/api/types";
 
 type SearchHitNavigationActions = {
   force?: boolean;
+  query?: string;
   goChannel: (
     channelId: string,
     options?: {
       force?: boolean;
       messageId?: string;
+      searchHighlight?: ReturnType<typeof createSearchHighlightNavigation>;
       threadRootId?: string | null;
     },
   ) => Promise<unknown>;
   goForumPost: (
     channelId: string,
     postId: string,
-    options?: { force?: boolean; replyId?: string },
+    options?: {
+      force?: boolean;
+      replyId?: string;
+      searchHighlight?: ReturnType<typeof createSearchHighlightNavigation>;
+    },
   ) => Promise<unknown>;
   signal?: AbortSignal;
 };
@@ -30,6 +37,10 @@ export async function openSearchHitWithNavigation(
   }
 
   const isLifecycleBound = Boolean(actions.signal);
+  const searchHighlight = createSearchHighlightNavigation(
+    hit.eventId,
+    actions.query,
+  );
   if (!isLifecycleBound) {
     cacheSearchHitEvent(hit);
   }
@@ -47,14 +58,16 @@ export async function openSearchHitWithNavigation(
 
   if (destination.kind === "forum-post") {
     return actions.goForumPost(destination.channelId, destination.postId, {
-      force: actions.force,
+      force: actions.force || Boolean(searchHighlight),
       replyId: destination.replyId,
+      searchHighlight,
     });
   }
 
   return actions.goChannel(destination.channelId, {
-    force: actions.force,
+    force: actions.force || Boolean(searchHighlight),
     messageId: destination.messageId,
+    searchHighlight,
     threadRootId: destination.threadRootId,
   });
 }

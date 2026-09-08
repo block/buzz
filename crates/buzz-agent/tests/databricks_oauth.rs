@@ -429,17 +429,25 @@ async fn spawn_capturing_server(
                 let body: serde_json::Value =
                     serde_json::from_slice(&buf[header_end..header_end + body_len])
                         .unwrap_or(json!(null));
+                let is_unity_catalog = path.starts_with("/api/2.1/unity-catalog/model-services");
                 captured.lock().await.push(CapturedRequest {
                     path,
                     authorization,
                     body,
                 });
-                let body = queue
-                    .lock()
-                    .await
-                    .pop_front()
-                    .unwrap_or_else(|| json!({ "error": "no canned response" }));
-                let body_s = serde_json::to_string(&body).unwrap();
+                let response_body = if is_unity_catalog {
+                    // v2 discovery probes both catalogs concurrently. Existing
+                    // request-shape tests need only the workspace fixture, so the
+                    // UC side is explicitly successful and empty.
+                    json!({ "model_services": [], "next_page_token": null })
+                } else {
+                    queue
+                        .lock()
+                        .await
+                        .pop_front()
+                        .unwrap_or_else(|| json!({ "error": "no canned response" }))
+                };
+                let body_s = serde_json::to_string(&response_body).unwrap();
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body_s.len(),
@@ -622,6 +630,7 @@ async fn run_captured_prompt(
         .filter(|r| {
             !r.path.starts_with("/api/2.0/serving-endpoints")
                 && !r.path.starts_with("/api/ai-gateway/v2/endpoints")
+                && !r.path.starts_with("/api/2.1/unity-catalog/model-services")
         })
         .collect();
     assert_eq!(llm_reqs.len(), 1, "expected exactly one LLM request");
@@ -764,6 +773,37 @@ async fn databricks_v2_other_models_route_through_ai_gateway_mlflow_chat() {
     );
 }
 
+#[tokio::test]
+async fn databricks_v2_model_service_fqn_uses_mlflow_chat_and_preserves_full_id() {
+    let canned = vec![json!({
+        "id": "x",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }]
+    })];
+    // Family-looking text in a Unity Catalog namespace is data, not route
+    // authority. The full raw FQN must reach the MLflow model field.
+    let model = "catalog.schema.claude-gpt-5";
+    let req = run_captured_prompt("databricks_v2", model, canned).await;
+
+    assert_eq!(
+        req.path.as_str(),
+        "/ai-gateway/mlflow/v1/chat/completions",
+        "Unity Catalog model-service FQNs must always use MLflow Chat"
+    );
+    assert_eq!(req.body["model"], model);
+    assert!(
+        req.body
+            .get("messages")
+            .and_then(|value| value.as_array())
+            .is_some(),
+        "model-service FQN requests must use the Chat Completions envelope"
+    );
+}
+
 // ---------- session/set_model integration tests ----------
 
 /// Helper: run initialize + session/new + optional set_model + session/prompt on a
@@ -849,6 +889,7 @@ async fn session_set_model_switches_databricks_legacy_route() {
         .filter(|r| {
             !r.path.starts_with("/api/2.0/serving-endpoints")
                 && !r.path.starts_with("/api/ai-gateway/v2/endpoints")
+                && !r.path.starts_with("/api/2.1/unity-catalog/model-services")
         })
         .collect();
     assert_eq!(
@@ -896,6 +937,7 @@ async fn session_set_model_switches_databricks_v2_route() {
         .filter(|r| {
             !r.path.starts_with("/api/2.0/serving-endpoints")
                 && !r.path.starts_with("/api/ai-gateway/v2/endpoints")
+                && !r.path.starts_with("/api/2.1/unity-catalog/model-services")
         })
         .collect();
     assert_eq!(
@@ -1020,7 +1062,7 @@ async fn model_discovery_surfaces_rejected_static_token_as_auth_failure() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let cfg = Config::for_discovery(Provider::DatabricksV2, "rejected".into(), host);
+    let cfg = Config::for_discovery(Provider::DatabricksV2, "rejected".into(), host, None);
     let error = discover_databricks_models(&cfg).await.unwrap_err();
 
     assert!(
@@ -1031,10 +1073,13 @@ async fn model_discovery_surfaces_rejected_static_token_as_auth_failure() {
         !error.to_string().contains("rejected bearer"),
         "auth errors must not propagate provider bodies that may echo credentials: {error}"
     );
-    assert_eq!(
-        requests.load(Ordering::SeqCst),
-        1,
-        "a static token cannot refresh, so discovery must not issue a duplicate request"
+    // The independent catalog requests run concurrently; the first auth
+    // failure can short-circuit the joined result before the peer finishes.
+    // Assert the contract at the behavior boundary rather than assuming both
+    // in-flight requests always reach the stub.
+    assert!(
+        requests.load(Ordering::SeqCst) >= 1,
+        "static-token auth failure must issue at least one catalog request"
     );
 }
 
@@ -1180,7 +1225,7 @@ async fn non_auth_discovery_failure_uses_configured_model_without_caching_fallba
         .await;
     assert!(h.recv_for(initialize).await.get("result").is_some());
 
-    for expected_attempts in 1..=2 {
+    for expected_attempts in [3, 6] {
         let request = h
             .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
             .await;

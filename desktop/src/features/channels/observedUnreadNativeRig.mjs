@@ -112,7 +112,7 @@ class Scope {
           badgeCount: 0,
           appBadgeCount: 0,
           topLevelUnread: false,
-          highPriorityUnread: false,
+          highPriorityCount: 0,
         },
       ]),
     );
@@ -128,14 +128,14 @@ class Scope {
         badgeCount: 0,
         appBadgeCount: 0,
         topLevelUnread: false,
-        highPriorityUnread: false,
+        highPriorityCount: 0,
       };
       entry.latest = Math.max(entry.latest, event.createdAt);
       entry.count += 1;
       entry.badgeCount += event.countsTowardBadge ? 1 : 0;
       entry.appBadgeCount += event.countsTowardAppBadge ? 1 : 0;
       entry.topLevelUnread ||= !event.rootId;
-      entry.highPriorityUnread ||= event.highPriority;
+      entry.highPriorityCount += event.highPriority ? 1 : 0;
       byChannel.set(event.channelId, entry);
     }
     return [...byChannel.values()].sort((a, b) =>

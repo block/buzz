@@ -246,6 +246,42 @@ void main() {
     });
   });
 
+  test(
+    'create and join stop before submitting after a community switch',
+    () async {
+      final keys = nostr.Keys.generate();
+      final session = _RecordingPublishRelaySession();
+      final actionsProvider = Provider<ChannelActions>((ref) {
+        return ChannelActions(
+          ref: ref,
+          session: session,
+          signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+          currentPubkey: keys.public,
+          isCommunityValid: () => false,
+        );
+      });
+      final container = ProviderContainer(retry: (_, _) => null);
+      addTearDown(container.dispose);
+
+      final actions = container.read(actionsProvider);
+      await expectLater(
+        actions.createChannel(
+          channelId: _channelId,
+          name: 'general',
+          channelType: 'stream',
+          visibility: 'open',
+        ),
+        throwsA(isA<StateError>()),
+      );
+      await expectLater(
+        actions.joinChannel(_channelId),
+        throwsA(isA<StateError>()),
+      );
+
+      expect(session.publishedEvents, isEmpty);
+    },
+  );
+
   group('Huddle channel lifecycle', () {
     test(
       'starts from accepted signed events without refreshing all channels',

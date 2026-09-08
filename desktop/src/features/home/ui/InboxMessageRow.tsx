@@ -14,6 +14,7 @@ import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { UnreadDivider } from "@/features/messages/ui/UnreadDivider";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -44,6 +45,8 @@ type InboxMessageRowProps = {
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
+  /** Resolves the mention identities carried by "Copy message". */
+  profiles?: UserProfileLookup;
   showUnreadBoundary?: boolean;
   videoReviewCommentRootId?: string;
   videoReviewContext?: VideoReviewContext;
@@ -61,6 +64,7 @@ export function InboxMessageRow({
   onEdit,
   onSelectReplyTarget,
   onToggleReaction,
+  profiles,
   showUnreadBoundary = false,
   videoReviewCommentRootId,
   videoReviewContext,
@@ -170,6 +174,7 @@ export function InboxMessageRow({
               onReply={
                 canReply ? () => onSelectReplyTarget(message) : undefined
               }
+              profiles={profiles}
               reactionErrorMessage={reactionErrorMessage}
               reactions={reactions}
             />
@@ -194,11 +199,18 @@ export function InboxMessageRow({
               role={profileRole}
               triggerElement="span"
             >
-              <span className="inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
+              <span
+                className={cn(
+                  "inline-flex shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                  isAuthorAgent ? "rounded-[30%]" : "rounded-full",
+                )}
+              >
                 <UserAvatar
+                  accent={isAuthorAgent}
                   avatarUrl={message.avatarUrl}
                   className="h-9 w-9 shrink-0"
                   displayName={message.authorLabel}
+                  shape={isAuthorAgent ? "squircle" : "circle"}
                   size="md"
                 />
               </span>

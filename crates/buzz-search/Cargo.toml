@@ -14,6 +14,7 @@ sqlx        = { workspace = true }
 uuid        = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
+metrics     = { workspace = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }

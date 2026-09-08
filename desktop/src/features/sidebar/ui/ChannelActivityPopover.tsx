@@ -78,11 +78,13 @@ function RowActionButton({
 }
 
 function ThreadPreviewRow({
+  isAgent,
   item,
   onMarkRead,
   onOpen,
   onRemindLater,
 }: {
+  isAgent: boolean;
   item: InboxItem;
   onMarkRead: () => void;
   onOpen: () => void;
@@ -104,6 +106,7 @@ function ThreadPreviewRow({
           avatarUrl={item.avatarUrl}
           className="h-9 w-9 shrink-0"
           displayName={item.senderLabel}
+          shape={isAgent ? "squircle" : "circle"}
           size="md"
         />
         <div className="min-w-0 flex-1">
@@ -168,6 +171,7 @@ function WorkingAgentRow({
         avatarUrl={avatarUrl}
         className="h-9 w-9 shrink-0"
         displayName={name}
+        shape="squircle"
         size="md"
       />
       <div className="min-w-0 flex-1">
@@ -424,6 +428,10 @@ export function ChannelActivityPopover({
             {activityItems.length > 0
               ? activityItems.map((item) => (
                   <ThreadPreviewRow
+                    isAgent={
+                      profiles?.[normalizePubkey(item.item.pubkey)]?.isAgent ===
+                      true
+                    }
                     item={item}
                     key={item.conversationId}
                     onMarkRead={() => handleMarkRead(item)}

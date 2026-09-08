@@ -82,11 +82,14 @@ type EmojiPickerProps = {
   autoFocus?: boolean;
   /** Called with the chosen emoji as a string: `native` glyph or `:shortcode:`. */
   onSelect: (emoji: string) => void;
+  /** Number of emoji columns. Defaults to the compact picker used elsewhere. */
+  perLine?: number;
 };
 
 export const EmojiPicker = React.memo(function EmojiPicker({
   autoFocus = false,
   onSelect,
+  perLine = 8,
 }: EmojiPickerProps) {
   const customEmoji = useCustomEmoji();
   const custom = React.useMemo(
@@ -116,7 +119,7 @@ export const EmojiPicker = React.memo(function EmojiPicker({
             onSelect(value);
           }
         }}
-        perLine={8}
+        perLine={perLine}
         previewPosition="bottom"
         set="native"
         skinTonePosition="search"

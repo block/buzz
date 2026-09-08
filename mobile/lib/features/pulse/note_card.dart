@@ -75,6 +75,7 @@ class NoteCard extends HookConsumerWidget {
                   color: context.colors.onPrimaryContainer,
                 ),
               ),
+              isAgent: profile?.ownerPubkey != null,
             ),
           ),
           const SizedBox(width: Grid.xs),

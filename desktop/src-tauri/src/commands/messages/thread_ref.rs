@@ -1,10 +1,42 @@
-use nostr::EventId;
+use nostr::{EventId, Keys};
 
 use crate::{
     app_state::AppState,
     events,
     relay::{query_relay_at, query_relay_at_with_keys},
 };
+
+/// Build a thread reference from a renderer-supplied root and parent.
+///
+/// Both IDs are parsed before signing. This path intentionally performs no
+/// relay query: the renderer supplies a root only when the parent is already
+/// present in its cache and the root can be read from that event's NIP-10 tags.
+pub(super) fn provided_thread_ref(
+    root_event_id: &str,
+    parent_event_id: &str,
+) -> Result<events::ThreadRef, String> {
+    let root_event_id =
+        EventId::from_hex(root_event_id).map_err(|e| format!("invalid root event ID: {e}"))?;
+    let parent_event_id =
+        EventId::from_hex(parent_event_id).map_err(|e| format!("invalid parent event ID: {e}"))?;
+    Ok(events::ThreadRef {
+        root_event_id,
+        parent_event_id,
+    })
+}
+
+pub(super) async fn thread_ref(
+    parent_event_id: &str,
+    root_event_id: Option<&str>,
+    state: &AppState,
+    api_base_url: &str,
+    signing_keys: Option<&Keys>,
+) -> Result<events::ThreadRef, String> {
+    match root_event_id {
+        Some(root_event_id) => provided_thread_ref(root_event_id, parent_event_id),
+        None => resolve_thread_ref(parent_event_id, state, api_base_url, signing_keys).await,
+    }
+}
 
 /// Fetch a parent event and extract the thread root from its NIP-10 e-tags.
 ///

@@ -47,6 +47,7 @@ class AgentActivityCard extends HookConsumerWidget {
                       radius: 18,
                       backgroundColor: context.colors.primaryContainer,
                       fallback: const Icon(LucideIcons.bot, size: 18),
+                      isAgent: true,
                     ),
                     Positioned(
                       right: 0,

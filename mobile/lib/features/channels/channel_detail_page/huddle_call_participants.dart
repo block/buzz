@@ -10,6 +10,7 @@ class _HuddleCallParticipants extends StatelessWidget {
     required this.localPubkey,
     required this.activeSpeakerPubkeys,
     required this.speakerLevels,
+    required this.workingAgentPubkeys,
     required this.retryTooltip,
     required this.retryIcon,
     required this.onRetry,
@@ -25,6 +26,7 @@ class _HuddleCallParticipants extends StatelessWidget {
   final String? localPubkey;
   final Set<String> activeSpeakerPubkeys;
   final Map<String, double> speakerLevels;
+  final Set<String> workingAgentPubkeys;
   final String retryTooltip;
   final IconData retryIcon;
   final VoidCallback onRetry;
@@ -126,6 +128,7 @@ class _HuddleCallParticipants extends StatelessWidget {
               speakerLevel: localPubkey == null
                   ? 0
                   : speakerLevels[localPubkey] ?? 0,
+              preparingResponse: false,
               isSelf: true,
               onTap: null,
             ),
@@ -145,6 +148,7 @@ class _HuddleCallParticipants extends StatelessWidget {
                 fallbackLabels: fallbackLabels,
                 activeSpeakerPubkeys: activeSpeakerPubkeys,
                 speakerLevels: speakerLevels,
+                workingAgentPubkeys: workingAgentPubkeys,
                 movementDuration: movementDuration,
                 entryDuration: entryDuration,
                 exitDuration: exitDuration,

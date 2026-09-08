@@ -24,18 +24,17 @@ import {
 } from "@/features/profile/lib/identity";
 import {
   CircleDot,
+  FolderGit2,
   GitBranch,
   GitCommitHorizontal,
   GitPullRequest,
 } from "lucide-react";
 
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
-import {
-  PROJECT_DETAIL_PANEL_CLASS,
-  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
-} from "./projectPanelStyles";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectWorkItemRow } from "./ProjectWorkItemRow";
+import { ProjectPanelState } from "./ProjectPanelState";
 
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -152,12 +151,10 @@ export function ContributorsPanel({
 
   if (rows.length === 0) {
     return (
-      <p
-        className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
-        data-project-detail-panel
-      >
-        No git contributors are available yet.
-      </p>
+      <ProjectPanelState
+        description="Contributors appear after signed project or repository activity."
+        title="No contributors yet"
+      />
     );
   }
 
@@ -240,6 +237,7 @@ export function ContributorsPanel({
 
 export function ActivityPanel({
   branch,
+  commitItems,
   snapshot,
   isLoading,
   error,
@@ -252,10 +250,18 @@ export function ActivityPanel({
   viewerGitIdentity,
 }: {
   branch?: string;
+  commitItems?: Array<{
+    branch?: string;
+    commit: ProjectRepoCommit;
+    project: Repository;
+    projectId: string;
+    pullRequests?: ProjectPullRequest[];
+    repoContributors?: ProjectRepoContributor[];
+  }>;
   snapshot: ProjectRepoSnapshot | null | undefined;
   isLoading: boolean;
   error: unknown;
-  onSelectCommit?: (commit: ProjectRepoCommit) => void;
+  onSelectCommit?: (commit: ProjectRepoCommit, project: Repository) => void;
   profiles?: UserProfileLookup;
   project: Repository;
   projectId: string;
@@ -263,21 +269,33 @@ export function ActivityPanel({
   repoContributors: ProjectRepoContributor[];
   viewerGitIdentity?: ViewerGitIdentity | null;
 }) {
-  const commits = snapshot?.commits ?? [];
-  const commitAuthorPubkeys = commitAuthorPubkeysFromPullRequests(
-    pullRequests ?? [],
-  );
-  const rangeItems = commits.map((commit) => {
-    const matchedProfile = profileForCommit(
+  const items =
+    commitItems ??
+    (snapshot?.commits ?? []).map((commit) => ({
+      branch,
       commit,
+      project,
+      projectId,
+      pullRequests,
+      repoContributors,
+    }));
+  const showRepositoryName =
+    commitItems !== undefined &&
+    new Set(items.map((item) => item.project.repoAddress)).size > 1;
+  const rangeItems = items.map((item) => {
+    const commitAuthorPubkeys = commitAuthorPubkeysFromPullRequests(
+      item.pullRequests ?? [],
+    );
+    const matchedProfile = profileForCommit(
+      item.commit,
       profiles,
       commitAuthorPubkeys,
       viewerGitIdentity,
     );
     return commitSelectionItem(
-      commit,
-      project,
-      projectId,
+      item.commit,
+      item.project,
+      item.projectId,
       matchedProfile?.pubkey,
     );
   });
@@ -286,25 +304,31 @@ export function ActivityPanel({
     return <BuzzLoadingState label="Loading activity" />;
   }
 
-  if (commits.length === 0) {
+  if (items.length === 0) {
     return (
-      <p
-        className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
-        data-project-detail-panel
-      >
-        {error
-          ? "Could not load repository activity from git."
-          : "No commits are available yet."}
-      </p>
+      <ProjectPanelState
+        description={
+          error
+            ? "Refresh the repository and try again."
+            : commitItems
+              ? "Commits pushed to this project's repositories will appear here."
+              : "Commits pushed to this repository will appear here."
+        }
+        error={Boolean(error)}
+        title={error ? "Could not load commits" : "No commits yet"}
+      />
     );
   }
 
   return (
     <section className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
       <div className="space-y-0.5 px-2">
-        {commits.map((commit) => {
+        {items.map((item) => {
+          const commitAuthorPubkeys = commitAuthorPubkeysFromPullRequests(
+            item.pullRequests ?? [],
+          );
           const matchedProfile = profileForCommit(
-            commit,
+            item.commit,
             profiles,
             commitAuthorPubkeys,
             viewerGitIdentity,
@@ -314,36 +338,51 @@ export function ActivityPanel({
                 pubkey: matchedProfile.pubkey,
                 profiles,
               })
-            : commit.authorName || commit.authorEmail || "Unknown author";
-          const matchingContributor = repoContributors.find(
+            : item.commit.authorName ||
+              item.commit.authorEmail ||
+              "Unknown author";
+          const matchingContributor = (item.repoContributors ?? []).find(
             (contributor) =>
               contributor.name.trim().toLowerCase() ===
-                commit.authorName.trim().toLowerCase() ||
+                item.commit.authorName.trim().toLowerCase() ||
               contributor.email.trim().toLowerCase() ===
-                commit.authorEmail.trim().toLowerCase(),
+                item.commit.authorEmail.trim().toLowerCase(),
           );
 
           return (
             <ProjectWorkItemRow
-              eventId={commit.hash}
-              identifier={commit.shortHash}
+              eventId={item.commit.hash}
+              identifier={item.commit.shortHash}
               identifierClassName="font-mono"
-              identifierTitle={`View commit ${commit.shortHash}`}
-              key={commit.hash}
+              identifierTitle={`View commit ${item.commit.shortHash}`}
+              key={`${item.project.repoAddress}:${item.commit.hash}`}
               metadata={
-                branch ? (
+                showRepositoryName || item.branch ? (
                   <span className="inline-flex min-w-0 items-center gap-1">
-                    <GitBranch className="h-3 w-3 shrink-0" />
-                    <span className="truncate">{branch}</span>
+                    {showRepositoryName ? (
+                      <>
+                        <FolderGit2 className="h-3 w-3 shrink-0" />
+                        <span className="truncate">{item.project.name}</span>
+                      </>
+                    ) : (
+                      <>
+                        <GitBranch className="h-3 w-3 shrink-0" />
+                        <span className="truncate">{item.branch}</span>
+                      </>
+                    )}
                   </span>
                 ) : undefined
               }
-              onOpen={onSelectCommit ? () => onSelectCommit(commit) : undefined}
+              onOpen={
+                onSelectCommit
+                  ? () => onSelectCommit(item.commit, item.project)
+                  : undefined
+              }
               selection={{
                 item: commitSelectionItem(
-                  commit,
-                  project,
-                  projectId,
+                  item.commit,
+                  item.project,
+                  item.projectId,
                   matchedProfile?.pubkey,
                 ),
                 rangeItems,
@@ -352,7 +391,7 @@ export function ActivityPanel({
                 <GitCommitHorizontal className="h-3.5 w-3.5 text-muted-foreground/70" />
               }
               testId="project-activity-feed-item"
-              title={commit.subject}
+              title={item.commit.subject}
               trailing={
                 <>
                   <span
@@ -379,14 +418,16 @@ export function ActivityPanel({
                   </span>
                   <CopyCommitHashButton
                     className="h-5 w-5 shrink-0 text-muted-foreground/60"
-                    hash={commit.hash}
+                    hash={item.commit.hash}
                   />
                   <span
                     className="hidden w-20 shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground/55 sm:block"
                     data-testid="project-commit-row-date"
-                    title={new Date(commit.timestamp * 1_000).toLocaleString()}
+                    title={new Date(
+                      item.commit.timestamp * 1_000,
+                    ).toLocaleString()}
                   >
-                    {relativeTime(commit.timestamp)}
+                    {relativeTime(item.commit.timestamp)}
                   </span>
                 </>
               }

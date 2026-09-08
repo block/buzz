@@ -1,3 +1,4 @@
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { Bot } from "lucide-react";
 import type { UserSearchResult } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
@@ -46,6 +47,7 @@ export function AddMemberSearchResultRow({
         avatarUrl={user.avatarUrl}
         className="pointer-events-none relative z-10 h-8 w-8 text-xs shadow-none"
         displayName={formatAddCandidateName(user)}
+        shape={user.isAgent ? "squircle" : "circle"}
         size="sm"
       />
       <div className="pointer-events-none relative z-10 min-w-0 flex-1">
@@ -59,6 +61,10 @@ export function AddMemberSearchResultRow({
                 <Bot aria-hidden="true" className="h-4 w-4" />
                 agent
               </span>
+              <AgentManagementMarker
+                pubkey={user.pubkey}
+                ownerPubkey={user.ownerPubkey}
+              />
             </div>
             <span className="block truncate font-mono text-2xs text-muted-foreground">
               {truncatePubkey(user.pubkey)}

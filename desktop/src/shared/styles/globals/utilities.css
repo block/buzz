@@ -37,6 +37,15 @@
     contain-intrinsic-size: auto 2rem;
   }
 
+  /*
+   * Member cards rendered eagerly can skip offscreen layout and paint.
+   * Virtualized member rows must not use this utility.
+   */
+  .content-visibility-auto-member-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 3.75rem;
+  }
+
   .buzz-huddle-tooltip {
     background: hsl(
       var(--huddle-tooltip-surface, var(--huddle-control-surface, 0 0% 20%))

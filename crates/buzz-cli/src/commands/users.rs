@@ -485,7 +485,7 @@ pub async fn cmd_get_presence(client: &BuzzClient, pubkeys_csv: &str) -> Result<
     Ok(())
 }
 
-fn presence_subject(event: &serde_json::Value) -> &str {
+pub(crate) fn presence_subject(event: &serde_json::Value) -> &str {
     event
         .get("tags")
         .and_then(|tags| tags.as_array())

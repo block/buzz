@@ -5,7 +5,11 @@ use crate::{
     events,
     models::{ChannelDetailInfo, ChannelInfo, ChannelMembersResponse, GetChannelsPayload},
     nostr_convert,
-    relay::{query_relay, relay_api_base_url_with_override, submit_event, submit_event_with_keys},
+    relay::{
+        assert_expected_relay_scope, assert_expected_signer, query_relay,
+        relay_api_base_url_with_override, submit_event, submit_event_at_with_keys,
+        submit_event_with_keys,
+    },
 };
 
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
@@ -534,9 +538,18 @@ pub async fn add_channel_members(
     channel_id: String,
     pubkeys: Vec<String>,
     role: Option<String>,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    let relay_base = relay_api_base_url_with_override(&state);
+    assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
+    let signing_keys = state.signing_keys()?;
+    assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &signing_keys.public_key().to_hex(),
+    )?;
     let role_str = match role.as_deref() {
         Some("admin") => Some("admin"),
         Some("bot") => Some("bot"),
@@ -556,7 +569,7 @@ pub async fn add_channel_members(
                 continue;
             }
         };
-        match submit_event(builder, &state).await {
+        match submit_event_at_with_keys(builder, &state, &relay_base, &signing_keys).await {
             Ok(_) => added.push(pubkey.clone()),
             Err(e) => errors.push(serde_json::json!({"pubkey": pubkey, "error": e})),
         }

@@ -90,7 +90,7 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
   Map<String, UserProfile> build() => _profiles;
 
   @override
-  Future<void> preload(Iterable<String> pubkeys) async {}
+  Future<bool> preload(List<String> pubkeys) async => true;
 }
 
 void main() {

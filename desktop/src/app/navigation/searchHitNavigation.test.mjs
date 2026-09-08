@@ -51,11 +51,51 @@ test("search-hit navigation preserves forced message routing while active", asyn
       options: {
         force: true,
         messageId: "message",
+        searchHighlight: undefined,
         threadRootId: "thread-root",
       },
     },
   ]);
   assert.equal(getCachedSearchHitEvent("message")?.id, "message");
+});
+
+test("search-hit navigation carries trimmed highlight state and forces repeated activations", async () => {
+  clearSearchHitEventCache();
+  const calls = [];
+
+  await openSearchHitWithNavigation(plainMessage, {
+    goChannel: async (channelId, options) => {
+      calls.push({ channelId, options });
+      return true;
+    },
+    goForumPost: async () => false,
+    query: "  Mentions  ",
+  });
+
+  assert.equal(calls[0].options.force, true);
+  assert.equal(calls[0].options.searchHighlight.messageId, "message");
+  assert.equal(calls[0].options.searchHighlight.query, "Mentions");
+  assert.match(calls[0].options.searchHighlight.activationId, /.+/);
+});
+
+test("forum-post search navigation carries transient same-route activation state", async () => {
+  clearSearchHitEventCache();
+  const forumPost = { ...forumComment, eventId: "post", kind: 45001 };
+  const calls = [];
+
+  await openSearchHitWithNavigation(forumPost, {
+    goChannel: async () => false,
+    goForumPost: async (channelId, postId, options) => {
+      calls.push({ channelId, postId, options });
+      return true;
+    },
+    query: "mentions",
+  });
+
+  assert.equal(calls[0].options.force, true);
+  assert.equal(calls[0].options.searchHighlight.messageId, "post");
+  assert.equal(calls[0].options.searchHighlight.query, "mentions");
+  assert.match(calls[0].options.searchHighlight.activationId, /.+/);
 });
 
 test("cancelled search-hit navigation cannot repopulate cache or route", async () => {

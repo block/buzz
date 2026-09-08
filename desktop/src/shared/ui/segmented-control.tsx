@@ -19,6 +19,7 @@ const SIZE_CLASSES: Record<SegmentedControlSize, string> = {
 /** A mutually exclusive control with equal-width, optionally scrubbable options. */
 export function SegmentedControl<Value extends string>({
   className,
+  disabled = false,
   indicatorTestId,
   legend,
   onPreviewChange,
@@ -30,6 +31,7 @@ export function SegmentedControl<Value extends string>({
   value,
 }: {
   className?: string;
+  disabled?: boolean;
   indicatorTestId?: string;
   legend: string;
   onPreviewChange?: (value: Value | null) => void;
@@ -161,10 +163,12 @@ export function SegmentedControl<Value extends string>({
         "relative isolate h-8 max-w-full shrink-0 overflow-hidden rounded-md bg-muted/45 p-0.5",
         SIZE_CLASSES[size],
         onPreviewChange && "touch-none select-none cursor-ew-resize",
+        "disabled:pointer-events-none disabled:opacity-50",
         className,
       )}
       data-slot="segmented-control"
       data-testid={testId}
+      disabled={disabled}
       onLostPointerCapture={handleLostPointerCapture}
       onPointerCancel={handlePointerCancel}
       onPointerDown={handlePointerDown}

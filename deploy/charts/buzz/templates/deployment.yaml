@@ -215,6 +215,12 @@ spec:
                   name: {{ include "buzz.envSecretName" . }}
                   key: BUZZ_S3_SECRET_KEY
                   optional: true
+            - name: BUZZ_KLIPY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: BUZZ_KLIPY_API_KEY
+                  optional: true
 
             - name: BUZZ_HUDDLE_AUDIO_AVAILABLE
               value: {{ include "buzz.huddleAudioAvailable" . | quote }}

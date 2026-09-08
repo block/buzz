@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -72,7 +74,43 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         !widget.dispatchMessageLinks) {
       return;
     }
+    if (link is MessageDeepLink) {
+      unawaited(_dispatchNotificationLink(link));
+      return;
+    }
 
+    _dispatchNavigableLink(link);
+  }
+
+  Future<void> _dispatchNotificationLink(MessageDeepLink link) async {
+    final preparation = await ref
+        .read(pendingDeepLinkProvider.notifier)
+        .prepareCommunity(link);
+    if (!mounted || ref.read(pendingDeepLinkProvider) != link) return;
+    switch (preparation) {
+      case DeepLinkCommunityPreparation.ready:
+        _dispatchNavigableLink(link);
+      case DeepLinkCommunityPreparation.switched:
+        // The community-scoped app subtree remounts and consumes the parked
+        // target after its channels load.
+        return;
+      case DeepLinkCommunityPreparation.unavailable:
+        ref.read(pendingDeepLinkProvider.notifier).consume();
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text('Notification community is no longer available'),
+          ),
+        );
+      case DeepLinkCommunityPreparation.failed:
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text('Could not open the notification community'),
+          ),
+        );
+    }
+  }
+
+  void _dispatchNavigableLink(BuzzDeepLink link) {
     final channelId = switch (link) {
       MessageDeepLink(:final channelId) => channelId,
       ChannelDeepLink(:final channelId) => channelId,
@@ -99,6 +137,11 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
     if (!context.mounted) return;
 
+    _pushChannel(channel, link);
+    ref.read(pendingDeepLinkProvider.notifier).consume();
+  }
+
+  void _pushChannel(Channel channel, BuzzDeepLink link) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) =>
@@ -112,7 +155,6 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
             ),
       ),
     );
-    ref.read(pendingDeepLinkProvider.notifier).consume();
   }
 
   void _maybeDispatchInvite(InviteDeepLink link) {
@@ -127,9 +169,31 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         ref.read(pendingDeepLinkProvider.notifier).consume();
         consumed = true;
         if (!navigatorContext.mounted) return;
-        final status = ref.read(inviteJoinProvider).status;
-        if (status == InviteJoinStatus.confirming) {
-          await showInviteJoinSheet(navigatorContext, ref);
+        final inviteState = ref.read(inviteJoinProvider);
+        final status = inviteState.status;
+        if (status == InviteJoinStatus.confirming ||
+            inviteState.isStarterSetupRecovery) {
+          final sheet = showInviteJoinSheet(navigatorContext);
+          if (status == InviteJoinStatus.claiming &&
+              inviteState.isStarterSetupRecovery) {
+            unawaited(
+              ref.read(inviteJoinProvider.notifier).startStarterSetupRecovery(),
+            );
+          }
+          final shouldFocusStarter = await sheet;
+          final focusChannelId = ref.read(inviteJoinProvider).focusChannelId;
+          if (shouldFocusStarter == true &&
+              focusChannelId != null &&
+              ref.read(pendingDeepLinkProvider) == null &&
+              navigatorContext.mounted) {
+            final channels = ref.read(channelsProvider).asData?.value;
+            final channel = channels
+                ?.where((candidate) => candidate.id == focusChannelId)
+                .firstOrNull;
+            if (channel != null) {
+              _pushChannel(channel, ChannelDeepLink(channelId: focusChannelId));
+            }
+          }
         } else if (status == InviteJoinStatus.switchedExisting) {
           messenger?.showSnackBar(
             const SnackBar(content: Text('Switched to this community')),

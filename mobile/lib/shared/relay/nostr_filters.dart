@@ -1,5 +1,12 @@
 import 'nostr_models.dart';
 
+/// Aggregate cap on explicit `#h` channel values the relay accepts across one
+/// REQ's filters before rejecting it as `restricted: too many explicit
+/// channels`. Mirrors `MAX_EXPLICIT_CHANNEL_VALUES` in
+/// `crates/buzz-relay/src/handlers/req.rs`. A subscription over more channels
+/// than this must be split into multiple REQs, each within the cap.
+const int kMaxExplicitChannelValues = 128;
+
 /// Canonical [NostrFilter] constructors for common Buzz queries.
 ///
 /// Centralising filter shapes keeps relay queries consistent across providers

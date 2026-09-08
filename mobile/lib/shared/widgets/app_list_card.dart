@@ -87,7 +87,7 @@ class AppListCard extends StatelessWidget {
             // does. The dividers carry the group structure, so the fill only has
             // to separate the card from the page.
             color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.card),
+            borderRadius: BorderRadius.circular(Radii.container),
             // Keeps row ripples inside the rounded corners.
             clipBehavior: Clip.antiAlias,
             child: AppListInset(

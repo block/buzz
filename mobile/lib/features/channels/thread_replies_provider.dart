@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
 
 class ThreadRepliesArgs {
@@ -29,12 +30,18 @@ class _ThreadCursor {
   const _ThreadCursor({required this.createdAt, required this.eventId});
 }
 
-final threadRepliesProvider =
-    FutureProvider.family<List<NostrEvent>, ThreadRepliesArgs>((
-      ref,
-      args,
-    ) async {
-      final session = ref.watch(relaySessionProvider.notifier);
+final threadRepliesProvider = FutureProvider.autoDispose
+    .family<List<NostrEvent>, ThreadRepliesArgs>((ref, args) async {
+      // A reply missed while the socket is stale cannot invalidate this
+      // one-shot query. Refresh mounted threads when the session recovers;
+      // auto-dispose also makes reopening a thread start from relay truth.
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (previous?.status != SessionStatus.connected &&
+            next.status == SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
+      final session = ref.read(relaySessionProvider.notifier);
       final replies = <NostrEvent>[];
       _ThreadCursor? cursor;
       for (var page = 0; page < 500; page++) {
@@ -99,24 +106,26 @@ final threadLocalRepliesProvider =
 
 /// Relay-backed replies merged with signed local replies that are still
 /// waiting for acknowledgement.
-final threadRepliesWithLocalProvider =
-    Provider.family<AsyncValue<List<NostrEvent>>, ThreadRepliesArgs>((
-      ref,
-      args,
-    ) {
+///
+/// The relay query is route-scoped, while the optimistic local overlay stays
+/// alive until confirmation so it can survive closing and reopening a thread.
+final threadRepliesWithLocalProvider = Provider.autoDispose
+    .family<AsyncValue<List<NostrEvent>>, ThreadRepliesArgs>((ref, args) {
       final relayReplies = ref.watch(threadRepliesProvider(args));
       final localReplies = ref.watch(threadLocalRepliesProvider(args));
       final authoritative = relayReplies.value;
       if (authoritative != null && localReplies.isNotEmpty) {
         final authoritativeIds = authoritative.map((event) => event.id).toSet();
         if (localReplies.any((event) => authoritativeIds.contains(event.id))) {
+          final localRepliesNotifier = ref.read(
+            threadLocalRepliesProvider(args).notifier,
+          );
+          final pendingMessagesNotifier = ref.read(
+            pendingLocalMessagesProvider(args.channelId).notifier,
+          );
           Future.microtask(() {
-            ref
-                .read(threadLocalRepliesProvider(args).notifier)
-                .confirm(authoritativeIds);
-            ref
-                .read(pendingLocalMessagesProvider(args.channelId).notifier)
-                .confirm(authoritativeIds);
+            localRepliesNotifier.confirm(authoritativeIds);
+            pendingMessagesNotifier.confirm(authoritativeIds);
           });
         }
       }
@@ -147,8 +156,5 @@ List<NostrEvent> _mergeReplies(
   for (final event in [...first, ...second]) {
     byId[event.id] = event;
   }
-  return byId.values.toList()..sort((a, b) {
-    final createdAt = a.createdAt.compareTo(b.createdAt);
-    return createdAt != 0 ? createdAt : a.id.compareTo(b.id);
-  });
+  return byId.values.toList()..sort(compareThreadRepliesChronologically);
 }

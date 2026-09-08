@@ -161,6 +161,7 @@ export function AddChannelBotTeamsSection({
                               avatarUrl={persona.avatarUrl}
                               className="h-4 w-4 text-3xs bg-secondary-foreground/20 text-secondary-foreground"
                               label={persona.displayName}
+                              shape="squircle"
                               testId="team-tooltip-persona-avatar"
                             />
                             <span className="text-2xs text-secondary-foreground">

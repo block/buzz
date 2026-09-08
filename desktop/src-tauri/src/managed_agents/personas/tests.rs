@@ -8,6 +8,7 @@ use crate::managed_agents::AgentDefinition;
 
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        description: None,
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -22,6 +23,7 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),

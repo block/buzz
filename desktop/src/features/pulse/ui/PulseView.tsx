@@ -128,7 +128,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     [agentPubkeys],
   );
   const agentStatusMap = React.useMemo(() => {
-    const map: Record<string, "online" | "away" | "offline"> = {};
+    const map: Record<string, "online" | "away" | "offline" | "unknown"> = {};
     for (const a of relayAgents) {
       map[a.pubkey] = a.status;
     }
@@ -397,6 +397,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                       avatarUrl={currentProfile?.avatarUrl ?? null}
                       className="!h-7 !w-7 shrink-0"
                       displayName={currentDisplayName}
+                      shape={
+                        currentProfile?.isAgent === true ? "squircle" : "circle"
+                      }
                     />
                     <span className="max-w-32 truncate text-sm font-medium text-foreground">
                       {currentDisplayName}

@@ -24,14 +24,20 @@ import {
   getWorkflowActionTiles,
   getWorkflowCardLabel,
   getWorkflowTriggerEmoji,
+  getWorkflowTriggerConfig,
   getWorkflowTriggerType,
 } from "./workflowDefinition";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
+import type { WorkflowCardAuthorPresentation } from "./useWorkflowListAuthorPresentations";
+import type { WorkflowMessagePresentation } from "./useWorkflowListMessagePresentations";
+import { workflowTriggerDescription } from "./workflowTriggerDescription";
 
 type WorkflowCardProps = {
   workflow: Workflow;
+  authorPresentation?: WorkflowCardAuthorPresentation;
   channelName?: string;
   isTogglingEnabled?: boolean;
+  messagePresentation?: WorkflowMessagePresentation;
   onView: (workflow: Workflow) => void;
   onTrigger: (workflowId: string) => void;
   onToggleEnabled: (workflow: Workflow) => void;
@@ -189,8 +195,10 @@ function ActionTileStack({
 
 export function WorkflowCard({
   workflow,
+  authorPresentation,
   channelName,
   isTogglingEnabled = false,
+  messagePresentation,
   onView,
   onTrigger,
   onToggleEnabled,
@@ -201,7 +209,17 @@ export function WorkflowCard({
   const [triggerAnimationSequence, setTriggerAnimationSequence] =
     React.useState(0);
   const isEnabled = getWorkflowEnabled(workflow.definition);
-  const cardLabel = getWorkflowCardLabel(workflow.definition);
+  const configuredTrigger = getWorkflowTriggerConfig(workflow.definition);
+  const cardLabel = getWorkflowCardLabel(workflow.definition, {
+    triggerDescription: configuredTrigger
+      ? workflowTriggerDescription(configuredTrigger, {
+          authorLabel: authorPresentation?.label ?? undefined,
+          authorLoading: authorPresentation?.loading,
+          messageLabel: messagePresentation?.messageLabel ?? undefined,
+          messageLoading: messagePresentation?.messageLoading,
+        })
+      : undefined,
+  });
   const triggerType = getWorkflowTriggerType(workflow.definition);
   const actionTiles = getWorkflowActionTiles(workflow.definition);
   const triggerEmoji = getWorkflowTriggerEmoji(workflow.definition);

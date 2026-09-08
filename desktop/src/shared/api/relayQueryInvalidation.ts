@@ -37,6 +37,7 @@ const RELAY_QUERY_ROOTS = new Set<string>([
 
 const RELAY_PROJECT_QUERY_PARTS = new Set<string>([
   "activity-summaries",
+  "home-channel",
   "issues",
   "pull-requests",
   // Fresh for two minutes (PROJECT_WORK_ITEMS_STALE_TIME_MS) and tolerant of

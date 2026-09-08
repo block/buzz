@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../../shared/relay/relay.dart';
+import 'channel_event_order.dart';
 
 class ChannelPageCursor {
   final int createdAt;
@@ -330,7 +331,11 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
   final oldest = oldestPage?.rows.isEmpty ?? true
       ? null
       : oldestPage!.rows.last.event;
-  if (oldest != null && _compareRelayOrder(event, oldest) >= 0) return current;
+  if (oldest != null &&
+      (event.createdAt < oldest.createdAt ||
+          (oldestPage!.hasMore && _compareRelayOrder(event, oldest) >= 0))) {
+    return current;
+  }
   final overlay =
       current.liveOverlay
           .where((candidate) => candidate.id != event.id)
@@ -362,7 +367,7 @@ List<NostrEvent> flattenChannelWindowEvents(ChannelWindowStore store) {
     byId[event.id] = event;
   }
   return byId.values.toList()
-    ..sort((left, right) => _compareRelayOrder(right, left));
+    ..sort(compareChannelTimelineEventsChronologically);
 }
 
 bool channelWindowHasMore(ChannelWindowStore store) =>

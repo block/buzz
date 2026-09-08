@@ -277,6 +277,75 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Fetch the relay's stable signing identity from its NIP-11 document.
+    ///
+    /// Relay-authored workflow attribution is trusted only when the event signer
+    /// matches this key. Missing, malformed, or unavailable identity data fails
+    /// closed by returning an error/`None` to the caller. NIP-11 is standardized
+    /// at the relay root; `/info` remains a compatibility fallback for relays
+    /// that expose the document through Buzz's explicit alias.
+    pub async fn relay_self(&self) -> Result<Option<String>, RelayError> {
+        let mut failures = Vec::new();
+        let mut saw_document_without_self = false;
+
+        for path in ["/", "/info"] {
+            let url = format!("{}{path}", self.base_url);
+            let response = match self
+                .http
+                .get(&url)
+                .header(reqwest::header::ACCEPT, "application/nostr+json")
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    failures.push(format!("GET {path} failed: {error}"));
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                failures.push(format!("GET {path} returned HTTP {}", response.status()));
+                continue;
+            }
+
+            let document: serde_json::Value = match response.json().await {
+                Ok(document) => document,
+                Err(error) => {
+                    failures.push(format!("GET {path} returned invalid NIP-11 JSON: {error}"));
+                    continue;
+                }
+            };
+            let Some(relay_self) = document.get("self") else {
+                saw_document_without_self = true;
+                continue;
+            };
+            let Some(relay_self) = relay_self.as_str() else {
+                failures.push(format!("GET {path} returned a non-string NIP-11 self key"));
+                continue;
+            };
+            let relay_self = match nostr::PublicKey::from_hex(relay_self) {
+                Ok(pubkey) => pubkey.to_hex(),
+                Err(error) => {
+                    failures.push(format!(
+                        "GET {path} returned an invalid NIP-11 self key: {error}"
+                    ));
+                    continue;
+                }
+            };
+            return Ok(Some(relay_self));
+        }
+
+        if saw_document_without_self {
+            Ok(None)
+        } else {
+            Err(RelayError::Http(format!(
+                "failed to fetch a usable NIP-11 document: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -423,6 +492,64 @@ impl RestClient {
             .map_err(|e| RelayError::Http(e.to_string()))
     }
 
+    /// Query events via `POST /query` with a raw NIP-01 filter document.
+    ///
+    /// `nostr::Filter` only encodes single-letter generic tags. Project home
+    /// lookup needs `#buzz-channel`, which this path serializes verbatim.
+    pub async fn query_raw(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query every historical event matching one raw filter across bounded pages.
+    ///
+    /// Uses the bridge's composite `(until, before_id)` cursor so a full page
+    /// never becomes evidence that older project metadata is absent.
+    pub async fn query_raw_all(&self, mut filter: Value) -> Result<Vec<Value>, RelayError> {
+        const PAGE_SIZE: usize = 500;
+        const EVENT_BOUND: usize = 10_000;
+        let mut events = Vec::new();
+        loop {
+            let remaining_probe = EVENT_BOUND + 1 - events.len();
+            let page_limit = PAGE_SIZE.min(remaining_probe);
+            filter["limit"] = serde_json::json!(page_limit);
+            let page = self.query_raw(std::slice::from_ref(&filter)).await?;
+            let page = page
+                .as_array()
+                .ok_or_else(|| RelayError::Http("query response is not an array".into()))?;
+            let done = page.len() < page_limit;
+            if events.len() + page.len() > EVENT_BOUND {
+                return Err(RelayError::Http(format!(
+                    "query exceeded the exhaustive {EVENT_BOUND}-event bound"
+                )));
+            }
+            if !done {
+                let last = page
+                    .last()
+                    .ok_or_else(|| RelayError::Http("full query page is empty".into()))?;
+                let created_at = last
+                    .get("created_at")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| RelayError::Http("query page event lacks created_at".into()))?;
+                let id = last
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| id.len() == 64 && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                    .ok_or_else(|| RelayError::Http("query page event has invalid id".into()))?;
+                filter["until"] = serde_json::json!(created_at);
+                filter["before_id"] = serde_json::json!(id);
+            }
+            events.extend(page.iter().cloned());
+            if done {
+                return Ok(events);
+            }
+        }
+    }
+
     /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
     ///
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
@@ -457,6 +584,10 @@ impl RestClient {
 /// Events the harness cares about.
 #[derive(Debug, Clone)]
 pub struct BuzzEvent {
+    /// Which authenticated relay connection delivered this event. Generation 0
+    /// is the initial connection; each successful reconnect increments it
+    /// before any buffered or live event from that connection is forwarded.
+    pub connection_generation: u64,
     /// Which channel this event belongs to.
     pub channel_id: Uuid,
     /// The underlying Nostr event.
@@ -1082,6 +1213,10 @@ struct BgState {
     /// A single failed channel REQ is parked here instead of aborting the whole
     /// reconnect. Drained by the main loop. Flushed on each reconnect attempt.
     resubscribe_retry: HashSet<Uuid>,
+    /// Current authenticated WebSocket generation. Incremented immediately
+    /// after each successful reconnect handshake, before buffered or live
+    /// events from the new connection are forwarded.
+    connection_generation: u64,
     /// Current position in the exponential backoff ladder.
     ///
     /// Persisted across calls to `wait_for_reconnect` so a flapping link stays at
@@ -1113,6 +1248,7 @@ impl BgState {
             observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
             resubscribe_retry: HashSet::new(),
+            connection_generation: 0,
             backoff_step: 0,
         }
     }
@@ -1234,6 +1370,40 @@ impl BgState {
         while let Some(event) = self.observer_in_flight.pop_back() {
             self.gated_observer_pending.push_front(event);
         }
+        self.trim_gated_observer_pending();
+    }
+
+    /// Re-park a frame the relay explicitly refused, ahead of frames parked
+    /// after the gate armed.
+    ///
+    /// An `OK(id, false, …)` names the refused frame, so only that frame is
+    /// retried — frames still awaiting their own verdict stay in the
+    /// acknowledgment window. This is the correlated counterpart to
+    /// [`Self::requeue_observer_in_flight`], which must retry everything
+    /// because a NOTICE identifies nothing.
+    fn requeue_rejected_observer_frame(&mut self, event_id: &str) {
+        let Some(index) = self
+            .observer_in_flight
+            .iter()
+            .position(|event| event.id.to_hex() == event_id)
+        else {
+            return;
+        };
+        if let Some(event) = self.observer_in_flight.remove(index) {
+            if self.gated_observer_pending.len() >= GATED_OBSERVER_QUEUE_CAP {
+                self.gated_observer_pending.pop_front();
+                self.gated_observer_dropped += 1;
+                warn!(
+                    dropped_total = self.gated_observer_dropped,
+                    "gated observer queue full — dropped oldest parked frame for refused retry"
+                );
+            }
+            self.gated_observer_pending.push_front(event);
+        }
+    }
+
+    /// Enforce the parked-queue bound, counting evictions so loss stays visible.
+    fn trim_gated_observer_pending(&mut self) {
         while self.gated_observer_pending.len() > GATED_OBSERVER_QUEUE_CAP {
             self.gated_observer_pending.pop_front();
             self.gated_observer_dropped += 1;
@@ -2097,6 +2267,36 @@ async fn handle_ws_message(
                     subscription_id,
                     event,
                 } => {
+                    // Relay and storage responses are untrusted. Verify before
+                    // any event field can affect routing, replay state, or the
+                    // harness queues.
+                    let event_id = event.id.to_hex();
+                    let event = match tokio::task::spawn_blocking(move || {
+                        buzz_core::verify_event(&event).map(|()| event)
+                    })
+                    .await
+                    {
+                        Ok(Ok(event)) => event,
+                        Ok(Err(error)) => {
+                            warn!(
+                                subscription_id,
+                                event_id,
+                                error = %error,
+                                "relay event failed NIP-01 verification — dropping"
+                            );
+                            return true;
+                        }
+                        Err(error) => {
+                            warn!(
+                                subscription_id,
+                                event_id,
+                                error = %error,
+                                "relay event verification task failed — dropping"
+                            );
+                            return true;
+                        }
+                    };
+
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
                         match observer_control_tx.try_send(*event) {
                             Ok(()) => {}
@@ -2131,6 +2331,7 @@ async fn handle_ws_message(
                         }
                         let ts = event.created_at.as_secs();
                         let buzz_event = BuzzEvent {
+                            connection_generation: state.connection_generation,
                             channel_id: channel_uuid,
                             event: *event,
                         };
@@ -2172,6 +2373,7 @@ async fn handle_ws_message(
                         let event_id_hex = event.id.to_hex();
                         if state.record_event(channel_id, &event) {
                             let buzz_event = BuzzEvent {
+                                connection_generation: state.connection_generation,
                                 channel_id,
                                 event: *event,
                             };
@@ -2224,7 +2426,10 @@ async fn handle_ws_message(
                 RelayMessage::Notice { message } => {
                     // Fix 4: NOTICE at warn level.
                     tracing::warn!("relay NOTICE: {message}");
-                    // The relay sends NOTICE for rate-limited EVENT/COUNT frames.
+                    // NOTICE now carries only connection-scoped refusals: an
+                    // EVENT is refused via OK and a REQ/COUNT via CLOSED. A
+                    // NOTICE names nothing, so every unacknowledged observer
+                    // write must be retried.
                     if message.starts_with("rate-limited:") {
                         let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
                         let deadline = state.set_rate_limit_gate(secs);
@@ -2391,6 +2596,25 @@ async fn handle_ws_message(
                         // AUTH OK with accepted=false means auth was rejected.
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
+                    }
+                    // A refused EVENT is acknowledged on its own channel, so the
+                    // backoff must arm here — not only in the NOTICE arm. Without
+                    // this the harness would publish straight back into the same
+                    // quota it was just refused on.
+                    if !accepted && message.starts_with("rate-limited:") {
+                        let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
+                        let deadline = state.set_rate_limit_gate(secs);
+                        // The OK names the refused frame, so re-park only that
+                        // one rather than every unacknowledged frame.
+                        state.requeue_rejected_observer_frame(&event_id);
+                        warn!(
+                            "rate-limit gate armed via OK for event {event_id} until ~{:.1}s from now",
+                            deadline
+                                .checked_duration_since(tokio::time::Instant::now())
+                                .unwrap_or_default()
+                                .as_secs_f64()
+                        );
+                        return true;
                     }
                     state.acknowledge_observer_frame(&event_id);
                     debug!("OK for event {event_id}: accepted={accepted} message={message}");
@@ -2955,6 +3179,7 @@ async fn try_autonomous_reconnect(
         match do_connect(relay_url, keys, auth_tag).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
+                state.connection_generation = state.connection_generation.saturating_add(1);
                 info!("autonomous reconnect succeeded (attempt {})", attempt + 1);
                 let handshake_ok = process_handshake_buffer(
                     ws,
@@ -3093,6 +3318,7 @@ async fn wait_for_reconnect(
         match do_connect(relay_url, keys, auth_tag).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
+                state.connection_generation = state.connection_generation.saturating_add(1);
                 info!("relay reconnected to {relay_url}");
                 let handshake_ok = process_handshake_buffer(
                     ws,
@@ -4026,6 +4252,147 @@ async fn wait_for_any_ok(
 mod tests {
     use super::*;
 
+    async fn nip11_test_client(
+        responses: HashMap<String, (u16, String)>,
+    ) -> (
+        RestClient,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind NIP-11 test server");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("test server address")
+        );
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0; 8192];
+                let bytes_read = socket.read(&mut request).await.unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes_read]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let has_nip11_accept = request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("accept: application/nostr+json"));
+                server_requests
+                    .lock()
+                    .expect("lock recorded NIP-11 requests")
+                    .push((path.clone(), has_nip11_accept));
+
+                let (status, body) = responses
+                    .get(&path)
+                    .cloned()
+                    .unwrap_or_else(|| (404, "not found".into()));
+                let reason = if status == 200 { "OK" } else { "Not Found" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let client = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        (client, requests, server)
+    }
+
+    #[tokio::test]
+    async fn relay_self_reads_and_normalizes_standard_root_document() {
+        let uppercase = "AB".repeat(32);
+        let responses = HashMap::from([
+            (
+                "/".to_string(),
+                (200, serde_json::json!({ "self": uppercase }).to_string()),
+            ),
+            (
+                "/info".to_string(),
+                (
+                    200,
+                    serde_json::json!({ "self": "cd".repeat(32) }).to_string(),
+                ),
+            ),
+        ]);
+        let (client, requests, server) = nip11_test_client(responses).await;
+
+        assert_eq!(
+            client.relay_self().await.expect("fetch relay self"),
+            Some("ab".repeat(32))
+        );
+        assert_eq!(
+            *requests.lock().expect("lock recorded requests"),
+            vec![("/".to_string(), true)],
+            "the standard root document should be preferred and request NIP-11 JSON"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_self_falls_back_to_info_alias() {
+        let responses = HashMap::from([
+            ("/".to_string(), (404, "not found".into())),
+            (
+                "/info".to_string(),
+                (
+                    200,
+                    serde_json::json!({ "self": "cd".repeat(32) }).to_string(),
+                ),
+            ),
+        ]);
+        let (client, requests, server) = nip11_test_client(responses).await;
+
+        assert_eq!(
+            client.relay_self().await.expect("fetch relay self"),
+            Some("cd".repeat(32))
+        );
+        assert_eq!(
+            *requests.lock().expect("lock recorded requests"),
+            vec![("/".to_string(), true), ("/info".to_string(), true)]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_self_rejects_malformed_identity_at_both_endpoints() {
+        let responses = HashMap::from([
+            (
+                "/".to_string(),
+                (
+                    200,
+                    serde_json::json!({ "self": "not-a-pubkey" }).to_string(),
+                ),
+            ),
+            (
+                "/info".to_string(),
+                (200, serde_json::json!({ "self": 42 }).to_string()),
+            ),
+        ]);
+        let (client, _requests, server) = nip11_test_client(responses).await;
+
+        let error = client
+            .relay_self()
+            .await
+            .expect_err("malformed relay identities must fail closed");
+        assert!(error
+            .to_string()
+            .contains("failed to fetch a usable NIP-11 document"));
+        server.abort();
+    }
+
     #[test]
     fn relay_ws_to_http_plain() {
         assert_eq!(
@@ -4435,6 +4802,237 @@ mod tests {
             .expect("read test websocket frame");
         serde_json::from_str(message.to_text().expect("expected text frame"))
             .expect("parse test websocket frame")
+    }
+
+    fn make_signed_channel_event(keys: &Keys, content: &str, created_at_secs: u64) -> Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags([])
+            .custom_created_at(nostr::Timestamp::from(created_at_secs))
+            .sign_with_keys(keys)
+            .expect("sign channel event")
+    }
+
+    fn replace_event_field(event: &Event, field: &str, replacement: Value) -> Event {
+        let mut value = serde_json::to_value(event).expect("serialize event");
+        value[field] = replacement;
+        serde_json::from_value(value).expect("deserialize tampered event")
+    }
+
+    fn recompute_event_id(event: &Event) -> Event {
+        let id = nostr::EventId::new(
+            &event.pubkey,
+            &event.created_at,
+            &event.kind,
+            &event.tags,
+            &event.content,
+        );
+        replace_event_field(event, "id", json!(id.to_hex()))
+    }
+
+    async fn handle_test_relay_event(
+        ws: &mut WsStream,
+        event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+        observer_control_tx: &mpsc::Sender<Event>,
+        state: &mut BgState,
+        subscription_id: &str,
+        event: &Event,
+    ) -> bool {
+        let keys = Keys::generate();
+        let agent_pubkey_hex = keys.public_key().to_hex();
+        let text = serde_json::to_string(&json!(["EVENT", subscription_id, event]))
+            .expect("serialize relay frame");
+        handle_ws_message(
+            Message::Text(text.into()),
+            ws,
+            event_tx,
+            observer_control_tx,
+            state,
+            &keys,
+            "wss://relay.example.com",
+            &agent_pubkey_hex,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn verified_channel_event_is_recorded_and_forwarded() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let event = make_signed_channel_event(&Keys::generate(), "hello", 2_000);
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &channel_sub_id(channel_id),
+                &event,
+            )
+            .await
+        );
+
+        let received = event_rx.try_recv().expect("verified event was forwarded");
+        let received = received.expect("event channel should not contain shutdown marker");
+        assert_eq!(received.channel_id, channel_id);
+        assert_eq!(received.event.id, event.id);
+        assert_eq!(state.last_seen.get(&channel_id), Some(&2_000));
+        assert!(state.seen_ids.contains(&event.id.to_hex()));
+        assert!(matches!(
+            observer_control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tampered_channel_events_are_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let owner_event = make_signed_channel_event(&Keys::generate(), "status", 2_000);
+        let other_event = make_signed_channel_event(&Keys::generate(), "other", 3_000);
+        let other = serde_json::to_value(&other_event).expect("serialize other event");
+        let owner_command = recompute_event_id(&replace_event_field(
+            &owner_event,
+            "content",
+            json!("!shutdown"),
+        ));
+
+        let cases = [
+            (
+                "changed content",
+                replace_event_field(&owner_event, "content", json!("tampered")),
+            ),
+            ("forged owner command with a matching id", owner_command),
+            (
+                "changed event id",
+                replace_event_field(&owner_event, "id", other["id"].clone()),
+            ),
+            (
+                "changed signature",
+                replace_event_field(&owner_event, "sig", other["sig"].clone()),
+            ),
+            (
+                "changed author pubkey",
+                replace_event_field(&owner_event, "pubkey", other["pubkey"].clone()),
+            ),
+            (
+                "changed tags",
+                replace_event_field(
+                    &owner_event,
+                    "tags",
+                    json!([["h", Uuid::new_v4().to_string()]]),
+                ),
+            ),
+            (
+                "changed timestamp",
+                replace_event_field(&owner_event, "created_at", json!(4_000)),
+            ),
+        ];
+
+        for (case, event) in cases {
+            assert!(
+                handle_test_relay_event(
+                    &mut client,
+                    &event_tx,
+                    &observer_control_tx,
+                    &mut state,
+                    &channel_sub_id(channel_id),
+                    &event,
+                )
+                .await,
+                "{case} should not close the connection"
+            );
+            assert!(
+                matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{case} reached the harness event queue"
+            );
+        }
+
+        assert!(state.last_seen.is_empty());
+        assert!(state.seen_ids.current.is_empty());
+        assert!(state.seen_ids.previous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forged_membership_notification_is_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let attacker_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16),
+            "membership changed",
+        )
+        .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+        .custom_created_at(nostr::Timestamp::from(2_000))
+        .sign_with_keys(&attacker_keys)
+        .expect("sign membership event");
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "pubkey",
+            json!(owner_keys.public_key().to_hex()),
+        ));
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                MEMBERSHIP_NOTIF_SUB_ID,
+                &forged,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(state.membership_last_seen, None);
+        assert!(state.seen_ids.current.is_empty());
+        assert!(state.seen_ids.previous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forged_observer_control_is_dropped_before_control_queue() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let event = make_signed_channel_event(&Keys::generate(), "control", 2_000);
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "content",
+            json!("tampered control"),
+        ));
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                OBSERVER_CONTROL_SUB_ID,
+                &forged,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            observer_control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     fn test_channel_filter() -> ChannelFilter {
@@ -5852,6 +6450,151 @@ mod tests {
         assert_eq!(
             first_deadline, second_deadline,
             "shorter hint must not overwrite a later existing deadline"
+        );
+    }
+
+    /// A rate-limited `OK(id, false, …)` must arm the backoff gate and re-park
+    /// the refused frame, driven through the real frame dispatcher.
+    ///
+    /// This is the buzz-acp side of the relay's rejection-correlation change:
+    /// a refused EVENT is now acknowledged on its own channel instead of via
+    /// NOTICE. Reverting either the gate arming or the requeue in the `Ok` arm
+    /// must fail this test.
+    #[tokio::test]
+    async fn rate_limited_ok_arms_gate_and_reparks_refused_observer_frame() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel::<Option<BuzzEvent>>(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel::<Event>(4);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+
+        let refused = make_observer_frame(&keys);
+        let still_pending = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(refused.clone()));
+        state.track_observer_in_flight(Box::new(still_pending.clone()));
+        assert!(
+            state.check_rate_gate().is_none(),
+            "gate must start disarmed"
+        );
+
+        let frame = json!([
+            "OK",
+            refused.id.to_hex(),
+            false,
+            "rate-limited: retry in 5s"
+        ]);
+        let should_continue = handle_ws_message(
+            Message::Text(frame.to_string().into()),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.test",
+            "agent-pubkey",
+            None,
+        )
+        .await;
+
+        assert!(should_continue, "a rate-limited OK must keep the socket");
+        assert!(
+            state.check_rate_gate().is_some(),
+            "a rate-limited OK must arm the backoff gate, or the harness \
+             republishes straight into the same quota"
+        );
+        let parked: Vec<_> = state
+            .gated_observer_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(
+            parked,
+            [refused.id],
+            "the refused frame must be re-parked for redelivery, not dropped"
+        );
+        let in_flight: Vec<_> = state
+            .observer_in_flight
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(
+            in_flight,
+            [still_pending.id],
+            "frames still awaiting their own verdict must stay in flight"
+        );
+    }
+
+    #[test]
+    fn rejected_observer_frame_displaces_oldest_parked_frame_at_capacity() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let refused = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(refused.clone()));
+
+        let oldest = make_observer_frame(&keys);
+        state.park_gated_observer_frame(Box::new(oldest.clone()));
+        let mut survivors = Vec::with_capacity(GATED_OBSERVER_QUEUE_CAP - 1);
+        for _ in 1..GATED_OBSERVER_QUEUE_CAP {
+            let event = make_observer_frame(&keys);
+            survivors.push(event.id);
+            state.park_gated_observer_frame(Box::new(event));
+        }
+
+        state.requeue_rejected_observer_frame(&refused.id.to_hex());
+
+        let parked: Vec<_> = state
+            .gated_observer_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(parked.len(), GATED_OBSERVER_QUEUE_CAP);
+        assert_eq!(parked.first(), Some(&refused.id));
+        assert_eq!(&parked[1..], survivors.as_slice());
+        assert!(!parked.contains(&oldest.id));
+        assert_eq!(state.gated_observer_dropped, 1);
+        assert!(state.observer_in_flight.is_empty());
+    }
+
+    /// A non-rate-limit refusal is terminal: retrying would be refused
+    /// identically, so the frame is retired rather than re-parked, and the
+    /// backoff gate stays disarmed.
+    #[tokio::test]
+    async fn non_rate_limited_ok_rejection_retires_frame_without_arming_gate() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel::<Option<BuzzEvent>>(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel::<Event>(4);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+
+        let refused = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(refused.clone()));
+
+        let frame = json!(["OK", refused.id.to_hex(), false, "invalid: bad signature"]);
+        let should_continue = handle_ws_message(
+            Message::Text(frame.to_string().into()),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.test",
+            "agent-pubkey",
+            None,
+        )
+        .await;
+
+        assert!(should_continue, "a rejected event must not drop the socket");
+        assert!(
+            state.check_rate_gate().is_none(),
+            "only a rate-limit refusal arms the backoff gate"
+        );
+        assert!(
+            state.gated_observer_pending.is_empty(),
+            "a permanently refused frame must not be requeued into a retry loop"
+        );
+        assert!(
+            state.observer_in_flight.is_empty(),
+            "a permanently refused frame must be retired from the window"
         );
     }
 

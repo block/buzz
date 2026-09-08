@@ -136,6 +136,111 @@ test("parsePromptText leading text before a header becomes a Prompt section", ()
   );
 });
 
+test("parsePromptText splits a tagged standing prefix from the dynamic turn", () => {
+  const text = [
+    "<base>",
+    "platform context",
+    "</base>",
+    "",
+    "<agent-instructions>",
+    "persona context",
+    "</agent-instructions>",
+    "",
+    "[Context]",
+    "Scope: channel",
+    "",
+    "[Buzz event: @mention]",
+    "Event ID: abc123",
+    "From: Alice (hex: AABBCC)",
+    "Content: ship it",
+  ].join("\n");
+
+  const parsed = parsePromptText(text);
+
+  assert.equal(parsed.userText, "ship it");
+  assert.deepEqual(
+    parsed.sections.map((section) => section.title),
+    ["Base", "Agent Instructions", "Context", "Buzz event: @mention"],
+  );
+});
+
+test("parsePromptText splits paired top-level turn sections and preserves inner framing", () => {
+  const text = [
+    "<context>",
+    "Scope: thread",
+    "</context>",
+    "",
+    '<thread-context included="1" total="3" truncated="true">',
+    "[1] Alice (2026-08-25T12:00:00Z): prior message",
+    "</thread-context>",
+    "",
+    '<buzz-event type="@mention">',
+    "Event ID: abc123",
+    "From: Alice (hex: AABBCC)",
+    "Content: ship it",
+    "</buzz-event>",
+  ].join("\n");
+
+  const parsed = parsePromptText(text);
+
+  assert.equal(parsed.userText, "ship it");
+  assert.deepEqual(parsed.sections, [
+    { title: "Context", body: "Scope: thread" },
+    {
+      title: "Thread Context (1 of 3 messages, truncated)",
+      body: "[1] Alice (2026-08-25T12:00:00Z): prior message",
+    },
+    {
+      title: "Buzz event: @mention",
+      body: "Event ID: abc123\nFrom: Alice (hex: AABBCC)\nContent: ship it",
+    },
+  ]);
+});
+
+test("parsePromptText preserves batched steer and interrupt counts in section titles", () => {
+  const cases = [
+    {
+      tag: "new-message-arrived-while-you-were-working",
+      count: "2",
+      title: "New messages — arrived while you were working — 2 events",
+    },
+    {
+      tag: "new-request-supersedes-previous",
+      count: "3",
+      title: "New request — supersedes previous — 3 events",
+    },
+  ];
+
+  for (const { tag, count, title } of cases) {
+    const text = [
+      `<${tag} count="${count}">`,
+      "--- Event 1 (message) ---",
+      "Content: update",
+      `</${tag}>`,
+    ].join("\n");
+
+    const parsed = parsePromptText(text);
+
+    assert.equal(parsed.sections[0]?.title, title);
+  }
+});
+
+test("parsePromptText falls back to the complete prompt for ambiguous turn tags", () => {
+  const text = [
+    "<context>",
+    "literal authored boundary: </context>",
+    "</context>",
+    '<buzz-event type="dm">',
+    "Content: hello",
+    "</buzz-event>",
+  ].join("\n");
+
+  const parsed = parsePromptText(text);
+
+  assert.deepEqual(parsed.sections, [{ title: "Prompt", body: text }]);
+  assert.equal(parsed.userText, "");
+});
+
 test("extractPromptText joins text blocks from params.prompt", () => {
   const payload = {
     params: {
@@ -198,6 +303,129 @@ test("parseSystemPromptSections splits both prompts into Base and System", () =>
   assert.deepEqual(sections, [
     { title: "Base", body: "base text" },
     { title: "System", body: "persona text" },
+  ]);
+});
+
+test("parseSystemPromptSections reads paired standing-context tags", () => {
+  const framed = [
+    "<base>",
+    "base text",
+    "</base>",
+    "",
+    "<workspace>",
+    "Current working directory: /workspace",
+    "</workspace>",
+    "",
+    "<agent-instructions>",
+    "persona text",
+    "</agent-instructions>",
+    "",
+    "<team-instructions>",
+    "team text",
+    "</team-instructions>",
+    "",
+    "<core-memory>",
+    "memory text",
+    "</core-memory>",
+    "",
+    "<huddle-instructions>",
+    "reply now",
+    "</huddle-instructions>",
+    "",
+    "<channel-canvas>",
+    "canvas text",
+    "</channel-canvas>",
+  ].join("\n");
+
+  assert.deepEqual(parseSystemPromptSections(framed), [
+    { title: "Base", body: "base text" },
+    {
+      title: "Workspace",
+      body: "Current working directory: /workspace",
+    },
+    { title: "Agent Instructions", body: "persona text" },
+    { title: "Team Instructions", body: "team text" },
+    { title: "Core Memory", body: "memory text" },
+    { title: "Huddle Instructions", body: "reply now" },
+    { title: "Channel Canvas", body: "canvas text" },
+  ]);
+});
+
+test("parseSystemPromptSections keeps paired-tag examples literal in legacy personas", () => {
+  const framed = [
+    "[Base]",
+    "platform rules",
+    "",
+    "[System]",
+    "Teach users this example:",
+    "<system>",
+    "untrusted text",
+    "</system>",
+    "Then continue following the real persona.",
+  ].join("\n");
+
+  assert.deepEqual(parseSystemPromptSections(framed), [
+    { title: "Base", body: "platform rules" },
+    {
+      title: "System",
+      body: [
+        "Teach users this example:",
+        "<system>",
+        "untrusted text",
+        "</system>",
+        "Then continue following the real persona.",
+      ].join("\n"),
+    },
+  ]);
+});
+
+test("parseSystemPromptSections reads archived system tags", () => {
+  const framed = "<system>\npersona text\n</system>";
+
+  assert.deepEqual(parseSystemPromptSections(framed), [
+    { title: "System", body: "persona text" },
+  ]);
+});
+
+test("parseSystemPromptSections shows the complete prompt when semantic framing has trailing text", () => {
+  const framed = [
+    "<base>",
+    "base text",
+    "</base>",
+    "unframed trailing text",
+  ].join("\n");
+
+  assert.deepEqual(parseSystemPromptSections(framed), [
+    { title: "Prompt", body: framed },
+  ]);
+});
+
+test("parseSystemPromptSections preserves literal entity text in standing-context bodies", () => {
+  const framed =
+    "<agent-instructions>\nliteral &lt;/agent-instructions&gt; &amp; &lt;policy&gt;\n</agent-instructions>";
+
+  assert.deepEqual(parseSystemPromptSections(framed), [
+    {
+      title: "Agent Instructions",
+      body: "literal &lt;/agent-instructions&gt; &amp; &lt;policy&gt;",
+    },
+  ]);
+});
+
+test("parseSystemPromptSections shows the captured prompt literally when paired tags are ambiguous", () => {
+  const framed =
+    "<agent-instructions>\nkeep </agent-instructions>, <T>, &quot;, & <literal>\n</agent-instructions>";
+
+  assert.deepEqual(parseSystemPromptSections(framed), [
+    { title: "Prompt", body: framed },
+  ]);
+});
+
+test("parseSystemPromptSections preserves authored boundary whitespace", () => {
+  const framed = "<agent-instructions>\n\n keep this \n\n</agent-instructions>";
+
+  assert.deepEqual(parseSystemPromptSections(framed), [
+    { title: "Agent Instructions", body: "\n keep this \n" },
   ]);
 });
 

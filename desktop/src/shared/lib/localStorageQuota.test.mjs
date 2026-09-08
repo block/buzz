@@ -34,10 +34,11 @@ function install(ls) {
 }
 
 test("startup recovery removes disposable caches but preserves user state", () => {
-  const ls = makeQuotaLocalStorage({ maxEntries: 6 });
+  const ls = makeQuotaLocalStorage({ maxEntries: 7 });
   install(ls);
   ls.store.set("buzz-channel-messages.v1:relay:chan", "big");
   ls.store.set("buzz-channels.v1:relay", "big");
+  ls.store.set("buzz-projects.v1:relay:owner", "big");
   ls.store.set("buzz-timeline-skeleton-shape.v1:chan", "small");
   ls.store.set("buzz-sidebar-skeleton-shape.v1:community:user", "small");
   ls.store.set("buzz-user-labels.v1:relay", "small");
@@ -47,6 +48,7 @@ test("startup recovery removes disposable caches but preserves user state", () =
 
   assert.equal(ls.getItem("buzz-channel-messages.v1:relay:chan"), null);
   assert.equal(ls.getItem("buzz-channels.v1:relay"), null);
+  assert.equal(ls.getItem("buzz-projects.v1:relay:owner"), null);
   assert.equal(ls.getItem("buzz-timeline-skeleton-shape.v1:chan"), null);
   assert.equal(
     ls.getItem("buzz-sidebar-skeleton-shape.v1:community:user"),
@@ -163,7 +165,7 @@ test("global cache byte budget spans relays and preserves durable state", () => 
 test("rejects a single cache entry larger than the global byte budget", () => {
   const ls = makeQuotaLocalStorage({ maxEntries: 10 });
   install(ls);
-  const key = "buzz-channel-messages.v1:relay:oversized";
+  const key = "buzz-projects.v1:relay:oversized";
   ls.store.set(key, "previous snapshot");
 
   assert.equal(
@@ -183,13 +185,33 @@ test("writes normally when under quota", () => {
 test("evicts pure caches and retries on quota failure", () => {
   const ls = makeQuotaLocalStorage({ maxEntries: 2 });
   install(ls);
-  ls.store.set("buzz-channel-messages.v1:relay:chan", "big");
+  ls.store.set("buzz-projects.v1:relay:owner", "big");
   ls.store.set("buzz-channels.v1:relay", "big");
 
   assert.equal(setLocalStorageItemWithRecovery("k", "v"), true);
   assert.equal(ls.getItem("k"), "v");
-  assert.equal(ls.getItem("buzz-channel-messages.v1:relay:chan"), null);
+  assert.equal(ls.getItem("buzz-projects.v1:relay:owner"), null);
   assert.equal(ls.getItem("buzz-channels.v1:relay"), null);
+});
+
+test("project snapshots participate in global LRU budgeting", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 20 });
+  install(ls);
+  ls.store.set("buzz-communities", "keep");
+  const snapshot = (updatedAt) =>
+    JSON.stringify({ updatedAt, payload: "x".repeat(400_000) });
+  const projectKey = "buzz-projects.v1:relay:owner";
+  const newerKey = "buzz-channels.v1:relay:newer";
+  const newestKey = "buzz-channel-messages.v1:relay:newest";
+
+  assert.equal(setLocalStorageItemWithRecovery(projectKey, snapshot(1)), true);
+  assert.equal(setLocalStorageItemWithRecovery(newerKey, snapshot(2)), true);
+  assert.equal(setLocalStorageItemWithRecovery(newestKey, snapshot(3)), true);
+
+  assert.equal(ls.getItem(projectKey), null);
+  assert.notEqual(ls.getItem(newerKey), null);
+  assert.notEqual(ls.getItem(newestKey), null);
+  assert.equal(ls.getItem("buzz-communities"), "keep");
 });
 
 test("returns false when eviction frees nothing", () => {

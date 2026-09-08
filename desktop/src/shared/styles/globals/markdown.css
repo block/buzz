@@ -1,5 +1,5 @@
 .message-markdown {
-  --inline-chip-padding-block-start: 0.1875rem;
+  --inline-chip-padding-block-start: 0.125rem;
   --inline-chip-padding-block-end: 0.125rem;
   --inline-chip-padding-inline: 0.25rem;
   --inline-chip-min-height: calc(
@@ -101,15 +101,11 @@
 }
 
 .message-markdown .mention-chip.buzz-link-unavailable,
-.message-markdown .mention-chip.buzz-link-unavailable:hover {
-  background: hsl(var(--secondary));
-  color: hsl(var(--secondary-foreground) / 0.7);
-}
-
+.message-markdown .mention-chip.buzz-link-unavailable:hover,
 .message-markdown .mention-chip.buzz-link-deleted,
 .message-markdown .mention-chip.buzz-link-deleted:hover {
-  background: hsl(var(--destructive) / 0.12);
-  color: hsl(var(--destructive));
+  background: hsl(var(--secondary));
+  color: hsl(var(--secondary-foreground) / 0.7);
 }
 
 .message-markdown .mention-chip.inbox-channel-chip {
@@ -209,6 +205,11 @@
     var(--inline-chip-icon-gap)
   );
   white-space: nowrap;
+}
+
+.message-markdown
+  .inline-chip-leading-fragment.inline-chip-with-icon:empty::after {
+  content: "\200b";
 }
 
 .message-markdown .inline-chip-leading-fragment.inline-chip-with-icon::before {
@@ -316,6 +317,7 @@
 }
 
 .message-markdown .inline-chip-icon-human::before {
+  transform: translateY(calc(-50% + 0.0625rem));
   -webkit-mask:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='4'/%3E%3Cpath d='M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8'/%3E%3C/svg%3E")
     center / contain no-repeat;

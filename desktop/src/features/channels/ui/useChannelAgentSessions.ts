@@ -19,10 +19,8 @@ import {
 } from "./agentSessionSelection";
 import type { PanelValueSetter } from "./useChannelPanelHistoryState";
 
-export type ChannelAgentSessionAgent = Pick<
-  ManagedAgent,
-  "pubkey" | "name" | "status"
-> & {
+export type ChannelAgentSessionAgent = Pick<ManagedAgent, "pubkey" | "name"> & {
+  status: ManagedAgent["status"] | "unknown";
   agentSource: "managed" | "member-bot" | "relay";
   canInterruptTurn: boolean;
   channelIds?: string[];
@@ -39,6 +37,7 @@ type UseChannelAgentSessionsOptions = {
   openAgentSessionPubkey: string | null;
   openThreadHeadId: string | null;
   profilePanelPubkey?: string | null;
+  requireThreadEditResolution: () => boolean;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
   setOpenAgentSessionChannelId: PanelValueSetter;
@@ -51,7 +50,8 @@ type UseChannelAgentSessionsOptions = {
 
 function relayStatusToManagedStatus(
   status: RelayAgent["status"],
-): ManagedAgent["status"] {
+): ChannelAgentSessionAgent["status"] {
+  if (status === "unknown") return "unknown";
   return status === "offline" ? "stopped" : "deployed";
 }
 
@@ -173,6 +173,7 @@ export function useChannelAgentSessions({
   openAgentSessionPubkey,
   openThreadHeadId,
   profilePanelPubkey = null,
+  requireThreadEditResolution,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
   setOpenAgentSessionChannelId,
@@ -209,6 +210,7 @@ export function useChannelAgentSessions({
 
   const openAgentSession = React.useCallback(
     (pubkey: string, channelId?: string | null) => {
+      if (!requireThreadEditResolution()) return;
       if (!isAgentSessionOpen) {
         returnTarget.capture(
           resolveAgentSessionReturnTarget({
@@ -234,6 +236,7 @@ export function useChannelAgentSessions({
       isAgentSessionOpen,
       openThreadHeadId,
       profilePanelPubkey,
+      requireThreadEditResolution,
       returnTarget,
       setChannelManagementOpen,
       setExpandedThreadReplyIds,
