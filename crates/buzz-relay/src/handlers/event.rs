@@ -517,6 +517,18 @@ async fn dispatch_persistent_event_inner(
         .await;
     }
 
+    trigger_event_workflows(tenant, state, stored_event, kind_u32);
+
+    matches.len()
+}
+
+/// Preserve the ordinary workflow trigger path for transactionally stored messages.
+pub(crate) fn trigger_event_workflows(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    stored_event: &StoredEvent,
+    kind_u32: u32,
+) {
     // Skip workflow triggering for workflow-execution kinds and relay-signed workflow messages.
     let is_relay_workflow_msg = stored_event.event.pubkey == state.relay_keypair.public_key()
         && stored_event
@@ -556,11 +568,9 @@ async fn dispatch_persistent_event_inner(
             }
         });
     }
-
-    matches.len()
 }
 
-async fn enqueue_event_created_audit(
+pub(crate) async fn enqueue_event_created_audit(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     stored_event: &StoredEvent,

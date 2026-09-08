@@ -1,4 +1,6 @@
 import * as React from "react";
+import { useFeatureEnabled } from "@/shared/features";
+import { InteractionCard } from "@/features/interactions/InteractionCard";
 import { AlertTriangle } from "lucide-react";
 import {
   depthGuideActionsEqual,
@@ -364,10 +366,24 @@ export const MessageRow = React.memo(
         collapseDepthGuideActions.map((action) => [action.depth, action]),
       );
     }, [collapseDepthGuideActions]);
+    const interactionsEnabled = useFeatureEnabled("interactions");
     const getTag = (name: string) =>
       message.tags?.find((tag) => tag[0] === name)?.[1];
 
     const renderBody = () => {
+      const promptId = getTag("interaction");
+      if (interactionsEnabled && promptId && channelId) {
+        return (
+          <InteractionCard
+            key={promptId}
+            promptId={promptId}
+            channelId={channelId}
+            signer={message.signerPubkey}
+            currentPubkey={currentPubkey}
+            fallback={message.body}
+          />
+        );
+      }
       switch (message.kind) {
         case KIND_STREAM_MESSAGE_DIFF:
           return (

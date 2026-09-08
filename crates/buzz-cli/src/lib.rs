@@ -174,6 +174,9 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Experimental signed buttons, forms and polls
+    #[command(subcommand)]
+    Interactions(commands::interactions::InteractionsCmd),
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -2102,6 +2105,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Interactions(sub) => commands::interactions::dispatch(sub, &client).await,
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
@@ -2259,6 +2263,7 @@ mod tests {
             "emoji",
             "feed",
             "gifs",
+            "interactions",
             "issues",
             "media",
             "mem",
@@ -2442,6 +2447,10 @@ mod tests {
             vec!["assign", "create", "get", "list", "status", "unassign"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
+        assert_eq!(
+            names(&cmd, "interactions"),
+            vec!["answer", "ask", "close", "get", "poll", "wait"]
+        );
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
         assert_eq!(
@@ -2468,6 +2477,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("interactions", 6),
             ("issues", 6),
             ("media", 1),
             ("messages", 8),
