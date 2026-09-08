@@ -378,6 +378,29 @@ pub(crate) fn save_managed_agents_with_new_keys<R: tauri::Runtime>(
     save_agent_edits(app, records, true)
 }
 
+/// Explicit user-supplied key import. Caller holds workspace/identity/store locks
+/// and verifies ownership. Commit credential + record in one restricted atomic
+/// file write, without a preceding keyring side effect. A failed write is safely
+/// retryable; ordinary saves still cannot restore credentials.
+pub(crate) fn import_existing_agent_key<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    record: ManagedAgentRecord,
+) -> Result<(), String> {
+    let mut current = load_agent_store(app)?;
+    if let Some(saved) = current.iter_mut().find(|r| r.pubkey == record.pubkey) {
+        if saved.persona_id != record.persona_id
+            || (!saved.relay_url.is_empty() && saved.relay_url != record.relay_url)
+        {
+            return Err("Existing agent profile or community does not match".into());
+        }
+        saved.private_key_nsec = record.private_key_nsec;
+    } else {
+        current.push(record);
+    }
+    let (definitions, instances) = current.into_iter().partition(|r| r.pubkey.is_empty());
+    write_agent_store(app, definitions, instances)
+}
+
 fn save_agent_edits<R: tauri::Runtime>(
     app: &AppHandle<R>,
     records: &[ManagedAgentRecord],

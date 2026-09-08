@@ -482,3 +482,17 @@ and disconnected/retired receivers cannot resume a later destination Start.
 Regression seams: desktopLifecycle.test.mjs, mounted DesktopLifecycleControl.test.mjs,
 core desktop_lifecycle/protocol_tests.rs and native placement/tests.rs. Mock IPC
 passing is not evidence of a native successful launch or two-Desktop switching.
+
+## Explicit existing-agent identity import
+
+Agents → Add existing agent is local provisioning, not snapshot import. It binds
+an explicitly supplied private key to the exact signed kind:0 owned identity and
+independently owner-signed kind:30177 persona link in the current community. The
+linked definition must already exist; it is never cloned. Workspace apply,
+identity mutation and agent store locks fence the commit. Healthy duplicates do
+not write; explicit repair changes only the credential, not runtime/config state.
+This operation deliberately stores the user-supplied key in the restricted local
+agent file in one atomic write with the record, avoiding a keyring-first partial
+commit. The dialog discloses that storage choice. Ordinary save/Move/restore and
+snapshot mint semantics remain unchanged; no lifecycle path gains provisioning
+permission and import never starts an agent.

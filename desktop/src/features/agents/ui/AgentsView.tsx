@@ -1,3 +1,4 @@
+import { AddExistingAgent } from "./AddExistingAgent";
 import { RuntimeConfigurations } from "./RuntimeConfigurations";
 import { KnownDesktops } from "./KnownDesktops";
 import * as React from "react";
@@ -148,6 +149,7 @@ export function AgentsView() {
           <PageHeader
             action={
               <>
+                <AddExistingAgent />
                 <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
                   <Button
                     data-testid="agent-defaults-button"
