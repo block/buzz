@@ -319,6 +319,7 @@ export function usePersonaActions() {
           updatedPersona = await createPersonaMutation.mutateAsync({
             displayName: persona.displayName,
             avatarUrl: persona.avatarUrl ?? undefined,
+            description: persona.description ?? undefined,
             systemPrompt: persona.systemPrompt,
             runtime: persona.runtime ?? undefined,
             model: persona.model ?? undefined,

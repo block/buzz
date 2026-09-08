@@ -207,6 +207,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const [isMainDeferredEditPending, setMainDeferredEditPending] =
     React.useState(false);
+  const [acceptsMainAttachments, setAcceptsMainAttachments] =
+    React.useState(true);
   const isNonMemberView =
     activeChannel !== null &&
     !activeChannel.isMember &&
@@ -334,6 +336,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     hasMainComposerOverlay &&
     !isComposerDisabled &&
     !isMainDeferredEditPending &&
+    acceptsMainAttachments &&
     !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
@@ -753,7 +756,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                   ) : null}
                   <ComposerDockBackdrop gutterClassName="inset-x-5" />
                   <MessageComposer
-                    audienceContext={{ type: "channel" }}
                     channelId={activeChannel?.id ?? null}
                     channelName={activeChannel?.name ?? "channel"}
                     channelType={activeChannel?.channelType ?? null}
@@ -765,6 +767,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     onAutoSubmitComplete={handleAutoSubmitComplete}
                     isSending={isSending}
                     mediaController={mainComposerMedia}
+                    onAttachmentAcceptanceChange={setAcceptsMainAttachments}
                     onDeferredEditPendingChange={setMainDeferredEditPending}
                     onCancelEdit={onCancelEdit}
                     onEditLastOwnMessage={handleEditLastOwnMainMessage}

@@ -34,7 +34,7 @@ use crate::acp::{
     model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
     ModelSwitchMethod, StopReason, SystemPromptTransport,
 };
-use crate::config::{compose_session_title, DedupMode, PermissionMode};
+use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::prompt_project::{pick_authoritative_project_home, PromptProjectInfo};
 use crate::queue::{
@@ -42,6 +42,7 @@ use crate::queue::{
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+use crate::scope::SessionScope;
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -60,6 +61,10 @@ pub struct SuccessfulSteerDelivery {
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Session scope of the in-flight turn (mid-turn steer/signal routing and
+    /// scope-to-worker affinity target this). `None` for heartbeat tasks.
+    /// Invariant when `Some`: `scope.channel_id() == channel_id.unwrap()`.
+    pub scope: Option<SessionScope>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -113,37 +118,46 @@ pub struct ChannelDeliveryState {
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
-    /// channel_id → session_id
-    pub sessions: HashMap<Uuid, String>,
+    /// session scope → session_id
+    pub sessions: HashMap<SessionScope, String>,
     pub heartbeat_session: Option<String>,
-    /// Per-channel turn counters for proactive session rotation.
+    /// Per-scope turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
-    pub turn_counts: HashMap<Uuid, u32>,
+    pub turn_counts: HashMap<SessionScope, u32>,
     /// Turn counter for the heartbeat session.
     pub heartbeat_turn_count: u32,
     /// Whether the live heartbeat session has successfully received `<base>`.
     pub heartbeat_standing_context_sent: bool,
-    /// channel_id → rendered NIP-AE core prompt section, populated once at
+    /// session scope → rendered NIP-AE core prompt section, populated once at
     /// session creation per Tyler's spec (no mid-session refresh).
-    pub core_sections: HashMap<Uuid, String>,
-    /// channel_id → rendered `<channel-canvas>` metadata section.
+    pub core_sections: HashMap<SessionScope, String>,
+    /// session scope → rendered `<channel-canvas>` metadata section.
     ///
     /// Populated once before session creation (same lifecycle as `core_sections`).
     /// Absent when the channel has no canvas, the canvas content is blank, or the
     /// fetch fails — all fail open. Cleared on session invalidation alongside
     /// `core_sections` so the next session picks up any canvas change.
-    pub canvas_sections: HashMap<Uuid, String>,
-    /// Per-channel successful-delivery state. Created with the ACP session and
+    pub canvas_sections: HashMap<SessionScope, String>,
+    /// Per-scope successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
-    pub deliveries: HashMap<Uuid, ChannelDeliveryState>,
+    pub deliveries: HashMap<SessionScope, ChannelDeliveryState>,
+    /// Pool-assigned ownership generation for each scope. A worker returning
+    /// after another worker forked the scope carries an older generation; the
+    /// pool uses this fence to discard that stale provider session before the
+    /// worker becomes claimable again.
+    scope_owner_generations: HashMap<SessionScope, u64>,
 }
 
 impl SessionState {
+    pub(crate) fn set_scope_owner_generation(&mut self, scope: SessionScope, generation: u64) {
+        self.scope_owner_generations.insert(scope, generation);
+    }
+
     /// Invalidate the session (and turn counter) for a specific prompt source.
     pub fn invalidate(&mut self, source: &PromptSource) {
         match source {
-            PromptSource::Channel(cid) => {
-                self.invalidate_channel(cid);
+            PromptSource::Channel(scope) => {
+                self.invalidate_scope(scope);
             }
             PromptSource::Heartbeat => {
                 self.heartbeat_session = None;
@@ -153,14 +167,41 @@ impl SessionState {
         }
     }
 
-    /// Invalidate a single channel's session and turn counter.
-    /// Returns `true` if the channel had an active session.
-    pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
-        self.turn_counts.remove(channel_id);
-        self.core_sections.remove(channel_id);
-        self.canvas_sections.remove(channel_id);
-        self.deliveries.remove(channel_id);
-        self.sessions.remove(channel_id).is_some()
+    /// Invalidate a single session scope's session and turn counter.
+    /// Returns `true` if the scope had an active session.
+    pub fn invalidate_scope(&mut self, scope: &SessionScope) -> bool {
+        self.turn_counts.remove(scope);
+        self.core_sections.remove(scope);
+        self.canvas_sections.remove(scope);
+        self.deliveries.remove(scope);
+        self.scope_owner_generations.remove(scope);
+        self.sessions.remove(scope).is_some()
+    }
+
+    /// Invalidate every session scope belonging to `channel_id` (channel-wide
+    /// cleanup, e.g. when the agent is removed from a channel). Returns the
+    /// number of scopes that had an active session.
+    pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> usize {
+        let scopes: Vec<SessionScope> = self
+            .sessions
+            .keys()
+            .chain(self.turn_counts.keys())
+            .chain(self.core_sections.keys())
+            .chain(self.canvas_sections.keys())
+            .chain(self.deliveries.keys())
+            .chain(self.scope_owner_generations.keys())
+            .filter(|s| s.channel_id() == *channel_id)
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut count = 0;
+        for scope in scopes {
+            if self.invalidate_scope(&scope) {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
@@ -173,26 +214,28 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.deliveries.clear();
+        self.scope_owner_generations.clear();
     }
 
-    pub(crate) fn mark_channel_delivery_success(
+    pub(crate) fn mark_scope_delivery_success(
         &mut self,
-        channel_id: Uuid,
+        scope: SessionScope,
         standing_context_sent: bool,
         event_ids: impl IntoIterator<Item = String>,
     ) {
-        let delivery = self.deliveries.entry(channel_id).or_default();
+        let delivery = self.deliveries.entry(scope).or_default();
         delivery.standing_context_sent |= standing_context_sent;
         delivery.delivered_event_ids.extend(event_ids);
     }
 
     #[cfg(test)]
     fn has_channel_state(&self, channel_id: &Uuid) -> bool {
-        self.sessions.contains_key(channel_id)
-            || self.turn_counts.contains_key(channel_id)
-            || self.core_sections.contains_key(channel_id)
-            || self.canvas_sections.contains_key(channel_id)
-            || self.deliveries.contains_key(channel_id)
+        let matches = |s: &SessionScope| s.channel_id() == *channel_id;
+        self.sessions.keys().any(matches)
+            || self.turn_counts.keys().any(matches)
+            || self.core_sections.keys().any(matches)
+            || self.canvas_sections.keys().any(matches)
+            || self.deliveries.keys().any(matches)
     }
 }
 
@@ -299,6 +342,29 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// Authoritative directory of which worker most recently owned each session
+    /// scope's provider session. Survives while a worker is checked out (its
+    /// `SessionState` is invisible to the pool then), so a busy owner does not
+    /// cause another worker to open a duplicate session for the same thread.
+    /// Best-effort: stale entries (rotation, crash/respawn) self-heal on the
+    /// next dispatch and are pruned on channel-wide session invalidation.
+    session_owners: HashMap<SessionScope, SessionOwner>,
+    /// Monotonic validity fence assigned whenever a scope is dispatched. The
+    /// generation distinguishes a newly forked owner from every older copy of
+    /// that scope's provider session.
+    next_scope_owner_generation: u64,
+    /// First time each scope was held for a busy owner, so the bounded hold can
+    /// expire and fork rather than starve behind an unbounded turn. Derived
+    /// state: cleared on every dispatch/invalidation path, and only ever holds
+    /// `Thread` scopes (the sole variant [`hold_decision`](Self::hold_decision)
+    /// stamps).
+    held_since: HashMap<SessionScope, tokio::time::Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionOwner {
+    agent_index: usize,
+    generation: u64,
 }
 
 /// Result returned by a completed prompt task.
@@ -313,10 +379,38 @@ pub struct PromptResult {
 }
 
 /// Whether the prompt came from a channel event or a heartbeat.
+///
+/// The channel variant carries the full [`SessionScope`] resolved at admission
+/// (conversation or thread), not just the channel id, so completion and
+/// invalidation target the exact session. Use [`channel_id`](PromptSource::channel_id)
+/// where only the channel is needed.
 #[derive(Debug)]
 pub enum PromptSource {
-    Channel(Uuid),
+    Channel(SessionScope),
     Heartbeat,
+}
+
+impl PromptSource {
+    /// The channel this prompt belongs to, or `None` for heartbeats.
+    pub fn channel_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Channel(scope) => Some(scope.channel_id()),
+            Self::Heartbeat => None,
+        }
+    }
+
+    /// The exact session scope this prompt belongs to, or `None` for
+    /// heartbeats. Callers that must target the precise thread (e.g. clearing a
+    /// typing indicator on completion) use this rather than [`channel_id`], so a
+    /// finishing turn never disturbs a sibling thread in the same channel.
+    ///
+    /// [`channel_id`]: PromptSource::channel_id
+    pub fn scope(&self) -> Option<&SessionScope> {
+        match self {
+            Self::Channel(scope) => Some(scope),
+            Self::Heartbeat => None,
+        }
+    }
 }
 
 /// Apply state effects for Race 1, where a control signal arrives just after the
@@ -700,18 +794,16 @@ pub struct PromptContext {
     pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
-    /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
-    /// on `session/new`. Never part of the prompt.
+    /// Sanitized agent name used to compose `_meta.sessionTitle` on session/new.
+    /// Channel sessions add the channel name; thread sessions also add the root
+    /// ID prefix. Never part of the prompt.
     pub session_title: Option<String>,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
-    /// Base prompt content, or `None` if `--no-base-prompt` was passed.
-    ///
-    /// `'static` because `PromptContext` is `Arc`-shared across async tasks.
-    /// Content from `--base-prompt-file` is promoted via `Box::leak` in `main.rs`
-    /// after validated file read in `Config::from_cli()`. The compiled-in default
-    /// (`include_str!`) is inherently `'static`.
-    pub base_prompt: Option<&'static str>,
+    /// Base instructions with the configured policy's Session Model appended,
+    /// assembled once and shared by modern and legacy ACP standing context.
+    /// `None` when `--no-base-prompt` was passed.
+    pub base_prompt: Option<String>,
     pub cwd: String,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
@@ -759,21 +851,116 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            session_owners: HashMap::new(),
+            next_scope_owner_generation: 1,
+            held_since: HashMap::new(),
         }
     }
 
-    /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
+    /// Record `agent_index` as the newest owner of `scope`, returning the
+    /// generation that the caller must install on the checked-out worker.
+    /// Returning workers are accepted only while this exact
+    /// `(worker, generation)` pair remains authoritative.
+    pub fn record_scope_owner(&mut self, scope: SessionScope, agent_index: usize) -> u64 {
+        let generation = self.next_scope_owner_generation;
+        self.next_scope_owner_generation = self.next_scope_owner_generation.wrapping_add(1);
+        if self.next_scope_owner_generation == 0 {
+            // Preserve zero as an unassigned sentinel. Reaching this requires
+            // 2^64 dispatches in one process, but resetting safely is cheap:
+            // every previously tagged session becomes stale on return/claim.
+            self.next_scope_owner_generation = 1;
+            self.session_owners.clear();
+        }
+        self.session_owners.insert(
+            scope,
+            SessionOwner {
+                agent_index,
+                generation,
+            },
+        );
+        generation
+    }
+
+    /// True when this scope should be **held** (left queued) rather than
+    /// dispatched to a fresh worker, because the worker that owns its provider
+    /// session is currently checked out (busy on another turn).
     ///
-    /// Pass 1: prefer an agent that already has a session for `channel_id`.
+    /// Only holds when no idle worker already holds the session
+    /// ([`has_session_for`](Self::has_session_for) is false): if an idle owner
+    /// exists, [`try_claim`](Self::try_claim) reuses it directly. Holding waits
+    /// for the busy owner to return so its exact session (and tool/turn
+    /// context) is reused, instead of forking a second session for the thread.
+    pub fn should_hold_for_busy_owner(&self, scope: &SessionScope) -> bool {
+        if self.has_session_for(scope) {
+            return false;
+        }
+        match self.session_owners.get(scope) {
+            Some(owner) => self
+                .task_map
+                .values()
+                .any(|m| m.agent_index == owner.agent_index),
+            None => false,
+        }
+    }
+
+    /// Decide whether to hold `scope`'s batch for its busy session owner, fork it
+    /// after a bounded hold, or dispatch immediately. Stamps the first-held time
+    /// so the bounded window survives across dispatch cycles; `now` and
+    /// `timeout` are injected for testability. An expired
+    /// stamp remains sticky until [`clear_hold`](Self::clear_hold) confirms a
+    /// worker was successfully claimed, so pool exhaustion cannot restart the
+    /// bounded window.
+    ///
+    /// Gated on the scope variant, not the session policy: `Conversation` scopes
+    /// (channel-policy channels and all DMs) never hold — a busy owner there means
+    /// fork onto another idle worker, the pre-thread-sessions behavior. Only
+    /// `Thread` scopes hold, so a momentarily busy owner does not cause a
+    /// duplicate provider session for the same thread.
+    pub fn hold_decision(
+        &mut self,
+        scope: &SessionScope,
+        now: tokio::time::Instant,
+        timeout: Duration,
+    ) -> HoldDecision {
+        if !scope.is_thread() || !self.should_hold_for_busy_owner(scope) {
+            self.held_since.remove(scope);
+            return HoldDecision::Dispatch;
+        }
+        let owner_index = self
+            .session_owners
+            .get(scope)
+            .map(|owner| owner.agent_index)
+            .unwrap_or_default();
+        let first = *self.held_since.entry(scope.clone()).or_insert(now);
+        let held_for = now.saturating_duration_since(first);
+        if held_for >= timeout {
+            HoldDecision::ForkAfterHold {
+                held_for,
+                owner_index,
+            }
+        } else {
+            HoldDecision::Hold {
+                held_for,
+                owner_index,
+            }
+        }
+    }
+
+    /// Try to claim an idle agent for the given session scope (or heartbeat if
+    /// `None`).
+    ///
+    /// Pass 1: prefer an agent that already has a session for this exact scope
+    /// (thread affinity — repeated activity in a thread reuses that thread's
+    /// provider session).
     /// Pass 2: any idle agent.
     ///
     /// Returns `None` if all agents are checked out.
-    pub fn try_claim(&mut self, channel_id: Option<Uuid>) -> Option<OwnedAgent> {
-        // Pass 1: prefer agent with existing session for this channel.
-        if let Some(cid) = channel_id {
+    pub fn try_claim(&mut self, scope: Option<&SessionScope>) -> Option<OwnedAgent> {
+        // Pass 1: prefer agent with existing session for this scope.
+        if let Some(scope) = scope {
             let idx = self.agents.iter().position(|slot| {
                 slot.as_ref()
-                    .map(|a| a.state.sessions.contains_key(&cid))
+                    .map(|a| self.agent_owns_scope(a, scope))
                     .unwrap_or(false)
             });
             if let Some(i) = idx {
@@ -787,7 +974,27 @@ impl AgentPool {
     }
 
     /// Return an agent to its slot after a task completes.
-    pub fn return_agent(&mut self, agent: OwnedAgent) {
+    pub fn return_agent(&mut self, mut agent: OwnedAgent) {
+        let stale_scopes: Vec<SessionScope> = agent
+            .state
+            .sessions
+            .keys()
+            .filter(|scope| !self.agent_owns_scope(&agent, scope))
+            .cloned()
+            .collect();
+        for scope in stale_scopes {
+            tracing::info!(
+                agent = agent.index,
+                scope = %scope.telemetry_label(),
+                "discarding stale session after ownership changed"
+            );
+            agent.state.invalidate_scope(&scope);
+        }
+        let live_scopes: HashSet<SessionScope> = agent.state.sessions.keys().cloned().collect();
+        agent
+            .state
+            .scope_owner_generations
+            .retain(|scope, _| live_scopes.contains(scope));
         let idx = agent.index;
         if self.agents[idx].is_some() {
             // This is a bug: two tasks returned the same agent index. Log it
@@ -807,14 +1014,62 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
-    /// Whether any idle agent already has a session for `channel_id`.
+    /// Confirm that pending work for `scope` successfully claimed a worker.
+    ///
+    /// In particular, an expired busy-owner hold must not be consumed until
+    /// this point: `try_claim` can fail while every worker remains checked out.
+    pub(crate) fn clear_hold(&mut self, scope: &SessionScope) {
+        self.held_since.remove(scope);
+    }
+
+    /// Remove derived hold stamps for scopes that no longer have pending work.
+    pub(crate) fn retain_held_scopes(
+        &mut self,
+        mut has_pending_work: impl FnMut(&SessionScope) -> bool,
+    ) {
+        self.held_since.retain(|scope, _| has_pending_work(scope));
+    }
+
+    /// Whether any idle agent already has a session for `scope`.
     /// Used to compute `affinity_hit` before calling `try_claim`.
-    pub fn has_session_for(&self, channel_id: Uuid) -> bool {
+    pub fn has_session_for(&self, scope: &SessionScope) -> bool {
         self.agents.iter().any(|slot| {
             slot.as_ref()
-                .map(|a| a.state.sessions.contains_key(&channel_id))
+                .map(|a| self.agent_owns_scope(a, scope))
                 .unwrap_or(false)
         })
+    }
+
+    fn agent_owns_scope(&self, agent: &OwnedAgent, scope: &SessionScope) -> bool {
+        let Some(owner) = self.session_owners.get(scope) else {
+            return false;
+        };
+        owner.agent_index == agent.index
+            && agent.state.scope_owner_generations.get(scope) == Some(&owner.generation)
+            && agent.state.sessions.contains_key(scope)
+    }
+
+    /// Earliest scheduled wake for a currently held scope that can claim a
+    /// worker. A worker return wakes the main loop independently, so arming an
+    /// already-expired timer while every slot is checked out would only spin.
+    pub(crate) fn next_hold_deadline(&self, timeout: Duration) -> Option<tokio::time::Instant> {
+        if !self.any_idle() {
+            return None;
+        }
+        self.held_since
+            .values()
+            .map(|held_since| *held_since + timeout)
+            .min()
+    }
+
+    /// Sleep until a held scope's scheduled wake, or remain pending when no
+    /// scope is held. This is the future polled directly by the main
+    /// `select!`, kept here so paused-time tests exercise the production seam.
+    pub(crate) async fn wait_for_hold_deadline(deadline: Option<tokio::time::Instant>) {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
     }
 
     /// Count of agents that are alive: idle OR checked out (have a task_map entry).
@@ -832,6 +1087,13 @@ impl AgentPool {
 
     pub fn task_map_mut(&mut self) -> &mut HashMap<tokio::task::Id, TaskMeta> {
         &mut self.task_map
+    }
+
+    /// Whether a first-held stamp is currently recorded for `scope`. Test seam
+    /// for [`hold_decision`](Self::hold_decision) callers outside this module.
+    #[cfg(test)]
+    pub(crate) fn held_since_contains(&self, scope: &SessionScope) -> bool {
+        self.held_since.contains_key(scope)
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
@@ -858,13 +1120,13 @@ impl AgentPool {
     /// event and let normal dispatch handle delivery.
     pub fn send_steer(
         &mut self,
-        channel_id: Uuid,
+        scope: &SessionScope,
         request: SteerRequest,
     ) -> Result<(), SteerError> {
         let meta = self
             .task_map
             .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .find(|m| m.scope.as_ref() == Some(scope))
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
@@ -880,14 +1142,14 @@ impl AgentPool {
     /// we write directly to the idle agent's matching live-session ledger.
     pub fn record_successful_steer(
         &mut self,
-        channel_id: Uuid,
+        scope: &SessionScope,
         event_id: String,
         session_id: String,
     ) -> bool {
         if let Some(meta) = self
             .task_map
             .values_mut()
-            .find(|meta| meta.channel_id == Some(channel_id))
+            .find(|meta| meta.scope.as_ref() == Some(scope))
         {
             meta.successful_steer_deliveries
                 .insert(SuccessfulSteerDelivery {
@@ -898,13 +1160,13 @@ impl AgentPool {
         }
 
         let Some(agent) = self.agents.iter_mut().flatten().find(|agent| {
-            agent.state.sessions.get(&channel_id).map(String::as_str) == Some(session_id.as_str())
+            agent.state.sessions.get(scope).map(String::as_str) == Some(session_id.as_str())
         }) else {
             return false;
         };
         agent
             .state
-            .mark_channel_delivery_success(channel_id, false, [event_id]);
+            .mark_scope_delivery_success(scope.clone(), false, [event_id]);
         true
     }
 
@@ -955,17 +1217,70 @@ impl AgentPool {
         let mut count = 0;
         for slot in &mut self.agents {
             if let Some(agent) = slot.as_mut() {
-                if agent.state.invalidate_channel(&channel_id) {
+                // Channel-wide: clears every child thread scope for the channel.
+                count += agent.state.invalidate_channel(&channel_id);
+            }
+        }
+        // Drop every scope-owner entry for this channel so the directory does
+        // not grow without bound and cannot strand a held batch behind a stale
+        // owner after the channel's sessions are gone.
+        self.session_owners
+            .retain(|scope, _| scope.channel_id() != channel_id);
+        // Prune held-since stamps for the same channel so an expiring hold cannot
+        // reference a scope whose sessions are gone.
+        self.held_since
+            .retain(|scope, _| scope.channel_id() != channel_id);
+        count
+    }
+
+    /// Invalidate the session for one exact scope across every worker, and drop
+    /// its scope-owner entry. The scope-precise counterpart of
+    /// [`invalidate_channel_sessions`](Self::invalidate_channel_sessions): under
+    /// thread policy an idle `!rotate` in thread A must rotate only thread A's
+    /// session, leaving sibling threads in the same channel untouched. Under the
+    /// default channel policy the scope is `Conversation(channel_id)` — the sole
+    /// scope for the channel — so this matches the channel-wide behavior.
+    /// Returns the number of workers that held a session for the scope.
+    pub fn invalidate_scope_session(&mut self, scope: &SessionScope) -> usize {
+        let mut count = 0;
+        for slot in &mut self.agents {
+            if let Some(agent) = slot.as_mut() {
+                if agent.state.invalidate_scope(scope) {
                     count += 1;
                 }
             }
         }
+        self.session_owners.remove(scope);
+        self.held_since.remove(scope);
         count
     }
 
+    /// Whether a channel-only control could name more than one session scope.
+    ///
+    /// Include idle and checked-out sessions, not just active turns: selecting
+    /// the first worker for an idle model switch is equally ambiguous. Stale
+    /// ownership entries may conservatively reject a control until reconciled.
+    pub fn channel_control_is_ambiguous(&self, channel_id: Uuid) -> bool {
+        let mut scopes = self
+            .session_owners
+            .keys()
+            .chain(
+                self.agents
+                    .iter()
+                    .flatten()
+                    .flat_map(|a| a.state.sessions.keys()),
+            )
+            .chain(self.task_map.values().filter_map(|m| m.scope.as_ref()))
+            .filter(|scope| scope.channel_id() == channel_id);
+        let Some(first) = scopes.next() else {
+            return false;
+        };
+        scopes.any(|scope| scope != first)
+    }
+
     /// Idle-path model switch: set `desired_model` on the idle agent for
-    /// `channel_id` and invalidate its session so the next turn re-creates the
-    /// session under the new model.
+    /// `channel_id` and invalidate its exact session scope so the next turn
+    /// re-creates that session under the new model.
     ///
     /// Pre-cancel guard: the desired model is validated against the agent's
     /// cached catalog *before* the session is invalidated, so an unsupported
@@ -982,12 +1297,25 @@ impl AgentPool {
         model_id: &str,
         request_id: Option<String>,
     ) -> IdleSwitchResult {
-        let Some(agent) = self
-            .agents
-            .iter_mut()
-            .flatten()
-            .find(|a| a.state.sessions.contains_key(&channel_id))
+        if self.channel_control_is_ambiguous(channel_id) {
+            return IdleSwitchResult::AmbiguousTarget;
+        }
+        let Some((agent_index, scope)) =
+            self.agents.iter().enumerate().find_map(|(index, slot)| {
+                slot.as_ref().and_then(|agent| {
+                    agent
+                        .state
+                        .sessions
+                        .keys()
+                        .find(|scope| scope.channel_id() == channel_id)
+                        .cloned()
+                        .map(|scope| (index, scope))
+                })
+            })
         else {
+            return IdleSwitchResult::NoIdleAgent;
+        };
+        let Some(agent) = self.agents.get_mut(agent_index).and_then(Option::as_mut) else {
             return IdleSwitchResult::NoIdleAgent;
         };
 
@@ -1008,15 +1336,39 @@ impl AgentPool {
         // Carry the pick's correlator so a deferred-validation miss on the next
         // turn's session creation emits a late frame the Desktop can match.
         agent.desired_model_request_id = request_id;
-        agent.state.invalidate_channel(&channel_id);
+        agent.state.invalidate_scope(&scope);
+        self.session_owners.remove(&scope);
+        self.held_since.remove(&scope);
         IdleSwitchResult::Switched
     }
+}
+
+/// Outcome of [`AgentPool::hold_decision`] for one queued batch.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HoldDecision {
+    /// Dispatch now: never-hold scope (conversation), idle owner holds the
+    /// session, or no busy owner is recorded.
+    Dispatch,
+    /// Leave queued this cycle: the thread's session owner is busy and the
+    /// bounded hold window has not elapsed.
+    Hold {
+        held_for: Duration,
+        owner_index: usize,
+    },
+    /// Bounded hold expired — dispatch anyway, forking a fresh session on an
+    /// idle worker.
+    ForkAfterHold {
+        held_for: Duration,
+        owner_index: usize,
+    },
 }
 
 /// Outcome of [`AgentPool::switch_idle_agent_model`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdleSwitchResult {
-    /// `desired_model` set and the channel session invalidated.
+    /// More than one session scope belongs to this channel; nothing changed.
+    AmbiguousTarget,
+    /// `desired_model` set and the selected session invalidated.
     Switched,
     /// Desired model is not in the agent's cached catalog — pick rejected,
     /// session untouched.
@@ -1048,6 +1400,12 @@ const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bounded window a `Thread` batch waits for its busy session-owner before we
+/// stop holding and fork a fresh session on an idle worker. Kept below the 30s
+/// maintenance tick so even a silent system re-evaluates a held batch shortly
+/// after expiry, versus the max-turn deadline it could starve behind today.
+pub(crate) const HOLD_BUSY_OWNER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Placeholder [`fetch_channel_info`] substitutes when a channel's metadata
 /// event carries no `name` tag. Not a real channel name — consumers that need
@@ -1100,7 +1458,7 @@ struct NewSessionChannelContext<'a> {
     huddle_instructions: Option<&'a str>,
     canvas: Option<&'a str>,
     name: Option<&'a str>,
-    id: Option<Uuid>,
+    scope: Option<&'a SessionScope>,
     channel_type: Option<&'a str>,
 }
 
@@ -1121,7 +1479,11 @@ async fn create_session_and_apply_model(
         with_huddle_instructions(
             with_core(
                 with_team(
-                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                    framed_system_prompt(
+                        &ctx.cwd,
+                        ctx.base_prompt.as_deref(),
+                        ctx.system_prompt.as_deref(),
+                    ),
                     ctx.team_instructions.as_deref(),
                 ),
                 agent_core,
@@ -1131,13 +1493,16 @@ async fn create_session_and_apply_model(
         channel.canvas,
     );
 
-    let session_title = ctx
-        .session_title
-        .as_deref()
-        .map(|agent_name| compose_session_title(agent_name, channel.name));
+    let session_title = ctx.session_title.as_deref().map(|agent_name| {
+        compose_scoped_session_title(
+            agent_name,
+            channel.name,
+            channel.scope.and_then(SessionScope::root_event_id),
+        )
+    });
     let mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
-        channel.id,
+        channel.scope.map(SessionScope::channel_id),
         channel.channel_type,
         ctx.session_title.as_deref(),
     );
@@ -1712,7 +2077,7 @@ pub(crate) fn prepend_standing_for_legacy(
 /// The static base remains first for prompt-prefix caching. When a base is
 /// present, the dynamic workspace anchor follows it and precedes the user-owned
 /// agent instructions. A persona-only agent still yields
-/// `<system>…</system>` rather than an unlabeled blob that would be mistaken
+/// `<agent-instructions>…</agent-instructions>` rather than an unlabeled blob that would be mistaken
 /// for `<base>`.
 fn framed_system_prompt(
     cwd: &str,
@@ -1724,14 +2089,17 @@ fn framed_system_prompt(
             "{}\n\n{}\n\n{}",
             crate::queue::base_section(bp),
             workspace_section(cwd),
-            crate::prompt_framing::semantic_section("system", sp),
+            crate::prompt_framing::semantic_section("agent-instructions", sp),
         )),
         (Some(bp), None) => Some(format!(
             "{}\n\n{}",
             crate::queue::base_section(bp),
             workspace_section(cwd)
         )),
-        (None, Some(sp)) => Some(crate::prompt_framing::semantic_section("system", sp)),
+        (None, Some(sp)) => Some(crate::prompt_framing::semantic_section(
+            "agent-instructions",
+            sp,
+        )),
         (None, None) => None,
     }
 }
@@ -1743,7 +2111,7 @@ fn workspace_section(cwd: &str) -> String {
     )
 }
 
-/// Append the team-owned instruction section after `<system>` and before core memory.
+/// Append the team-owned instruction section after `<agent-instructions>` and before core memory.
 fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
     let instructions = instructions
         .map(str::trim)
@@ -1877,13 +2245,10 @@ pub async fn run_prompt_task(
 ) {
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
-        Some(b) => PromptSource::Channel(b.channel_id),
+        Some(b) => PromptSource::Channel(b.scope.clone()),
         None => PromptSource::Heartbeat,
     };
-    let observer_channel_id = match &source {
-        PromptSource::Channel(channel_id) => Some(*channel_id),
-        PromptSource::Heartbeat => None,
-    };
+    let observer_channel_id = source.channel_id();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -1959,11 +2324,11 @@ pub async fn run_prompt_task(
     // outcome: fail closed and preserve the batch without poisoning the healthy
     // ACP process.
     let resolved_channel_info = match &source {
-        PromptSource::Channel(channel_id) => match ctx.channel_info.resolve(*channel_id).await {
+        PromptSource::Channel(scope) => match ctx.channel_info.resolve(scope.channel_id()).await {
             Ok(info) => info,
             Err(error) => {
                 tracing::warn!(
-                    channel_id = %channel_id,
+                    channel_id = %scope.channel_id(),
                     "project context is indeterminate; requeueing turn before ACP session creation: {}",
                     error.0
                 );
@@ -1983,7 +2348,7 @@ pub async fn run_prompt_task(
 
     //
     // Core memory is delivered inside the system prompt the harness already
-    // builds (system role for protocol >= 2, the `<system>` user-message
+    // builds (system role for protocol >= 2, the `<agent-instructions>` user-message
     // section for legacy agents). To put it on the wire at `session/new` for
     // modern agents, the fetch must run *before* the session is created — so
     // we do it here and cache the rendered section in `state.core_sections`.
@@ -2007,11 +2372,15 @@ pub async fn run_prompt_task(
     //
     // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
     if ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
+        if let (PromptSource::Channel(scope), Some(owner_pk)) =
             (&source, ctx.agent_owner_pubkey.as_ref())
         {
-            let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-            if is_new_channel_session && !agent.state.core_sections.contains_key(cid) {
+            // Session state is keyed by scope: repeated activity in a thread
+            // reuses exactly that thread's session. `cid` is only for
+            // channel-level fetches/logging.
+            let cid = &scope.channel_id();
+            let is_new_channel_session = !agent.state.sessions.contains_key(scope);
+            if is_new_channel_session && !agent.state.core_sections.contains_key(scope) {
                 // Bounded — we'd rather start the session with no core hint
                 // than block session creation on a stalled relay.
                 const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -2036,10 +2405,11 @@ pub async fn run_prompt_task(
                     tracing::info!(
                         target: "engram::core",
                         channel = %cid,
+                        scope = %scope.telemetry_label(),
                         section_len = rendered.len(),
                         "injected NIP-AE core section into system prompt"
                     );
-                    agent.state.core_sections.insert(*cid, rendered);
+                    agent.state.core_sections.insert(scope.clone(), rendered);
                 }
             }
         }
@@ -2057,29 +2427,30 @@ pub async fn run_prompt_task(
     // commit it to `canvas_sections` only after session creation succeeds. This
     // prevents a stale revision A surviving a failed create and being re-used by
     // the next attempt after the canvas was cleared.
-    let mut pending_canvas: Option<(Uuid, String)> = None;
+    let mut pending_canvas: Option<(SessionScope, String)> = None;
     let mut huddle_instructions: Option<String> = None;
     // Channel name for the session title, from the same single resolve the
     // canvas DM check uses — see `resolve_new_session_channel_context`.
     let mut title_channel: Option<String> = None;
     let mut origin_channel_type: Option<String> = None;
-    if let PromptSource::Channel(cid) = &source {
-        let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-        let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
+    if let PromptSource::Channel(scope) = &source {
+        let cid = scope.channel_id();
+        let is_new_channel_session = !agent.state.sessions.contains_key(scope);
+        let needs_canvas =
+            is_new_channel_session && !agent.state.canvas_sections.contains_key(scope);
         if is_new_channel_session {
             let (is_dm, resolved_channel, resolved_channel_type) =
                 resolve_new_session_channel_context(resolved_channel_info.as_ref()).await;
             title_channel = resolved_channel;
             origin_channel_type = resolved_channel_type;
             if let Some(owner) = ctx.agent_owner_pubkey.as_ref() {
-                huddle_instructions =
-                    fetch_huddle_instructions(*cid, owner, &ctx.rest_client).await;
+                huddle_instructions = fetch_huddle_instructions(cid, owner, &ctx.rest_client).await;
             }
             // A confirmed DM never receives a canvas section; an undeterminable
             // channel type fails closed as a DM for the same reason.
             if needs_canvas && !is_dm {
-                if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
-                    pending_canvas = Some((*cid, section));
+                if let Some(section) = fetch_canvas_section(cid, &ctx.rest_client).await {
+                    pending_canvas = Some((scope.clone(), section));
                 }
             }
         }
@@ -2088,31 +2459,31 @@ pub async fn run_prompt_task(
     // The core section to fold into the system prompt for this turn's session.
     // Channel-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Channel(scope) => agent.state.core_sections.get(scope).cloned(),
         PromptSource::Heartbeat => None,
     };
 
     // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
     // Prefer the committed cache; fall back to pending (for new sessions being created now).
     let agent_canvas: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent
+        PromptSource::Channel(scope) => agent
             .state
             .canvas_sections
-            .get(cid)
+            .get(scope)
             .cloned()
             .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
         PromptSource::Heartbeat => None,
     };
 
     let (session_id, is_new_session) = match &source {
-        PromptSource::Channel(cid) => {
-            if let Some(sid) = agent.state.sessions.get(cid) {
+        PromptSource::Channel(scope) => {
+            let cid = &scope.channel_id();
+            if let Some(sid) = agent.state.sessions.get(scope) {
                 (sid.clone(), false)
             } else {
-                // The title is channel-qualified (`Agent · #channel`) so one
-                // agent in several channels doesn't produce identical session
-                // rows; `title_channel` comes from the single resolve above and
-                // is `None` for DM, unresolved, and unnamed channels.
+                // The title includes channel and, for thread sessions, the
+                // canonical root prefix so sibling sessions are distinguishable.
+                // DMs, unresolved, and unnamed channels omit the channel name.
                 match create_session_and_apply_model(
                     &mut agent,
                     &ctx,
@@ -2121,7 +2492,7 @@ pub async fn run_prompt_task(
                         huddle_instructions: huddle_instructions.as_deref(),
                         canvas: agent_canvas.as_deref(),
                         name: title_channel.as_deref(),
-                        id: Some(*cid),
+                        scope: Some(scope),
                         channel_type: origin_channel_type.as_deref(),
                     },
                 )
@@ -2130,19 +2501,20 @@ pub async fn run_prompt_task(
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
-                            "created session {sid} for channel {cid}"
+                            "created session {sid} for channel {cid} (scope {})",
+                            scope.telemetry_label()
                         );
-                        agent.state.sessions.insert(*cid, sid.clone());
+                        agent.state.sessions.insert(scope.clone(), sid.clone());
                         agent
                             .state
                             .deliveries
-                            .insert(*cid, ChannelDeliveryState::default());
+                            .insert(scope.clone(), ChannelDeliveryState::default());
                         // Seed a zero usage baseline: buzz-acp spawned this session
                         // so prior usage is zero by definition — first turn is reliable.
                         agent.acp.notify_session_spawned(&sid);
                         // Commit canvas only after session creation succeeds (I3).
-                        if let Some((pending_cid, section)) = pending_canvas.take() {
-                            agent.state.canvas_sections.insert(pending_cid, section);
+                        if let Some((pending_scope, section)) = pending_canvas.take() {
+                            agent.state.canvas_sections.insert(pending_scope, section);
                         }
                         (sid, true)
                     }
@@ -2186,7 +2558,7 @@ pub async fn run_prompt_task(
                         huddle_instructions: None,
                         canvas: None,
                         name: None,
-                        id: None,
+                        scope: None,
                         channel_type: None,
                     },
                 )
@@ -2255,7 +2627,7 @@ pub async fn run_prompt_task(
     // whenever a session is invalidated — so the replacement session re-delivers
     // rather than leaving the agent unbriefed.
     let standing = crate::queue::StandingContext {
-        base_prompt: ctx.base_prompt,
+        base_prompt: ctx.base_prompt.as_deref(),
         system_prompt: ctx.system_prompt.as_deref(),
         team_instructions: ctx.team_instructions.as_deref(),
         agent_core: agent_core.as_deref(),
@@ -2266,17 +2638,19 @@ pub async fn run_prompt_task(
     // sessions created before this field existed fail safe by behaving as
     // undelivered once, rather than silently omitting standing context.
     let mut standing_context_sent = match &source {
-        PromptSource::Channel(cid) => agent
+        PromptSource::Channel(scope) => agent
             .state
             .deliveries
-            .get(cid)
+            .get(scope)
             .is_some_and(|delivery| delivery.standing_context_sent),
         PromptSource::Heartbeat => agent.state.heartbeat_standing_context_sent,
     };
 
     if is_new_session {
-        if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
+        if let (PromptSource::Channel(scope), Some(ref initial_msg)) =
+            (&source, &ctx.initial_message)
         {
+            let cid = &scope.channel_id();
             tracing::info!(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
@@ -2310,7 +2684,9 @@ pub async fn run_prompt_task(
                     // prompt below must not repeat it. Every other arm returns.
                     standing_context_sent = true;
                     if !agent.has_system_prompt_support() {
-                        agent.state.mark_channel_delivery_success(*cid, true, []);
+                        agent
+                            .state
+                            .mark_scope_delivery_success(scope.clone(), true, []);
                     }
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
@@ -2452,7 +2828,7 @@ pub async fn run_prompt_task(
                     1
                 },
                 &crate::queue::StandingContext {
-                    base_prompt: ctx.base_prompt,
+                    base_prompt: ctx.base_prompt.as_deref(),
                     ..Default::default()
                 },
                 &text,
@@ -2478,7 +2854,7 @@ pub async fn run_prompt_task(
         let delivered_ids = agent
             .state
             .deliveries
-            .get(&b.channel_id)
+            .get(&b.scope)
             .map(|delivery| &delivery.delivered_event_ids)
             .cloned()
             .unwrap_or_default();
@@ -2747,11 +3123,11 @@ pub async fn run_prompt_task(
                             );
                         }
                         log_stop_reason(&source, &StopReason::EndTurn);
-                        if let PromptSource::Channel(cid) = &source {
+                        if let PromptSource::Channel(scope) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
-                            record_channel_delivery_success(
+                            record_scope_delivery_success(
                                 &mut agent,
-                                *cid,
+                                scope.clone(),
                                 standing_sent,
                                 &pending_delivered_event_ids,
                             );
@@ -2790,11 +3166,11 @@ pub async fn run_prompt_task(
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
 
-            if let PromptSource::Channel(cid) = &source {
+            if let PromptSource::Channel(scope) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
-                record_channel_delivery_success(
+                record_scope_delivery_success(
                     &mut agent,
-                    *cid,
+                    scope.clone(),
                     standing_sent,
                     &pending_delivered_event_ids,
                 );
@@ -2811,8 +3187,8 @@ pub async fn run_prompt_task(
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
                     match &source {
-                        PromptSource::Channel(cid) => {
-                            let count = agent.state.turn_counts.entry(*cid).or_insert(0);
+                        PromptSource::Channel(scope) => {
+                            let count = agent.state.turn_counts.entry(scope.clone()).or_insert(0);
                             *count += 1;
                             *count >= limit
                         }
@@ -3491,8 +3867,21 @@ fn conversation_context_delta(
 /// - The REST fetch fails or times out (graceful degradation)
 /// - `context_message_limit` is 0
 ///
-/// For batches with multiple events, thread context is fetched for the **last**
-/// reply event only (most recent = most likely to need a response).
+/// Context is scoped by the batch's resolved [`SessionScope`], never inferred
+/// from whichever event happens to be last:
+///
+/// - **Thread scope** → fetch only that canonical thread's history (all
+///   messages under the root, including intervening non-mention human
+///   messages). A brand-new thread (root == the triggering event, first turn)
+///   has no prior history, so this returns `None`, which is correct: the
+///   trigger itself is delivered as the `[Event]` block.
+/// - **Conversation scope** (DMs always; channels under the `channel` policy)
+///   → preserve legacy behavior: a threaded reply fetches its reply chain;
+///   a DM non-reply fetches recent conversation history.
+///
+/// The delivery-delta filter (`conversation_context_delta`) then removes any
+/// events this scope's live session already received, so subsequent turns
+/// deliver only intervening same-thread messages plus the trigger.
 async fn fetch_conversation_context(
     batch: &FlushBatch,
     channel_info: &Option<PromptChannelInfo>,
@@ -3504,28 +3893,54 @@ async fn fetch_conversation_context(
         .map(|ci| ci.channel_type == "dm")
         .unwrap_or(false);
 
-    // Check thread tags on the last event first — this applies to both
-    // channels and DMs. A DM reply needs thread context (not channel history)
-    // because /api/channels/{id}/messages excludes thread replies.
-    let last_event = batch.events.last()?;
-    let tags = crate::queue::parse_thread_tags(&last_event.event);
-    if let Some(root_id) = tags.root_event_id {
-        return fetch_thread_context(
-            batch.channel_id,
-            &root_id,
-            limit,
-            ctx.agent_keys.public_key(),
-            &ctx.rest_client,
-        )
-        .await;
+    match resolve_context_target(batch, is_dm) {
+        ContextTarget::Thread(root_id) => {
+            fetch_thread_context(
+                batch.channel_id,
+                &root_id,
+                limit,
+                ctx.agent_keys.public_key(),
+                &ctx.rest_client,
+            )
+            .await
+        }
+        ContextTarget::Dm => fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await,
+        ContextTarget::None => None,
     }
+}
 
-    // DM non-reply: fetch recent conversation history.
+/// Which history to fetch for a batch's context section.
+#[derive(Debug, PartialEq, Eq)]
+enum ContextTarget {
+    /// Fetch the canonical thread rooted at this event id.
+    Thread(String),
+    /// Fetch recent DM conversation history.
+    Dm,
+    /// No supplementary context (new thread's first turn, or plain channel).
+    None,
+}
+
+/// Decide which history to gather, driven by the batch's resolved
+/// [`SessionScope`] — never by inferring scope from the last event.
+///
+/// - Thread scope: the canonical root is authoritative.
+/// - Conversation scope (DMs always; channels under `channel` policy): a
+///   threaded reply fetches its reply chain; a DM non-reply fetches recent
+///   conversation history; a plain top-level channel message has none.
+fn resolve_context_target(batch: &FlushBatch, is_dm: bool) -> ContextTarget {
+    if let Some(root_id) = batch.scope.root_event_id() {
+        return ContextTarget::Thread(root_id.to_string());
+    }
+    let Some(last_event) = batch.events.last() else {
+        return ContextTarget::None;
+    };
+    if let Some(root_id) = crate::queue::parse_thread_tags(&last_event.event).root_event_id {
+        return ContextTarget::Thread(root_id);
+    }
     if is_dm {
-        return fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await;
+        return ContextTarget::Dm;
     }
-
-    None
+    ContextTarget::None
 }
 
 /// Normalize AND validate a pubkey for the batch profile API request.
@@ -4248,7 +4663,11 @@ fn classify_control_cancel_failure(
 /// Shared by the turn-start and turn-stop lines so a log can be read as pairs.
 fn prompt_label(source: &PromptSource) -> String {
     match source {
-        PromptSource::Channel(cid) => format!("channel {cid}"),
+        PromptSource::Channel(scope) => format!(
+            "channel {} ({})",
+            scope.channel_id(),
+            scope.telemetry_label()
+        ),
         PromptSource::Heartbeat => "heartbeat".to_string(),
     }
 }
@@ -4284,19 +4703,19 @@ fn delivery_receipt_line(channel_id: Uuid, event_ids: &HashSet<String>) -> Strin
     )
 }
 
-fn record_channel_delivery_success(
+fn record_scope_delivery_success(
     agent: &mut OwnedAgent,
-    channel_id: Uuid,
+    scope: SessionScope,
     standing_context_sent: bool,
     event_ids: &HashSet<String>,
 ) {
     tracing::info!(
         target: "pool::prompt",
         "{}",
-        delivery_receipt_line(channel_id, event_ids)
+        delivery_receipt_line(scope.channel_id(), event_ids)
     );
-    agent.state.mark_channel_delivery_success(
-        channel_id,
+    agent.state.mark_scope_delivery_success(
+        scope,
         standing_context_sent,
         event_ids.iter().cloned(),
     );
@@ -4774,14 +5193,21 @@ pub(crate) async fn post_failure_notice(
             parent_event_id: parent_id,
         })
     });
-    let builder =
-        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
-                return;
-            }
-        };
+    let builder = match buzz_sdk::build_message(
+        channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+        &[],
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+            return;
+        }
+    };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
@@ -4916,6 +5342,12 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    /// Conversation scope for a channel — the scope these pool tests exercise
+    /// (equivalent to the pre-thread-scoping channel key).
+    fn conv(channel_id: Uuid) -> SessionScope {
+        SessionScope::Conversation { channel_id }
+    }
 
     fn test_mcp_server() -> McpServer {
         McpServer {
@@ -5132,7 +5564,7 @@ mod tests {
         let composed = prepend_standing_for_legacy(1, &full_standing(), "do the thing");
         let positions: Vec<usize> = [
             "<base>",
-            "<system>",
+            "<agent-instructions>",
             "<team-instructions>",
             "<core-memory>",
             "<huddle-instructions>",
@@ -5192,7 +5624,7 @@ mod tests {
             .expect("both present yields Some");
         assert_eq!(
             framed,
-            "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>\n\n<system>\npersona text\n</system>"
+            "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>\n\n<agent-instructions>\npersona text\n</agent-instructions>"
         );
     }
 
@@ -5209,18 +5641,24 @@ mod tests {
     #[test]
     fn test_framed_system_prompt_persona_only_labels_agent_instructions() {
         // A bare persona would be mislabeled "Base" downstream — it must carry
-        // its own <system> boundary even when no base prompt exists.
+        // its own <agent-instructions> boundary even when no base prompt exists.
         let framed = framed_system_prompt("/workspace", None, Some("persona text"))
             .expect("persona yields Some");
-        assert_eq!(framed, "<system>\npersona text\n</system>");
+        assert_eq!(
+            framed,
+            "<agent-instructions>\npersona text\n</agent-instructions>"
+        );
     }
 
     #[test]
     fn test_framed_system_prompt_preserves_persona_bytes_verbatim() {
-        let persona = "literal </system>, <T>, &quot;, & <policy>";
+        let persona = "literal </agent-instructions>, <T>, &quot;, & <policy>";
         let framed =
             framed_system_prompt("/workspace", None, Some(persona)).expect("persona yields Some");
-        assert_eq!(framed, format!("<system>\n{persona}\n</system>"));
+        assert_eq!(
+            framed,
+            format!("<agent-instructions>\n{persona}\n</agent-instructions>")
+        );
     }
 
     #[test]
@@ -6128,8 +6566,10 @@ mod tests {
             .sign_with_keys(&keys)
             .unwrap();
         let author_hex = event.pubkey.to_hex();
+        let channel_id = Uuid::new_v4();
         let batch = FlushBatch {
-            channel_id: Uuid::new_v4(),
+            channel_id,
+            scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "@mention".into(),
@@ -6263,7 +6703,7 @@ done"#
         agent.state.heartbeat_session = Some("live-session".into());
 
         let mut ctx = make_prompt_context_no_owner();
-        ctx.base_prompt = Some("standing-once");
+        ctx.base_prompt = Some("standing-once".into());
         let ctx = Arc::new(ctx);
         let (result_tx, mut result_rx) = mpsc::unbounded_channel();
 
@@ -6363,14 +6803,14 @@ done"#
         agent
             .state
             .sessions
-            .insert(channel_id, "live-session".into());
+            .insert(conv(channel_id), "live-session".into());
         agent
             .state
             .deliveries
-            .insert(channel_id, ChannelDeliveryState::default());
+            .insert(conv(channel_id), ChannelDeliveryState::default());
 
         let mut ctx = make_prompt_context_no_owner();
-        ctx.base_prompt = Some("standing-once");
+        ctx.base_prompt = Some("standing-once".into());
         let ctx = Arc::new(ctx);
         let (result_tx, mut result_rx) = mpsc::unbounded_channel();
 
@@ -6381,6 +6821,7 @@ done"#
             let event_id = event.id.to_hex();
             let batch = FlushBatch {
                 channel_id,
+                scope: SessionScope::Conversation { channel_id },
                 events: vec![crate::queue::BatchEvent {
                     event,
                     prompt_tag: "test".into(),
@@ -6407,7 +6848,7 @@ done"#
                     PromptOutcome::Ok(StopReason::EndTurn)
                 )),
             }
-            let delivery = &result.agent.state.deliveries[&channel_id];
+            let delivery = &result.agent.state.deliveries[&conv(channel_id)];
             assert_eq!(
                 delivery.standing_context_sent,
                 turn >= 2,
@@ -6463,6 +6904,7 @@ done"#
             .unwrap();
         let merged_batch = FlushBatch {
             channel_id,
+            scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
                 event: new_event.clone(),
                 prompt_tag: "test".into(),
@@ -6477,6 +6919,7 @@ done"#
         };
         let next_batch = FlushBatch {
             channel_id,
+            scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
                 event: next_event,
                 prompt_tag: "test".into(),
@@ -6538,11 +6981,11 @@ done"#
         agent
             .state
             .sessions
-            .insert(channel_id, "live-session".into());
+            .insert(conv(channel_id), "live-session".into());
         agent
             .state
             .deliveries
-            .insert(channel_id, ChannelDeliveryState::default());
+            .insert(conv(channel_id), ChannelDeliveryState::default());
 
         let mut ctx = make_prompt_context_no_owner();
         ctx.context_message_limit = 10;
@@ -6584,7 +7027,7 @@ done"#
             ));
             agent = result.agent;
         }
-        let delivery = &agent.state.deliveries[&channel_id];
+        let delivery = &agent.state.deliveries[&conv(channel_id)];
         assert!(delivery.delivered_event_ids.contains(&carry_over_id));
         assert!(delivery.delivered_event_ids.contains(&new_event_id));
         agent.acp.shutdown().await;
@@ -6632,6 +7075,7 @@ done"#
             .unwrap();
         let batch = FlushBatch {
             channel_id,
+            scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
                 event: trigger,
                 prompt_tag: "test".into(),
@@ -6691,22 +7135,22 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         agent
             .state
             .sessions
-            .insert(channel_id, "live-session".into());
+            .insert(conv(channel_id), "live-session".into());
         agent
             .state
             .deliveries
-            .insert(channel_id, ChannelDeliveryState::default());
+            .insert(conv(channel_id), ChannelDeliveryState::default());
 
         // Model the adversarial ordering: the task result has already retired
         // its TaskMeta and returned the agent before the successful ack arrives.
         let mut pool = AgentPool::from_slots(vec![Some(agent)]);
         assert!(pool.record_successful_steer(
-            channel_id,
+            &conv(channel_id),
             steered_event_id.clone(),
             "live-session".into(),
         ));
         let agent = pool
-            .try_claim(Some(channel_id))
+            .try_claim(Some(&conv(channel_id)))
             .expect("claim returned agent");
 
         let mut ctx = make_prompt_context_no_owner();
@@ -6769,19 +7213,19 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let mut state = SessionState::default();
         state
             .deliveries
-            .insert(channel, ChannelDeliveryState::default());
+            .insert(conv(channel), ChannelDeliveryState::default());
 
         // Building or attempting a prompt does not mutate delivery state.
-        let delivery = state.deliveries.get(&channel).unwrap();
+        let delivery = state.deliveries.get(&conv(channel)).unwrap();
         assert!(!delivery.standing_context_sent);
         assert!(delivery.delivered_event_ids.is_empty());
 
-        state.mark_channel_delivery_success(
-            channel,
+        state.mark_scope_delivery_success(
+            conv(channel),
             true,
             ["trigger".to_string(), "context".to_string()],
         );
-        let delivery = state.deliveries.get(&channel).unwrap();
+        let delivery = state.deliveries.get(&conv(channel)).unwrap();
         assert!(delivery.standing_context_sent);
         assert_eq!(delivery.delivered_event_ids.len(), 2);
     }
@@ -6790,17 +7234,17 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn delivery_state_is_cleared_on_rotation_and_restarts_empty() {
         let channel = Uuid::new_v4();
         let mut state = SessionState::default();
-        state.sessions.insert(channel, "old-session".into());
-        state.mark_channel_delivery_success(channel, true, ["old-event".to_string()]);
+        state.sessions.insert(conv(channel), "old-session".into());
+        state.mark_scope_delivery_success(conv(channel), true, ["old-event".to_string()]);
 
-        assert!(state.invalidate_channel(&channel));
-        assert!(!state.deliveries.contains_key(&channel));
+        assert!(state.invalidate_channel(&channel) > 0);
+        assert!(!state.deliveries.contains_key(&conv(channel)));
 
-        state.sessions.insert(channel, "new-session".into());
+        state.sessions.insert(conv(channel), "new-session".into());
         state
             .deliveries
-            .insert(channel, ChannelDeliveryState::default());
-        let delivery = state.deliveries.get(&channel).unwrap();
+            .insert(conv(channel), ChannelDeliveryState::default());
+        let delivery = state.deliveries.get(&conv(channel)).unwrap();
         assert!(!delivery.standing_context_sent);
         assert!(delivery.delivered_event_ids.is_empty());
     }
@@ -6910,21 +7354,21 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch_a, "sess-a".into());
-        s.sessions.insert(ch_b, "sess-b".into());
-        s.turn_counts.insert(ch_a, 5);
-        s.turn_counts.insert(ch_b, 3);
-        s.core_sections.insert(ch_a, "core-a".into());
-        s.core_sections.insert(ch_b, "core-b".into());
+        s.sessions.insert(conv(ch_a), "sess-a".into());
+        s.sessions.insert(conv(ch_b), "sess-b".into());
+        s.turn_counts.insert(conv(ch_a), 5);
+        s.turn_counts.insert(conv(ch_b), 3);
+        s.core_sections.insert(conv(ch_a), "core-a".into());
+        s.core_sections.insert(conv(ch_b), "core-b".into());
         s.deliveries.insert(
-            ch_a,
+            conv(ch_a),
             ChannelDeliveryState {
                 standing_context_sent: true,
                 delivered_event_ids: HashSet::from(["event-a".into()]),
             },
         );
         s.deliveries.insert(
-            ch_b,
+            conv(ch_b),
             ChannelDeliveryState {
                 standing_context_sent: true,
                 delivered_event_ids: HashSet::from(["event-b".into()]),
@@ -6936,23 +7380,596 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         (s, ch_a, ch_b)
     }
 
+    fn thread_scope(channel_id: Uuid, root: &str) -> SessionScope {
+        SessionScope::Thread {
+            channel_id,
+            root_event_id: root.to_string(),
+        }
+    }
+
+    #[test]
+    fn two_threads_in_one_channel_get_distinct_sessions() {
+        let ch = Uuid::new_v4();
+        let ta = thread_scope(ch, &"a".repeat(64));
+        let tb = thread_scope(ch, &"b".repeat(64));
+        let mut s = SessionState::default();
+        s.sessions.insert(ta.clone(), "sess-thread-a".into());
+        s.sessions.insert(tb.clone(), "sess-thread-b".into());
+        // Distinct roots key distinct provider sessions.
+        assert_eq!(
+            s.sessions.get(&ta).map(String::as_str),
+            Some("sess-thread-a")
+        );
+        assert_eq!(
+            s.sessions.get(&tb).map(String::as_str),
+            Some("sess-thread-b")
+        );
+        // Repeated activity under one root reuses that exact session.
+        assert_eq!(
+            s.sessions.get(&ta).map(String::as_str),
+            Some("sess-thread-a")
+        );
+        // The conversation scope is a different key again (no accidental reuse).
+        assert!(!s.sessions.contains_key(&conv(ch)));
+    }
+
+    #[test]
+    fn invalidate_scope_leaves_sibling_thread_untouched() {
+        let ch = Uuid::new_v4();
+        let ta = thread_scope(ch, &"a".repeat(64));
+        let tb = thread_scope(ch, &"b".repeat(64));
+        let mut s = SessionState::default();
+        s.sessions.insert(ta.clone(), "a".into());
+        s.sessions.insert(tb.clone(), "b".into());
+        s.turn_counts.insert(ta.clone(), 2);
+        assert!(s.invalidate_scope(&ta));
+        assert!(!s.sessions.contains_key(&ta));
+        assert!(!s.turn_counts.contains_key(&ta));
+        // Sibling thread's session survives.
+        assert_eq!(s.sessions.get(&tb).map(String::as_str), Some("b"));
+    }
+
+    fn batch_with_scope(scope: SessionScope, event: nostr::Event) -> FlushBatch {
+        FlushBatch {
+            channel_id: scope.channel_id(),
+            scope,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    fn signed_event_with_tags(tags: Vec<Vec<String>>) -> nostr::Event {
+        let keys = Keys::generate();
+        let tags: Vec<Tag> = tags.into_iter().map(|t| Tag::parse(t).unwrap()).collect();
+        EventBuilder::new(Kind::Custom(9), "hi")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn context_target_uses_thread_scope_root_not_last_event_tags() {
+        let ch = Uuid::new_v4();
+        let scope_root = "a".repeat(64);
+        // Last event carries a DIFFERENT root tag than the scope; the scope
+        // must win so context is gathered for the canonical thread.
+        let ev = signed_event_with_tags(vec![vec![
+            "e".into(),
+            "b".repeat(64),
+            String::new(),
+            "root".into(),
+        ]]);
+        let batch = batch_with_scope(thread_scope(ch, &scope_root), ev);
+        assert_eq!(
+            resolve_context_target(&batch, false),
+            ContextTarget::Thread(scope_root)
+        );
+    }
+
+    #[test]
+    fn context_target_new_top_level_thread_has_no_history() {
+        // A top-level mention opens a thread rooted at its own id; on the first
+        // turn there is no prior thread history to fetch, but the scope still
+        // resolves to that root (subsequent turns fetch it).
+        let ch = Uuid::new_v4();
+        let ev = signed_event_with_tags(vec![]);
+        let root = ev.id.to_hex();
+        let batch = batch_with_scope(thread_scope(ch, &root), ev);
+        assert_eq!(
+            resolve_context_target(&batch, false),
+            ContextTarget::Thread(root)
+        );
+    }
+
+    #[test]
+    fn context_target_conversation_channel_plain_has_none() {
+        // Channel-policy conversation scope + a plain (no-thread-tag) event =>
+        // no unrelated channel transcript is injected.
+        let ch = Uuid::new_v4();
+        let ev = signed_event_with_tags(vec![]);
+        let batch = batch_with_scope(conv(ch), ev);
+        assert_eq!(resolve_context_target(&batch, false), ContextTarget::None);
+    }
+
+    #[test]
+    fn context_target_dm_nonreply_is_dm_history() {
+        let ch = Uuid::new_v4();
+        let ev = signed_event_with_tags(vec![]);
+        let batch = batch_with_scope(conv(ch), ev);
+        assert_eq!(resolve_context_target(&batch, true), ContextTarget::Dm);
+    }
+
+    #[test]
+    fn context_target_conversation_reply_uses_reply_chain() {
+        // DM (or legacy channel-policy) reply: conversation scope but the last
+        // event has thread tags => fetch that reply chain.
+        let ch = Uuid::new_v4();
+        let root = "c".repeat(64);
+        let ev = signed_event_with_tags(vec![
+            vec!["e".into(), root.clone(), String::new(), "root".into()],
+            vec!["e".into(), "d".repeat(64), String::new(), "reply".into()],
+        ]);
+        let batch = batch_with_scope(conv(ch), ev);
+        assert_eq!(
+            resolve_context_target(&batch, true),
+            ContextTarget::Thread(root)
+        );
+    }
+
+    #[test]
+    fn invalidate_channel_clears_every_thread_scope() {
+        let ch = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.sessions
+            .insert(thread_scope(ch, &"a".repeat(64)), "a".into());
+        s.sessions
+            .insert(thread_scope(ch, &"b".repeat(64)), "b".into());
+        s.sessions.insert(conv(ch), "c".into());
+        s.sessions
+            .insert(thread_scope(other, &"d".repeat(64)), "d".into());
+        let cleared = s.invalidate_channel(&ch);
+        assert_eq!(cleared, 3, "all three ch scopes had sessions");
+        assert!(s.sessions.keys().all(|k| k.channel_id() == other));
+    }
+
+    #[test]
+    fn prompt_source_scope_exposes_thread_scope_and_none_for_heartbeat() {
+        let ch = Uuid::new_v4();
+        let scope = thread_scope(ch, &"a".repeat(64));
+        let channel = PromptSource::Channel(scope.clone());
+        // The scope-precise accessor returns the exact thread so a completing
+        // turn clears only its own typing indicator.
+        assert_eq!(channel.scope(), Some(&scope));
+        assert_eq!(channel.channel_id(), Some(ch));
+        assert_eq!(PromptSource::Heartbeat.scope(), None);
+    }
+
+    #[tokio::test]
+    async fn invalidate_scope_session_targets_one_thread_and_drops_its_owner() {
+        // The idle `!rotate` path: rotating thread A must invalidate only thread
+        // A's session and drop its scope-owner entry, leaving a sibling thread
+        // in the same channel fully intact.
+        let ch = Uuid::new_v4();
+        let ta = thread_scope(ch, &"a".repeat(64));
+        let tb = thread_scope(ch, &"b".repeat(64));
+        let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
+            .await
+            .expect("spawn dummy ACP");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "test".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent.state.sessions.insert(ta.clone(), "sess-a".into());
+        agent.state.sessions.insert(tb.clone(), "sess-b".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        let ta_generation = pool.record_scope_owner(ta.clone(), 0);
+        let tb_generation = pool.record_scope_owner(tb.clone(), 0);
+        let agent = pool.agents[0].as_mut().expect("idle test agent");
+        agent
+            .state
+            .set_scope_owner_generation(ta.clone(), ta_generation);
+        agent
+            .state
+            .set_scope_owner_generation(tb.clone(), tb_generation);
+        let now = tokio::time::Instant::now();
+        pool.held_since.insert(ta.clone(), now);
+        pool.held_since.insert(tb.clone(), now);
+
+        let cleared = pool.invalidate_scope_session(&ta);
+
+        assert_eq!(cleared, 1, "exactly one worker held thread A's session");
+        assert!(!pool.has_session_for(&ta), "thread A session invalidated");
+        assert!(
+            pool.has_session_for(&tb),
+            "sibling thread B session survives"
+        );
+        assert!(
+            !pool.session_owners.contains_key(&ta),
+            "thread A owner dropped"
+        );
+        assert!(
+            pool.session_owners.contains_key(&tb),
+            "thread B owner retained"
+        );
+        assert!(
+            !pool.held_since.contains_key(&ta),
+            "thread A hold stamp dropped"
+        );
+        assert!(
+            pool.held_since.contains_key(&tb),
+            "thread B hold stamp retained"
+        );
+    }
+
+    /// Insert a `task_map` entry so `agent_index` reads as checked-out (busy)
+    /// for the busy-owner predicate, mirroring an in-flight prompt task without
+    /// spawning a real one. `busy_scope` is the turn the worker is running.
+    fn mark_agent_busy(pool: &mut AgentPool, agent_index: usize, busy_scope: SessionScope) {
+        let abort = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort.id(),
+            TaskMeta {
+                agent_index,
+                channel_id: Some(busy_scope.channel_id()),
+                scope: Some(busy_scope),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+    }
+
+    /// An idle agent (slot 0) holding a provider session for `scope`, so
+    /// `has_session_for(scope)` is true.
+    async fn idle_agent_with_session(index: usize, scope: SessionScope) -> OwnedAgent {
+        let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
+            .await
+            .expect("spawn dummy ACP");
+        let mut agent = OwnedAgent {
+            index,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "test".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent.state.sessions.insert(scope, "sess".into());
+        agent
+    }
+
+    // `hold_decision` is gated on the scope variant (not session policy),
+    // short-circuits when an idle worker already holds the session or no busy
+    // owner is recorded, and only a busy `Thread` owner holds — for a bounded
+    // window, after which it forks. The `Conversation` + busy row is the
+    // cross-channel head-of-line-blocking regression guard (PR #6732).
+    #[tokio::test]
+    async fn hold_decision_covers_variant_session_busy_and_timeout() {
+        #[derive(Debug)]
+        enum Expect {
+            Dispatch,
+            Hold,
+            ForkAfterHold,
+        }
+        struct Row {
+            name: &'static str,
+            is_thread: bool,
+            has_session: bool,
+            owner_busy: bool,
+            elapsed: Duration,
+            expect: Expect,
+        }
+        let timeout = Duration::from_secs(10);
+        let rows = [
+            // Cross-channel regression guard: a conversation scope with a busy
+            // recorded owner dispatches (forks) rather than starving a sibling.
+            Row {
+                name: "conversation + busy owner dispatches",
+                is_thread: false,
+                has_session: false,
+                owner_busy: true,
+                elapsed: Duration::ZERO,
+                expect: Expect::Dispatch,
+            },
+            // An idle worker already holds the thread session — reuse it.
+            Row {
+                name: "thread + idle session dispatches",
+                is_thread: true,
+                has_session: true,
+                owner_busy: true,
+                elapsed: Duration::ZERO,
+                expect: Expect::Dispatch,
+            },
+            // No busy owner recorded — nothing to wait for.
+            Row {
+                name: "thread + no busy owner dispatches",
+                is_thread: true,
+                has_session: false,
+                owner_busy: false,
+                elapsed: Duration::ZERO,
+                expect: Expect::Dispatch,
+            },
+            // Busy thread owner within the window — hold.
+            Row {
+                name: "thread + busy owner within window holds",
+                is_thread: true,
+                has_session: false,
+                owner_busy: true,
+                elapsed: Duration::ZERO,
+                expect: Expect::Hold,
+            },
+            // Busy thread owner past the window — fork onto an idle worker.
+            Row {
+                name: "thread + busy owner past window forks",
+                is_thread: true,
+                has_session: false,
+                owner_busy: true,
+                elapsed: timeout,
+                expect: Expect::ForkAfterHold,
+            },
+        ];
+
+        let base = tokio::time::Instant::now();
+        for row in rows {
+            let ch = Uuid::new_v4();
+            let scope = if row.is_thread {
+                thread_scope(ch, &"a".repeat(64))
+            } else {
+                conv(ch)
+            };
+            let slots = if row.has_session {
+                vec![Some(idle_agent_with_session(0, scope.clone()).await)]
+            } else {
+                vec![]
+            };
+            let mut pool = AgentPool::from_slots(slots);
+            if row.has_session {
+                let generation = pool.record_scope_owner(scope.clone(), 0);
+                pool.agents[0]
+                    .as_mut()
+                    .expect("idle test agent")
+                    .state
+                    .set_scope_owner_generation(scope.clone(), generation);
+            } else if row.owner_busy {
+                pool.record_scope_owner(scope.clone(), 1);
+                mark_agent_busy(&mut pool, 1, thread_scope(ch, &"b".repeat(64)));
+            }
+
+            // A non-zero elapsed needs a first stamping call before the second
+            // evaluates the window against the same base instant.
+            if !row.elapsed.is_zero() {
+                assert!(
+                    matches!(
+                        pool.hold_decision(&scope, base, timeout),
+                        HoldDecision::Hold { .. }
+                    ),
+                    "{}: first call stamps a hold",
+                    row.name
+                );
+            }
+            let decision = pool.hold_decision(&scope, base + row.elapsed, timeout);
+
+            match (&row.expect, &decision) {
+                (Expect::Dispatch, HoldDecision::Dispatch)
+                | (Expect::Hold, HoldDecision::Hold { .. })
+                | (Expect::ForkAfterHold, HoldDecision::ForkAfterHold { .. }) => {}
+                _ => panic!("{}: expected {:?}, got {decision:?}", row.name, row.expect),
+            }
+
+            // An expired hold remains sticky until a worker is successfully
+            // claimed; only immediate dispatch clears it here.
+            if matches!(
+                decision,
+                HoldDecision::Hold { .. } | HoldDecision::ForkAfterHold { .. }
+            ) {
+                assert!(
+                    pool.held_since.contains_key(&scope),
+                    "{}: hold stamps held_since",
+                    row.name
+                );
+            } else {
+                assert!(
+                    !pool.held_since.contains_key(&scope),
+                    "{}: dispatch/fork clears held_since",
+                    row.name
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_scope_deadline_wakes_a_quiet_dispatch_loop() {
+        let channel_id = Uuid::new_v4();
+        let scope = thread_scope(channel_id, &"a".repeat(64));
+        let idle_scope = thread_scope(channel_id, &"c".repeat(64));
+        let idle_agent = idle_agent_with_session(0, idle_scope).await;
+        let mut pool = AgentPool::from_slots(vec![Some(idle_agent)]);
+        pool.record_scope_owner(scope.clone(), 1);
+        mark_agent_busy(&mut pool, 1, thread_scope(channel_id, &"b".repeat(64)));
+
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            pool.hold_decision(&scope, started, HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::Hold { .. }
+        ));
+        let deadline = pool
+            .next_hold_deadline(HOLD_BUSY_OWNER_TIMEOUT)
+            .expect("held scope schedules an independent wake");
+        let wake = AgentPool::wait_for_hold_deadline(Some(deadline));
+        tokio::pin!(wake);
+
+        tokio::time::advance(HOLD_BUSY_OWNER_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, &mut wake)
+                .await
+                .is_err(),
+            "quiet loop stays asleep before deadline"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        wake.await;
+
+        assert!(matches!(
+            pool.hold_decision(&scope, tokio::time::Instant::now(), HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_hold_survives_pool_exhaustion_until_a_worker_is_claimable() {
+        let channel_id = Uuid::new_v4();
+        let scope = thread_scope(channel_id, &"a".repeat(64));
+        let mut pool = AgentPool::from_slots(vec![None]);
+        pool.record_scope_owner(scope.clone(), 1);
+        mark_agent_busy(&mut pool, 1, thread_scope(channel_id, &"b".repeat(64)));
+
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            pool.hold_decision(&scope, started, HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::Hold { .. }
+        ));
+        assert!(matches!(
+            pool.hold_decision(
+                &scope,
+                started + HOLD_BUSY_OWNER_TIMEOUT,
+                HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+        assert!(
+            pool.held_since.contains_key(&scope),
+            "failed claim must not restart the timeout"
+        );
+        assert_eq!(
+            pool.next_hold_deadline(HOLD_BUSY_OWNER_TIMEOUT),
+            None,
+            "an expired hold cannot spin while all workers are checked out"
+        );
+
+        let idle_scope = thread_scope(channel_id, &"c".repeat(64));
+        pool.agents[0] = Some(idle_agent_with_session(0, idle_scope).await);
+        assert_eq!(
+            pool.next_hold_deadline(HOLD_BUSY_OWNER_TIMEOUT),
+            Some(started + HOLD_BUSY_OWNER_TIMEOUT),
+            "worker availability immediately re-arms the expired deadline"
+        );
+        assert!(matches!(
+            pool.hold_decision(
+                &scope,
+                started + HOLD_BUSY_OWNER_TIMEOUT + Duration::from_secs(1),
+                HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+        pool.clear_hold(&scope);
+        assert!(!pool.held_since.contains_key(&scope));
+    }
+
+    #[tokio::test]
+    async fn forked_scope_discards_stale_session_when_busy_owner_returns() {
+        let channel_id = Uuid::new_v4();
+        let scope = thread_scope(channel_id, &"a".repeat(64));
+        let busy_scope = thread_scope(channel_id, &"b".repeat(64));
+        let old_owner = idle_agent_with_session(0, scope.clone()).await;
+        let replacement = idle_agent_with_session(1, busy_scope.clone()).await;
+        let mut pool = AgentPool::from_slots(vec![Some(old_owner), Some(replacement)]);
+
+        let mut old_owner = pool.try_claim(None).expect("claim worker 0");
+        let old_generation = pool.record_scope_owner(scope.clone(), old_owner.index);
+        old_owner
+            .state
+            .set_scope_owner_generation(scope.clone(), old_generation);
+        mark_agent_busy(&mut pool, old_owner.index, busy_scope);
+
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            pool.hold_decision(&scope, started, HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::Hold { .. }
+        ));
+        assert!(matches!(
+            pool.hold_decision(
+                &scope,
+                started + HOLD_BUSY_OWNER_TIMEOUT,
+                HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+
+        let mut replacement = pool
+            .try_claim(Some(&scope))
+            .expect("idle worker receives forked scope");
+        pool.clear_hold(&scope);
+        assert_eq!(replacement.index, 1);
+        replacement
+            .state
+            .sessions
+            .insert(scope.clone(), "fresh-session".into());
+        let fresh_generation = pool.record_scope_owner(scope.clone(), replacement.index);
+        replacement
+            .state
+            .set_scope_owner_generation(scope.clone(), fresh_generation);
+
+        // Both turns return. Slot order must not make worker 0's old provider
+        // context claimable after worker 1 became the authoritative owner.
+        pool.return_agent(replacement);
+        pool.task_map
+            .retain(|_, meta| meta.agent_index != old_owner.index);
+        pool.return_agent(old_owner);
+        assert!(
+            !pool.agents[0]
+                .as_ref()
+                .expect("worker 0 returned")
+                .state
+                .sessions
+                .contains_key(&scope),
+            "return cleanup removes the old provider session"
+        );
+
+        let claimed = pool
+            .try_claim(Some(&scope))
+            .expect("authoritative owner remains claimable");
+        assert_eq!(claimed.index, 1, "next turn resumes the forked session");
+    }
+
     #[test]
     fn test_rotate_after_natural_completion_invalidates_channel_state() {
         let (mut s, ch_a, ch_b) = make_state();
 
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Channel(SessionScope::Conversation { channel_id: ch_a }),
             &ControlSignal::Rotate,
         );
 
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&conv(ch_a)));
+        assert!(!s.turn_counts.contains_key(&conv(ch_a)));
+        assert!(!s.core_sections.contains_key(&conv(ch_a)));
         assert!(!s.has_channel_state(&ch_a));
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
     }
@@ -6963,29 +7980,31 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Channel(SessionScope::Conversation { channel_id: ch_a }),
             &ControlSignal::Cancel,
         );
 
-        assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(s.sessions.get(&conv(ch_a)).unwrap(), "sess-a");
+        assert_eq!(*s.turn_counts.get(&conv(ch_a)).unwrap(), 5);
+        assert_eq!(s.core_sections.get(&conv(ch_a)).unwrap(), "core-a");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
     }
 
     #[test]
     fn test_invalidate_channel_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
-        s.invalidate(&PromptSource::Channel(ch_a));
+        s.invalidate(&PromptSource::Channel(SessionScope::Conversation {
+            channel_id: ch_a,
+        }));
 
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&conv(ch_a)));
+        assert!(!s.turn_counts.contains_key(&conv(ch_a)));
+        assert!(!s.core_sections.contains_key(&conv(ch_a)));
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -7001,10 +8020,10 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert!(!s.heartbeat_standing_context_sent);
         // channels untouched
         assert_eq!(s.sessions.len(), 2);
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_a)).unwrap(), 5);
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_a)).unwrap(), "core-a");
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
     }
 
     #[test]
@@ -7024,15 +8043,17 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn test_invalidate_nonexistent_channel_is_noop() {
         let (mut s, ch_a, ch_b) = make_state();
         let ghost = Uuid::new_v4();
-        s.invalidate(&PromptSource::Channel(ghost));
+        s.invalidate(&PromptSource::Channel(SessionScope::Conversation {
+            channel_id: ghost,
+        }));
 
         // Everything still intact.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_a)).unwrap(), 5);
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_a)).unwrap(), "core-a");
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
     }
 
     #[test]
@@ -7047,15 +8068,15 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[test]
     fn test_invalidate_channel_returns_true_when_session_existed() {
         let (mut s, ch_a, ch_b) = make_state();
-        assert!(s.invalidate_channel(&ch_a));
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(s.invalidate_channel(&ch_a) > 0);
+        assert!(!s.sessions.contains_key(&conv(ch_a)));
+        assert!(!s.turn_counts.contains_key(&conv(ch_a)));
+        assert!(!s.core_sections.contains_key(&conv(ch_a)));
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -7065,7 +8086,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn test_invalidate_channel_returns_false_when_no_session() {
         let (mut s, _ch_a, _ch_b) = make_state();
         let ghost = Uuid::new_v4();
-        assert!(!s.invalidate_channel(&ghost));
+        assert_eq!(s.invalidate_channel(&ghost), 0);
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
@@ -7080,13 +8101,13 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         for ch in &removed {
             s.invalidate_channel(ch);
         }
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&conv(ch_a)));
+        assert!(!s.turn_counts.contains_key(&conv(ch_a)));
+        assert!(!s.core_sections.contains_key(&conv(ch_a)));
         assert!(!s.has_channel_state(&ch_a));
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&conv(ch_b)).unwrap(), "core-b");
     }
 
     // ── ControlSignal::SwitchModel (Phase 3a, Option ii) ─────────────────────
@@ -7099,7 +8120,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         // re-creates a fresh session that re-applies the new desired_model.
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Channel(SessionScope::Conversation { channel_id: ch_a }),
             &ControlSignal::SwitchModel {
                 model_id: "gpt-5".into(),
                 request_id: None,
@@ -7108,8 +8129,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched — the switch is channel-scoped.
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.sessions.get(&conv(ch_b)).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&conv(ch_b)).unwrap(), 3);
     }
 
     // ── requeue_cancelled_batch ────────────────────────────────────────────
@@ -7127,6 +8148,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             .unwrap();
         FlushBatch {
             channel_id,
+            scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -8348,14 +9370,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn test_invalidate_channel_clears_canvas_section() {
         let ch = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch, "sess".into());
+        s.sessions.insert(conv(ch), "sess".into());
         s.canvas_sections
-            .insert(ch, "[Channel Canvas]\nrev abc".into());
+            .insert(conv(ch), "[Channel Canvas]\nrev abc".into());
 
         s.invalidate_channel(&ch);
 
-        assert!(!s.canvas_sections.contains_key(&ch));
-        assert!(!s.sessions.contains_key(&ch));
+        assert!(!s.canvas_sections.contains_key(&conv(ch)));
+        assert!(!s.sessions.contains_key(&conv(ch)));
     }
 
     #[test]
@@ -8363,9 +9385,9 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.canvas_sections.insert(ch_a, "canvas-a".into());
-        s.canvas_sections.insert(ch_b, "canvas-b".into());
-        s.sessions.insert(ch_a, "sess-a".into());
+        s.canvas_sections.insert(conv(ch_a), "canvas-a".into());
+        s.canvas_sections.insert(conv(ch_b), "canvas-b".into());
+        s.sessions.insert(conv(ch_a), "sess-a".into());
 
         s.invalidate_all();
 
@@ -8378,22 +9400,22 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch_a, "sess-a".into());
-        s.sessions.insert(ch_b, "sess-b".into());
-        s.canvas_sections.insert(ch_a, "canvas-a".into());
-        s.canvas_sections.insert(ch_b, "canvas-b".into());
+        s.sessions.insert(conv(ch_a), "sess-a".into());
+        s.sessions.insert(conv(ch_b), "sess-b".into());
+        s.canvas_sections.insert(conv(ch_a), "canvas-a".into());
+        s.canvas_sections.insert(conv(ch_b), "canvas-b".into());
 
         s.invalidate_channel(&ch_a);
 
-        assert!(!s.canvas_sections.contains_key(&ch_a));
-        assert_eq!(s.canvas_sections.get(&ch_b).unwrap(), "canvas-b");
+        assert!(!s.canvas_sections.contains_key(&conv(ch_a)));
+        assert_eq!(s.canvas_sections.get(&conv(ch_b)).unwrap(), "canvas-b");
     }
 
     #[test]
     fn test_has_channel_state_true_when_only_canvas_section_present() {
         let ch = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.canvas_sections.insert(ch, "canvas".into());
+        s.canvas_sections.insert(conv(ch), "canvas".into());
         assert!(s.has_channel_state(&ch));
     }
 
@@ -8874,6 +9896,7 @@ done"#
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id,
+            scope: conv(channel_id),
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -9322,7 +10345,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9359,7 +10382,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9393,7 +10416,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9426,7 +10449,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9466,7 +10489,7 @@ exit 0"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9567,6 +10590,160 @@ done"#
     const OPTS_MODEL_A_AND_B: &str = r#"[{"configId":"model","category":"model","currentValue":"model-a","options":[{"value":"model-a"},{"value":"model-b"}]}]"#;
 
     #[tokio::test]
+    async fn session_new_sends_policy_specific_base_and_scope_specific_title() {
+        use crate::scope::SessionPolicy;
+
+        let channel_id = Uuid::new_v4();
+        let thread_a = SessionScope::Thread {
+            channel_id,
+            root_event_id: "abcdef01".repeat(8),
+        };
+        let thread_b = SessionScope::Thread {
+            channel_id,
+            root_event_id: "12345678".repeat(8),
+        };
+        let conversation = SessionScope::Conversation { channel_id };
+        for (policy, scope, name, channel_type, title) in [
+            (
+                SessionPolicy::Channel,
+                Some(&conversation),
+                Some("engineering"),
+                Some("stream"),
+                "Fizz · #engineering",
+            ),
+            (
+                SessionPolicy::Thread,
+                Some(&thread_a),
+                Some("engineering"),
+                Some("stream"),
+                "Fizz · #engineering · abcdef01",
+            ),
+            (
+                SessionPolicy::Thread,
+                Some(&thread_b),
+                Some("engineering"),
+                Some("stream"),
+                "Fizz · #engineering · 12345678",
+            ),
+            (
+                SessionPolicy::Thread,
+                Some(&conversation),
+                None,
+                Some("dm"),
+                "Fizz",
+            ),
+            (SessionPolicy::Thread, None, None, None, "Fizz"),
+        ] {
+            for (version, include_base) in [(1, true), (2, true), (1, false), (2, false)] {
+                let acp = spawn_switch_acp("[]", r#""result":{}"#).await;
+                let mut agent = switching_agent(acp, "unused");
+                agent.desired_model = None;
+                agent.protocol_version = version;
+                let observer = observer::ObserverHandle::in_process();
+                agent.acp.set_observer(Some(observer.clone()), 0);
+                let mut ctx = make_prompt_context_no_owner();
+                ctx.session_title = Some("Fizz".into());
+                ctx.base_prompt =
+                    include_base.then(|| policy.append_session_model("Custom base instructions."));
+                create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    None,
+                    NewSessionChannelContext {
+                        huddle_instructions: None,
+                        canvas: None,
+                        name,
+                        scope,
+                        channel_type,
+                    },
+                )
+                .await
+                .unwrap();
+                let request = observer
+                    .snapshot()
+                    .into_iter()
+                    .find(|event| {
+                        event.kind == "acp_write" && event.payload["method"] == "session/new"
+                    })
+                    .unwrap()
+                    .payload;
+                assert_eq!(request["params"]["_meta"]["sessionTitle"], title);
+                let base = ctx
+                    .base_prompt
+                    .as_deref()
+                    .map(crate::queue::base_section)
+                    .unwrap_or_default();
+                if !include_base {
+                    assert!(request["params"].get("systemPrompt").is_none());
+                } else if version == 2 {
+                    let system = request["params"]["systemPrompt"].as_str().unwrap();
+                    assert!(system.starts_with(&base));
+                    assert_eq!(system.matches("## Session Model").count(), 1);
+                } else {
+                    assert!(request["params"].get("systemPrompt").is_none());
+                    let legacy = prepend_standing_for_legacy(
+                        version,
+                        &crate::queue::StandingContext {
+                            base_prompt: ctx.base_prompt.as_deref(),
+                            ..Default::default()
+                        },
+                        "hello",
+                    );
+                    assert!(legacy.starts_with(&base));
+                    assert_eq!(legacy.matches("## Session Model").count(), 1);
+                }
+                agent.acp.shutdown().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_channel_switch_preserves_all_sibling_sessions_and_model() {
+        let channel_id = Uuid::new_v4();
+        let scopes = ["a", "b"].map(|root| SessionScope::Thread {
+            channel_id,
+            root_event_id: root.repeat(64),
+        });
+        let acp = spawn_switch_acp(OPTS_MODEL_A_AND_B, r#""result":{}"#).await;
+        let mut agent = switching_agent(acp, "model-a");
+        for scope in &scopes {
+            agent
+                .state
+                .sessions
+                .insert(scope.clone(), scope.telemetry_label());
+        }
+        let original_sessions = agent.state.sessions.clone();
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        assert_eq!(
+            pool.switch_idle_agent_model(channel_id, "model-b", Some("pick".into())),
+            IdleSwitchResult::AmbiguousTarget,
+        );
+        let agent = pool.agents[0].as_ref().unwrap();
+        assert_eq!(agent.desired_model.as_deref(), Some("model-a"));
+        assert_eq!(agent.desired_model_request_id, None);
+        assert_eq!(agent.state.sessions, original_sessions);
+
+        // One remaining session is an unambiguous channel control again. The
+        // selected scope and its owner are cleared without broad channel cleanup.
+        pool.invalidate_scope_session(&scopes[1]);
+        pool.record_scope_owner(scopes[0].clone(), 0);
+        pool.held_since
+            .insert(scopes[0].clone(), tokio::time::Instant::now());
+        assert_eq!(
+            pool.switch_idle_agent_model(channel_id, "model-b", Some("pick".into())),
+            IdleSwitchResult::Switched,
+        );
+        let agent = pool.agents[0].as_ref().unwrap();
+        assert_eq!(agent.desired_model.as_deref(), Some("model-b"));
+        assert!(!agent.state.sessions.contains_key(&scopes[0]));
+        assert!(!pool.session_owners.contains_key(&scopes[0]));
+        assert!(
+            !pool.held_since.contains_key(&scopes[0]),
+            "switched scope's hold stamp cleared with its session"
+        );
+    }
+
+    #[tokio::test]
     async fn test_applied_switch_refreshes_capabilities_from_post_switch_snapshot() {
         // The adapter accepts the switch and echoes the target model's rebuilt
         // configOptions — including a thought_level option the default model
@@ -9593,7 +10770,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9664,7 +10841,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9719,7 +10896,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9761,7 +10938,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9802,7 +10979,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9868,7 +11045,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9905,7 +11082,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -9978,7 +11155,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )
@@ -10019,7 +11196,7 @@ done"#
                 huddle_instructions: None,
                 canvas: None,
                 name: None,
-                id: None,
+                scope: None,
                 channel_type: None,
             },
         )

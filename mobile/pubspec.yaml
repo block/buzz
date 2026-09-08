@@ -27,7 +27,7 @@ dependencies:
   nostr: ^2.0.0
   pointycastle: ^4.0.0
   url_launcher: ^6.3.2
-  gpt_markdown: ^1.1.6
+  gpt_markdown: ^1.2.1
   highlight: ^0.7.0
   intl: ^0.20.2
   uuid: ^4.5.1
@@ -38,6 +38,8 @@ dependencies:
   google_mlkit_selfie_segmentation: ^0.10.1
   photo_manager: ^3.11.0
   video_player: ^2.10.1
+  just_audio: ^0.10.6
+  record: ^6.2.1
   package_info_plus: ^10.0.0
   app_badge_plus: ^1.2.10
   app_links: ^6.4.0

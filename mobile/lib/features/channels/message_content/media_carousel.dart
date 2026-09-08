@@ -73,7 +73,8 @@ _TrailingImageGallery? _extractTrailingImageGallery(
     if (match == null) break;
     final url = match.group(2)!;
     final imeta = imetaByUrl[url];
-    if (classifyMediaUrl(url, imeta: imeta) == MessageMediaKind.video) {
+    final mediaKind = classifyMediaUrl(url, imeta: imeta);
+    if (mediaKind != MessageMediaKind.image) {
       break;
     }
     final markdownLabel = match.group(1)?.trim();

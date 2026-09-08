@@ -109,6 +109,7 @@ async fn boundary_sync_managed_agent_profile_blocks_ncryptsec() {
         &format!("agent {NCRYPTSEC}"),
         None,
         None,
+        None,
     )
     .await
     .unwrap_err();

@@ -155,6 +155,7 @@ pub async fn apply_workspace(
     nsec: Option<String>,
     repos_dir: Option<String>,
     agent_managed_profiles: Option<bool>,
+    thread_scoped_acp_sessions: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
@@ -228,8 +229,15 @@ pub async fn apply_workspace(
         // experiment before launch-time restore can spawn any agents. Missing
         // means the stable behavior: desktop remains authoritative.
         state
-            .managed_agent_profile_reconcile_enabled
+            .managed_agent_profile_reconcile_enabled()
             .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
+        // Persisted frontend experiment state must land before launch-time
+        // restore so every restored agent starts with the selected ACP policy.
+        // Missing preserves the stable channel-scoped behavior.
+        state.thread_scoped_acp_sessions_enabled().store(
+            thread_scoped_acp_sessions.unwrap_or(false),
+            Ordering::Release,
+        );
 
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
         // Persist the *effective* repos_dir (None when the candidate failed
@@ -345,7 +353,7 @@ pub async fn apply_workspace(
                 }
             }
         });
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "mesh-llm"))]
@@ -364,9 +372,11 @@ pub async fn apply_workspace(
         return Ok(());
     }
 
-    assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
-
-    Ok(())
+    #[cfg(not(feature = "mesh-llm"))]
+    {
+        assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

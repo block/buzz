@@ -12410,7 +12410,9 @@ void main() {
         final composer = find.byKey(const ValueKey('composer-surface'));
         // Clear the gesture arena's touch slop so this represents a deliberate
         // tail-detaching drag rather than a long-press hold with small motion.
-        await tester.drag(list, const Offset(0, 48));
+        // The compact composer now rests lower, so use enough drag distance to
+        // keep the final reply beneath its top edge for this covered-tail case.
+        await tester.drag(list, const Offset(0, 56));
         await tester.pumpAndSettle();
         expect(
           tester.getBottomLeft(latest).dy,

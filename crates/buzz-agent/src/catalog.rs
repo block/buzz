@@ -12,7 +12,7 @@
 //! This helper never opens a browser. Callers choose whether to reject, degrade,
 //! or start a separate interactive authentication flow.
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 
 use reqwest::Client;
 use serde_json::Value;
@@ -133,7 +133,26 @@ pub(crate) fn is_chat_capable_endpoint(name: &str) -> bool {
 /// # Panics
 /// Never panics.
 pub async fn discover_databricks_models(cfg: &Config) -> Result<Vec<ModelEntry>, AgentError> {
-    discover_databricks_models_with_token_source(cfg, build_token_source(cfg)?).await
+    discover_databricks_models_with_cache_dir(cfg, None).await
+}
+
+/// Discover Databricks models while storing PKCE credentials under an explicit
+/// cache root. `None` preserves buzz-agent's production cache location.
+pub async fn discover_databricks_models_with_cache_dir(
+    cfg: &Config,
+    cache_dir: Option<&Path>,
+) -> Result<Vec<ModelEntry>, AgentError> {
+    let token_source = if matches!(cfg.provider, Provider::Databricks | Provider::DatabricksV2)
+        && cfg.api_key.is_empty()
+    {
+        crate::auth::PkceOAuthTokenSource::new(crate::llm::databricks_pkce_config(
+            &cfg.base_url,
+            cache_dir.map(Path::to_path_buf),
+        ))?
+    } else {
+        build_token_source(cfg)?
+    };
+    discover_databricks_models_with_token_source(cfg, token_source).await
 }
 
 async fn discover_databricks_models_with_token_source(

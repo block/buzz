@@ -437,6 +437,9 @@ fn member_copy(
     Ok(AgentDefinition {
         id: Uuid::new_v4().to_string(),
         display_name: member.display_name.clone(),
+        // Team catalog members carry no public description; an adopted copy
+        // starts without one.
+        description: None,
         avatar_url: member.avatar_url.clone(),
         system_prompt: member.system_prompt.clone().unwrap_or_default(),
         runtime: member.runtime.clone(),

@@ -43,8 +43,10 @@ impl UsageMetricsLeader {
 
 /// Total number of communities registered on this relay.
 pub async fn community_count(pool: &PgPool) -> Result<i64> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     let row = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM communities")
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await?;
     Ok(row)
 }
@@ -64,6 +66,8 @@ pub struct CommunityUserCounts {
 ///
 /// Agent discriminator: `agent_owner_pubkey IS NOT NULL`.
 pub async fn user_counts(pool: &PgPool) -> Result<Vec<CommunityUserCounts>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     // Single GROUP BY query; two conditional SUMs avoid two round-trips.
     let rows = sqlx::query_as::<_, (Uuid, i64, i64)>(
         r#"
@@ -76,7 +80,7 @@ pub async fn user_counts(pool: &PgPool) -> Result<Vec<CommunityUserCounts>> {
         GROUP BY community_id
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     Ok(rows
@@ -102,6 +106,8 @@ pub struct CommunityChannelCount {
 
 /// Return non-deleted channel counts per community per type.
 pub async fn channel_counts(pool: &PgPool) -> Result<Vec<CommunityChannelCount>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     let rows = sqlx::query_as::<_, (Uuid, String, i64)>(
         r#"
         SELECT community_id, channel_type::text, COUNT(*) AS count
@@ -110,7 +116,7 @@ pub async fn channel_counts(pool: &PgPool) -> Result<Vec<CommunityChannelCount>>
         GROUP BY community_id, channel_type
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     Ok(rows
@@ -136,6 +142,8 @@ pub struct CommunityMessageCount {
 
 /// Return non-deleted kind=9 event counts per community.
 pub async fn message_counts(pool: &PgPool) -> Result<Vec<CommunityMessageCount>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     let rows = sqlx::query_as::<_, (Uuid, i64)>(
         r#"
         SELECT community_id, COUNT(*) AS count
@@ -144,7 +152,7 @@ pub async fn message_counts(pool: &PgPool) -> Result<Vec<CommunityMessageCount>>
         GROUP BY community_id
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     Ok(rows
@@ -169,6 +177,8 @@ pub struct CommunityMemberCount {
 
 /// Return relay-member counts per community per role.
 pub async fn relay_member_counts(pool: &PgPool) -> Result<Vec<CommunityMemberCount>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     let rows = sqlx::query_as::<_, (Uuid, String, i64)>(
         r#"
         SELECT community_id, role::text, COUNT(*) AS count
@@ -176,7 +186,7 @@ pub async fn relay_member_counts(pool: &PgPool) -> Result<Vec<CommunityMemberCou
         GROUP BY community_id, role
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     Ok(rows
@@ -202,6 +212,8 @@ pub struct CommunityWorkflowCount {
 
 /// Return workflow counts per community per status.
 pub async fn workflow_counts(pool: &PgPool) -> Result<Vec<CommunityWorkflowCount>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     let rows = sqlx::query_as::<_, (Uuid, String, i64)>(
         r#"
         SELECT community_id, status::text, COUNT(*) AS count
@@ -209,7 +221,7 @@ pub async fn workflow_counts(pool: &PgPool) -> Result<Vec<CommunityWorkflowCount
         GROUP BY community_id, status
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     Ok(rows
@@ -233,6 +245,8 @@ pub struct CommunityGitRepoCount {
 
 /// Return git repo counts per community.
 pub async fn git_repo_counts(pool: &PgPool) -> Result<Vec<CommunityGitRepoCount>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     let rows = sqlx::query_as::<_, (Uuid, i64)>(
         r#"
         SELECT community_id, COUNT(*) AS count
@@ -240,7 +254,7 @@ pub async fn git_repo_counts(pool: &PgPool) -> Result<Vec<CommunityGitRepoCount>
         GROUP BY community_id
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     Ok(rows
@@ -280,6 +294,8 @@ pub async fn active_user_counts(
     pool: &PgPool,
     interval_sql: &'static str,
 ) -> Result<Vec<CommunityActiveUsers>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     // LEFT JOIN users: pubkeys with no row have u.* = NULL.
     // Three-way classification:
     //   human   — row exists (u.pubkey IS NOT NULL) and agent_owner_pubkey IS NULL
@@ -304,7 +320,7 @@ pub async fn active_user_counts(
         "#
     );
     let rows = sqlx::query_as::<_, (Uuid, i64, i64, i64)>(sqlx::AssertSqlSafe(sql))
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
 
     Ok(rows
@@ -334,6 +350,8 @@ pub async fn active_channel_counts(
     pool: &PgPool,
     interval_sql: &'static str,
 ) -> Result<Vec<CommunityActiveChannels>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     let sql = format!(
         r#"
         SELECT community_id, COUNT(DISTINCT channel_id) AS count
@@ -346,7 +364,7 @@ pub async fn active_channel_counts(
         "#
     );
     let rows = sqlx::query_as::<_, (Uuid, i64)>(sqlx::AssertSqlSafe(sql))
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
 
     Ok(rows
@@ -370,8 +388,16 @@ pub struct CommunityHost {
 
 /// Fetch all community id → host mappings in one query.
 pub async fn community_hosts(pool: &PgPool) -> Result<Vec<CommunityHost>> {
+    community_hosts_with_operation(pool, observability::WriterOperation::Maintenance).await
+}
+
+async fn community_hosts_with_operation(
+    pool: &PgPool,
+    operation: observability::WriterOperation,
+) -> Result<Vec<CommunityHost>> {
+    let mut connection = observability::acquire_writer(pool, operation).await?;
     let rows = sqlx::query_as::<_, (Uuid, String)>("SELECT id, host FROM communities")
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
     Ok(rows
         .into_iter()
@@ -391,8 +417,11 @@ impl Db {
         &self,
         lock_key: i64,
     ) -> Result<Option<UsageMetricsLeader>> {
-        let mut connection =
-            observability::acquire(&self.pool, observability::PoolRole::Writer).await?;
+        let mut connection = observability::acquire_writer_with_legacy_metrics(
+            &self.pool,
+            observability::WriterOperation::Maintenance,
+        )
+        .await?;
         let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
             .bind(lock_key)
             .fetch_one(&mut *connection)
@@ -473,20 +502,24 @@ impl Db {
     pub async fn usage_community_hosts(&self) -> Result<Vec<CommunityHost>> {
         community_hosts(&self.pool).await
     }
+
+    /// Return community host mappings during startup bootstrap work.
+    #[datastore_span(name = "bootstrap_community_hosts", system = "postgresql")]
+    pub async fn bootstrap_community_hosts(&self) -> Result<Vec<CommunityHost>> {
+        community_hosts_with_operation(&self.pool, observability::WriterOperation::Bootstrap).await
+    }
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use buzz_core::CommunityId;
     use nostr::Keys;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
     async fn get_pool() -> PgPool {
-        PgPool::connect(TEST_DB_URL)
+        PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB")
     }
@@ -497,7 +530,7 @@ mod tests {
             .execute(admin)
             .await
             .expect("create scratch db");
-        let base = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let base = crate::test_support::database_url();
         let idx = base.rfind('/').expect("db url has a path segment");
         let scratch_url = format!("{}/{}", &base[..idx], name);
         let pool = PgPool::connect(&scratch_url)
@@ -525,7 +558,7 @@ mod tests {
         // Postgres advisory locks are per-database; hardcoding the production
         // USAGE_METRICS_LOCK_KEY (0x4255_5A5A_4D45_5452) on the shared test DB
         // races any live buzz-relay on the same database (see #3619).
-        let admin_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let admin_url = crate::test_support::database_url();
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect(&admin_url)

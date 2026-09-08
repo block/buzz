@@ -1,7 +1,7 @@
 //! Behavior tests for the observer-retention setting, the size readout, and the
 //! M4 migration.
 //!
-//! Kept in a sibling file so `retention.rs` stays under the 1000-line gate;
+//! Kept in a sibling file so `retention.rs` stays under the 1500-line gate;
 //! `#[path]`-included from there. `super::*` brings the retention API (and its
 //! `rusqlite::{params, Connection}` imports) into scope; `super::super::store`
 //! reaches the neighbouring subscription mutators and the base `SCHEMA`.

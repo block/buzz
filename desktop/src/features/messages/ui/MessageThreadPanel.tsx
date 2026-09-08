@@ -14,6 +14,7 @@ import {
 } from "@/features/messages/lib/messageGrouping";
 import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { VideoReviewPresentation } from "@/features/messages/lib/videoReviewContext";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -508,6 +509,7 @@ export function MessageThreadPanel({
       data-buzz-conversation-scroll
       data-testid="message-thread-body"
       mode={isHuddleTranscript ? "panel" : undefined}
+      onCopy={handleTimelineMentionCopy}
       onScroll={onScroll}
       tabIndex={-1}
       ref={threadBodyRef}
@@ -830,7 +832,10 @@ export function MessageThreadPanel({
           >
             <ComposerDockBackdrop gutterClassName="inset-x-5" />
             <MessageComposer
-              audienceContext={{ type: "thread" }}
+              audienceContext={{
+                type: "thread",
+                rootTags: threadHead.tags,
+              }}
               channelId={channelId}
               channelName={channelName}
               channelType={channel?.channelType ?? null}

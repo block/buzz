@@ -46,6 +46,21 @@ test("setOverride persists filtered overrides", () => {
   );
 });
 
+test("thread-scoped ACP session preference persists without changing existing experiments", () => {
+  const { values } = installStorage({ workflows: true, projects: false });
+
+  setOverride("threadScopedAcpSessions", true);
+
+  assert.equal(
+    values.get(OVERRIDES_KEY),
+    JSON.stringify({
+      workflows: true,
+      projects: false,
+      threadScopedAcpSessions: true,
+    }),
+  );
+});
+
 test("getOverrides drops non-boolean values", () => {
   installStorage({ workflows: "yes", projects: false });
 

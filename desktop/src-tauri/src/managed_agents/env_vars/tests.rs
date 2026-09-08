@@ -146,6 +146,14 @@ fn reserved_keys_include_agent_owner_for_legacy_records() {
 }
 
 #[test]
+fn reserved_keys_include_pi_acp_command() {
+    assert!(is_reserved_env_key("PI_ACP_PI_COMMAND"));
+    let agent = map(&[("PI_ACP_PI_COMMAND", "/tmp/custom-pi")]);
+    let merged = merged_user_env(&BTreeMap::new(), &agent);
+    assert!(merged.is_empty());
+}
+
+#[test]
 fn reserved_keys_include_respond_to_gate() {
     // Respond-to mode + allowlist control who the agent answers.
     // Overriding via env_vars would let the running agent answer
@@ -173,6 +181,13 @@ fn reserved_keys_include_remote_lifetime_policy() {
         let agent = map(&[(key, "0")]);
         assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
     }
+}
+
+#[test]
+fn reserved_keys_include_desktop_acp_session_policy() {
+    assert!(is_reserved_env_key("BUZZ_ACP_SESSION_POLICY"));
+    let agent = map(&[("BUZZ_ACP_SESSION_POLICY", "thread")]);
+    assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
 }
 
 #[test]

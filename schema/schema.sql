@@ -1134,7 +1134,7 @@ CREATE TABLE push_gateway_installations (
     app_attest_key_id BYTEA NOT NULL UNIQUE CHECK (octet_length(app_attest_key_id) BETWEEN 1 AND 128),
     app_attest_public_key BYTEA NOT NULL CHECK (octet_length(app_attest_public_key) BETWEEN 33 AND 256),
     assertion_counter BIGINT NOT NULL CHECK (assertion_counter BETWEEN 0 AND 4294967295),
-    app_profile TEXT NOT NULL CHECK (app_profile IN ('buzz-ios-production','buzz-ios-sandbox')),
+    app_profile TEXT NOT NULL CHECK (app_profile = 'buzz-ios-dogfood'),
     token_ciphertext BYTEA NOT NULL CHECK (octet_length(token_ciphertext) BETWEEN 1 AND 2048),
     token_fingerprint BYTEA NOT NULL CHECK (length(token_fingerprint) = 32),
     endpoint_epoch BIGINT NOT NULL CHECK (endpoint_epoch > 0),
@@ -1485,12 +1485,9 @@ $$;
 CREATE FUNCTION community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN
 LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
     SELECT target::TEXT = ANY (ARRAY[
-        'community_deletion_requests',
-        'community_deletion_approvals',
-        'community_deletion_checkpoints',
-        'community_serving_write_leases',
-        'community_deletion_executor_heartbeats',
-        'product_feedback',
+        'community_deletion_requests', 'community_deletion_approvals',
+        'community_deletion_checkpoints', 'community_serving_write_leases',
+        'community_deletion_executor_heartbeats', 'product_feedback',
         'rate_limit_violations'
     ]::TEXT[])
 $$;
@@ -1895,3 +1892,4 @@ CREATE INDEX idx_relay_operator_audit_target
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
+

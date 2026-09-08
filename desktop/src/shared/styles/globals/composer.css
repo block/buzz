@@ -259,11 +259,13 @@
 
    Plain-text mention decorations stay inline because inline-flex pulls the
    caret into their decorated range and swallows the trailing space after an
-   @mention. Composer Buzz links are atom nodes, but their labels may still
-   fragment between characters; only the icon and leading label fragment stay
-   together. The line-height keeps each inline decoration box tall enough to
-   paint both block-padding edges without clipping. */
+   @mention. Their generated icon participates in the first line's inline
+   flow: absolute positioning anchors it to the union of every wrapped line,
+   and icon-sized left padding is cloned onto every continuation fragment.
+   Composer Buzz links are atom nodes with their own leading-fragment wrapper. */
 .rich-text-composer .tiptap .mention-chip {
+  overflow-wrap: anywhere;
+  white-space: normal;
   display: inline;
   min-height: 0;
   line-height: calc(
@@ -271,4 +273,49 @@
     var(--inline-chip-padding-block-start) +
     var(--inline-chip-padding-block-end)
   );
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-with-icon:not(.wrapping-inline-chip) {
+  padding-left: var(--inline-chip-padding-inline);
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-with-icon:not(.wrapping-inline-chip)::before {
+  position: static;
+  display: inline-block;
+  margin-right: var(--inline-chip-icon-gap);
+  transform: none;
+  vertical-align: -0.125em;
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.inline-chip-icon-human:not(.wrapping-inline-chip)::before {
+  transform: translateY(0.0625rem);
+}
+
+/* Full-key literal decorations can split at any character (including into multiple
+   spans where highlight patterns overlap). Paint the actual @/# prefix rather
+   than absolutely positioned icons, which overlap labels or wrapped key lines.
+   Cloned padding must not extend a wrapped key past the editable line box. */
+.rich-text-composer .tiptap
+  .mention-chip.mention-literal-key:not(.wrapping-inline-chip) {
+  padding-inline: 0;
+}
+
+.rich-text-composer
+  .tiptap
+  .mention-chip.mention-literal-key:not(.wrapping-inline-chip)::before {
+  display: none;
+}
+
+.rich-text-composer .tiptap .mention-prefix-hidden.mention-literal-key {
+  display: inline;
+  width: auto;
+  max-width: none;
+  overflow: visible;
+  opacity: 1;
 }

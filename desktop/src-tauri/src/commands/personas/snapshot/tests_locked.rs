@@ -1,7 +1,7 @@
 //! Locked-card import tests for `decode_snapshot_for_import`.
 //!
 //! Kept in a sibling file so `snapshot/tests.rs` stays under the
-//! 1000-line gate; `#[path]`-included from there as a child module,
+//! 1500-line gate; `#[path]`-included from there as a child module,
 //! so `super::*` still resolves to the shared test helpers.
 
 use super::*;

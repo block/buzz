@@ -181,6 +181,9 @@ pub(super) fn prepare_persona_publication_at(
             &scoped_persona.display_name,
             &scoped_persona.system_prompt,
         )?;
+        crate::managed_agents::validate_agent_description_text(
+            scoped_persona.description.as_deref(),
+        )?;
     }
     let event = build_persona_event(&scoped_persona)?
         .custom_created_at(monotonic_created_at(
@@ -307,6 +310,7 @@ mod tests {
 
     fn persona() -> AgentDefinition {
         AgentDefinition {
+            description: None,
             id: "catalog-reviewer".to_string(),
             display_name: "Catalog Reviewer".to_string(),
             avatar_url: None,

@@ -20,6 +20,7 @@ function createCatalogEvent(input: {
   createdAt?: number;
   shared?: boolean;
   avatarUrl?: string;
+  description?: string;
 }): RelayEvent {
   const ownerPrivateKey =
     input.ownerPrivateKey ??
@@ -43,6 +44,7 @@ function createCatalogEvent(input: {
         display_name: input.displayName,
         system_prompt: input.systemPrompt,
         avatar_url: input.avatarUrl ?? null,
+        description: input.description ?? null,
         runtime: null,
         model: null,
         provider: null,
@@ -309,6 +311,7 @@ test("built-in persona edits persist", async ({ page }) => {
 
   const dialog = page.getByTestId("persona-dialog");
   await dialog.getByLabel("Agent name").fill("My Fizz");
+  await dialog.getByLabel("Description").fill("Helps teams ship reliably.");
   await dialog.getByLabel("Agent instruction").fill("User-edited instructions");
   await dialog.getByRole("button", { name: "Save changes" }).click();
 
@@ -316,13 +319,22 @@ test("built-in persona edits persist", async ({ page }) => {
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     "My Fizz",
   );
+  await expect(
+    page.getByTestId("persona-agent-row-builtin:fizz"),
+  ).toContainText("Helps teams ship reliably.");
   const personas = await invokeTauri<
-    Array<{ id: string; display_name: string; system_prompt: string }>
+    Array<{
+      id: string;
+      display_name: string;
+      description: string | null;
+      system_prompt: string;
+    }>
   >(page, "list_personas");
   expect(
     personas.find((persona) => persona.id === "builtin:fizz"),
   ).toMatchObject({
     display_name: "My Fizz",
+    description: "Helps teams ship reliably.",
     system_prompt: "User-edited instructions",
   });
 });
@@ -734,7 +746,7 @@ test("agent defaults stays in the header without an actions menu", async ({
     defaultsDialog.getByTestId("global-agent-model"),
   ).toHaveAttribute("data-value", "gpt-5.5[high]");
   await expect(defaultsDialog.getByTestId("global-agent-model")).toContainText(
-    "gpt-5.5[high]",
+    "GPT-5.5 (high)",
   );
   await page.keyboard.press("Escape");
   await expect(defaultsDialog).toHaveCount(0);
@@ -836,34 +848,55 @@ test("agent catalog chooser order stays stable when selection changes", async ({
   expect(await getCatalogOrder(page)).toEqual(before);
 });
 
-test("catalog detail pane shows the full persona details", async ({ page }) => {
-  const personaId = "custom:researcher";
-  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
+test("catalog detail pane shows the full persona details before Add agent", async ({
+  page,
+}) => {
+  const personaId = "remote-researcher";
+  const remoteCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${personaId}`;
+  const description = `Maps evidence across systems: ${"界".repeat(180)}`;
   await installMockBridge(page, {
-    personas: [
-      {
-        id: personaId,
-        displayName: "Researcher",
+    personaCatalogEvents: [
+      createCatalogEvent({
+        ownerPubkey: TEST_IDENTITIES.alice.pubkey,
+        sourcePersonaId: personaId,
+        displayName: "Alice’s Researcher",
+        description,
         systemPrompt: "Research the question and cite the evidence.",
-      },
+      }),
     ],
   });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await sharePersonaToCatalog(page, "Researcher");
   await openPersonaCatalog(page);
 
-  await selectCatalogPersona(page, personaId);
-  const useAgentTarget = page.getByTestId(
-    `community-catalog-use-agent-${personaId}`,
+  const catalogRow = page.getByTestId(
+    `community-catalog-agent-${remoteCatalogId}`,
   );
+  await expect(catalogRow).toContainText("Alice’s Researcher");
+  const rowDescription = page.getByTestId(
+    `community-catalog-agent-description-${remoteCatalogId}`,
+  );
+  await expect(rowDescription).toHaveText(description);
+  await expect(rowDescription).toHaveCSS("overflow", "hidden");
+  await catalogRow.click();
+
+  const useAgentTarget = page.getByTestId(
+    `community-catalog-use-agent-${remoteCatalogId}`,
+  );
+  const detailDescription = page.getByTestId("persona-catalog-description");
 
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
-    "Researcher",
+    "Alice’s Researcher",
   );
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
-    "Added by You",
+    "Added by alice",
   );
+  await expect(detailDescription).toHaveText(description);
+  const detailWidth = await detailDescription.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(detailWidth.scrollWidth).toBeLessThanOrEqual(detailWidth.clientWidth);
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Research the question and cite the evidence.",
   );
@@ -881,10 +914,10 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
   );
   await expect(useAgentTarget).toHaveAttribute(
     "aria-label",
-    "Researcher is already in My Agents",
+    "Add Alice’s Researcher from Community Catalog",
   );
-  await expect(useAgentTarget).toHaveText("Added to My Agents");
-  await expect(useAgentTarget).toBeDisabled();
+  await expect(useAgentTarget).toHaveText("Add agent");
+  await expect(useAgentTarget).toBeEnabled();
 });
 
 type AgentShareCommand = { command: string; payload: unknown };
@@ -2672,6 +2705,34 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   expect(samples.at(-1)?.width).toBeCloseTo(activeDotSize, 0);
   expect(samples.at(-1)?.height).toBeCloseTo(activeDotSize, 0);
   expect(samples.at(-1)?.backgroundColor).not.toBe(samples[0]?.backgroundColor);
+  // The runtime transition must morph the badge without inventing availability.
+  const availabilityDot = page.getByTestId(`agent-runtime-active-${pubkey}`);
+  await expect(availabilityDot).toHaveAttribute(
+    "aria-label",
+    "Motion Auditor: Offline",
+  );
+  await expect(availabilityDot.locator("xpath=../..")).not.toHaveClass(
+    /bg-emerald-500/,
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+          channelName: "agents",
+          kind: 20001,
+        }),
+      ),
+    )
+    .toBe(true);
+  await page.evaluate((pubkey) => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_PRESENCE__;
+    if (!emit) throw new Error("Mock presence emitter is unavailable.");
+    emit({ pubkey, status: "online" });
+  }, pubkey);
+  await expect(availabilityDot).toHaveAttribute(
+    "aria-label",
+    "Motion Auditor: Online",
+  );
   await expect(
     page.getByTestId(`agent-runtime-active-${pubkey}`).locator("xpath=../.."),
   ).toHaveClass(/bg-emerald-500/);

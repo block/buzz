@@ -211,8 +211,13 @@ _ensure-migrations: _ensure-services
     ./scripts/seed-local-community.sh
 
 # Run clippy on the desktop Tauri Rust crate
+# Features are additive, so a single invocation lints only one cfg graph.
+# Both graphs ship (release-windows builds without mesh-llm), so lint both:
+# the default graph covers the `#[cfg(not(feature = "mesh-llm"))]` arms and
+# the feature-enabled graph covers the mesh code.
 desktop-tauri-clippy: _ensure-sidecar-stubs
     cargo clippy --manifest-path {{desktop_tauri_manifest}} --workspace --all-targets -- -D warnings
+    cargo clippy --manifest-path {{desktop_tauri_manifest}} --workspace --all-targets --features mesh-llm -- -D warnings
 
 # Check the desktop Tauri Rust crate compiles
 desktop-tauri-check: _ensure-sidecar-stubs
@@ -256,7 +261,18 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
       BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
       cargo test compiled_policy_matches_expected -- --ignored --nocapture
-    echo "Both compiled states verified."
+    echo "=== Maximum accepted demo name reaches Rust build validation ==="
+    DEMO_CONFIG="$(node ../scripts/demo-build-config.mjs "$(printf 'x%.0s' {1..31})" /dev/null 1234567812345678)"
+    DEMO_SLUG="$(node -e 'console.log(JSON.parse(process.argv[1]).slug)' "$DEMO_CONFIG")"
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" \
+      BUZZ_TEST_EXPECTED_DEMO_SLUG="$DEMO_SLUG" \
+      cargo test compiled_demo_slug_matches_expected -- --ignored --nocapture
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" cargo test --workspace
+    if node ../scripts/demo-build-config.mjs "$(printf 'x%.0s' {1..32})" /dev/null 1234567812345678; then
+      echo "A 32-character demo name unexpectedly passed JavaScript validation" >&2
+      exit 1
+    fi
+    echo "Both compiled states and the accepted/rejected demo-name boundary verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
 # Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
@@ -276,6 +292,38 @@ desktop-release-build target="aarch64-apple-darwin":
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+
+# Build an unsigned named macOS demo DMG with isolated app and runtime identities.
+desktop-demo-build demo_name target="aarch64-apple-darwin":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TARGET={{target}}
+    [[ "$(uname -s)" == "Darwin" && "$TARGET" == *-apple-darwin ]] || { echo "Demo DMGs require a macOS Apple target" >&2; exit 2; }
+    CONFIG_PATH="$(mktemp "${TMPDIR:-/tmp}/buzz-demo-config.XXXXXX")"
+    trap 'rm -f "$CONFIG_PATH"' EXIT
+    DEMO_BUILD_ID="$(node -e 'console.log(require("node:crypto").randomBytes(8).toString("hex"))')"
+    DEMO_CONFIG="$(node desktop/scripts/demo-build-config.mjs {{quote(demo_name)}} "$CONFIG_PATH" "$DEMO_BUILD_ID")"
+    read_config() { node -e 'console.log(JSON.parse(process.argv[1])[process.argv[2]])' "$DEMO_CONFIG" "$1"; }
+    PRODUCT_NAME="$(read_config productName)"
+    DMG_VOLUME_NAME="$(read_config dmgVolumeName)"
+    DMG_FILE_STEM="$(read_config dmgFileStem)"
+    DEMO_SLUG="$(read_config slug)"
+    cargo build --release --target "$TARGET" \
+      -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp \
+      -p git-credential-nostr -p buzz-cli
+    ./scripts/bundle-sidecars.sh "$TARGET"
+    pnpm install
+    cd {{desktop_dir}}
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" pnpm tauri build --features mesh-llm --target "$TARGET" --bundles app --config "$CONFIG_PATH"
+    cd ..
+    VERSION="$(node -p "require('./desktop/package.json').version")"
+    DMG_ARCH="${TARGET%%-*}"; [[ "$DMG_ARCH" == "x86_64" ]] && DMG_ARCH=x64
+    APP_PATH="desktop/src-tauri/target/$TARGET/release/bundle/macos/$PRODUCT_NAME.app"
+    PLIST="$APP_PATH/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $PRODUCT_NAME" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName $PRODUCT_NAME" "$PLIST"
+    codesign --force --deep --sign - "$APP_PATH"
+    VOL_NAME="$DMG_VOLUME_NAME" ./desktop/scripts/package-macos-dmg.sh "$APP_PATH" "desktop/src-tauri/target/$TARGET/release/bundle/dmg/${DMG_FILE_STEM}_${VERSION}_${DMG_ARCH}.dmg"
 
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
@@ -326,6 +374,9 @@ test-unit:
         cargo test -p buzz-auth --doc
         cargo nextest run -p buzz-voice --lib
         cargo nextest run -p buzz-cli
+        # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
+        # forged relay events cannot regain a path into agent routing unnoticed.
+        cargo nextest run -p buzz-acp
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
         # They guard the embedded-migrator invariant (the complete checked-in
         # additive migration set; legacy cutover/backfill remains an operator
@@ -348,14 +399,21 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
-        # buzz-agent model-capabilities corpus: the Rust half of the
-        # cross-language drift guard. `model_capabilities.rs` embeds
-        # scripts/model-capabilities.json + scripts/normative-corpus.json via
-        # include_str! and replays the full locked corpus as pure in-process tests (no
-        # infra). Enumerated explicitly because nothing in CI runs
-        # `cargo test --workspace`; without this step a manifest edit that
-        # diverges Rust from the corpus ships green.
-        cargo nextest run -p buzz-agent --lib
+        # buzz-agent: two infra-free concerns run together by executing the
+        # whole crate (lib + integration tests), because nothing in CI runs
+        # `cargo test --workspace`, so without this stanza neither the crate's
+        # library tests nor its integration tests execute remotely.
+        #   * model-capabilities corpus (lib): the Rust half of the
+        #     cross-language drift guard. `model_capabilities.rs` embeds
+        #     scripts/model-capabilities.json + scripts/normative-corpus.json via
+        #     include_str! and replays the full locked corpus as pure in-process
+        #     tests; without it a manifest edit that diverges Rust from the
+        #     corpus ships green.
+        #   * OAuth auth coordinator (lib concurrency matrix + databricks
+        #     integration tests): lock single-flight, cooldown, cross-process
+        #     crash recovery — infra-free via a stub OIDC provider and an
+        #     injected browser opener, no network or Postgres.
+        cargo nextest run -p buzz-agent
         # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
         # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
         # the admin.localhost origin/advertisement/canonical-URL pins, and the
@@ -379,8 +437,21 @@ test-unit:
         # disabled_mode_regression_pin_unauthenticated_request_is_served on the
         # DB-free /probe route, and its Host/Origin gating is covered here by
         # disabled_mode_still_requires_the_correct_host / _a_matching_origin.
+        # The second clause adds the relay's pure authorization-decision tests:
+        # the NIP-29 channel membership grid (handlers::channel_authz), the
+        # moderation capability grid (handlers::moderation_authz), and the pure
+        # helpers in handlers::side_effects. They ran in NO lane before —
+        # `test(/^api::admin::/)` never matched them, and the PostgreSQL lane
+        # pairs `--run-ignored ignored-only` with a `postgres_tests::`
+        # default-filter — so a red one shipped green, exactly the gap the
+        # api::admin clause above was added to close.
+        # Deliberately scoped to these three modules instead of all of
+        # `handlers::`: the wider set is mostly Postgres-backed, and five of its
+        # non-postgres_tests cases only "pass" without a database by waiting out
+        # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
+        # unit job either.
         cargo nextest run -p buzz-relay --lib \
-            -E 'test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)'
+            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/)'
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
@@ -616,7 +687,11 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     fi
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
-    pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+    FEATURES=()
+    if [[ -n "{{mesh}}" ]]; then
+        FEATURES=(--features mesh-llm)
+    fi
+    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs

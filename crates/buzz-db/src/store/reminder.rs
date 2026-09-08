@@ -239,7 +239,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use crate::event::insert_event;
     use nostr::{EventBuilder, Keys, Kind, Tag};

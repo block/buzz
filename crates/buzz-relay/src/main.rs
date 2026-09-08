@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tracing::{error, info, warn};
@@ -18,6 +17,7 @@ use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
 use buzz_relay::config::{Config, MAX_DRAIN_JITTER_MS};
+use buzz_relay::lifecycle::{BootTracker, LifecycleReason, StartupPhase};
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
@@ -105,15 +105,36 @@ impl EmissionScope {
 
 const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let (runtime, boot) = BootTracker::start_before_runtime(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+    })
+    .map_err(|error| anyhow::anyhow!("failed to build Tokio runtime: {error}"))?;
+    runtime.block_on(run_relay_main(boot))
+}
+
+async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // Install the ring CryptoProvider for rustls. Required before any rustls
     // TLS connection (rediss:// to ElastiCache, wss://, S3 over TLS): both
     // aws-lc-rs and ring are compiled in transitively, so rustls can't
     // auto-select a provider and would panic at first use without this.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls crypto provider");
+    let (mut boot, ()) = boot
+        .run_required(
+            StartupPhase::CryptoInit,
+            || {
+                rustls::crypto::ring::default_provider()
+                    .install_default()
+                    .map_err(|_provider| ())
+            },
+            |_error| LifecycleReason::ProviderConflict,
+        )
+        .map_err(|()| {
+            anyhow::anyhow!(
+                "failed to install rustls crypto provider: another provider is already installed"
+            )
+        })?;
 
     // JSON-only structured logs — simple, machine-parseable, CAKE-compatible.
     // If OTEL_EXPORTER_OTLP_ENDPOINT is set, also attach an OpenTelemetry tracing
@@ -122,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
     // Build a single shared Resource (service.name=buzz-relay by default, overridable
     // via OTEL_SERVICE_NAME) for the trace provider so that Datadog can identify
     // spans under the correct service identity.
+    let tracing_init = boot.start(StartupPhase::TracingInit);
     let resource = telemetry::service_resource();
     let tracer_init = telemetry::try_init_tracer(resource.clone());
     let otel_enabled = matches!(&tracer_init, telemetry::TracerInit::Enabled(_));
@@ -155,17 +177,43 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Log any exporter-build failure now that the subscriber is installed.
-    if let telemetry::TracerInit::ExporterBuildFailed(ref e) = tracer_init {
-        warn!(error = %e, "Failed to build OTLP trace exporter; distributed tracing disabled");
+    match &tracer_init {
+        telemetry::TracerInit::Enabled(_) => tracing_init.succeed(),
+        // Structured logging is installed regardless of whether optional OTLP
+        // export is configured, so the phase itself completed successfully.
+        telemetry::TracerInit::Disabled => tracing_init.succeed(),
+        telemetry::TracerInit::ExporterBuildFailed(_) => {
+            tracing_init.degrade(LifecycleReason::ExporterBuild);
+            boot.mark_degraded(LifecycleReason::ExporterBuild);
+            // Do not log the raw exporter error: OTLP endpoint URLs can carry
+            // credentials. The bounded lifecycle reason is sufficient here.
+            warn!("Failed to build OTLP trace exporter; distributed tracing disabled");
+        }
     }
 
     info!("Starting buzz-relay");
 
-    let config = Config::from_env().map_err(|e| {
-        error!("Invalid configuration: {e}");
-        anyhow::anyhow!("Configuration error: {e}")
-    })?;
-    let relay_keypair = relay_keypair_from_config(config.relay_private_key.as_deref())?;
+    let (next_boot, config) = boot
+        .run_required(StartupPhase::ConfigLoad, Config::from_env, |_error| {
+            LifecycleReason::ConfigInvalid
+        })
+        .map_err(|error| {
+            error!("Invalid configuration: {error}");
+            anyhow::anyhow!("Configuration error: {error}")
+        })?;
+    boot = next_boot;
+
+    let key_failure = if config.relay_private_key.is_some() {
+        LifecycleReason::RequiredInvalid
+    } else {
+        LifecycleReason::Missing
+    };
+    let (next_boot, relay_keypair) = boot.run_required(
+        StartupPhase::KeyLoad,
+        || relay_keypair_from_config(config.relay_private_key.as_deref()),
+        |_error| key_failure,
+    )?;
+    boot = next_boot;
     info!(
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
@@ -179,7 +227,18 @@ async fn main() -> anyhow::Result<()> {
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
-    relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
+    let (boot, ()) = boot.run_required(
+        StartupPhase::MetricsBind,
+        || relay_metrics::try_install(config.metrics_port, usage_idle_timeout_secs),
+        |error| match error.failure() {
+            relay_metrics::MetricsInstallFailure::Bind => LifecycleReason::Bind,
+            relay_metrics::MetricsInstallFailure::RecorderConflict => {
+                LifecycleReason::RecorderConflict
+            }
+            relay_metrics::MetricsInstallFailure::ExporterBuild => LifecycleReason::ExporterBuild,
+        },
+    )?;
+    boot.finish();
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     metrics::gauge!("buzz_push_enabled").set(if config.push_enabled { 1.0 } else { 0.0 });
     info!(
@@ -303,7 +362,7 @@ async fn main() -> anyhow::Result<()> {
             );
             None
         } else {
-            match db.ensure_configured_community(&host).await {
+            match db.ensure_configured_community_for_bootstrap(&host).await {
                 Ok(record) => {
                     info!(host = %record.host, community = %record.id, "Deployment community ensured");
                     Some(record.id)
@@ -564,7 +623,11 @@ async fn main() -> anyhow::Result<()> {
     // this repairs pre-snapshot communities and any publication that failed
     // after a membership transaction committed.
     if config.require_relay_membership {
-        match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(&state).await
+        match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots_with_purpose(
+            &state,
+            buzz_relay::handlers::side_effects::Nip43ReconciliationPurpose::Bootstrap,
+        )
+        .await
         {
             Ok(count) => info!(count, "NIP-43 membership snapshots reconciled on startup"),
             Err(error) => {
@@ -583,8 +646,9 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(
+                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots_with_purpose(
                     &reconcile_state,
+                    buzz_relay::handlers::side_effects::Nip43ReconciliationPurpose::Maintenance,
                 )
                 .await
                 {
@@ -1042,6 +1106,7 @@ async fn main() -> anyhow::Result<()> {
                 metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
                 metrics::gauge!("buzz_db_pool_active").set(active as f64);
                 metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
+                pool_state.db.refresh_pool_waiter_metrics();
 
                 if let Some(read_stats) = pool_state.db.read_pool_stats() {
                     let read_active = read_stats.size.saturating_sub(read_stats.idle);
@@ -1312,7 +1377,7 @@ async fn serve(
     });
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
-    let shutdown_flag = Arc::clone(&state.shutting_down);
+    let shutdown_state = Arc::clone(&state);
     let drain_conn_manager = Arc::clone(&state.conn_manager);
     let drain_jitter_ms = state.config.drain_jitter_ms;
     let tx = shutdown_tx.clone();
@@ -1345,7 +1410,7 @@ async fn serve(
     // sleeps. Not implemented here. This comment records the plan only.
     let shutdown_handle = tokio::spawn(async move {
         shutdown_signal().await;
-        shutdown_flag.store(true, Ordering::Relaxed);
+        shutdown_state.begin_shutdown();
         info!("Shutdown signal received — readiness now returns 503");
         // 5s grace: let K8s stop routing new traffic before we close listeners.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -2098,8 +2163,6 @@ mod tests {
         assert!(tick_count.load(std::sync::atomic::Ordering::Relaxed) <= 1);
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits() {
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = connect_audit_pool(&DbConfig {
@@ -2157,6 +2220,14 @@ mod tests {
             .execute(&mut *holder)
             .await
             .expect("release audit advisory lock");
+    }
+
+    mod postgres_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits() {
+            super::audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits().await;
+        }
     }
 
     #[test]

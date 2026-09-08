@@ -428,29 +428,20 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
     )
     .expect("sample managed agent record");
 
-    let persona = crate::managed_agents::AgentDefinition {
-        id: "persona-1".to_string(),
-        display_name: "Persona".to_string(),
-        avatar_url: None,
-        system_prompt: "You are a persona.".to_string(),
-        runtime: Some("goose".to_string()),
-        model: Some("persona-model".to_string()),
-        provider: Some("anthropic".to_string()),
-        name_pool: Vec::new(),
-        is_builtin: false,
-        is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        team_catalog_source: None,
-        env_vars: BTreeMap::new(),
-        respond_to: None,
-        respond_to_allowlist: Vec::new(),
-        parallelism: None,
-        created_at: "".to_string(),
-        updated_at: "".to_string(),
-    };
+    let persona: crate::managed_agents::AgentDefinition = serde_json::from_str(
+        r#"{
+            "id": "persona-1",
+            "display_name": "Persona",
+            "system_prompt": "You are a persona.",
+            "runtime": "goose",
+            "model": "persona-model",
+            "provider": "anthropic",
+            "is_active": true,
+            "created_at": "",
+            "updated_at": ""
+        }"#,
+    )
+    .expect("sample persona");
 
     // agent_model_discovery_config is the single helper get_agent_models
     // consumes — the stale record bytes must lose to the persona's current

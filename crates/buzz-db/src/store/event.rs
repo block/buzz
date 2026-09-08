@@ -221,12 +221,68 @@ fn huddle_started_content_links(content: &str, ephemeral_channel_id: Uuid) -> bo
         .is_some_and(|id| id == ephemeral_channel_id)
 }
 
-/// Return whether `parent_channel_id` has a creator-signed huddle-start event
-/// that links to `ephemeral_channel_id`.
+/// Resolve creator-authenticated parent links for a bounded set of huddle sessions.
 ///
 /// The creator constraint matters: a member of some unrelated channel can post
 /// their own kind:48100 event there, but they cannot sign as the creator of the
-/// target ephemeral channel.
+/// target ephemeral channel. One set-based query replaces the liveness
+/// endpoint's former session × parent lookup loop. Malformed historical start
+/// content is ignored rather than aborting the complete liveness snapshot.
+pub async fn huddle_started_links(
+    pool: &PgPool,
+    community_id: CommunityId,
+    parent_channel_ids: &[Uuid],
+    ephemeral_channel_ids: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid, Vec<u8>)>> {
+    if parent_channel_ids.is_empty() || ephemeral_channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (backing.id)
+               backing.id AS session_id,
+               start.channel_id AS parent_channel_id,
+               backing.created_by
+        FROM events start
+        JOIN channels backing
+          ON backing.community_id = start.community_id
+         AND backing.id::text = CASE
+             WHEN start.content IS JSON OBJECT
+             THEN (start.content::json ->> 'ephemeral_channel_id')
+             ELSE NULL
+         END
+         AND backing.deleted_at IS NULL
+        WHERE start.deleted_at IS NULL
+          AND start.community_id = $1
+          AND start.channel_id = ANY($2)
+          AND start.kind = $3
+          AND octet_length(start.content) <= $5
+          AND backing.id = ANY($4)
+          AND start.pubkey = backing.created_by
+        ORDER BY backing.id, start.created_at DESC, start.id ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(parent_channel_ids)
+    .bind(KIND_HUDDLE_STARTED as i32)
+    .bind(ephemeral_channel_ids)
+    .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("session_id")?,
+                row.try_get("parent_channel_id")?,
+                row.try_get("created_by")?,
+            ))
+        })
+        .collect()
+}
+
+/// Return whether a creator-signed huddle-start event links a parent channel
+/// to the requested ephemeral huddle channel.
 pub async fn huddle_started_link_exists(
     pool: &PgPool,
     community_id: CommunityId,
@@ -234,6 +290,26 @@ pub async fn huddle_started_link_exists(
     ephemeral_channel_id: Uuid,
     creator_pubkey: &[u8],
 ) -> Result<bool> {
+    huddle_started_link_exists_with_operation(
+        pool,
+        community_id,
+        parent_channel_id,
+        ephemeral_channel_id,
+        creator_pubkey,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+}
+
+async fn huddle_started_link_exists_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    parent_channel_id: Uuid,
+    ephemeral_channel_id: Uuid,
+    creator_pubkey: &[u8],
+    operation: crate::observability::WriterOperation,
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     let uuid_needle = format!("%{}%", ephemeral_channel_id);
     let candidates: Vec<String> = sqlx::query_scalar(
         r#"
@@ -257,7 +333,7 @@ pub async fn huddle_started_link_exists(
     .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
     .bind(uuid_needle)
     .bind(HUDDLE_LINK_CANDIDATE_LIMIT)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     Ok(candidates
@@ -274,7 +350,11 @@ pub async fn insert_event(
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
-    let mut connection = pool.acquire().await?;
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     insert_event_on(&mut connection, community_id, event, channel_id).await
 }
 
@@ -355,7 +435,20 @@ async fn insert_event_on(
 /// Uses `QueryBuilder` for dynamic filter composition — avoids string concatenation
 /// while keeping all user values in bind parameters.
 pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEvent>> {
-    let mut conn = pool.acquire().await?;
+    query_events_with_operation(
+        pool,
+        q,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await
+}
+
+pub(crate) async fn query_events_with_operation(
+    pool: &PgPool,
+    q: &EventQuery,
+    operation: crate::observability::WriterOperation,
+) -> Result<Vec<StoredEvent>> {
+    let mut conn = crate::observability::acquire_writer(pool, operation).await?;
     query_events_on(&mut conn, q).await
 }
 
@@ -659,7 +752,11 @@ pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<S
 ///
 /// Uses the same filter logic as `query_events` but returns only the count.
 pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     count_events_on(&mut conn, q).await
 }
 
@@ -823,12 +920,17 @@ pub async fn soft_delete_event(
     community_id: CommunityId,
     event_id: &[u8],
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
             .bind(community_id.as_uuid())
             .bind(event_id)
-            .execute(pool)
+            .execute(&mut *connection)
             .await?;
 
     Ok(result.rows_affected() > 0)
@@ -873,6 +975,11 @@ pub async fn soft_delete_by_coordinate(
 ) -> Result<bool> {
     let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -883,7 +990,7 @@ pub async fn soft_delete_by_coordinate(
     .bind(pubkey)
     .bind(d_tag)
     .bind(deletion_created_at)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     Ok(result.rows_affected() > 0)
@@ -901,7 +1008,12 @@ pub async fn soft_delete_event_and_update_thread(
     parent_event_id: Option<&[u8]>,
     root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
@@ -949,6 +1061,11 @@ pub async fn get_last_message_at(
     community_id: CommunityId,
     channel_id: uuid::Uuid,
 ) -> Result<Option<DateTime<Utc>>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     let row = sqlx::query(
         "SELECT created_at FROM events \
          WHERE community_id = $1 AND channel_id = $2 AND deleted_at IS NULL \
@@ -956,7 +1073,7 @@ pub async fn get_last_message_at(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     match row {
@@ -977,6 +1094,11 @@ pub async fn get_last_message_at_bulk(
     if channel_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT channel_id, MAX(created_at) as last_at FROM events \
@@ -990,7 +1112,7 @@ pub async fn get_last_message_at_bulk(
     }
     qb.push(") GROUP BY channel_id");
 
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = qb.build().fetch_all(&mut *connection).await?;
 
     let mut map = std::collections::HashMap::with_capacity(rows.len());
     for row in rows {
@@ -1011,13 +1133,29 @@ pub async fn get_event_by_id(
     community_id: CommunityId,
     id_bytes: &[u8],
 ) -> Result<Option<StoredEvent>> {
+    get_event_by_id_with_operation(
+        pool,
+        community_id,
+        id_bytes,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+}
+
+pub(crate) async fn get_event_by_id_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+    operation: crate::observability::WriterOperation,
+) -> Result<Option<StoredEvent>> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
          FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     match row {
@@ -1038,6 +1176,11 @@ pub async fn get_latest_global_replaceable(
     kind: i32,
     pubkey_bytes: &[u8],
 ) -> Result<Option<StoredEvent>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
          FROM events \
@@ -1048,7 +1191,7 @@ pub async fn get_latest_global_replaceable(
     .bind(community_id.as_uuid())
     .bind(kind)
     .bind(pubkey_bytes)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     match row {
@@ -1067,13 +1210,29 @@ pub async fn get_event_by_id_including_deleted(
     community_id: CommunityId,
     id_bytes: &[u8],
 ) -> Result<Option<StoredEvent>> {
+    get_event_by_id_including_deleted_with_operation(
+        pool,
+        community_id,
+        id_bytes,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+}
+
+pub(crate) async fn get_event_by_id_including_deleted_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+    operation: crate::observability::WriterOperation,
+) -> Result<Option<StoredEvent>> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
          FROM events WHERE community_id = $1 AND id = $2 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     match row {
@@ -1091,10 +1250,25 @@ pub async fn get_events_by_ids(
     community_id: CommunityId,
     ids: &[&[u8]],
 ) -> Result<Vec<StoredEvent>> {
+    get_events_by_ids_with_operation(
+        pool,
+        community_id,
+        ids,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await
+}
+
+pub(crate) async fn get_events_by_ids_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    ids: &[&[u8]],
+    operation: crate::observability::WriterOperation,
+) -> Result<Vec<StoredEvent>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(pool, operation).await?;
     get_events_by_ids_on(&mut conn, community_id, ids).await
 }
 
@@ -1340,7 +1514,12 @@ pub async fn insert_event_with_thread_metadata(
     channel_id: Option<Uuid>,
     thread_meta: Option<ThreadMetadataParams<'_>>,
 ) -> Result<(StoredEvent, bool)> {
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
     let result =
         insert_event_with_thread_metadata_tx(&mut tx, community_id, event, channel_id, thread_meta)
             .await?;
@@ -1378,7 +1557,46 @@ impl Db {
     /// explicit, per-callsite decision, never a change to this method.
     #[datastore_span(name = "query_events", system = "postgresql")]
     pub async fn query_events(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
-        crate::event::query_events(&self.pool, q).await
+        crate::event::query_events_with_operation(
+            &self.pool,
+            q,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
+    }
+
+    /// Query authoritative event state that directly controls a durable event
+    /// mutation or its post-commit side effects.
+    #[datastore_span(name = "query_events_for_event_write", system = "postgresql")]
+    pub async fn query_events_for_event_write(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        crate::event::query_events_with_operation(
+            &self.pool,
+            q,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+    }
+
+    /// Query authoritative event state for startup reconciliation.
+    #[datastore_span(name = "query_events_for_bootstrap", system = "postgresql")]
+    pub async fn query_events_for_bootstrap(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        crate::event::query_events_with_operation(
+            &self.pool,
+            q,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await
+    }
+
+    /// Query authoritative event state for background reconciliation or repair.
+    #[datastore_span(name = "query_events_for_maintenance", system = "postgresql")]
+    pub async fn query_events_for_maintenance(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        crate::event::query_events_with_operation(
+            &self.pool,
+            q,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await
     }
 
     /// [`Db::query_events`] with replica routing — the opt-in fast path for
@@ -1404,7 +1622,14 @@ impl Db {
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
         let predicate = crate::RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
-        match self.route_read(path, predicate).await {
+        match self
+            .route_read(
+                path,
+                predicate,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q).await {
                     Ok(events) => {
@@ -1416,11 +1641,23 @@ impl Db {
                         // writer rather than surfacing a routed error.
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
-                        crate::event::query_events(&self.pool, q).await
+                        crate::event::query_events_with_operation(
+                            &self.pool,
+                            q,
+                            crate::observability::WriterOperation::SubscriptionHistory,
+                        )
+                        .await
                     }
                 }
             }
-            crate::RouteDecision::Writer => crate::event::query_events(&self.pool, q).await,
+            crate::RouteDecision::Writer => {
+                crate::event::query_events_with_operation(
+                    &self.pool,
+                    q,
+                    crate::observability::WriterOperation::SubscriptionHistory,
+                )
+                .await
+            }
         }
     }
 
@@ -1438,7 +1675,14 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
-        match self.route_read(path, crate::RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                crate::RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q).await {
                     Ok(events) => {
@@ -1448,11 +1692,23 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
-                        crate::event::query_events(&self.pool, q).await
+                        crate::event::query_events_with_operation(
+                            &self.pool,
+                            q,
+                            crate::observability::WriterOperation::SubscriptionHistory,
+                        )
+                        .await
                     }
                 }
             }
-            crate::RouteDecision::Writer => crate::event::query_events(&self.pool, q).await,
+            crate::RouteDecision::Writer => {
+                crate::event::query_events_with_operation(
+                    &self.pool,
+                    q,
+                    crate::observability::WriterOperation::SubscriptionHistory,
+                )
+                .await
+            }
         }
     }
 
@@ -1477,7 +1733,14 @@ impl Db {
     /// the error to the accepted budget `B`.
     #[datastore_span(name = "count_events_routed", system = "postgresql")]
     pub async fn count_events_routed(&self, path: &'static str, q: &EventQuery) -> Result<i64> {
-        match self.route_read(path, crate::RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                crate::RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::count_events_on(&mut tx, q).await {
                     Ok(count) => {
@@ -1495,8 +1758,25 @@ impl Db {
         }
     }
 
+    /// Resolve creator-signed huddle-start links for bounded parent/session sets.
+    #[datastore_span(name = "huddle_started_links", system = "postgresql")]
+    pub async fn huddle_started_links(
+        &self,
+        community_id: CommunityId,
+        parent_channel_ids: &[Uuid],
+        ephemeral_channel_ids: &[Uuid],
+    ) -> Result<Vec<(Uuid, Uuid, Vec<u8>)>> {
+        crate::event::huddle_started_links(
+            &self.pool,
+            community_id,
+            parent_channel_ids,
+            ephemeral_channel_ids,
+        )
+        .await
+    }
+
     /// Return whether a creator-signed huddle-start event links a parent
-    /// channel to an ephemeral huddle channel.
+    /// channel to the requested ephemeral huddle channel.
     #[datastore_span(name = "huddle_started_link_exists", system = "postgresql")]
     pub async fn huddle_started_link_exists(
         &self,
@@ -1511,6 +1791,29 @@ impl Db {
             parent_channel_id,
             ephemeral_channel_id,
             creator_pubkey,
+        )
+        .await
+    }
+
+    /// Validate a huddle link while admitting a huddle event for persistence.
+    #[datastore_span(
+        name = "huddle_started_link_exists_for_event_write",
+        system = "postgresql"
+    )]
+    pub async fn huddle_started_link_exists_for_event_write(
+        &self,
+        community_id: CommunityId,
+        parent_channel_id: Uuid,
+        ephemeral_channel_id: Uuid,
+        creator_pubkey: &[u8],
+    ) -> Result<bool> {
+        crate::event::huddle_started_link_exists_with_operation(
+            &self.pool,
+            community_id,
+            parent_channel_id,
+            ephemeral_channel_id,
+            creator_pubkey,
+            crate::observability::WriterOperation::EventWrite,
         )
         .await
     }
@@ -1543,6 +1846,23 @@ impl Db {
         crate::event::get_event_by_id(&self.pool, community_id, id_bytes).await
     }
 
+    /// Fetch an event as a prerequisite of an event write or durable
+    /// post-write side effect.
+    #[datastore_span(name = "get_event_by_id_for_event_write", system = "postgresql")]
+    pub async fn get_event_by_id_for_event_write(
+        &self,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id_with_operation(
+            &self.pool,
+            community_id,
+            id_bytes,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+    }
+
     /// Fetches a single event by its raw ID bytes, **including soft-deleted rows**.
     #[datastore_span(name = "get_event_by_id_including_deleted", system = "postgresql")]
     pub async fn get_event_by_id_including_deleted(
@@ -1551,6 +1871,26 @@ impl Db {
         id_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
         crate::event::get_event_by_id_including_deleted(&self.pool, community_id, id_bytes).await
+    }
+
+    /// Fetch an event including tombstones as a prerequisite of an event
+    /// write or durable post-write side effect.
+    #[datastore_span(
+        name = "get_event_by_id_including_deleted_for_event_write",
+        system = "postgresql"
+    )]
+    pub async fn get_event_by_id_including_deleted_for_event_write(
+        &self,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id_including_deleted_with_operation(
+            &self.pool,
+            community_id,
+            id_bytes,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
     }
 
     /// Soft-deletes an event. Returns `Ok(true)` if deleted, `Ok(false)` if already deleted.
@@ -1633,7 +1973,13 @@ impl Db {
         community_id: CommunityId,
         ids: &[&[u8]],
     ) -> Result<Vec<StoredEvent>> {
-        crate::event::get_events_by_ids(&self.pool, community_id, ids).await
+        crate::event::get_events_by_ids_with_operation(
+            &self.pool,
+            community_id,
+            ids,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
     }
 
     /// [`Db::get_events_by_ids`] with replica routing — same contract and
@@ -1650,7 +1996,14 @@ impl Db {
         community_id: CommunityId,
         ids: &[&[u8]],
     ) -> Result<Vec<StoredEvent>> {
-        match self.route_read(path, crate::RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                crate::RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::get_events_by_ids_on(&mut tx, community_id, ids).await {
                     Ok(events) => {
@@ -1660,12 +2013,24 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
-                        crate::event::get_events_by_ids(&self.pool, community_id, ids).await
+                        crate::event::get_events_by_ids_with_operation(
+                            &self.pool,
+                            community_id,
+                            ids,
+                            crate::observability::WriterOperation::SubscriptionHistory,
+                        )
+                        .await
                     }
                 }
             }
             crate::RouteDecision::Writer => {
-                crate::event::get_events_by_ids(&self.pool, community_id, ids).await
+                crate::event::get_events_by_ids_with_operation(
+                    &self.pool,
+                    community_id,
+                    ids,
+                    crate::observability::WriterOperation::SubscriptionHistory,
+                )
+                .await
             }
         }
     }
@@ -1703,6 +2068,11 @@ impl Db {
     /// Runs a single UPDATE touching only NIP-33 rows with NULL d_tag.
     #[datastore_span(name = "backfill_d_tags", system = "postgresql")]
     pub async fn backfill_d_tags(&self) -> Result<u64> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await?;
         let result = sqlx::query(
             "UPDATE events \
              SET d_tag = COALESCE( \
@@ -1713,7 +2083,7 @@ impl Db {
              WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL \
                AND community_write_allowed(community_id)",
         )
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?;
         Ok(result.rows_affected())
     }
@@ -1726,6 +2096,11 @@ impl Db {
         channel_id: Uuid,
         relay_pubkey: &[u8],
     ) -> Result<u64> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         let result = sqlx::query(
             "UPDATE events SET deleted_at = NOW() \
              WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND deleted_at IS NULL AND kind IN (39000, 39001, 39002)",
@@ -1733,14 +2108,14 @@ impl Db {
         .bind(community_id.as_uuid())
         .bind(channel_id)
         .bind(relay_pubkey)
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?;
         Ok(result.rows_affected())
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -2419,6 +2794,47 @@ mod tests {
             current_deleted,
             "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn huddle_started_links_batches_valid_creator_links_and_ignores_malformed_content() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let parent = make_test_channel(&pool, community_uuid, None).await;
+        let session = make_test_channel(&pool, community_uuid, Some(60)).await;
+        let creator = vec![7_u8; 32];
+
+        for (index, content) in [
+            "not-json".to_owned(),
+            serde_json::json!({ "ephemeral_channel_id": session }).to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+                 VALUES ($1, $2, $3, NOW() + make_interval(secs => $4), $5, '[]', $6, $7, $8)",
+            )
+            .bind(community_uuid)
+            .bind(vec![(index + 1) as u8; 32])
+            .bind(&creator)
+            .bind(index as f64)
+            .bind(KIND_HUDDLE_STARTED as i32)
+            .bind(content)
+            .bind(vec![0_u8; 64])
+            .bind(parent)
+            .execute(&pool)
+            .await
+            .expect("insert huddle-start candidate");
+        }
+
+        let links = huddle_started_links(&pool, community, &[parent], &[session])
+            .await
+            .expect("batch huddle links");
+        assert_eq!(links, vec![(session, parent, creator)]);
     }
 
     #[test]
