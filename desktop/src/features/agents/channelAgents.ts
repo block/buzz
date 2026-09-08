@@ -1,5 +1,6 @@
 import {
   commandsMatch,
+  findPersonaAgentInChannel,
   findReusableGenericAgent,
   findReusablePersonaAgent,
   pickPreferredManagedAgent,
@@ -72,7 +73,7 @@ export type CreateChannelManagedAgentInput = {
   systemPrompt?: string;
   avatarUrl?: string;
   personaId?: string | null;
-  /** Team this instance is deployed from; prevents cross-team reuse. */
+  /** Team recorded on a newly created instance. */
   teamId?: string | null;
   /**
    * True when `runtime` is a runtime the user deliberately picked to override
@@ -326,6 +327,36 @@ export async function provisionChannelManagedAgent(
     throw new Error("Agent name is required.");
   }
 
+  // A repeated team deployment must be idempotent. Prefer the persona's
+  // existing channel member before looking elsewhere or minting a new key.
+  if (
+    input.personaId &&
+    !input.forceNewInstance &&
+    context?.managedAgents &&
+    context.channelMemberPubkeys
+  ) {
+    const inChannel = findPersonaAgentInChannel(
+      context.managedAgents,
+      input.personaId,
+      context.channelMemberPubkeys,
+    );
+    if (inChannel) {
+      const definition = context.personas.find(
+        (persona) => persona.id === input.personaId,
+      );
+      const { agent: updatedAgent } = await applyReusableAgentAccessPolicy(
+        inChannel,
+        input,
+        definition,
+      );
+      return {
+        agent: updatedAgent,
+        created: false,
+        runtimeId: input.runtime.id,
+      };
+    }
+  }
+
   // Smart reuse: if a managed agent with the same personaId already exists
   // and is not already in this channel, attach it instead of creating a new one.
   if (
@@ -466,7 +497,11 @@ export async function createChannelManagedAgents(
   const channelMemberPubkeys = new Set(
     members.map((m) => normalizePubkey(m.pubkey)),
   );
-  const context = { managedAgents, channelMemberPubkeys, personas };
+  const context: ChannelAgentReuseContext = {
+    managedAgents: [...managedAgents],
+    channelMemberPubkeys,
+    personas,
+  };
 
   // Sequential loop: each agent must be fully created and its relay membership
   // written before the next starts. Concurrent writes to the replaceable
@@ -479,6 +514,18 @@ export async function createChannelManagedAgents(
     try {
       const result = await createChannelManagedAgent(channelId, input, context);
       successes.push(result);
+      const normalizedPubkey = normalizePubkey(result.agent.pubkey);
+      context.channelMemberPubkeys = new Set(context.channelMemberPubkeys).add(
+        normalizedPubkey,
+      );
+      const existingIndex = context.managedAgents.findIndex(
+        (agent) => normalizePubkey(agent.pubkey) === normalizedPubkey,
+      );
+      if (existingIndex === -1) {
+        context.managedAgents.push(result.agent);
+      } else {
+        context.managedAgents[existingIndex] = result.agent;
+      }
     } catch (error) {
       failures.push({
         kind: input.personaId ? "persona" : "generic",
