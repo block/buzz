@@ -11,10 +11,22 @@ const AGENT_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
 const CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301"; // #agents
 const T0 = Date.parse("2025-06-15T12:00:00Z");
 
+const IDLE_THREAD_AGENT_PUBKEY = `${"c".repeat(63)}D`;
+
 const MANAGED_AGENTS = [
   {
     pubkey: AGENT_PUBKEY,
     name: "Observer Agent",
+    status: "running" as const,
+    channelNames: ["agents"],
+  },
+];
+
+const MULTI_AGENT_MANAGED_AGENTS = [
+  ...MANAGED_AGENTS,
+  {
+    pubkey: IDLE_THREAD_AGENT_PUBKEY,
+    name: "Idle Thread Agent",
     status: "running" as const,
     channelNames: ["agents"],
   },
@@ -247,6 +259,7 @@ async function openObserverFeedPanel(page: import("@playwright/test").Page) {
 async function seedObserverEvents(
   page: import("@playwright/test").Page,
   events: SeededObserverEvent[],
+  pubkey = AGENT_PUBKEY,
 ) {
   await page.evaluate(
     ({ pubkey, evts }) => {
@@ -255,7 +268,7 @@ async function seedObserverEvents(
         events: evts,
       });
     },
-    { pubkey: AGENT_PUBKEY, evts: events },
+    { pubkey, evts: events },
   );
   // Let React re-render and the rAF loop paint a frame.
   await page.waitForTimeout(400);
@@ -465,6 +478,84 @@ test.describe("agent activity panel screenshots", () => {
     // shorter than the three-file map (rows drive canvas height).
     if (!evictionBox || !readmeBox) throw new Error("panel box unavailable");
     expect(readmeBox.height).toBeLessThan(evictionBox.height);
+  });
+
+  test("05 — thread popover only shows agents active in that thread", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: MULTI_AGENT_MANAGED_AGENTS,
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await waitForSeedHook(page);
+
+    await page.getByTestId("channel-agents").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+    await seedThreadedChannel(page);
+    await seedObserverEvents(page, activityFrames());
+    await seedObserverEvents(
+      page,
+      [
+        frame(1, 141_000, "turn_started", "idle-thread-turn", {
+          source: "channel",
+          triggeringEventIds: ["b".repeat(64)],
+        }),
+        frame(2, 142_000, "acp_read", "idle-thread-turn", {
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "session-002",
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: "idle-call-1",
+              status: "pending",
+              title: "read_file",
+              kind: "read",
+              locations: [{ path: "/Users/idle/repo/docs/idle.md" }],
+            },
+          },
+        }),
+        frame(3, 143_000, "turn_completed", "idle-thread-turn", {}),
+      ],
+      IDLE_THREAD_AGENT_PUBKEY,
+    );
+
+    const pills = page.getByTestId("thread-activity-pill");
+    await expect(pills).toHaveCount(2, { timeout: 5_000 });
+
+    // README thread has both agents; selecting one chip must not trap the
+    // popover, and the older eviction thread must not show the unrelated agent.
+    await pills.nth(1).click();
+    let popover = page.getByTestId("thread-activity-popover");
+    await expect(popover).toBeVisible({ timeout: 5_000 });
+    await expect(
+      popover.getByRole("button", { name: "Observer Agent" }),
+    ).toBeVisible();
+    await expect(
+      popover.getByRole("button", { name: "Idle Thread Agent" }),
+    ).toBeVisible();
+
+    await popover.getByRole("button", { name: "Idle Thread Agent" }).click();
+    await expect(
+      popover.getByRole("button", { name: "All agents" }),
+    ).toBeVisible();
+    await expect(
+      popover.locator('section[aria-label="Agent file activity"]'),
+    ).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
+
+    await pills.first().click();
+    popover = page.getByTestId("thread-activity-popover");
+    await expect(popover).toBeVisible({ timeout: 5_000 });
+    await expect(
+      popover.getByRole("button", { name: "Observer Agent" }),
+    ).toBeVisible();
+    await expect(
+      popover.getByRole("button", { name: "Idle Thread Agent" }),
+    ).toHaveCount(0);
   });
 
   test("02 — turn-scoped replay", async ({ page }) => {

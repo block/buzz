@@ -4,36 +4,77 @@
 //
 // The event cache is module-level (not per-mount) because thread roots are
 // immutable once fetched — a channel revisit or a second surface mounting the
-// map should never refetch the same roots. Failed lookups cache as null so a
-// deleted trigger message doesn't refetch on every recompute.
+// map should never refetch the same roots. Successful lookups and definitive
+// not-found errors are cached; transient failures evict their entry so a later
+// mount can retry.
 
 import * as React from "react";
 
 import { getEventById } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
+import { isDefinitiveEventNotFound } from "@/shared/lib/eventLookupError";
 import type { ObserverEvent } from "../ui/agentSessionTypes";
 import {
   buildThreadGroups,
-  resolveTurnThreads,
+  resolveTurnThread,
   type ThreadGroups,
   type TurnThreadResolution,
 } from "./activityThreads";
 import { type ActivityTurn, deriveActivityTurns } from "./activityTurns";
 
-const eventCache = new Map<string, Promise<RelayEvent | null>>();
+export type EventByIdFetcher = (eventId: string) => Promise<RelayEvent>;
+
+export function createThreadEventCache(fetchEventById: EventByIdFetcher): {
+  fetchEventCached: (eventId: string) => Promise<RelayEvent | null>;
+  clear: () => void;
+} {
+  const cache = new Map<string, Promise<RelayEvent | null>>();
+  return {
+    fetchEventCached(eventId) {
+      let promise = cache.get(eventId);
+      if (!promise) {
+        promise = fetchEventById(eventId).catch((error) => {
+          if (isDefinitiveEventNotFound(error)) {
+            return null;
+          }
+          cache.delete(eventId);
+          throw error;
+        });
+        cache.set(eventId, promise);
+      }
+      return promise;
+    },
+    clear() {
+      cache.clear();
+    },
+  };
+}
+
+const moduleEventCache = createThreadEventCache(getEventById);
 
 function fetchEventCached(eventId: string): Promise<RelayEvent | null> {
-  let promise = eventCache.get(eventId);
-  if (!promise) {
-    promise = getEventById(eventId).catch(() => null);
-    eventCache.set(eventId, promise);
-  }
-  return promise;
+  return moduleEventCache.fetchEventCached(eventId);
+}
+
+export async function resolveTurnThreadsRetriable(
+  turns: readonly ActivityTurn[],
+  fetchEvent: (eventId: string) => Promise<RelayEvent | null>,
+): Promise<Map<string, TurnThreadResolution>> {
+  const entries = await Promise.all(
+    turns.map(async (turn) => {
+      try {
+        return [turn.id, await resolveTurnThread(turn, fetchEvent)] as const;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return new Map(entries.filter((entry) => entry !== null));
 }
 
 /** Test-only: reset the module cache between specs. */
 export function _testResetThreadEventCache() {
-  eventCache.clear();
+  moduleEventCache.clear();
 }
 
 export interface ThreadScopeState {
@@ -100,16 +141,19 @@ export function useThreadScope(
     const generation = ++generationRef.current;
     let cancelled = false;
 
-    void resolveTurnThreads(unresolved, fetchEventCached).then((resolved) => {
-      if (cancelled || generation !== generationRef.current) return;
-      setResolutions((current) => {
-        const next = new Map(current);
-        for (const [turnId, resolution] of resolved) {
-          next.set(turnId, resolution);
-        }
-        return next;
-      });
-    });
+    void resolveTurnThreadsRetriable(unresolved, fetchEventCached).then(
+      (resolved) => {
+        if (cancelled || generation !== generationRef.current) return;
+        if (resolved.size === 0) return;
+        setResolutions((current) => {
+          const next = new Map(current);
+          for (const [turnId, resolution] of resolved) {
+            next.set(turnId, resolution);
+          }
+          return next;
+        });
+      },
+    );
 
     return () => {
       cancelled = true;
