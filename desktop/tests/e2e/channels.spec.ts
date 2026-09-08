@@ -1657,10 +1657,16 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     },
   );
 
-  await expect(page.getByTestId(`channel-unread-${channelName}`)).toBeVisible();
+  await expect(page.getByTestId(`channel-${channelName}`)).toHaveCSS(
+    "font-weight",
+    "700",
+  );
+  await expect(page.getByTestId(`channel-unread-${channelName}`)).toHaveCount(
+    0,
+  );
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
 });
 
 test("ephemeral countdown refreshes when switching channels after a clock jump", async ({
