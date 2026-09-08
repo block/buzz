@@ -196,6 +196,15 @@ fn classify_body_timeout(e: &reqwest::Error) -> Option<String> {
     e.is_timeout().then(|| classify_request_error(e))
 }
 
+/// Preserve timeout bodies as connectivity failures while allowing each caller
+/// to retain its established non-timeout error behavior.
+pub(crate) fn classify_body_read_error(
+    e: &reqwest::Error,
+    fallback: impl FnOnce() -> String,
+) -> String {
+    classify_body_timeout(e).unwrap_or_else(fallback)
+}
+
 /// Detect responses that were intercepted by a captive portal or auth proxy.
 ///
 /// Returns `Some(msg)` when the response clearly did not come from the relay:
@@ -533,21 +542,19 @@ pub async fn sync_managed_agent_profile(
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
 
     let url = format!("{}/events", relay_http_base_url(relay_url));
-    let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
-
-    let mut request = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json");
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response = match send_event_http_request_with_keys(
+        &state.http_client,
+        &url,
+        agent_keys,
+        auth_tag,
+        &body_bytes,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(EventSubmitHttpError::Auth(error)) => return Err(error),
+        Err(error) => return Err(error.into_message()),
+    };
 
     if !response.status().is_success() {
         let msg = relay_error_message(response).await;
@@ -623,6 +630,10 @@ mod get;
 pub use get::get_relay_json;
 
 mod submit;
+pub(crate) use submit::{
+    send_event_http_request_with_keys, submit_event_json_with_keys, submit_event_text_with_keys,
+    EventSubmitHttpError,
+};
 pub use submit::{
     submit_event, submit_event_at_created_at, submit_event_at_with_keys,
     submit_event_with_keys_created_at, submit_signed_event_at_with_keys, SubmitEventResponse,
@@ -659,28 +670,8 @@ pub async fn submit_signed_event_with_keys(
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
-    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
-
-    let mut request = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", "application/json");
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
-
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
-    }
-
-    let result: SubmitEventResponse = parse_json_response(response).await?;
+    let result: SubmitEventResponse =
+        submit_event_json_with_keys(&state.http_client, &url, keys, auth_tag, &body_bytes).await?;
 
     if !result.accepted {
         return Err(format!("relay rejected event: {}", result.message));

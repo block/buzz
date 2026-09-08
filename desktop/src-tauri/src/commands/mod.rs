@@ -19,6 +19,7 @@ mod channel_window;
 mod channels;
 mod clipboard;
 mod dms;
+pub(crate) mod engram_submit_response;
 mod engrams;
 mod export_util;
 mod global_agent_config;
