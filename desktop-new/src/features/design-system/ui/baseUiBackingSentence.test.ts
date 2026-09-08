@@ -20,13 +20,12 @@ describe("the Base UI backing sentence", () => {
     expect(sentenceFor("button")).toBe("Built on Base UI Button.");
     expect(sentenceFor("avatar")).toBe("Built on Base UI Avatar.");
     expect(sentenceFor("tabs")).toBe("Built on Base UI Tabs.");
+    expect(sentenceFor("navigation-item")).toBe("Built on Base UI Button.");
+    expect(sentenceFor("preview-card")).toBe("Built on Base UI Preview Card.");
   });
 
   it("says where an indirect part enters, rather than claiming none", () => {
     expect(sentenceFor("icon-button")).toBe(
-      "No Base UI part of its own. Inherits Base UI Button through Buzz Button.",
-    );
-    expect(sentenceFor("navigator-row")).toBe(
       "No Base UI part of its own. Inherits Base UI Button through Buzz Button.",
     );
   });
@@ -42,7 +41,7 @@ describe("the Base UI backing sentence", () => {
       "No Base UI part. Semantic native header.",
     );
     expect(sentenceFor("inline-chip")).toBe(
-      "No Base UI part. Semantic native button or image role.",
+      "No Base UI part of its own. Inherits Base UI Preview Card through Buzz PreviewCard.",
     );
   });
 
@@ -64,5 +63,11 @@ describe("the Base UI backing sentence", () => {
       .filter((segment) => segment.kind === "part")
       .map((segment) => (segment.kind === "part" ? segment.part.name : ""));
     expect(linked).toEqual(["Field", "Input", "Button"]);
+
+    expect(
+      baseUiBackingSentence("inline-chip", "unused")
+        .filter((segment) => segment.kind === "part")
+        .map((segment) => (segment.kind === "part" ? segment.part.name : "")),
+    ).toEqual(["Preview Card"]);
   });
 });

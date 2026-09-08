@@ -5,7 +5,22 @@ import { useColorScheme } from "@/shared/theme/useColorScheme";
 import { COMPONENTS } from "@/shared/ui/registry";
 
 /** A nav entry, optionally with children shown indented beneath it. */
-type NavItem = [label: string, to: string, children?: Array<[string, string]>];
+type NavItem = [label: string, to: string, children?: NavItem[]];
+
+function componentNavItems(parent?: string): NavItem[] {
+  return COMPONENTS.filter((component) => component.parent === parent).map(
+    (component) => [
+      component.name,
+      `/design/components/${component.slug}`,
+      componentNavItems(component.slug),
+    ],
+  );
+}
+
+const COMPONENT_NAV_ITEMS: NavItem[] = [
+  ["Overview", "/design/components", componentNavItems()],
+  ["Base UI backing", "/design/components/base-ui"],
+];
 
 const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
   {
@@ -24,6 +39,10 @@ const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
     ],
   },
   {
+    heading: "Product compositions",
+    items: [["Composer", "/design/composer"]],
+  },
+  {
     heading: "System",
     items: [
       ["Vocabulary", "/design/vocabulary"],
@@ -32,17 +51,7 @@ const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
   },
   {
     heading: "Components",
-    items: [
-      [
-        "Overview",
-        "/design/components",
-        COMPONENTS.map((component) => [
-          component.name,
-          `/design/components/${component.slug}`,
-        ]),
-      ],
-      ["Base UI backing", "/design/components/base-ui"],
-    ],
+    items: COMPONENT_NAV_ITEMS,
   },
 ];
 
@@ -68,6 +77,28 @@ function NavLink({
     >
       {children}
     </Link>
+  );
+}
+
+function NavItems({ items, depth = 0 }: { items: NavItem[]; depth?: number }) {
+  return (
+    <div className="flex flex-wrap gap-1 lg:flex-col">
+      {items.map(([label, to, children]) => (
+        <Fragment key={to}>
+          <div className={depth === 0 ? undefined : "lg:pl-3"}>
+            <NavLink
+              to={to}
+              exact={children !== undefined && children.length > 0}
+            >
+              {label}
+            </NavLink>
+          </div>
+          {children && children.length > 0 ? (
+            <NavItems items={children} depth={depth + 1} />
+          ) : null}
+        </Fragment>
+      ))}
+    </div>
   );
 }
 
@@ -104,25 +135,7 @@ export function DesignSystemLayout() {
                   time, as the product repeats something.
                 </p>
               ) : (
-                /* Narrow: links wrap as a row so the nav costs a few lines
-                   instead of a screen. From lg they return to a column. */
-                <div className="flex flex-wrap gap-1 lg:flex-col">
-                  {section.items.map(([label, to, children]) => (
-                    <Fragment key={to}>
-                      <NavLink to={to} exact={children !== undefined}>
-                        {label}
-                      </NavLink>
-                      {/* Indented on the side rail so the nesting reads;
-                          inline in the wrapped narrow row, where an indent
-                          would just look like a gap. */}
-                      {children?.map(([childLabel, childTo]) => (
-                        <div key={childTo} className="lg:pl-3">
-                          <NavLink to={childTo}>{childLabel}</NavLink>
-                        </div>
-                      ))}
-                    </Fragment>
-                  ))}
-                </div>
+                <NavItems items={section.items} />
               )}
             </div>
           ))}
@@ -132,7 +145,7 @@ export function DesignSystemLayout() {
           type="button"
           onClick={toggle}
           aria-label={`Switch to ${scheme === "light" ? "dark" : "light"} mode`}
-          className="mx-3 self-start rounded-lg bg-inset px-3 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
+          className="mx-3 self-start rounded-lg bg-neutral-2 px-3 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
         >
           {scheme === "light" ? "Dark mode" : "Light mode"}
         </button>

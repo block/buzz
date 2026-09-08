@@ -1,9 +1,5 @@
-import type {
-  ActivityItem,
-  ActivityStatus,
-  AgentTurn,
-  ObserverEvent,
-} from "./types";
+import type { ObserverEvent } from "@/shared/runtime/observerEvent";
+import type { ActivityItem, ActivityStatus, AgentTurn } from "./types";
 
 const TERMINAL_KINDS: Record<string, ActivityStatus> = {
   turn_completed: "completed",
@@ -38,13 +34,13 @@ function statusFor(event: ObserverEvent): ActivityStatus {
 }
 
 function itemLabel(event: ObserverEvent): string {
-  const title =
+  return (
     text(event.payload.title) ??
     text(event.payload.toolCallTitle) ??
     text(event.payload.toolName) ??
-    text(event.payload.name);
-  if (title) return title;
-  return event.kind.replaceAll("_", " ");
+    text(event.payload.name) ??
+    event.kind.replaceAll("_", " ")
+  );
 }
 
 function itemId(event: ObserverEvent): string {
@@ -68,6 +64,10 @@ function eventToItem(event: ObserverEvent): ActivityItem {
   };
 }
 
+/**
+ * Projects one owner-private observer event into a stable agent turn. The
+ * capability owns this projection once; conversations only read its result.
+ */
 export function reduceActivity(
   current: Map<string, AgentTurn>,
   event: ObserverEvent,
@@ -89,16 +89,32 @@ export function reduceActivity(
   if (existingIndex >= 0) items[existingIndex] = incoming;
   else items.push(incoming);
   items.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  // A completed tool call is evidence within an active turn, not completion
+  // of the turn itself. Only a terminal turn event may replace its aggregate
+  // state; otherwise the dock would disappear midway through an agent's work.
+  const isTerminalTurnEvent = event.kind in TERMINAL_KINDS;
+  const turnStatus = isTerminalTurnEvent
+    ? statusFor(event)
+    : previous
+      ? previous.status
+      : statusFor(event);
+
   next.set(key, {
     key,
     agentPubkey: event.agentPubkey,
     agentName: text(event.payload.agentName) ?? fallbackAgentName,
     sessionId,
     turnId: event.turnId,
-    status: statusFor(event),
+    channelId: event.channelId,
+    status: turnStatus,
     items,
   });
   return next;
+}
+
+/** The most recent activity item is the compact dock's truthful summary. */
+export function latestActivityItem(turn: AgentTurn): ActivityItem | undefined {
+  return turn.items.at(-1);
 }
 
 export function partitionActivity(turn: AgentTurn): {
@@ -115,12 +131,12 @@ export function partitionActivity(turn: AgentTurn): {
       )
       .map((item) => item.id),
   );
-  const visibleItems = turn.items.filter(
-    (item) => recentIds.has(item.id) || urgentIds.has(item.id),
-  );
-  const visibleIds = new Set(visibleItems.map((item) => item.id));
   return {
-    visibleItems,
-    hiddenItems: turn.items.filter((item) => !visibleIds.has(item.id)),
+    visibleItems: turn.items.filter(
+      (item) => recentIds.has(item.id) || urgentIds.has(item.id),
+    ),
+    hiddenItems: turn.items.filter(
+      (item) => !recentIds.has(item.id) && !urgentIds.has(item.id),
+    ),
   };
 }

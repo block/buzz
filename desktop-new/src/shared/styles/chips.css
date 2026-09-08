@@ -39,11 +39,13 @@
     cursor: pointer;
   }
 
-  button.inline-chip:hover {
+  button.inline-chip:hover,
+  html[data-keyboard-navigation] button.inline-chip:focus-visible,
+  button.inline-chip[data-popup-open] {
     background: var(--purple-4);
   }
 
-  .inline-chip:focus-visible {
+  html[data-keyboard-navigation] .inline-chip:focus-visible {
     outline: 2px solid var(--purple-8);
     outline-offset: 2px;
   }
@@ -54,7 +56,7 @@
    * reads as inert rather than pretending to be actionable.
    */
   .inline-chip[data-state="unresolved"] {
-    background: var(--bg-inset);
+    background: var(--neutral-2);
     color: var(--text-tertiary);
   }
 

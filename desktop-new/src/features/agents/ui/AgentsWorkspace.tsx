@@ -5,9 +5,23 @@ import {
   IconRobot,
 } from "@tabler/icons-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { runtime } from "@/shared/runtime/client";
+import { readRelayUrl } from "@/shared/community/useCommunity";
+import { readIdentity } from "@/shared/identity/useIdentity";
 import { agentRuntime } from "../runtime";
 import type { AgentRuntime, ManagedAgent } from "../types";
+
+/**
+ * The community and signer a managed agent is launched against. Read from the
+ * shared facts rather than the backend adapter, so this feature cannot disagree
+ * with the rest of the app about who is running it or where.
+ */
+async function readAgentScope() {
+  const [relayUrl, identity] = await Promise.all([
+    readRelayUrl(),
+    readIdentity(),
+  ]);
+  return { relayUrl, signerPubkey: identity.pubkey };
+}
 
 function runtimeReady(runtime: AgentRuntime) {
   return (
@@ -34,7 +48,7 @@ export function AgentsNavigator({
         <span className="text-heading text-primary">Agents</span>
         <button
           type="button"
-          className="navigator-row-action always-visible"
+          className="navigation-item-action always-visible"
           onClick={onNew}
           aria-label="New agent"
         >
@@ -45,7 +59,7 @@ export function AgentsNavigator({
         {agents.map((agent) => (
           <button
             type="button"
-            className="agent-navigator-row"
+            className="agent-navigation-item"
             data-selected={selectedPubkey === agent.pubkey || undefined}
             key={agent.pubkey}
             onClick={() => onSelect(agent.pubkey)}
@@ -91,17 +105,13 @@ function AgentCreation({
     setSaving(true);
     setError(null);
     try {
-      const [relayUrl, identity] = await Promise.all([
-        runtime.relayUrl(),
-        runtime.identity(),
-      ]);
+      const scope = await readAgentScope();
       onCreated(
         await agentRuntime.create({
           name: name.trim(),
           instructions: instructions.trim(),
           runtime: selected,
-          relayUrl,
-          signerPubkey: identity.pubkey,
+          ...scope,
         }),
       );
     } catch (caught) {
@@ -159,7 +169,7 @@ function AgentCreation({
           </p>
         ) : null}
         {error ? (
-          <p className="text-body text-danger" role="alert">
+          <p className="text-body text-red-12" role="alert">
             {error}
           </p>
         ) : null}
@@ -198,15 +208,8 @@ function AgentDetail({
       if (agent.status === "running") {
         onChange(await agentRuntime.stop(agent.pubkey));
       } else {
-        const [relayUrl, identity] = await Promise.all([
-          runtime.relayUrl(),
-          runtime.identity(),
-        ]);
         onChange(
-          await agentRuntime.start(agent.pubkey, {
-            relayUrl,
-            signerPubkey: identity.pubkey,
-          }),
+          await agentRuntime.start(agent.pubkey, await readAgentScope()),
         );
       }
     } catch (caught) {
@@ -263,7 +266,7 @@ function AgentDetail({
           </div>
         </section>
         {error || agent.lastError ? (
-          <p className="setup-callout text-body text-danger" role="alert">
+          <p className="setup-callout text-body text-red-12" role="alert">
             {error || agent.lastError}
           </p>
         ) : null}

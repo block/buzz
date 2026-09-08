@@ -23,7 +23,7 @@ export function OverviewPage() {
         title="The layers"
         description="Only the role layer is ever used when building a screen. That separation is what lets the entire look change without editing a component."
       >
-        <div className="flex flex-col gap-2 rounded-xl bg-inset px-6 py-5">
+        <div className="flex flex-col gap-2 rounded-xl bg-neutral-2 px-6 py-5">
           {LAYERS.map(([layer, what, why]) => (
             <div key={layer} className="flex flex-wrap items-baseline gap-x-4">
               <span className="w-16 shrink-0 text-body text-tertiary">
@@ -64,19 +64,19 @@ export function OverviewPage() {
           </Link>
           <Link
             to="/design/typography"
-            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
+            className="rounded-lg bg-neutral-2 px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
           >
             Typography
           </Link>
           <Link
             to="/design/glass"
-            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
+            className="rounded-lg bg-neutral-2 px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
           >
             Glass
           </Link>
           <Link
             to="/design/growth"
-            className="rounded-lg bg-inset px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
+            className="rounded-lg bg-neutral-2 px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
           >
             Growing the system
           </Link>

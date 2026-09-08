@@ -75,15 +75,37 @@ test("an unresolved reference is never a control", async ({ page }) => {
   await expect(unresolved).toHaveRole("img");
 });
 
-test("read-only chips claim no interactive stop", async ({ page }) => {
+test("inert chips claim no interactive stop", async ({ page }) => {
   await open(page);
 
-  const readOnly = group(
-    page,
-    "Read-only, as a conversation renders it",
-  ).locator(".inline-chip");
-  await expect(readOnly).toHaveRole("img");
-  await expect(readOnly.locator("xpath=self::button")).toHaveCount(0);
+  const inert = group(page, "Inert rendering").locator(".inline-chip");
+  await expect(inert).toHaveRole("img");
+  await expect(inert.locator("xpath=self::button")).toHaveCount(0);
+});
+
+test("a resolved chip previews on pointer and keyboard focus", async ({
+  page,
+}) => {
+  await open(page);
+  const resolved = group(page, "Resolved preview").locator(".inline-chip");
+  const preview = page.getByRole("tooltip");
+
+  await expect(preview).toHaveCount(0);
+  await resolved.hover();
+  await expect(preview).toBeVisible();
+  await expect(preview).toContainText("Person");
+  await expect(preview).toContainText("Morgan Martin");
+
+  await page.mouse.move(0, 0);
+  await resolved.focus();
+  await expect(preview).toBeVisible();
+});
+
+test("an unresolved chip has no preview", async ({ page }) => {
+  await open(page);
+  await expect(
+    group(page, "Unresolved reference").getByRole("tooltip"),
+  ).toHaveCount(0);
 });
 
 test("activating a chip reports its address, not its label", async ({

@@ -1,12 +1,12 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
-import { projectChannelWindow } from "@/features/sessions/channelWindowProjection";
+import type { ChannelWindowRequest, RawChannelEvent } from "./channelWindow";
 import type {
   Channel as BuzzChannel,
   Identity,
   Message,
-  ObserverEvent,
   Participant,
 } from "@/features/sessions/types";
+import type { ObserverEvent } from "./observerEvent";
 
 type RawIdentity = { pubkey: string; display_name: string };
 type RawChannel = {
@@ -25,14 +25,7 @@ type RawMember = {
   is_agent: boolean;
   display_name?: string | null;
 };
-type RawEvent = {
-  id: string;
-  pubkey: string;
-  content: string;
-  created_at: number;
-  kind: number;
-  tags: string[][];
-};
+type RawEvent = RawChannelEvent;
 
 const LIVE_MESSAGE_KINDS = [9, 40002, 40008];
 
@@ -41,6 +34,7 @@ type MockState = {
   channels: BuzzChannel[];
   messages: Record<string, Message[]>;
   participants: Record<string, Participant[]>;
+  sessionLinks: Record<string, string[]>;
 };
 
 const mockState: MockState = {
@@ -64,6 +58,51 @@ const mockState: MockState = {
       memberCount: 7,
       lastMessageAt: new Date(Date.now() - 86_400_000).toISOString(),
     },
+    {
+      id: "launch-planning",
+      name: "launch-planning",
+      channelType: "stream",
+      visibility: "private",
+      description: "Planning the next Buzz release",
+      memberCount: 5,
+      lastMessageAt: new Date(Date.now() - 172_800_000).toISOString(),
+    },
+    {
+      id: "cynthia",
+      name: "Cynthia Chen",
+      channelType: "dm",
+      visibility: "private",
+      description: "Direct message",
+      memberCount: 2,
+      lastMessageAt: new Date(Date.now() - 900_000).toISOString(),
+    },
+    {
+      id: "design-sync",
+      name: "Cynthia Chen, Alex Kim",
+      channelType: "dm",
+      visibility: "private",
+      description: "Direct message",
+      memberCount: 3,
+      lastMessageAt: new Date(Date.now() - 3_600_000).toISOString(),
+    },
+    {
+      id: "session-navigation",
+      name: "Refine the conversation hierarchy",
+      channelType: "stream",
+      visibility: "private",
+      description: "Focused work",
+      memberCount: 2,
+      lastMessageAt: new Date(Date.now() - 1_800_000).toISOString(),
+    },
+    {
+      id: "session-agent-setup",
+      name: "Review agent setup",
+      channelType: "stream",
+      visibility: "private",
+      description: "Focused work",
+      memberCount: 1,
+      lastMessageAt: new Date(Date.now() - 10_800_000).toISOString(),
+    },
   ],
   messages: {
     design: [
@@ -76,6 +115,9 @@ const mockState: MockState = {
         tags: [["h", "design"]],
       },
     ],
+  },
+  sessionLinks: {
+    design: ["session-navigation"],
   },
   participants: {
     design: [
@@ -102,6 +144,9 @@ const mockState: MockState = {
 };
 
 const useMock = !isTauri() || new URLSearchParams(location.search).has("mock");
+
+/** Browser fixtures use the same runtime adapter as the native client. */
+export const isMockRuntime = useMock;
 
 function relayFrames(delivery: unknown): unknown[] {
   const envelopes = Array.isArray(delivery) ? delivery : [delivery];
@@ -222,7 +267,31 @@ export const runtime = {
   },
 
   async channelSessions(parentChannelId: string) {
-    if (useMock) return [];
+    if (useMock) {
+      return (mockState.sessionLinks[parentChannelId] ?? []).map(
+        (sessionChannelId) => ({
+          parent_channel_id: parentChannelId,
+          session_channel_id: sessionChannelId,
+          creator_pubkey: mockState.identity.pubkey,
+          created_at: Math.floor(Date.now() / 1000) - 3_600,
+          channel: (() => {
+            const channel = mockState.channels.find(
+              (candidate) => candidate.id === sessionChannelId,
+            );
+            return channel
+              ? {
+                  id: channel.id,
+                  name: channel.name,
+                  channel_type: channel.channelType,
+                  visibility: channel.visibility,
+                  description: channel.description,
+                  member_count: channel.memberCount,
+                }
+              : null;
+          })(),
+        }),
+      );
+    }
     return invoke<
       {
         parent_channel_id: string;
@@ -266,14 +335,41 @@ export const runtime = {
     return (raw.channels ?? []).map(channel);
   },
 
-  async messages(channelId: string): Promise<Message[]> {
-    if (useMock) return [...(mockState.messages[channelId] ?? [])];
+  async channelWindow({
+    channelId,
+    cursor = null,
+  }: ChannelWindowRequest): Promise<RawEvent[]> {
+    if (useMock) {
+      return [
+        ...(mockState.messages[channelId] ?? []).map((message) => ({
+          id: message.id,
+          pubkey: message.pubkey,
+          content: message.content,
+          created_at: message.createdAt,
+          kind: message.kind,
+          tags: message.tags,
+        })),
+        {
+          id: `bounds-${channelId}`,
+          pubkey: "relay",
+          content: '{"has_more":false,"next_cursor":null}',
+          created_at: 0,
+          kind: 39006,
+          tags: [
+            ["h", channelId],
+            ["d", `${channelId}:head`],
+          ],
+        },
+      ];
+    }
     const events = await invoke<RawEvent[]>("get_channel_window", {
       channelId,
       limitRows: 80,
-      cursor: null,
+      cursor: cursor
+        ? { created_at: cursor.createdAt, event_id: cursor.id }
+        : null,
     });
-    return projectChannelWindow(events).messages;
+    return events;
   },
 
   async participants(channelId: string): Promise<Participant[]> {

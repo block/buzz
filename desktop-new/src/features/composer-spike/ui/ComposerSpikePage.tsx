@@ -114,7 +114,7 @@ export function ComposerSpikePage() {
           data-testid="insert-morgan"
           onMouseDown={keepFocus}
           onClick={() => insertChip(MORGAN)}
-          className="rounded-md bg-inset px-3 py-1 text-body text-primary"
+          className="rounded-md bg-neutral-2 px-3 py-1 text-body text-primary"
         >
           Insert Morgan
         </button>
@@ -123,7 +123,7 @@ export function ComposerSpikePage() {
           data-testid="insert-alex"
           onMouseDown={keepFocus}
           onClick={() => insertChip(ALEX)}
-          className="rounded-md bg-inset px-3 py-1 text-body text-primary"
+          className="rounded-md bg-neutral-2 px-3 py-1 text-body text-primary"
         >
           Insert Alex
         </button>
@@ -132,7 +132,7 @@ export function ComposerSpikePage() {
           data-testid="clear"
           onMouseDown={keepFocus}
           onClick={() => editor.chain().focus().clearContent(true).run()}
-          className="rounded-md bg-inset px-3 py-1 text-body text-primary"
+          className="rounded-md bg-neutral-2 px-3 py-1 text-body text-primary"
         >
           Clear
         </button>

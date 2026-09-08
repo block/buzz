@@ -39,7 +39,7 @@
   }
 
   .buzz-button[data-variant="quiet"] {
-    background: var(--bg-inset);
+    background: var(--neutral-2);
     color: var(--text-primary);
   }
 
@@ -50,9 +50,10 @@
      IconButton light grey while its text stayed white — Lc 13, invisible. An
      icon button's hover belongs to its icon variant; see below. */
   .buzz-button[data-variant="quiet"]:hover:not([data-disabled]),
-  .buzz-button[data-variant="ghost"]:not([data-icon-variant]):hover:not(
-    [data-disabled]
-  ) {
+  .buzz-button[data-variant="ghost"]:not(
+    [data-icon-variant],
+    [data-navigation-item]
+  ):hover:not([data-disabled]) {
     background: var(--neutral-4);
   }
 
@@ -82,7 +83,7 @@
   /* Every icon variant states its own hover. The one that did not —
      `solid` — fell through to the neutral ghost hover and lost its accent. */
   .buzz-button[data-icon-variant="quiet"] {
-    background: var(--bg-inset);
+    background: var(--neutral-2);
   }
 
   .buzz-button[data-icon-variant="quiet"]:hover:not([data-disabled]),
@@ -106,6 +107,53 @@
     @apply glass-primary-interactive;
   }
 
+  /* A preview is supplemental context, never a second interactive surface.
+     It is portal-rendered by Base UI so a clipped parent cannot hide it. */
+  .buzz-preview-card {
+    z-index: 1000;
+    display: grid;
+    width: max-content;
+    max-width: min(18rem, 75vw);
+    gap: var(--space-1);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-float);
+    box-shadow: var(--shadow-sm);
+    pointer-events: none;
+    transform-origin: var(--transform-origin);
+    transition:
+      opacity var(--duration-state) var(--easing-state),
+      transform var(--duration-state) var(--easing-state);
+  }
+
+  .buzz-preview-card[data-starting-style],
+  .buzz-preview-card[data-ending-style] {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+
+  .buzz-preview-card-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .buzz-preview-card-example {
+    border: 0;
+    border-bottom: 1px solid var(--purple-8);
+    padding: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  html[data-keyboard-navigation] .buzz-preview-card-example:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
   .buzz-avatar {
     position: relative;
     display: grid;
@@ -115,7 +163,7 @@
     place-items: center;
     overflow: hidden;
     border-radius: var(--radius-pill);
-    background: var(--bg-inset);
+    background: var(--neutral-2);
     color: var(--text-secondary);
   }
 
@@ -148,16 +196,6 @@
     border-radius: var(--radius-panel);
     background: var(--bg-panel);
     box-shadow: var(--shadow-xs);
-  }
-
-  .panel[data-variant="connected-left"] {
-    border-top-left-radius: 0;
-    border-bottom-left-radius: 0;
-  }
-
-  .panel[data-variant="connected-right"] {
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
   }
 
   /* ============================================================
@@ -385,12 +423,8 @@
     gap: var(--space-row-gap);
     border-radius: var(--radius-control);
     padding: 0 var(--space-control-inset);
-    background: var(--bg-inset);
+    background: var(--neutral-2);
     color: var(--text-tertiary);
-  }
-
-  .search-field:focus-within {
-    box-shadow: 0 0 0 2px var(--purple-8);
   }
 
   .search-field input {
@@ -403,6 +437,11 @@
     font: inherit;
   }
 
+  html[data-keyboard-navigation] .search-field input:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
   .search-field input::placeholder {
     color: var(--text-tertiary);
   }
@@ -411,7 +450,7 @@
     display: none;
   }
 
-  .navigator-section {
+  .navigation-section {
     display: flex;
     flex-direction: column;
   }
@@ -421,41 +460,76 @@
      `--space-section-gap` apart, and that difference is the entire signal for
      where one group ends and the next begins. Expressed as an adjacent-sibling
      margin so a section stacked anywhere gets it, with no wrapper required. */
-  .navigator-section + .navigator-section {
+  .navigation-section + .navigation-section {
     margin-top: var(--space-section-gap);
   }
 
-  .navigator-section-label {
+  .navigation-section-heading {
+    display: flex;
     min-height: var(--size-row);
-    margin: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-row-gap);
     padding: 0 var(--space-control-inset);
-    line-height: var(--size-row);
   }
 
-  .navigator-section-rows {
+  .navigation-section-label {
+    margin: 0;
+  }
+
+  .navigation-section-heading .buzz-button[data-icon-size="compact"] {
+    margin-right: calc(var(--space-control-inset) * -1);
+  }
+
+  .navigation-section-rows {
     display: flex;
     flex-direction: column;
     gap: 1px;
   }
 
-  .buzz-button[data-navigator-row] {
+  /* NavigationItem owns its complete visual treatment, although it shares
+     Base UI Button's native button behavior. It does not compose Buzz Button:
+     a navigation destination is not an ordinary action button, and sharing the
+     styling made the generic ghost hover compete with navigation's own states. */
+  .navigation-item {
+    display: inline-flex;
     width: 100%;
-    justify-content: flex-start;
+    min-width: 0;
+    height: var(--size-row);
+    align-items: center;
+    gap: var(--space-row-gap);
+    overflow: hidden;
+    border: 0;
+    border-radius: var(--radius-row);
+    padding: 0 var(--space-control-inset);
+    background: transparent;
     color: var(--text-secondary);
+    font: inherit;
     text-align: left;
+    cursor: pointer;
+    transition:
+      color var(--duration-state) var(--easing-state),
+      background-color var(--duration-state) var(--easing-state);
   }
 
-  .buzz-button[data-navigator-row]:hover,
-  .buzz-button[data-navigator-row][data-selected] {
-    background: var(--neutral-4);
+  /* Hover is the lightest acknowledgement; selection is a persistent, one-step
+     stronger statement. Keeping them separate prevents a selected destination
+     from becoming indistinguishable the moment a pointer passes over it. */
+  .navigation-item:hover:not([data-selected]) {
+    background: var(--neutral-2);
     color: var(--text-primary);
   }
 
-  .buzz-button[data-navigator-row][data-inset] {
+  .navigation-item[data-selected] {
+    background: var(--neutral-3);
+    color: var(--text-primary);
+  }
+
+  .navigation-item[data-inset] {
     padding-left: calc(var(--space-control-inset) + var(--space-4));
   }
 
-  .navigator-row-label {
+  .navigation-item-label {
     min-width: 0;
     flex: 1;
     overflow: hidden;
@@ -463,19 +537,21 @@
     white-space: nowrap;
   }
 
-  .navigator-row-trailing {
+  .navigation-item-trailing {
     flex: 0 0 auto;
     color: var(--text-tertiary);
   }
 
-  .buzz-button:focus-visible,
-  .buzz-tabs-tab:focus-visible {
+  html[data-keyboard-navigation] .buzz-button:focus-visible,
+  html[data-keyboard-navigation] .navigation-item:focus-visible,
+  html[data-keyboard-navigation] .buzz-tabs-tab:focus-visible {
     outline: 2px solid var(--purple-8);
     outline-offset: 2px;
   }
 
   @media (prefers-reduced-motion: reduce) {
     .buzz-button,
+    .navigation-item,
     .buzz-tabs-indicator {
       transition-duration: 0ms;
     }

@@ -386,6 +386,8 @@ Every addition lands in `src/shared/tokens/registry.ts` in the same change that 
 ## Components
 
 - **Compose existing components freely. Never reimplement one.**
+- **Focus is keyboard-only visual navigation.** Pointer focus stays quiet; keyboard navigation gives the focused control—not its container—a visible focus ring. Browsers treat clicked text fields as `:focus-visible`, so the app-root keyboard-navigation fact gates every focus treatment. Never add a `:focus-within` focus ring to a container: it duplicates the child control's signal and makes pointer focus noisy.
+- **Base UI is the behavior layer.** Before writing an interactive shared component, inspect Base UI for the matching primitive. When one exists, wrap and compose it; Base UI owns focus, keyboard behavior, positioning, portals, and dismissal, while Buzz owns the visual language and product semantics. Reach for native elements only when Base UI has no matching primitive or the component is semantically static.
 - **Need a variant that doesn't exist? Add it, mark it proposed.** If a variant almost fits but you would cancel several of its states, the base is wrong for the job and the system is missing a variant.
 - **Never add a boolean prop for a visual difference.** Variants are enumerable, so an agent can read the list and pick; booleans multiply, and nobody designed most of the combinations. New props are for data and behaviour, not appearance.
 - **Used by one feature? It lives in that feature's folder.** Used by two? Propose it as shared. The folder is the namespace.

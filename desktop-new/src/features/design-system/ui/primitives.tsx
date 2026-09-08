@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
  * component at a time as the product repeats something.
  *
  * Surface convention on these pages: a region is separated by a soft fill, not
- * by an outline. Reach for `bg-inset` before reaching for a border; use a
+ * by an outline. Reach for `bg-neutral-2` before reaching for a border; use a
  * hairline only where a genuine boundary is needed, and never above
  * `border-primary`. See DESIGN.md § Surface and depth.
  */
@@ -70,7 +70,7 @@ export function Section({
 
 export function Note({ children }: { children: ReactNode }) {
   return (
-    <p className="max-w-2xl rounded-xl bg-inset px-5 py-4 text-body-sm text-secondary">
+    <p className="max-w-2xl rounded-xl bg-neutral-2 px-5 py-4 text-body-sm text-secondary">
       {children}
     </p>
   );
@@ -78,7 +78,7 @@ export function Note({ children }: { children: ReactNode }) {
 
 export function Stub({ what, decide }: { what: string; decide: string[] }) {
   return (
-    <div className="flex max-w-2xl flex-col gap-4 rounded-xl bg-inset px-6 py-5">
+    <div className="flex max-w-2xl flex-col gap-4 rounded-xl bg-neutral-2 px-6 py-5">
       <p className="text-body text-secondary">{what}</p>
       <div className="flex flex-col gap-2">
         <p className="text-body text-tertiary">Still to decide</p>

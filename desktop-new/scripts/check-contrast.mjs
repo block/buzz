@@ -57,7 +57,7 @@ const META_ROLES = new Set(["--text-tertiary"]);
  * its step here. It still belongs in this list: a row under the cursor is a
  * surface text sits on, whatever it is called.
  */
-const SURFACES = ["--bg-panel", "--bg-float", "--bg-inset", "--neutral-4"];
+const SURFACES = ["--bg-panel", "--bg-float", "--neutral-2", "--neutral-4"];
 
 /**
  * Text that must be readable on every neutral surface.

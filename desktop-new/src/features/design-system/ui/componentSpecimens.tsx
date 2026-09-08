@@ -11,14 +11,15 @@ import { Avatar } from "@/shared/ui/Avatar";
 import { InlineChip } from "@/shared/ui/InlineChip";
 import { Button } from "@/shared/ui/Button";
 import { IconButton } from "@/shared/ui/IconButton";
-import { NavigatorRow } from "@/shared/ui/NavigatorRow";
-import { NavigatorSection } from "@/shared/ui/NavigatorSection";
+import { NavigationItem } from "@/shared/ui/NavigationItem";
+import { NavigationSection } from "@/shared/ui/NavigationSection";
 import { PanelHeader } from "@/shared/ui/PanelHeader";
 import { SearchField } from "@/shared/ui/SearchField";
 import { Tabs } from "@/shared/ui/Tabs";
 
 import { ComponentAnatomy } from "./ComponentAnatomy";
 import { Panel } from "@/shared/ui/Panel";
+import { PreviewCard } from "@/shared/ui/PreviewCard";
 import type { ChipAddress } from "@/shared/chips/address";
 import { chipFaces } from "@/shared/chips/faceResolver";
 
@@ -498,52 +499,52 @@ function SearchFieldSpecimen() {
   );
 }
 
-function NavigatorSectionSpecimen() {
+function NavigationSectionSpecimen() {
   return (
     <div className="component-specimen-stack">
       <SpecimenGroup label='label="Pinned", with rows as children'>
-        <div className="component-navigator-section-demo">
-          <NavigatorSection label="Pinned">
-            <NavigatorRow
+        <div className="component-navigation-section-demo">
+          <NavigationSection label="Pinned">
+            <NavigationItem
               label="buzz-design"
               icon={<IconHash size={16} stroke={1.7} aria-hidden="true" />}
             />
-            <NavigatorRow
+            <NavigationItem
               label="desktop-new"
               icon={<IconHash size={16} stroke={1.7} aria-hidden="true" />}
             />
-          </NavigatorSection>
+          </NavigationSection>
         </div>
       </SpecimenGroup>
       <SpecimenGroup label="Two sections adjacent — the gap between them is the grouping">
-        <div className="component-navigator-section-demo">
-          <NavigatorSection label="Projects">
-            <NavigatorRow label="berd-main" />
-          </NavigatorSection>
-          <NavigatorSection label="Personal">
-            <NavigatorRow label="design-system" />
-          </NavigatorSection>
+        <div className="component-navigation-section-demo">
+          <NavigationSection label="Projects">
+            <NavigationItem label="berd-main" />
+          </NavigationSection>
+          <NavigationSection label="Personal">
+            <NavigationItem label="design-system" />
+          </NavigationSection>
         </div>
       </SpecimenGroup>
     </div>
   );
 }
 
-function NavigatorRowSpecimen() {
+function NavigationItemSpecimen() {
   const [selected, setSelected] = useState("buzz-design");
   return (
     <div className="component-specimen-stack">
       {/* Interactive: clicking moves `selected`, so the selected fill and the
           unselected rest state are both visible at once and comparable. */}
       <SpecimenGroup label="Selected, and trailing for metadata — click to move the selection">
-        <div className="component-navigator-section-demo">
-          <NavigatorRow
+        <div className="component-navigation-section-demo">
+          <NavigationItem
             label="buzz-design"
             icon={<IconHash size={16} stroke={1.7} aria-hidden="true" />}
             selected={selected === "buzz-design"}
             onClick={() => setSelected("buzz-design")}
           />
-          <NavigatorRow
+          <NavigationItem
             label="desktop-new"
             icon={<IconHash size={16} stroke={1.7} aria-hidden="true" />}
             trailing={<span className="text-body-sm">3</span>}
@@ -553,8 +554,8 @@ function NavigatorRowSpecimen() {
         </div>
       </SpecimenGroup>
       <SpecimenGroup label="Inset — one level of nesting under a row">
-        <div className="component-navigator-section-demo">
-          <NavigatorRow
+        <div className="component-navigation-section-demo">
+          <NavigationItem
             label="Session interaction model"
             icon={
               <IconMessageCircle size={16} stroke={1.7} aria-hidden="true" />
@@ -628,6 +629,35 @@ function seedChipFaces() {
   });
 }
 
+function PreviewCardSpecimen() {
+  return (
+    <div className="component-specimen-stack">
+      <SpecimenGroup label="Default">
+        <p className="text-body text-primary">
+          <PreviewCard
+            trigger={
+              <button type="button" className="buzz-preview-card-example">
+                Morgan Martin
+              </button>
+            }
+          >
+            <span className="buzz-preview-card-kind text-body-sm text-tertiary">
+              Person
+            </span>
+            <span className="buzz-preview-card-name text-body text-primary">
+              Morgan Martin
+            </span>
+            <span className="text-body-sm text-secondary">
+              Product designer
+            </span>
+          </PreviewCard>{" "}
+          is reviewing the first Composer composition.
+        </p>
+      </SpecimenGroup>
+    </div>
+  );
+}
+
 function InlineChipSpecimen() {
   const [activated, setActivated] = useState<string | null>(null);
   seedChipFaces();
@@ -657,11 +687,17 @@ function InlineChipSpecimen() {
         </p>
       </SpecimenGroup>
 
-      <SpecimenGroup label="Read-only, as a conversation renders it">
+      <SpecimenGroup label="Resolved preview">
         <p className="text-body text-primary">
-          A chip in a sent message is not a control when the surface has no
-          detail to open:{" "}
-          <InlineChip address={CHIP_PERSON} interactive={false} />
+          Hover or focus <InlineChip address={CHIP_PERSON} /> to reveal its
+          quiet preview. It supplies context without opening another surface.
+        </p>
+      </SpecimenGroup>
+
+      <SpecimenGroup label="Inert rendering">
+        <p className="text-body text-primary">
+          A surface that cannot honestly reveal reference detail renders an
+          inert chip: <InlineChip address={CHIP_PERSON} interactive={false} />
         </p>
       </SpecimenGroup>
 
@@ -711,11 +747,12 @@ export const COMPONENT_SPECIMENS: Record<string, () => ReactNode> = {
   button: ButtonSpecimen,
   "icon-button": IconButtonSpecimen,
   avatar: AvatarSpecimen,
+  "preview-card": PreviewCardSpecimen,
   "inline-chip": InlineChipSpecimen,
   panel: PanelSpecimen,
   tabs: TabsSpecimen,
   "panel-header": PanelHeaderSpecimen,
   "search-field": SearchFieldSpecimen,
-  "navigator-section": NavigatorSectionSpecimen,
-  "navigator-row": NavigatorRowSpecimen,
+  "navigation-section": NavigationSectionSpecimen,
+  "navigation-item": NavigationItemSpecimen,
 };

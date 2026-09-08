@@ -1,6 +1,6 @@
 import { IconArrowLeft, IconHash, IconLock } from "@tabler/icons-react";
+import { MessageComposer } from "@/features/composer/ui/MessageComposer";
 import type { Channel, Message } from "../types";
-import { SessionComposer } from "./SessionComposer";
 
 export function NewSessionView({
   origin,
@@ -8,12 +8,16 @@ export function NewSessionView({
   error,
   onBack,
   onCreate,
+  draft,
+  onDraftChange,
 }: {
   origin?: Channel;
   pending?: Message;
   error?: string | null;
   onBack: () => void;
   onCreate: (content: string) => Promise<void>;
+  draft: string;
+  onDraftChange: (value: string) => void;
 }) {
   return (
     <main className="session-view new-session">
@@ -75,9 +79,10 @@ export function NewSessionView({
         ) : null}
       </div>
       <div className="composer-dock">
-        <SessionComposer
-          initialValue={pending?.pending === "failed" ? pending.content : ""}
+        <MessageComposer
+          draft={pending?.pending === "failed" ? pending.content : draft}
           disabled={Boolean(pending && pending.pending !== "failed")}
+          onDraftChange={onDraftChange}
           onSend={onCreate}
           placeholder="Start a Session"
         />

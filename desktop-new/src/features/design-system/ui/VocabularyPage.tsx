@@ -15,7 +15,7 @@ export function VocabularyPage() {
       />
 
       <Section title="The words">
-        <div className="flex flex-col gap-0 rounded-xl bg-inset px-5 py-2">
+        <div className="flex flex-col gap-0 rounded-xl bg-neutral-2 px-5 py-2">
           {VOCABULARY.map((group) => (
             <div
               key={group.group}
@@ -28,7 +28,7 @@ export function VocabularyPage() {
                 {group.words.map((word) => (
                   <code
                     key={word}
-                    className="rounded bg-inset px-1.5 py-0.5 text-body-sm text-primary"
+                    className="rounded bg-neutral-2 px-1.5 py-0.5 text-body-sm text-primary"
                   >
                     {word}
                   </code>
@@ -64,7 +64,7 @@ export function VocabularyPage() {
           ).map((group) => (
             <div
               key={group.label}
-              className="flex-1 rounded-xl bg-inset px-5 py-4"
+              className="flex-1 rounded-xl bg-neutral-2 px-5 py-4"
             >
               <p className="mb-1.5 text-body text-primary">{group.label}</p>
               {group.examples.map((example) => (

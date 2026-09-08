@@ -48,7 +48,7 @@ export function GrowthPage() {
         title="The procedure"
         description="Runs per change, by whoever needs the value. Nothing here needs permission, and every addition arrives in the same change that needed it, carrying its values, its description, and its owner."
       >
-        <ol className="flex flex-col gap-2 rounded-xl bg-inset px-5 py-4">
+        <ol className="flex flex-col gap-2 rounded-xl bg-neutral-2 px-5 py-4">
           {GROWTH_PROCEDURE.map((step, index) => (
             <li key={step} className="flex gap-3">
               <span className="w-4 shrink-0 text-body text-purple-12">
@@ -64,7 +64,7 @@ export function GrowthPage() {
         title="The audit"
         description="Runs on a schedule rather than per change. It reports rather than silently rewrites, except where the fix is unambiguous. Growth without pruning is how a system accumulates thirteen transparencies of one colour."
       >
-        <div className="rounded-xl bg-inset px-5">
+        <div className="rounded-xl bg-neutral-2 px-5">
           {AUDIT.map(([check, action]) => (
             <div
               key={check}

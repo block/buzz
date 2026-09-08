@@ -38,6 +38,20 @@ describe("component registry — Base UI backing", () => {
     }
   });
 
+  it("places documented child components beneath a real parent", () => {
+    for (const component of COMPONENTS) {
+      if (!component.parent) continue;
+      const parent = COMPONENTS.find(
+        (candidate) => candidate.slug === component.parent,
+      );
+      expect(parent, `${component.slug} parent`).toBeDefined();
+      expect(
+        parent?.parent,
+        `${component.slug} parent is top-level`,
+      ).toBeUndefined();
+    }
+  });
+
   it("claims exactly the Base UI modules its source imports", () => {
     for (const component of COMPONENTS) {
       const source = read(component.source);

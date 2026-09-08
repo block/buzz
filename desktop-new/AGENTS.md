@@ -113,7 +113,7 @@ is not glass, so it is reachable only through the `glass-primary` /
 
 | Choice | Reason |
 |---|---|
-| **Base UI** | Behaviour, accessibility, keyboard, and positioning with zero appearance. The visual language is authored here, not inherited then overridden. |
+| **Base UI** | Behaviour, accessibility, keyboard, and positioning with zero appearance. The visual language is authored here, not inherited then overridden. **Before building any interactive shared component, check Base UI first; when it has the behavior, wrap and compose that primitive rather than recreating its events, focus, positioning, portal, or dismissal logic.** A native element is appropriate only when Base UI has no corresponding primitive or the component is semantically static. |
 | **Tailwind v4** | Tokens are defined in CSS via `@theme`; the CSS *is* the config. No JS config file. |
 | **Own colour tokens** | Not shadcn. Its vocabulary — `muted-foreground`, `secondary-foreground` — is what made colour illegible in the existing client. |
 | **TanStack Router** | File-based routes, same as the existing client. |

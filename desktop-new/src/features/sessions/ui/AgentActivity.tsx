@@ -6,8 +6,8 @@ import {
   IconLoader2,
   IconPlayerPause,
 } from "@tabler/icons-react";
-import { partitionActivity } from "../activityProjection";
-import type { ActivityItem, AgentTurn } from "../types";
+import { partitionActivity } from "@/features/agent-activity/activityProjection";
+import type { ActivityItem, AgentTurn } from "@/features/agent-activity/types";
 
 function ActivityIcon({ item }: { item: ActivityItem }) {
   const common = { size: 15, stroke: 1.7, "aria-hidden": true } as const;

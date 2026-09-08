@@ -38,6 +38,19 @@
      A hairline rather than a tinted fill, because the specimen must show the
      component against the surface it is designed for. Tinting the frame would
      change what is being judged. */
+  /* A product composition specimen keeps the runtime's bounded dock geometry
+     visible without borrowing the viewport height of the app shell. */
+  .composer-page-specimen {
+    overflow: hidden;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    background: var(--bg-panel);
+  }
+
+  .composer-page-specimen .conversation-composer-dock {
+    height: 13rem;
+  }
+
   .component-specimen-frame {
     display: flex;
     min-width: 0;
@@ -100,6 +113,7 @@
      A former two-panel pseudo-workspace was deleted: resize seams and layout
      geometry belong to DockWorkspace, not to Panel. */
   .component-single-surface-demo {
+    width: 100%;
     height: 16rem;
     padding: var(--space-workspace-inset);
     border-radius: var(--radius-panel);
@@ -114,7 +128,7 @@
     width: min(100%, var(--size-navigator));
   }
 
-  .component-navigator-section-demo {
+  .component-navigation-section-demo {
     width: min(100%, var(--size-navigator));
     padding: var(--space-2);
     border-radius: var(--radius-control);

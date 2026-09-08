@@ -149,7 +149,13 @@
     box-shadow: var(--shadow-xs);
   }
 
-  /* Dockview arranges panels; Panel owns the surface treatment. */
+  /* Dockview arranges detached panels. The visible sash is a real workspace
+     gutter, so every Panel inside it keeps its complete rounded silhouette.
+
+     A future zero-gap docked group will own one shared outer frame, clipping,
+     and its internal resize seam. Do not make individual panels infer or remove
+     corners from their position: a drag can create a split, a tab group, or a
+     separated panel, and only the workspace topology knows which it is. */
   .buzz-dockview .dv-content-container {
     overflow: hidden;
   }
@@ -207,127 +213,75 @@
     border-bottom: 1px solid var(--border-primary);
   }
 
+  /* The navigator is a quiet scan surface: its search field and first section
+     are separated by space, not a boundary line. PanelHeader owns dividers for
+     titled work surfaces; this local composition deliberately does not use it. */
   .navigator-heading {
-    min-height: 3.25rem;
-  }
-
-  .navigator-search {
-    width: 100%;
-  }
-
-  .navigator-search input {
-    width: 100%;
-    border: 0;
-    border-radius: 0.75rem;
-    padding: 0.5rem 0.75rem;
-    outline: 0;
-    background: var(--bg-inset);
-    color: var(--text-primary);
-    font: inherit;
-  }
-
-  .navigator-section-label {
-    display: block;
-    padding: 0.25rem 0.625rem 0.5rem;
+    min-height: 0;
+    padding: var(--space-2);
+    border-bottom: 0;
   }
 
   .navigator-list {
     min-height: 0;
     flex: 1;
     overflow-y: auto;
-    padding: 0.75rem;
+    padding: var(--space-2);
   }
 
   .channel-cluster {
-    margin-bottom: 0.25rem;
+    position: relative;
   }
 
+  /* A Room and its Session action are one visual row. The action remains a
+     separate button for keyboard and pointer users, but it is positioned over
+     the Room item rather than reserving a second grid column that would cut the
+     selected/hover treatment short. */
   .channel-main-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
+    position: relative;
   }
 
-  .navigator-row,
-  .session-child-row,
-  .navigator-row-action {
-    border: 0;
-    background: transparent;
-    color: var(--text-secondary);
-    font: inherit;
-    cursor: pointer;
+  .channel-main-row .navigation-item {
+    padding-right: calc(var(--size-row) + var(--space-control-inset));
   }
 
-  .navigator-row {
-    display: flex;
-    min-width: 0;
-    height: 2.25rem;
-    align-items: center;
-    gap: 0.5rem;
-    overflow: hidden;
-    border-radius: 0.625rem;
-    padding: 0 0.625rem;
-    text-align: left;
-  }
-
-  .navigator-row span,
-  .session-child-row span:last-child {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .navigator-row:hover,
-  .session-child-row:hover,
-  .navigator-row-action:hover {
-    background: var(--neutral-4);
-    color: var(--text-primary);
-  }
-
-  .navigator-row[data-selected],
-  .session-child-row[data-selected] {
-    background: var(--bg-inset);
-    color: var(--text-primary);
-  }
-
-  .navigator-row-action {
-    display: grid;
-    width: 1.75rem;
-    height: 1.75rem;
-    place-items: center;
-    border-radius: 0.5rem;
+  .channel-main-row .buzz-button[data-icon-size="compact"] {
+    position: absolute;
+    top: 0;
+    right: 0;
     opacity: 0;
   }
 
-  .channel-main-row:hover .navigator-row-action,
-  .navigator-row-action:focus-visible {
+  .channel-main-row:hover .buzz-button[data-icon-size="compact"],
+  .channel-main-row .buzz-button[data-icon-size="compact"]:focus-visible {
     opacity: 1;
   }
 
   .session-children {
     display: flex;
     flex-direction: column;
-    padding-left: 1.25rem;
+    gap: 1px;
+    padding-left: var(--space-4);
   }
 
-  .session-child-row {
-    display: grid;
-    min-width: 0;
-    min-height: 2rem;
-    grid-template-columns: 0.75rem minmax(0, 1fr);
-    align-items: center;
-    gap: 0.375rem;
-    border-radius: 0.5rem;
-    padding: 0 0.5rem;
-    text-align: left;
+  /* This connector expresses the channel → Session relationship and therefore
+     stays in the Messages composition. The selectable Session itself is the
+     shared NavigationItem. */
+  .session-child {
+    position: relative;
   }
 
-  .session-thread-line {
-    width: 0.625rem;
-    height: 0.875rem;
+  .session-child::before {
+    position: absolute;
+    top: 0;
+    bottom: 50%;
+    left: calc(var(--space-4) * -0.5);
+    width: calc(var(--space-4) * 0.5);
     border-bottom: 1px solid var(--border-primary);
     border-left: 1px solid var(--border-primary);
-    border-radius: 0 0 0 0.375rem;
+    border-bottom-left-radius: var(--radius-row);
+    content: "";
+    pointer-events: none;
   }
 
   .empty-workspace-panel {
@@ -365,7 +319,7 @@
   .conversation-column {
     width: min(100%, 47rem);
     margin: 0 auto;
-    padding: 1.75rem 2rem 7rem;
+    padding: 1.75rem 2rem;
   }
 
   .message-row {
@@ -381,7 +335,7 @@
     flex: 0 0 auto;
     place-items: center;
     border-radius: 50%;
-    background: var(--bg-inset);
+    background: var(--neutral-2);
     color: var(--text-secondary);
   }
 
@@ -401,31 +355,84 @@
     white-space: pre-wrap;
   }
 
-  .composer-dock {
-    position: absolute;
-    right: 1.5rem;
-    bottom: 1.5rem;
-    left: 1.5rem;
-    margin: auto;
+  /* The bottom dock owns the reserved workspace, not Composer. Its top edge
+     stays put; agent activity consumes room from the dock's lower edge, so the
+     composer shortens from below rather than jumping upward. */
+  .conversation-composer-dock {
+    display: grid;
+    flex: 0 0 auto;
+    height: 13rem;
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: var(--space-1);
+    padding: 0 1.5rem 1.5rem;
+    background: var(--bg-panel);
   }
 
-  .session-composer {
-    display: grid;
+  /* Activity is an auto-sized grid row, not an estimated absolute rail. Its
+     arrival takes room from the Composer's bottom edge while grid keeps the
+     Composer's top edge fixed. The 4px grid gap is the only separation. */
+  .conversation-activity-rail {
+    display: flex;
     width: min(100%, 47rem);
-    min-height: 3.5rem;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: end;
-    gap: 0.75rem;
+    gap: var(--space-2);
+    margin: 0 auto;
+    overflow-x: auto;
+  }
+
+  .conversation-activity-rail-item {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 16rem;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-row);
+    background: var(--neutral-2);
+  }
+
+  /* An authoring surface is inset into the conversation panel, not another
+     floating panel. The boundary is a real input boundary, hence the one
+     shared border role; focus moves it to the palette's focus step. */
+  .message-composer {
+    display: grid;
+    box-sizing: border-box;
+    width: min(100%, 47rem);
+    height: 100%;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: var(--space-2);
     margin: auto;
     border: 1px solid var(--border-primary);
-    border-radius: 1rem;
-    padding: 0.625rem;
-    background: var(--bg-float);
-    box-shadow: var(--shadow-sm);
+    border-radius: var(--radius-control);
+    padding: var(--space-3);
+    background: var(--neutral-2);
+    transition:
+      height var(--duration-settle) var(--easing-settle),
+      border-color var(--duration-state) var(--easing-state),
+      box-shadow var(--duration-state) var(--easing-state);
   }
 
-  .session-composer textarea {
+  .message-composer[data-state="failed"] {
+    border-color: var(--red-8);
+  }
+
+  .message-composer[data-state="disabled"] {
+    background: var(--neutral-3);
+  }
+
+  .message-composer-input {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .message-composer textarea {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
     max-height: 10rem;
+    min-height: 4.5lh;
+    overflow-y: auto;
     resize: none;
     border: 0;
     outline: 0;
@@ -435,7 +442,71 @@
     font: inherit;
   }
 
-  .session-composer button,
+  html[data-keyboard-navigation] .message-composer textarea:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
+  .message-composer textarea::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  .message-composer textarea:disabled {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+
+  .message-composer-feedback {
+    margin: 0.25rem 0.5rem 0;
+  }
+
+  .message-composer-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border-primary);
+  }
+
+  .message-composer-actions-start,
+  .message-composer-actions-end {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .composer-emoji-picker {
+    z-index: 1000;
+    width: 15rem;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding: var(--space-2);
+    background: var(--bg-float);
+    box-shadow: var(--shadow-sm);
+    transform-origin: var(--transform-origin);
+    transition:
+      opacity var(--duration-state) var(--easing-state),
+      transform var(--duration-state) var(--easing-state);
+  }
+
+  .composer-emoji-picker[data-starting-style],
+  .composer-emoji-picker[data-ending-style] {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+
+  .composer-emoji-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: var(--space-1);
+  }
+
+  .composer-emoji-grid .buzz-button {
+    padding: 0;
+  }
+
   .icon-button,
   .quiet-button,
   .primary-button {
@@ -444,7 +515,6 @@
     cursor: pointer;
   }
 
-  .session-composer button,
   .icon-button {
     display: grid;
     width: 2.25rem;
@@ -463,7 +533,7 @@
   }
 
   .quiet-button {
-    background: var(--bg-inset);
+    background: var(--neutral-2);
     color: var(--text-primary);
   }
 
@@ -489,16 +559,19 @@
     margin: 0.5rem 0 0.75rem 2.625rem;
     border-radius: 0.875rem;
     padding: 0.75rem;
-    background: var(--bg-inset);
-  }
-
-  button:focus-visible,
-  textarea:focus-visible {
-    outline: 2px solid var(--purple-8);
-    outline-offset: 2px;
+    background: var(--neutral-2);
   }
 
   @media (max-width: 48rem) {
+    .conversation-composer-dock {
+      padding: 0 0.75rem 0.75rem;
+    }
+
+    .message-composer {
+      gap: var(--space-1);
+      padding: var(--space-1);
+    }
+
     .workspace-topbar {
       padding: 0 0.75rem;
     }

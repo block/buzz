@@ -1,18 +1,11 @@
 import { IconAlertCircle, IconHash, IconRefresh } from "@tabler/icons-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { runtime } from "@/shared/runtime/client";
-import { reduceActivity } from "../activityProjection";
-import type {
-  AgentTurn,
-  Channel,
-  Identity,
-  Message,
-  ObserverEvent,
-  Participant,
-} from "../types";
+import { useCallback, useMemo } from "react";
+import { useConversation } from "@/features/conversation/useConversation";
+import { ConversationComposerDock } from "@/features/conversation/ui/ConversationComposerDock";
+import type { AgentTurn } from "@/features/agent-activity/types";
+import type { Channel, Identity, Message, Participant } from "../types";
 import { AgentActivity } from "./AgentActivity";
 import { ParticipantDialog } from "./ParticipantDialog";
-import { SessionComposer } from "./SessionComposer";
 
 function displayName(
   pubkey: string,
@@ -30,10 +23,12 @@ function MessageRow({
   message,
   participants,
   identity,
+  onRetry,
 }: {
   message: Message;
   participants: Participant[];
   identity: Identity;
+  onRetry?: () => void;
 }) {
   const name = displayName(message.pubkey, participants, identity);
   const isSelf = message.pubkey === identity.pubkey;
@@ -65,15 +60,22 @@ function MessageRow({
           {message.content}
         </p>
         {message.pending ? (
-          <p className="mt-1 text-body-sm text-tertiary" role="status">
-            {message.pending === "creating"
-              ? "Creating Session"
-              : message.pending === "waiting"
-                ? "Waiting for connection"
-                : message.pending === "failed"
-                  ? (message.error ?? "Not sent")
-                  : "Sending"}
-          </p>
+          <div className="mt-1 text-body-sm text-tertiary" role="status">
+            <span>
+              {message.pending === "creating"
+                ? "Creating Session"
+                : message.pending === "waiting"
+                  ? "Waiting for connection"
+                  : message.pending === "failed"
+                    ? (message.error ?? "Not sent")
+                    : "Sending"}
+            </span>
+            {message.pending === "failed" && onRetry ? (
+              <button type="button" className="quiet-button" onClick={onRetry}>
+                Retry send
+              </button>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </article>
@@ -87,6 +89,8 @@ export function SessionView({
   turns,
   mode,
   onStartSession,
+  draft,
+  onDraftChange,
 }: {
   channel: Channel;
   identity: Identity;
@@ -94,105 +98,15 @@ export function SessionView({
   turns: AgentTurn[];
   mode: "channel" | "session";
   onStartSession?: () => void;
+  draft: string;
+  onDraftChange: (value: string) => void;
 }) {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [participants, setParticipants] = useState<Participant[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { messages, participants, loading, error, refresh, retrySend, send } =
+    useConversation(channel, identity);
 
   const refreshParticipants = useCallback(async () => {
-    setParticipants(await runtime.participants(channel.id));
-  }, [channel.id]);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [nextMessages] = await Promise.all([
-        runtime.messages(channel.id),
-        refreshParticipants(),
-      ]);
-      setMessages((current) => {
-        const merged = new Map(current.map((item) => [item.id, item]));
-        for (const item of nextMessages) merged.set(item.id, item);
-        return [...merged.values()].sort(
-          (left, right) => left.createdAt - right.createdAt,
-        );
-      });
-      setError(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setLoading(false);
-    }
-  }, [channel.id, refreshParticipants]);
-
-  useEffect(() => {
-    let stop: undefined | (() => void);
-    let disposed = false;
-    void refresh();
-    void runtime
-      .subscribeMessages(channel.id, (incoming) => {
-        setMessages((current) => {
-          if (current.some((item) => item.id === incoming.id)) return current;
-          return [...current, incoming].sort(
-            (left, right) => left.createdAt - right.createdAt,
-          );
-        });
-      })
-      .then((cleanup) => {
-        if (disposed) cleanup();
-        else stop = cleanup;
-      })
-      .catch((caught) => {
-        if (!disposed) {
-          setError(
-            caught instanceof Error
-              ? `Live updates unavailable: ${caught.message}`
-              : "Live updates unavailable.",
-          );
-        }
-      });
-    const timer = window.setInterval(() => void refresh(), 30_000);
-    return () => {
-      disposed = true;
-      stop?.();
-      window.clearInterval(timer);
-    };
-  }, [channel.id, refresh]);
-
-  async function send(content: string) {
-    const pendingId = `pending-${crypto.randomUUID()}`;
-    const pending: Message = {
-      id: pendingId,
-      pubkey: identity.pubkey,
-      content,
-      createdAt: Math.floor(Date.now() / 1000),
-      kind: 9,
-      tags: [["h", channel.id]],
-      pending: navigator.onLine ? "sending" : "waiting",
-    };
-    setMessages((current) => [...current, pending]);
-    try {
-      const accepted = await runtime.sendMessage(channel.id, content);
-      setMessages((current) =>
-        current.map((item) => (item.id === pendingId ? accepted : item)),
-      );
-    } catch (caught) {
-      setMessages((current) =>
-        current.map((item) =>
-          item.id === pendingId
-            ? {
-                ...item,
-                pending: "failed",
-                error:
-                  caught instanceof Error ? caught.message : String(caught),
-              }
-            : item,
-        ),
-      );
-      throw caught;
-    }
-  }
+    await refresh();
+  }, [refresh]);
 
   const timeline = useMemo(() => {
     const channelTurns = turns.filter((turn) =>
@@ -283,6 +197,11 @@ export function SessionView({
                 message={item.message}
                 participants={participants}
                 identity={identity}
+                onRetry={
+                  item.message.pending === "failed"
+                    ? () => void retrySend(item.message.id)
+                    : undefined
+                }
               />
             ) : (
               <AgentActivity key={item.key} turn={item.turn} />
@@ -290,27 +209,12 @@ export function SessionView({
           )}
         </div>
       </div>
-      <div className="composer-dock">
-        <SessionComposer onSend={send} />
-      </div>
+      <ConversationComposerDock
+        draft={draft}
+        onDraftChange={onDraftChange}
+        onSend={send}
+        turns={turns}
+      />
     </main>
   );
-}
-
-export function useAgentTurns() {
-  const [projection, setProjection] = useState<Map<string, AgentTurn>>(
-    new Map(),
-  );
-  useEffect(() => {
-    let stop: undefined | (() => void);
-    void runtime
-      .observe((event: ObserverEvent) => {
-        setProjection((current) => reduceActivity(current, event));
-      })
-      .then((cleanup) => {
-        stop = cleanup;
-      });
-    return () => stop?.();
-  }, []);
-  return [...projection.values()];
 }

@@ -3,14 +3,21 @@ import { COMPONENTS } from "@/shared/ui/registry";
 import { COMPONENT_SPECIMENS } from "./componentSpecimens";
 
 export function ComponentsPage() {
+  const topLevelComponents = COMPONENTS.filter(
+    (component) => component.parent === undefined,
+  );
+
   return (
     <>
       <header className="component-page-heading">
         <h1 className="text-title text-primary">Components</h1>
       </header>
       <div className="component-overview-grid">
-        {COMPONENTS.map((component) => {
+        {topLevelComponents.map((component) => {
           const Specimen = COMPONENT_SPECIMENS[component.slug];
+          const children = COMPONENTS.filter(
+            (candidate) => candidate.parent === component.slug,
+          );
           return (
             <article key={component.slug} className="component-overview-item">
               <div className="component-overview-preview">
@@ -23,6 +30,20 @@ export function ComponentsPage() {
               >
                 {component.name}
               </Link>
+              {children.length > 0 ? (
+                <nav aria-label={`${component.name} components`}>
+                  {children.map((child) => (
+                    <Link
+                      key={child.slug}
+                      to="/design/components/$component"
+                      params={{ component: child.slug }}
+                      className="text-body-sm text-secondary hover:text-primary"
+                    >
+                      {child.name}
+                    </Link>
+                  ))}
+                </nav>
+              ) : null}
             </article>
           );
         })}

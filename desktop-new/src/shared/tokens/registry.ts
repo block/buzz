@@ -320,13 +320,6 @@ export const ROLE_GROUPS: RoleGroup[] = [
         use: "Anything hovering above the page: menus, dialogs, tooltips, toasts. Shares a light value with bg-panel and diverges in dark, because a shadow cannot carry elevation on a near-black background.",
         status: "core",
       },
-      {
-        token: "bg-inset",
-        variable: "--bg-inset",
-        pointsAt: "neutral 3 light / neutral 2 dark",
-        use: "Anything pushed in: inputs, code blocks, quotes.",
-        status: "core",
-      },
     ],
   },
   {

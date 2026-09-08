@@ -1,7 +1,7 @@
+import { Button as BaseButton } from "@base-ui/react/button";
 import type { ReactNode } from "react";
-import { Button } from "./Button";
 
-export function NavigatorRow({
+export function NavigationItem({
   label,
   icon,
   trailing,
@@ -17,20 +17,18 @@ export function NavigatorRow({
   onClick?: () => void;
 }) {
   return (
-    <Button
-      variant="ghost"
-      size="compact"
-      data-navigator-row=""
+    <BaseButton
+      className="navigation-item"
       data-selected={selected || undefined}
       data-inset={inset || undefined}
       onClick={onClick}
       aria-current={selected ? "page" : undefined}
     >
       {icon}
-      <span className="navigator-row-label">{label}</span>
+      <span className="navigation-item-label">{label}</span>
       {trailing ? (
-        <span className="navigator-row-trailing">{trailing}</span>
+        <span className="navigation-item-trailing">{trailing}</span>
       ) : null}
-    </Button>
+    </BaseButton>
   );
 }

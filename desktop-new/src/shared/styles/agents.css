@@ -4,11 +4,11 @@
     justify-content: space-between;
   }
 
-  .navigator-row-action.always-visible {
+  .navigation-item-action.always-visible {
     opacity: 1;
   }
 
-  .agent-navigator-row {
+  .agent-navigation-item {
     display: grid;
     width: 100%;
     min-width: 0;
@@ -25,9 +25,9 @@
     cursor: pointer;
   }
 
-  .agent-navigator-row:hover,
-  .agent-navigator-row[data-selected] {
-    background: var(--bg-inset);
+  .agent-navigation-item:hover,
+  .agent-navigation-item[data-selected] {
+    background: var(--neutral-2);
   }
 
   .agent-avatar,
@@ -122,7 +122,7 @@
     gap: 1rem;
     border-radius: 1rem;
     padding: 1rem;
-    background: var(--bg-inset);
+    background: var(--neutral-2);
   }
 
   .field-stack {
@@ -151,7 +151,7 @@
   .setup-callout {
     border-radius: 0.875rem;
     padding: 0.875rem 1rem;
-    background: var(--bg-inset);
+    background: var(--neutral-2);
   }
 
   .agent-create-action {

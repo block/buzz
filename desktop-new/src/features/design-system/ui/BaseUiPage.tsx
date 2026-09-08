@@ -186,7 +186,7 @@ export function BaseUiPage() {
         title="The count"
         description="Stated so the balance is visible rather than counted by hand each time someone asks."
       >
-        <dl className="flex flex-wrap gap-x-12 gap-y-4 rounded-xl bg-inset px-5 py-4">
+        <dl className="flex flex-wrap gap-x-12 gap-y-4 rounded-xl bg-neutral-2 px-5 py-4">
           <div className="flex flex-col gap-1">
             <dt className="text-body-sm text-tertiary">Backed by Base UI</dt>
             <dd className="text-body text-primary">

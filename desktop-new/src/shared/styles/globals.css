@@ -8,6 +8,14 @@
 @import "./agents.css";
 
 @layer base {
+  /* Pointer focus has a caret or pressed control to make its destination clear.
+     Chrome also matches :focus-visible for text fields clicked with a pointer,
+     so the app-root modality fact gates every focus treatment consistently. */
+  :focus:not(:focus-visible),
+  html:not([data-keyboard-navigation]) :focus-visible {
+    outline: none;
+  }
+
   body {
     margin: 0;
     background: var(--bg-app);
@@ -146,7 +154,7 @@
   display: inline-block;
   padding-inline: 0.375rem;
   border-radius: var(--radius-sm);
-  background: var(--color-bg-inset);
+  background: var(--neutral-2);
   color: var(--color-text-primary);
   user-select: none;
 }

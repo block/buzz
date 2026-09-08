@@ -1,163 +1,59 @@
-import { IconHash, IconMoon, IconPlus, IconSun } from "@tabler/icons-react";
+import { IconHash, IconMoon, IconSun } from "@tabler/icons-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAgentActivity } from "@/features/agent-activity/useAgentActivity";
+import { useComposerDrafts } from "@/features/composer/useComposerDrafts";
 import { useAgentsWorkspace } from "@/features/agents/ui/AgentsWorkspace";
-import { runtime } from "@/shared/runtime/client";
+import { MessagesNavigator } from "@/features/navigation/ui/MessagesNavigator";
+import { useNavigation } from "@/features/navigation/useNavigation";
+import { communityScope, useCommunity } from "@/shared/community/useCommunity";
+import { useIdentity } from "@/shared/identity/useIdentity";
+import { isMockRuntime, runtime } from "@/shared/runtime/client";
+import { useColorScheme } from "@/shared/theme/useColorScheme";
 import { DockWorkspace } from "@/shared/ui/DockWorkspace";
+import { Panel } from "@/shared/ui/Panel";
 import {
   listSessions,
   rememberSession,
   updateSession,
 } from "../sessionRegistry";
-import type { Channel, Identity, Message, SessionRecord } from "../types";
+import type { Channel, Message, SessionRecord } from "../types";
 import { NewSessionView } from "./NewSessionView";
-import { SessionView, useAgentTurns } from "./SessionView";
-
-type View =
-  | { type: "empty" }
-  | { type: "channel"; channelId: string }
-  | { type: "new"; originChannelId: string }
-  | { type: "session"; channelId: string };
-
-type Destination = "channels" | "agents";
-
-function ChannelNavigator({
-  channels,
-  sessions,
-  selectedId,
-  onOpen,
-  onOpenSession,
-  onNewSession,
-  query,
-  onQueryChange,
-}: {
-  channels: Channel[];
-  sessions: SessionRecord[];
-  selectedId?: string;
-  onOpen: (channelId: string) => void;
-  onOpenSession: (channelId: string) => void;
-  onNewSession: (channelId: string) => void;
-  query: string;
-  onQueryChange: (query: string) => void;
-}) {
-  const sessionIds = new Set(sessions.map((session) => session.channelId));
-  return (
-    <aside className="workspace-navigator" aria-label="Channels">
-      <header className="panel-heading navigator-heading">
-        <label className="navigator-search">
-          <span className="sr-only">Find a channel or Session</span>
-          <input
-            placeholder="Find a channel or Session"
-            value={query}
-            onChange={(event) => onQueryChange(event.target.value)}
-          />
-        </label>
-      </header>
-      <div className="navigator-list">
-        <p className="navigator-section-label text-body-sm text-tertiary">
-          Channels and Sessions
-        </p>
-        {channels
-          .filter((channel) => !sessionIds.has(channel.id))
-          .filter((channel) => {
-            const normalized = query.trim().toLowerCase();
-            if (!normalized) return true;
-            return (
-              channel.name.toLowerCase().includes(normalized) ||
-              sessions
-                .filter((session) => session.originChannelId === channel.id)
-                .some((session) =>
-                  channels
-                    .find((candidate) => candidate.id === session.channelId)
-                    ?.name.toLowerCase()
-                    .includes(normalized),
-                )
-            );
-          })
-          .map((channel) => {
-            const channelSessions = sessions.filter(
-              (session) => session.originChannelId === channel.id,
-            );
-            return (
-              <section className="channel-cluster" key={channel.id}>
-                <div className="channel-main-row">
-                  <button
-                    type="button"
-                    className="navigator-row"
-                    data-selected={selectedId === channel.id || undefined}
-                    onClick={() => onOpen(channel.id)}
-                  >
-                    <IconHash size={15} stroke={1.6} aria-hidden="true" />
-                    <span>{channel.name}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="navigator-row-action"
-                    aria-label={`New Session in ${channel.name}`}
-                    onClick={() => onNewSession(channel.id)}
-                  >
-                    <IconPlus size={14} stroke={1.7} aria-hidden="true" />
-                  </button>
-                </div>
-                {channelSessions.length ? (
-                  <div className="session-children">
-                    {channelSessions.map((session) => {
-                      const sessionChannel = channels.find(
-                        (candidate) => candidate.id === session.channelId,
-                      );
-                      if (!sessionChannel) return null;
-                      return (
-                        <button
-                          key={session.channelId}
-                          type="button"
-                          className="session-child-row"
-                          data-selected={
-                            selectedId === session.channelId || undefined
-                          }
-                          onClick={() => onOpenSession(session.channelId)}
-                        >
-                          <span
-                            aria-hidden="true"
-                            className="session-thread-line"
-                          />
-                          <span>{sessionChannel.name}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </section>
-            );
-          })}
-      </div>
-    </aside>
-  );
-}
+import { SessionView } from "./SessionView";
 
 export function AppShell() {
-  const [identity, setIdentity] = useState<Identity | null>(null);
-  const [relay, setRelay] = useState("");
+  const { identity, load: loadIdentity } = useIdentity();
+  const { relayUrl: relay, load: loadCommunity } = useCommunity();
+  const { scheme, toggle: toggleColorScheme } = useColorScheme();
   const [channels, setChannels] = useState<Channel[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
-  const [view, setView] = useState<View>({ type: "empty" });
-  const [destination, setDestination] = useState<Destination>("channels");
   const [pending, setPending] = useState<Message>();
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
-  const [dark, setDark] = useState(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const [channelQuery, setChannelQuery] = useState("");
-  const turns = useAgentTurns();
+  const {
+    destination,
+    messagesDestination: view,
+    resolveMessages,
+    openAgents,
+    openChannel,
+    openChannels,
+    openSession: navigateToSession,
+    startSession,
+  } = useNavigation();
+  const agentActivity = useAgentActivity();
+  const composerDrafts = useComposerDrafts();
   const agentsWorkspace = useAgentsWorkspace();
-  const scope = identity ? `${relay}:${identity.pubkey}` : "";
+  const scope = identity ? communityScope(relay, identity.pubkey) : "";
 
   const refresh = useCallback(async () => {
-    const [nextIdentity, nextRelay, nextChannels, pendingBootstraps] =
+    const [nextIdentity, nextRelay, loadedChannels, pendingBootstraps] =
       await Promise.all([
-        runtime.identity(),
-        runtime.relayUrl(),
+        loadIdentity(),
+        loadCommunity(),
         runtime.channels(),
         runtime.pendingSessionBootstraps(),
       ]);
-    let effectiveChannels = nextChannels;
+    let effectiveChannels = loadedChannels;
     const failedRecoveries = (
       await Promise.all(
         pendingBootstraps.map(async (operation) => {
@@ -173,7 +69,7 @@ export function AppShell() {
     if (pendingBootstraps.length > failedRecoveries.length) {
       effectiveChannels = await runtime.channels();
     }
-    const nextScope = `${nextRelay}:${nextIdentity.pubkey}`;
+    const nextScope = communityScope(nextRelay, nextIdentity.pubkey);
     const discoveredLinks = (
       await Promise.all(
         effectiveChannels.map((parent) =>
@@ -211,9 +107,7 @@ export function AppShell() {
         lastMessageAt: null,
       }),
     );
-    setIdentity(nextIdentity);
-    setRelay(nextRelay);
-    setChannels([
+    const nextChannels = [
       ...incompleteChannels,
       ...discoveredChannels,
       ...effectiveChannels.filter(
@@ -222,7 +116,15 @@ export function AppShell() {
             (incomplete) => incomplete.id === channel.id,
           ) && !discoveredChannels.some((session) => session.id === channel.id),
       ),
-    ]);
+    ];
+    setChannels(nextChannels);
+    resolveMessages(
+      nextChannels,
+      new Set([
+        ...incompleteChannels.map((channel) => channel.id),
+        ...discoveredChannels.map((channel) => channel.id),
+      ]),
+    );
     for (const link of discoveredLinks) {
       rememberSession(nextScope, {
         channelId: link.session_channel_id,
@@ -245,9 +147,30 @@ export function AppShell() {
         });
       }
     }
-    setSessions(listSessions(nextScope));
+    const rememberedSessions = listSessions(nextScope);
+    // Rich browser fixtures give the navigation a real standalone Session to
+    // arrange and open without claiming the current native parent-required
+    // bootstrap contract can create one yet.
+    const fixtureSessions = isMockRuntime
+      ? [
+          {
+            channelId: "session-agent-setup",
+            createdAt: Date.now() - 10_800_000,
+            updatedAt: Date.now() - 10_800_000,
+          },
+        ]
+      : [];
+    setSessions([
+      ...fixtureSessions,
+      ...rememberedSessions.filter(
+        (remembered) =>
+          !fixtureSessions.some(
+            (fixture) => fixture.channelId === remembered.channelId,
+          ),
+      ),
+    ]);
     setStartupError(null);
-  }, []);
+  }, [loadCommunity, loadIdentity, resolveMessages]);
 
   useEffect(() => {
     void refresh().catch((caught) => {
@@ -257,10 +180,6 @@ export function AppShell() {
     });
   }, [refresh]);
 
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", dark);
-  }, [dark]);
-
   const channelsById = useMemo(
     () => new Map(channels.map((channel) => [channel.id, channel])),
     [channels],
@@ -269,6 +188,12 @@ export function AppShell() {
   async function createSession(content: string) {
     if (view.type !== "new") return;
     const originChannelId = view.originChannelId;
+    if (!originChannelId) {
+      const message =
+        "Standalone Sessions need the native creation contract before they can be started here.";
+      setBootstrapError(message);
+      throw new Error(message);
+    }
     const operationId =
       pending?.pending === "failed"
         ? pending.id
@@ -299,7 +224,7 @@ export function AppShell() {
       setChannels((current) => [created, ...current]);
       setSessions(listSessions(scope));
       setPending(undefined);
-      setView({ type: "session", channelId: created.id });
+      navigateToSession(created.id);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setPending({ ...optimistic, pending: "failed", error: message });
@@ -311,7 +236,7 @@ export function AppShell() {
   function openSession(channelId: string) {
     updateSession(scope, channelId, { updatedAt: Date.now() });
     setSessions(listSessions(scope));
-    setView({ type: "session", channelId });
+    navigateToSession(channelId);
   }
 
   if (!identity) {
@@ -330,6 +255,16 @@ export function AppShell() {
       </div>
     );
   }
+
+  const draftDestinationId =
+    view.type === "channel" || view.type === "session"
+      ? `conversation:${view.channelId}`
+      : view.type === "new"
+        ? `new-session:${view.originChannelId ?? "standalone"}`
+        : undefined;
+  const draft = draftDestinationId
+    ? composerDrafts.readDraft(draftDestinationId)
+    : "";
 
   const activeId =
     view.type === "channel" || view.type === "session"
@@ -353,9 +288,18 @@ export function AppShell() {
         pending={pending}
         error={bootstrapError}
         onBack={() =>
-          setView({ type: "channel", channelId: view.originChannelId })
+          view.originChannelId
+            ? openChannel(view.originChannelId)
+            : openChannels()
         }
         onCreate={createSession}
+        draft={draft}
+        onDraftChange={(value) =>
+          composerDrafts.writeDraft(
+            `new-session:${view.originChannelId ?? "standalone"}`,
+            value,
+          )
+        }
       />
     ) : activeChannel &&
       (view.type === "channel" || view.type === "session") ? (
@@ -363,12 +307,16 @@ export function AppShell() {
         channel={activeChannel}
         identity={identity}
         origin={origin}
-        turns={turns}
+        turns={agentActivity.forChannel(activeChannel.id)}
         mode={view.type}
         onStartSession={
           view.type === "channel"
-            ? () => setView({ type: "new", originChannelId: activeChannel.id })
+            ? () => startSession(activeChannel.id)
             : undefined
+        }
+        draft={draft}
+        onDraftChange={(value) =>
+          composerDrafts.writeDraft(`conversation:${activeChannel.id}`, value)
         }
       />
     ) : (
@@ -388,14 +336,14 @@ export function AppShell() {
           <button
             type="button"
             data-selected={destination === "channels" || undefined}
-            onClick={() => setDestination("channels")}
+            onClick={openChannels}
           >
             Channels
           </button>
           <button
             type="button"
             data-selected={destination === "agents" || undefined}
-            onClick={() => setDestination("agents")}
+            onClick={openAgents}
           >
             Agents
           </button>
@@ -407,10 +355,10 @@ export function AppShell() {
           <button
             type="button"
             className="topbar-icon-button"
-            onClick={() => setDark((value) => !value)}
-            aria-label={dark ? "Use light mode" : "Use dark mode"}
+            onClick={toggleColorScheme}
+            aria-label={scheme === "dark" ? "Use light mode" : "Use dark mode"}
           >
-            {dark ? (
+            {scheme === "dark" ? (
               <IconSun size={16} aria-hidden="true" />
             ) : (
               <IconMoon size={16} aria-hidden="true" />
@@ -423,25 +371,28 @@ export function AppShell() {
           panels={{
             navigator:
               destination === "channels" ? (
-                <ChannelNavigator
-                  channels={channels}
-                  sessions={sessions}
-                  selectedId={activeId}
-                  onOpen={(channelId) => {
-                    setDestination("channels");
-                    setView({ type: "channel", channelId });
-                  }}
-                  onOpenSession={openSession}
-                  onNewSession={(originChannelId) =>
-                    setView({ type: "new", originChannelId })
-                  }
-                  query={channelQuery}
-                  onQueryChange={setChannelQuery}
-                />
+                <Panel as="aside" aria-label="Channels">
+                  <MessagesNavigator
+                    conversations={channels}
+                    sessions={sessions}
+                    selectedId={activeId}
+                    onOpenRoom={openChannel}
+                    onOpenDirectMessage={openChannel}
+                    onOpenSession={openSession}
+                    onStartSession={startSession}
+                    onStartStandaloneSession={() => startSession()}
+                    query={channelQuery}
+                    onQueryChange={setChannelQuery}
+                  />
+                </Panel>
               ) : (
-                agentsWorkspace.navigator
+                <Panel as="aside" aria-label="Agents">
+                  {agentsWorkspace.navigator}
+                </Panel>
               ),
-            conversation,
+            conversation: (
+              <Panel aria-label="Workspace content">{conversation}</Panel>
+            ),
           }}
         />
       </section>
