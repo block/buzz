@@ -43,11 +43,14 @@ void main() {
     Gradient? topSectionGradient,
     ValueChanged<double>? onSettingsTransitionProgress,
     ValueListenable<int>? tabReselection,
+    _FakeProfileNotifier? profile,
   }) {
     return ProviderScope(
       overrides: [
-        // Provide a fake profile and presence so the avatar doesn't hit the network.
-        profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        // Provide a fake profile and presence so the avatar doesn't hit the
+        // network. [profile] swaps the current user for tests keyed to a
+        // different identity (the page reads its pubkey from profileProvider).
+        profileProvider.overrideWith(() => profile ?? _FakeProfileNotifier()),
         presenceProvider.overrideWith(() => _FakePresenceNotifier()),
         communityIconProvider.overrideWith((ref, relayUrl) async {
           onCommunityIconLoad?.call(relayUrl);
@@ -283,7 +286,7 @@ void main() {
       createdBy: 'aabb',
       createdAt: DateTime(2025),
       memberCount: 2,
-      participants: const ['Test', 'Bob'],
+      participants: const ['Test', 'Dana'],
       participantPubkeys: const ['aabb', b0b],
       isMember: true,
     );
@@ -303,8 +306,48 @@ void main() {
     // that same hex key — never the current user's `A`.
     expect(find.text(shortPubkey(b0b)), findsOneWidget);
     expect(_dmTileAvatarInitial(tester, shortPubkey(b0b)), 'B');
-    // A named counterpart listed second keeps its authored initial too.
-    expect(_dmTileAvatarInitial(tester, 'Bob'), 'B');
+    // A named counterpart listed second keeps its authored initial too —
+    // `D`, not its key's `B`, proves the name is the initial's source.
+    expect(_dmTileAvatarInitial(tester, 'Dana'), 'D');
+  });
+
+  testWidgets('keys the self-DM tile avatar to the current user key', (
+    tester,
+  ) async {
+    // A self-DM lists only the current user, so the tile label falls back
+    // to the sole participant — the compact npub of the current user's
+    // own key.
+    const b0b =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+    final selfDm = Channel(
+      id: 'dm-self',
+      name: 'DM',
+      channelType: 'dm',
+      visibility: 'open',
+      description: 'Direct message',
+      createdBy: b0b,
+      createdAt: DateTime(2025),
+      memberCount: 1,
+      participants: [shortPubkey(b0b)],
+      participantPubkeys: const [b0b],
+      isMember: true,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        // The tile reads the current user's pubkey from profileProvider, so
+        // the self-DM needs the fake profile keyed to the same participant.
+        profile: _FakeProfileNotifier(pubkey: b0b),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier([selfDm])),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The compact-npub label and its avatar identify the same key: the
+    // hex-key initial `B`, never the `N` the npub label starts with.
+    expect(find.text(shortPubkey(b0b)), findsOneWidget);
+    expect(_dmTileAvatarInitial(tester, shortPubkey(b0b)), 'B');
   });
 
   testWidgets('sizes the community header for accessible text', (tester) async {
@@ -2629,9 +2672,15 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {
+  _FakeProfileNotifier({this.pubkey = 'aabb'});
+
+  /// Current-user pubkey; the default keeps the historical 'aabb' fake used
+  /// by the other tile tests. The display name stays 'Test'.
+  final String pubkey;
+
   @override
   Future<UserProfile?> build() async =>
-      const UserProfile(pubkey: 'aabb', displayName: 'Test');
+      UserProfile(pubkey: pubkey, displayName: 'Test');
 }
 
 class _FakePresenceNotifier extends PresenceNotifier {

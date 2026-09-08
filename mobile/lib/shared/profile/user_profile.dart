@@ -37,11 +37,12 @@ class UserProfile {
   ///
   /// Blank display names (empty or whitespace-only) fall back to the compact
   /// npub too — relay profiles can carry them — so a valid identity never
-  /// renders an empty label. Mirrors [initial], which already rejects blank
-  /// names.
+  /// renders an empty label, like [initial]. Nonblank names render as
+  /// authored: trim only tests blankness, so authored padding survives
+  /// (unlike [initial], which reads the trimmed padding).
   String get label {
-    final name = displayName?.trim();
-    return name != null && name.isNotEmpty ? name : shortPubkey(pubkey);
+    final name = displayName;
+    return name != null && name.trim().isNotEmpty ? name : shortPubkey(pubkey);
   }
 
   /// First letter for fallback avatar.

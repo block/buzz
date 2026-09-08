@@ -12,14 +12,14 @@ void main() {
     // Relay profiles can carry a blank `display_name` (empty or
     // whitespace-only) and reach the cache unchanged, so both accessors must
     // reject blank names and fall back to the key instead of rendering an
-    // empty label. Resolved names keep their authored label and initial
-    // (whitespace-only padding is trimmed, like `initial` already did).
+    // empty label. Nonblank names render as authored: `label` only tests
+    // blankness with trim, while `initial` reads the trimmed padding.
     final cases = <({String? displayName, String label, String initial})>[
       (displayName: null, label: shortPubkey(b0b), initial: 'B'),
       (displayName: '', label: shortPubkey(b0b), initial: 'B'),
       (displayName: '   ', label: shortPubkey(b0b), initial: 'B'),
       (displayName: 'Carol', label: 'Carol', initial: 'C'),
-      (displayName: ' Carol ', label: 'Carol', initial: 'C'),
+      (displayName: ' Carol ', label: ' Carol ', initial: 'C'),
     ];
 
     for (final testCase in cases) {

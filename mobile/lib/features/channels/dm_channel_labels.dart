@@ -57,11 +57,12 @@ String resolveDmChannelDisplayLabel(Channel channel, {String? currentPubkey}) {
 /// Avatar initial for the DM's visible counterpart.
 ///
 /// Mirrors [resolveDmChannelDisplayLabel]'s participant selection: the
-/// first participant that is not [currentPubkey] (falling back to the first
-/// participant when every participant is the current user), since member
-/// order does not guarantee the counterpart is listed first — otherwise the
-/// avatar could identify the current user while the label beside it
-/// identifies the counterpart.
+/// first participant that is not [currentPubkey], since member order does
+/// not guarantee the counterpart is listed first — otherwise the avatar
+/// could identify the current user while the label beside it identifies
+/// the counterpart. When every participant is the current user (a
+/// self-DM), the label names the current user too, so the avatar keys off
+/// that same first participant instead of its label's first character.
 ///
 /// A resolved display name keeps its name-derived initial. A label that
 /// fell back to the compact npub form of the participant's key is keyed to
@@ -76,14 +77,21 @@ String dmAvatarInitial(Channel channel, {String? currentPubkey}) {
     index++;
   }
 
-  // No participant pubkeys (labels only) or every pubkey is the current
-  // user: fall back to the first participant label, like the channel label
-  // does when the non-self list is empty.
   if (index >= channel.participantPubkeys.length) {
-    final label = channel.participants.isNotEmpty
-        ? channel.participants.first
-        : '';
-    return label.isNotEmpty ? label[0].toUpperCase() : '?';
+    // No participant pubkeys (labels only): fall back to the first
+    // participant label, like the channel label does when the non-self
+    // list is empty.
+    if (channel.participantPubkeys.isEmpty) {
+      final label = channel.participants.isNotEmpty
+          ? channel.participants.first
+          : '';
+      return label.isNotEmpty ? label[0].toUpperCase() : '?';
+    }
+    // Keys exist but every participant is the current user (a self-DM):
+    // the label names the current user, so key the avatar to that same
+    // first participant with the shared provenance rule below — the hex
+    // key for a compact npub label, the authored name otherwise.
+    index = 0;
   }
 
   final pubkey = channel.participantPubkeys[index];
