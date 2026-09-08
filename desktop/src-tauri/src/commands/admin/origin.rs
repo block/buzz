@@ -317,13 +317,11 @@ mod tests {
     //
     // The `url` crate (per the URL Standard) lowercases ASCII hostnames during
     // parsing. `AdminOrigin` preserves whatever the URL Standard produces —
-    // which for ASCII hostnames is always lowercase. This matches the relay's
-    // requirement that the admin console URL's host equals `BUZZ_ADMIN_HOST`
-    // byte-for-byte: since the URL parser always lowercases, operators must
-    // configure `BUZZ_ADMIN_HOST` in lowercase as well.
-    //
-    // A relay-side normalization chore (separate PR) would make `BUZZ_ADMIN_HOST`
-    // lowercase on startup, eliminating the footgun entirely.
+    // which for ASCII hostnames is always lowercase. Host case is not a footgun:
+    // the relay lowercases `BUZZ_ADMIN_HOST` when it loads config AND compares
+    // inbound Host/Origin hosts case-insensitively, so a mixed-case
+    // `BUZZ_ADMIN_HOST` and a mixed-case desktop URL both resolve correctly.
+    // This test pins the desktop-side canonicalization regardless.
     #[test]
     fn host_case_preserved_as_supplied() {
         // Lowercase input stays lowercase.
@@ -332,7 +330,7 @@ mod tests {
 
         // The URL Standard normalises ASCII hostnames to lowercase — so "Admin.Example.Com"
         // becomes "admin.example.com" after parsing. Both inputs produce the same
-        // canonical origin. Operators must therefore use lowercase in BUZZ_ADMIN_HOST.
+        // canonical origin, and the relay compares hosts case-insensitively anyway.
         let from_mixed = AdminOrigin::parse("https://Admin.Example.Com").unwrap();
         assert_eq!(
             from_mixed.as_str(),
@@ -341,7 +339,7 @@ mod tests {
         );
 
         // Consequently the two parsed origins ARE equal — they produce identical
-        // NIP-98 u-tag values and both match a lowercase BUZZ_ADMIN_HOST.
+        // NIP-98 u-tag values and both match the relay's case-insensitive host check.
         assert_eq!(lower.as_str(), from_mixed.as_str());
     }
 }
