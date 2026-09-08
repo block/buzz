@@ -586,6 +586,7 @@ use inbound_author_gate::{AuthorizedListenerEvent, InboundAuthorGate};
 struct AuthorizedNormalListenerEvent(AuthorizedListenerEvent);
 
 struct NormalListenerIngress {
+    delivery: Option<relay::DeliveryReceipt>,
     buzz_event: relay::BuzzEvent,
     effective_author: String,
     prompt_tag: String,
@@ -606,6 +607,7 @@ impl AuthorizedNormalListenerEvent {
         )
         .await?;
         Some(NormalListenerIngress {
+            delivery: None,
             buzz_event,
             effective_author,
             prompt_tag: matched.prompt_tag,
@@ -670,6 +672,7 @@ impl NormalListenerIngress {
         session_scope: scope::SessionScope,
     ) -> QueuedNormalListenerEvent {
         let Self {
+            delivery,
             buzz_event,
             effective_author,
             prompt_tag,
@@ -679,6 +682,7 @@ impl NormalListenerIngress {
         let prompt_tag_for_steer = prompt_tag.clone();
         let channel_id = buzz_event.channel_id;
         let accepted = queue.push(QueuedEvent {
+            delivery,
             channel_id,
             scope: session_scope.clone(),
             event: buzz_event.event,
@@ -2063,6 +2067,7 @@ struct SteerAckEvent {
     /// and deadline extension target this, not the whole channel.
     scope: scope::SessionScope,
     event_id: String,
+    turn_id: String,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -3248,6 +3253,7 @@ async fn tokio_main() -> Result<()> {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
                         Some(buzz_event) => {
+                            let delivery = relay.event_publisher().delivery_receipt(&buzz_event, &config.relay_url);
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
@@ -3370,6 +3376,7 @@ async fn tokio_main() -> Result<()> {
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
+                                if let Some(ref receipt) = delivery { receipt.rejected(); }
                                 continue;
                             }
 
@@ -3390,7 +3397,8 @@ async fn tokio_main() -> Result<()> {
                                             "shutdown command from owner — exiting gracefully"
                                         );
                                         let _ = shutdown_tx.send(());
-                                        continue;
+                                        if let Some(ref receipt) = delivery { receipt.rejected(); }
+                                continue;
                                     }
                                 }
                                 // Not from owner — fall through to normal prompt handling.
@@ -3441,7 +3449,8 @@ async fn tokio_main() -> Result<()> {
                                             "!cancel received but no in-flight task — no-op"
                                         );
                                     }
-                                    continue; // consume event — do NOT push to queue
+                                    if let Some(ref receipt) = delivery { receipt.rejected(); }
+                                continue; // consume event — do NOT push to queue
                                 }
                                 // Not from owner — fall through to normal prompt handling.
                             }
@@ -3502,7 +3511,8 @@ async fn tokio_main() -> Result<()> {
                                             "!rotate received — invalidated idle session for scope"
                                         );
                                     }
-                                    continue; // consume event — do NOT push to queue
+                                    if let Some(ref receipt) = delivery { receipt.rejected(); }
+                                continue; // consume event — do NOT push to queue
                                 }
                                 // Not from owner — fall through to normal prompt handling.
                             }
@@ -3529,14 +3539,16 @@ async fn tokio_main() -> Result<()> {
                             )
                             .await
                             else {
+                                if let Some(ref receipt) = delivery { receipt.rejected(); }
                                 continue;
                             };
-                            let Some(ingress) =
+                            let Some(mut ingress) =
                                 AuthorizedNormalListenerEvent(authorized_event)
                                     .match_subscription(&rules, &pubkey_hex)
                                     .await
                             else {
                                 tracing::debug!("authorized event matched no rule — dropping");
+                                if let Some(ref receipt) = delivery { receipt.rejected(); }
                                 continue;
                             };
                             // Derive the session scope once, at admission, from
@@ -3564,7 +3576,11 @@ async fn tokio_main() -> Result<()> {
                                 policy = %config.session_policy,
                                 "admitted event — resolved session scope"
                             );
+                            ingress.delivery = delivery.clone();
                             let queued = ingress.push(&mut queue, session_scope);
+                            if let Some(ref receipt) = delivery {
+                                if queued.accepted { receipt.accepted(); } else { receipt.rejected(); }
+                            }
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
@@ -3828,6 +3844,7 @@ async fn tokio_main() -> Result<()> {
                 channel_id,
                 scope,
                 event_id,
+                turn_id,
                 ack,
             })) => {
                 // Mid-turn steer attempt resolved (either transport:
@@ -3939,9 +3956,17 @@ async fn tokio_main() -> Result<()> {
                     signal_fallback,
                     "non-cancelling steer ack received"
                 );
+                let owns_turn = pool.task_map().values().any(|meta| meta.turn_id == turn_id);
                 if let Ok(pool::SteerAck::Success { session_id }) = &ack {
-                    queue.extend_in_flight_deadline(&scope, config.max_turn_duration_secs);
-                    if !pool.record_successful_steer(&scope, event_id.clone(), session_id.clone()) {
+                    if owns_turn {
+                        queue.extend_in_flight_deadline(&scope, config.max_turn_duration_secs);
+                    }
+                    if !pool.record_successful_steer_for_turn(
+                        &scope,
+                        &turn_id,
+                        event_id.clone(),
+                        session_id.clone(),
+                    ) {
                         tracing::warn!(
                             channel = %channel_id,
                             event_id = %event_id,
@@ -3950,12 +3975,14 @@ async fn tokio_main() -> Result<()> {
                     }
                 }
                 if drop_withheld {
+                    // Receipt ownership was bound synchronously at submission,
+                    // not here: this watcher may run after the task returned.
                     queue.remove_event(&scope, &event_id);
                 }
                 if release_withheld {
                     queue.release_native_steer(&scope, &event_id);
                 }
-                if signal_fallback {
+                if signal_fallback && owns_turn {
                     // Universal cancel+merge fallback. Note: the
                     // queued event has already been released to the
                     // front of `queues[scope]`, so the cancel will pick
@@ -4310,9 +4337,13 @@ fn signal_in_flight_task_for_scope(
 /// universal cancel+merge `ControlSignal::Steer` fallback — the watcher
 /// will issue it from the ack arm if the native attempt fails.
 ///
-/// Returns `false` if `pool.send_steer` failed (no in-flight task,
-/// `steer_tx` already full from a prior in-flight steer, or read loop
-/// torn down). The caller MUST fall through to
+/// Also returns `true` (suppress fallback, NOT a delivery acknowledgement) on
+/// mailbox backpressure or pending control. Those events stay in the existing
+/// bounded queue, unwithheld, for dispatch at the next turn boundary. No extra
+/// task or unbounded secondary mailbox is allocated.
+///
+/// Returns `false` for a transport failure (e.g. read loop torn down).
+/// The caller MUST fall through to
 /// `signal_in_flight_task(channel_id, ControlSignal::Steer)` so the
 /// event still reaches the agent via the universal path.
 ///
@@ -4343,6 +4374,7 @@ fn try_native_steer(
     let (tag, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
     let be = queue::BatchEvent {
+        delivery: None,
         event,
         prompt_tag: prompt_tag.clone(),
         received_at: std::time::Instant::now(),
@@ -4357,13 +4389,38 @@ fn try_native_steer(
     let body = format!("{new_message}\n\n{event_section}\n\n{closing}");
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
+    let mut ledger_event = queue.delivery_event(&scope, &event_id_hex);
+    if let Some(event) = &mut ledger_event {
+        event.delivery = event
+            .delivery
+            .as_ref()
+            .map(relay::DeliveryReceipt::native_pending);
+    }
+    let delivery = ledger_event.as_ref().and_then(|e| e.delivery.clone());
+    let turn_id = pool
+        .task_map()
+        .values()
+        .find(|meta| meta.scope.as_ref() == Some(&scope))
+        .map(|meta| meta.turn_id.clone())
+        .unwrap_or_default();
     let request = pool::SteerRequest {
+        delivery,
         prompt_blocks: vec![body],
         ack_tx,
     };
 
     match pool.send_steer(&scope, request) {
         Ok(()) => {
+            if let Some(event) = ledger_event.filter(|e| e.delivery.is_some()) {
+                if let Some(batch) = pool
+                    .task_map_mut()
+                    .values_mut()
+                    .find(|meta| meta.turn_id == turn_id)
+                    .and_then(|meta| meta.recoverable_batch.as_mut())
+                {
+                    batch.events.push(event);
+                }
+            }
             // Withhold the queued event synchronously BEFORE spawning
             // the watcher: this closes the race where `mark_complete`
             // clears `in_flight_channels` and a stray `flush_next` could
@@ -4394,9 +4451,19 @@ fn try_native_steer(
                     channel_id,
                     scope: scope_for_watcher,
                     event_id: event_id_for_watcher,
+                    turn_id,
                     ack,
                 });
             });
+            true
+        }
+        Err(
+            pool::SteerError::Backpressure
+            | pool::SteerError::ControlPending
+            | pool::SteerError::PromptCompleted,
+        ) => {
+            // No withhold was established. Existing queue ownership is the
+            // backpressure mechanism; completing/draining the turn releases it.
             true
         }
         Err(e) => {
@@ -4532,6 +4599,15 @@ fn dispatch_pending(
 
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
+            DedupMode::Drop
+                if batch
+                    .events
+                    .iter()
+                    .chain(&batch.cancelled_events)
+                    .any(|e| e.delivery.is_some()) =>
+            {
+                Some(batch.clone())
+            }
             DedupMode::Drop => None,
         };
 
@@ -4686,6 +4762,51 @@ fn handle_prompt_result(
         .find(|meta| meta.agent_index == agent_index)
         .map(|meta| meta.successful_steer_deliveries.clone())
         .unwrap_or_default();
+    // The prompt task's resolved outcome owns terminal disposition. A late
+    // steer transport failure or control request can take control_tx after
+    // EndTurn, while this result is pending; scheduling ownership cannot undo
+    // completed side effects. Real control cancellation returns Cancelled (or
+    // an error), not Ok(EndTurn). Native receipts retain their read-loop gate.
+    let successful = matches!(result.outcome, PromptOutcome::Ok(acp::StopReason::EndTurn));
+    if !successful {
+        if let Some(returned) = result.batch.as_mut() {
+            if let Some(ledger) = pool
+                .task_map()
+                .values()
+                .find(|meta| meta.agent_index == agent_index)
+                .and_then(|meta| meta.recoverable_batch.as_ref())
+            {
+                for event in ledger.events.iter().chain(&ledger.cancelled_events) {
+                    if event
+                        .delivery
+                        .as_ref()
+                        .is_some_and(|r| r.completion_eligible())
+                        && !returned
+                            .events
+                            .iter()
+                            .chain(&returned.cancelled_events)
+                            .any(|e| e.event.id == event.event.id)
+                    {
+                        returned.events.push(event.clone());
+                    }
+                }
+            }
+        }
+    }
+    if successful {
+        if let Some(batch) = pool
+            .task_map()
+            .values()
+            .find(|meta| meta.agent_index == agent_index)
+            .and_then(|meta| meta.recoverable_batch.as_ref())
+        {
+            for event in batch.events.iter().chain(&batch.cancelled_events) {
+                if let Some(ref receipt) = event.delivery {
+                    receipt.completed();
+                }
+            }
+        }
+    }
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
@@ -5085,9 +5206,15 @@ fn recover_panicked_agent(
     let i = meta.agent_index;
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
-    if let Some(batch) = meta.recoverable_batch {
+    if let Some(mut batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
-            if !removed_channels.contains(&ch) {
+            if !removed_channels.contains(&ch) && matches!(config.dedup_mode, DedupMode::Queue) {
+                batch
+                    .events
+                    .retain(|e| e.delivery.as_ref().is_none_or(|r| r.completion_eligible()));
+                batch
+                    .cancelled_events
+                    .retain(|e| e.delivery.as_ref().is_none_or(|r| r.completion_eligible()));
                 // Dead-letter on exhaustion is logged inside requeue(); a
                 // panic path has no outcome to report, so no notice here.
                 let _ = queue.requeue(batch);
@@ -6128,6 +6255,122 @@ mod owner_control_command_tests {
     }
 
     #[tokio::test]
+    async fn steer_mailbox_pressure_keeps_control_available_and_drain_fences_sends() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let ch = Uuid::new_v4();
+        let a = thread_scope(ch, &"a".repeat(64));
+        let b = thread_scope(ch, &"b".repeat(64));
+        let (control, mut cancel_rx) = tokio::sync::oneshot::channel();
+        insert_task_meta(&mut pool, 0, a.clone(), control);
+        let (steer, mut steer_rx) = mpsc::channel(1);
+        pool.task_map_mut().values_mut().next().unwrap().steer_tx = Some(steer);
+        let request = || {
+            let (ack_tx, _) = tokio::sync::oneshot::channel();
+            pool::SteerRequest {
+                delivery: None,
+                prompt_blocks: vec!["correction".into()],
+                ack_tx,
+            }
+        };
+        assert!(pool.send_steer(&a, request()).is_ok());
+        for _ in 0..600 {
+            assert!(matches!(
+                pool.send_steer(&a, request()),
+                Err(pool::SteerError::Backpressure)
+            ));
+        }
+        assert!(matches!(
+            cancel_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            pool.send_steer(&b, request()),
+            Err(pool::SteerError::PromptCompleted)
+        ));
+        assert!(signal_in_flight_task_for_scope(
+            &mut pool,
+            &a,
+            ControlSignal::Interrupt
+        ));
+        assert_eq!(cancel_rx.await.unwrap(), ControlSignal::Interrupt);
+        // Emptying the mailbox during drain must not re-enable steer attempts.
+        assert!(steer_rx.try_recv().is_ok());
+        for _ in 0..600 {
+            assert!(matches!(
+                pool.send_steer(&a, request()),
+                Err(pool::SteerError::ControlPending)
+            ));
+        }
+        assert!(steer_rx.try_recv().is_err());
+        assert!(!signal_in_flight_task_for_scope(
+            &mut pool,
+            &a,
+            ControlSignal::Interrupt
+        ));
+    }
+
+    #[tokio::test]
+    async fn full_steer_mailbox_leaves_events_for_exact_once_turn_boundary_dispatch() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let ch = Uuid::new_v4();
+        let scope = thread_scope(ch, &"a".repeat(64));
+        let (control, mut cancel_rx) = tokio::sync::oneshot::channel();
+        insert_task_meta(&mut pool, 0, scope.clone(), control);
+        let (steer, _steer_rx) = mpsc::channel(1);
+        let (ack_tx, _) = tokio::sync::oneshot::channel();
+        steer
+            .try_send(pool::SteerRequest {
+                delivery: None,
+                prompt_blocks: vec![],
+                ack_tx,
+            })
+            .unwrap();
+        pool.task_map_mut().values_mut().next().unwrap().steer_tx = Some(steer);
+        let (acks, mut ack_rx) = mpsc::unbounded_channel();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let keys = nostr::Keys::generate();
+        let mut expected = HashSet::new();
+        for i in 0..100 {
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), format!("queued-{i}"))
+                .sign_with_keys(&keys)
+                .unwrap();
+            expected.insert(event.id);
+            assert!(queue.push(queue::QueuedEvent {
+                delivery: None,
+                channel_id: ch,
+                scope: scope.clone(),
+                event: event.clone(),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "message".into()
+            }));
+            assert!(try_native_steer(
+                &mut pool,
+                &mut queue,
+                scope.clone(),
+                event,
+                "message".into(),
+                &acks
+            ));
+        }
+        assert!(matches!(
+            cancel_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(
+            ack_rx.try_recv().is_err(),
+            "no acknowledgement watcher allocated on Full"
+        );
+        let mut delivered = HashSet::new();
+        while let Some(batch) = queue.flush_next() {
+            for event in batch.events {
+                assert!(delivered.insert(event.event.id), "duplicate delivery");
+            }
+            queue.mark_complete(&scope);
+        }
+        assert_eq!(delivered, expected);
+    }
+
+    #[tokio::test]
     async fn observer_channel_controls_reject_sibling_sessions_without_signalling() {
         let mut pool = AgentPool::from_slots(vec![]);
         let ch = Uuid::new_v4();
@@ -6344,6 +6587,7 @@ mod owner_control_command_tests {
 
         let oldest = std::time::Instant::now() - Duration::from_secs(1);
         queue.push(queue::QueuedEvent {
+            delivery: None,
             channel_id,
             scope: held_scope.clone(),
             event: make_event(KIND_STREAM_MESSAGE, "held", None),
@@ -6352,6 +6596,7 @@ mod owner_control_command_tests {
         });
         for i in 0..500 {
             queue.push(queue::QueuedEvent {
+                delivery: None,
                 channel_id,
                 scope: surviving_scope.clone(),
                 event: make_event(KIND_STREAM_MESSAGE, &format!("new-{i}"), None),
@@ -6934,6 +7179,7 @@ mod author_gate_tests {
             rest_client.clone(),
         );
         let event = relay::BuzzEvent {
+            delivery: None,
             connection_generation: event_generation,
             channel_id,
             event: relay_signed_workflow_dispatch(relay_keys, workflow_owner, &agent),
@@ -7250,6 +7496,7 @@ mod author_gate_tests {
             rest_client.clone(),
         );
         let buzz_event = relay::BuzzEvent {
+            delivery: None,
             connection_generation: 0,
             channel_id,
             event,
@@ -7359,6 +7606,7 @@ mod author_gate_tests {
             rest_client.clone(),
         );
         let buzz_event = relay::BuzzEvent {
+            delivery: None,
             connection_generation: 1,
             channel_id,
             event,
@@ -7424,6 +7672,7 @@ mod author_gate_tests {
             rest_client.clone(),
         );
         let event = relay::BuzzEvent {
+            delivery: None,
             connection_generation: 0,
             channel_id,
             event: relay_signed_workflow_dispatch(&relay_keys, &workflow_owner, &agent),
@@ -7484,6 +7733,7 @@ mod author_gate_tests {
                 rest_client.clone(),
             );
             let mut event = relay::BuzzEvent {
+                delivery: None,
                 connection_generation: 0,
                 channel_id,
                 event: relay_signed_workflow_dispatch(&relay_keys, &workflow_owner, &agent),
@@ -7564,6 +7814,7 @@ mod author_gate_tests {
         assert_eq!(gate.relay_identity_for_test(), Some(old_relay_hex.as_str()));
 
         let new_event = relay::BuzzEvent {
+            delivery: None,
             connection_generation: 2,
             channel_id,
             event: relay_signed_workflow_dispatch(&new_relay, &workflow_owner, &agent),
@@ -7602,6 +7853,7 @@ mod author_gate_tests {
         );
 
         let stale_old_event = relay::BuzzEvent {
+            delivery: None,
             connection_generation: 2,
             channel_id,
             event: relay_signed_workflow_dispatch(&old_relay, &workflow_owner, &agent),
@@ -9348,6 +9600,7 @@ mod error_outcome_emission_tests {
     //!   If any branch drops its `emit_turn_error` call, the matching test goes
     //!   red.
 
+    include!("delivery_lifecycle_tests.rs");
     use super::*;
     use crate::acp::{AcpClient, AcpError};
     use crate::observer::ObserverHandle;
@@ -9908,6 +10161,7 @@ mod error_outcome_emission_tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
         queue.push(queue::QueuedEvent {
+            delivery: None,
             channel_id,
             scope: scope.clone(),
             event,
@@ -10105,6 +10359,7 @@ mod error_outcome_emission_tests {
                 channel_id: __cid,
                 scope: scope::SessionScope::Conversation { channel_id: __cid },
                 events: vec![BatchEvent {
+                    delivery: None,
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
@@ -10214,6 +10469,7 @@ mod error_outcome_emission_tests {
                 channel_id,
                 scope: scope::SessionScope::Conversation { channel_id },
                 events: vec![BatchEvent {
+                    delivery: None,
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
@@ -10335,6 +10591,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                delivery: None,
                 event: EventBuilder::new(Kind::Custom(9), "test")
                     .sign_with_keys(&Keys::generate())
                     .unwrap(),
@@ -10431,6 +10688,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                delivery: None,
                 event: EventBuilder::new(Kind::Custom(9), "final-attempt")
                     .sign_with_keys(&Keys::generate())
                     .unwrap(),
@@ -10512,6 +10770,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                delivery: None,
                 event: original_event.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -10542,6 +10801,7 @@ mod error_outcome_emission_tests {
         // out on drain — so it is already queued by the time
         // handle_prompt_result runs.
         queue.push(QueuedEvent {
+            delivery: None,
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             event: new_event.clone(),
@@ -10783,6 +11043,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: session_scope.clone(),
             events: vec![BatchEvent {
+                delivery: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -10937,6 +11198,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                delivery: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -11025,6 +11287,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                delivery: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),

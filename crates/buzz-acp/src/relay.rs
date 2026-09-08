@@ -22,6 +22,10 @@
 //! channel. `next_event()` reads from the event receiver.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{
+    atomic::{AtomicU64, AtomicU8, Ordering},
+    Arc, Weak,
+};
 use std::time::Duration;
 
 /// Default capacity of the event channel from background task to harness.
@@ -584,6 +588,8 @@ impl RestClient {
 /// Events the harness cares about.
 #[derive(Debug, Clone)]
 pub struct BuzzEvent {
+    /// Private tracked admission lease; absent for ordinary stock delivery.
+    pub(crate) delivery: Option<DeliveryLease>,
     /// Which authenticated relay connection delivered this event. Generation 0
     /// is the initial connection; each successful reconnect increments it
     /// before any buffered or live event from that connection is forwarded.
@@ -662,6 +668,12 @@ const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
 
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
 enum RelayCommand {
+    /// Local managed-gateway feedback; never retained across a reconnect.
+    DeliveryAck {
+        generation: u64,
+        event_id: String,
+        outcome: &'static str,
+    },
     /// Subscribe to a channel (sends a NIP-01 REQ) with the given filter.
     Subscribe {
         channel_id: Uuid,
@@ -720,7 +732,251 @@ pub struct RelayEventPublisher {
     cmd_tx: mpsc::Sender<RelayCommand>,
 }
 
+/// Shared disposition survives feedback refusal; ownership does not. The registry
+/// keeps only a weak lease so failed/evicted work becomes replayable naturally.
+#[derive(Debug)]
+struct DeliveryState {
+    generation: AtomicU64,
+    // 0 pending admission, 1 accepted, 2 rejected, 3 completed.
+    disposition: AtomicU8,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeliveryLease {
+    state: Arc<DeliveryState>,
+    alive: Arc<()>,
+}
+
+impl DeliveryLease {
+    fn new(generation: u64) -> Self {
+        Self {
+            state: Arc::new(DeliveryState {
+                generation: AtomicU64::new(generation),
+                disposition: AtomicU8::new(0),
+            }),
+            alive: Arc::new(()),
+        }
+    }
+}
+
+struct DeliveryEntry {
+    state: Arc<DeliveryState>,
+    alive: Weak<()>,
+    order: u64,
+}
+
+#[derive(Default)]
+struct TrackedDeliveries {
+    entries: HashMap<String, DeliveryEntry>,
+    order: u64,
+}
+
+enum TrackedAdmission {
+    New(DeliveryLease),
+    Replay(Option<&'static str>),
+    Full,
+}
+
+impl TrackedDeliveries {
+    fn admit(&mut self, id: &str, generation: u64, limit: usize) -> TrackedAdmission {
+        if let Some(entry) = self.entries.get(id) {
+            // New socket replay (not a late command) authorizes rebinding.
+            entry.state.generation.store(generation, Ordering::SeqCst);
+            // Pin work ownership BEFORE reading disposition. If the last owner
+            // completes concurrently, either this pin prevents readmission or
+            // the terminal store precedes the failed upgrade and is visible.
+            let alive = entry.alive.upgrade();
+            let disposition = entry.state.disposition.load(Ordering::SeqCst);
+            if disposition >= 2 || alive.is_some() {
+                return TrackedAdmission::Replay(match disposition {
+                    1 => Some("accepted"),
+                    2 => Some("rejected"),
+                    3 => Some("completed"),
+                    _ => None,
+                });
+            }
+            self.entries.remove(id);
+        }
+        if self.entries.len() >= limit {
+            // A bounded terminal cache, never an active-work eviction policy.
+            let oldest = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.state.disposition.load(Ordering::SeqCst) >= 2
+                        || entry.alive.strong_count() == 0
+                })
+                .min_by_key(|(_, entry)| entry.order)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = oldest {
+                self.entries.remove(&id);
+            } else {
+                return TrackedAdmission::Full;
+            }
+        }
+        let lease = DeliveryLease::new(generation);
+        self.order = self.order.saturating_add(1);
+        self.entries.insert(
+            id.to_owned(),
+            DeliveryEntry {
+                state: lease.state.clone(),
+                alive: Arc::downgrade(&lease.alive),
+                order: self.order,
+            },
+        );
+        TrackedAdmission::New(lease)
+    }
+}
+
+fn local_delivery_enabled(relay_url: &str) -> bool {
+    std::env::var("JANET_DELIVERY_ACK").as_deref() == Ok("1") && literal_loopback(relay_url)
+}
+
+fn literal_loopback(relay_url: &str) -> bool {
+    // URL parsing normalizes shorthand IPv4 (127.1), so check raw authority
+    // as well. No DNS aliases, userinfo, or remote feedback endpoints.
+    let Some(rest) = relay_url
+        .strip_prefix("ws://")
+        .or_else(|| relay_url.strip_prefix("wss://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let literal = ["127.0.0.1", "[::1]"].iter().any(|host| {
+        authority == *host
+            || authority.strip_prefix(host).is_some_and(|suffix| {
+                suffix.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
+    });
+    literal && url::Url::parse(relay_url).is_ok()
+}
+
+/// Private localhost delivery receipt carried with queued/requeued work.
+#[derive(Clone, Debug)]
+pub struct DeliveryReceipt {
+    cmd_tx: mpsc::Sender<RelayCommand>,
+    event_id: String,
+    lease: DeliveryLease,
+    // Native injection is not completion. Only the read loop may open this
+    // gate, before returning the owning prompt result (not the ack watcher).
+    native_injected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl DeliveryReceipt {
+    /// Report admission without asserting durable completion.
+    pub fn accepted(&self) {
+        if self
+            .lease
+            .state
+            .disposition
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            self.report("accepted");
+        }
+    }
+    /// Report deliberate author/rule/drop-mode rejection, not transport failure.
+    pub fn rejected(&self) {
+        self.terminal_report("rejected");
+    }
+    /// Report successful terminal work, never cancellation or failed drain.
+    pub fn completed(&self) {
+        if self.completion_eligible() {
+            self.terminal_report("completed");
+        }
+    }
+    fn terminal_report(&self, outcome: &'static str) {
+        let value = if outcome == "completed" { 3 } else { 2 };
+        if self
+            .lease
+            .state
+            .disposition
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+                (old < 2).then_some(value)
+            })
+            .is_ok()
+        {
+            self.report(outcome);
+        }
+    }
+    pub(crate) fn native_pending(&self) -> Self {
+        let mut receipt = self.clone();
+        receipt.native_injected = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        receipt
+    }
+    pub(crate) fn mark_native_injected(&self) {
+        if let Some(gate) = &self.native_injected {
+            gate.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    pub(crate) fn completion_eligible(&self) -> bool {
+        self.native_injected
+            .as_ref()
+            .is_none_or(|gate| gate.load(std::sync::atomic::Ordering::Acquire))
+    }
+    fn report(&self, outcome: &'static str) {
+        if self
+            .cmd_tx
+            .try_send(RelayCommand::DeliveryAck {
+                generation: self.lease.state.generation.load(Ordering::SeqCst),
+                event_id: self.event_id.clone(),
+                outcome,
+            })
+            .is_err()
+        {
+            // Do NOT rerun successful work to repair feedback. The gateway must
+            // replay the uncommitted page on timeout/disconnect. The registry
+            // replays retained terminal disposition, without rerunning work.
+            warn!(event_id = %self.event_id, outcome, "local delivery feedback capacity unavailable; checkpoint remains uncommitted");
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct DeliveryProbe {
+    rx: mpsc::Receiver<RelayCommand>,
+}
+#[cfg(test)]
+impl DeliveryProbe {
+    pub(crate) fn new(id: &str, capacity: usize) -> (DeliveryReceipt, Self) {
+        let (cmd_tx, rx) = mpsc::channel(capacity);
+        (
+            DeliveryReceipt {
+                cmd_tx,
+                event_id: id.into(),
+                lease: DeliveryLease::new(7),
+                native_injected: None,
+            },
+            Self { rx },
+        )
+    }
+    pub(crate) fn outcomes(&mut self) -> Vec<&'static str> {
+        let mut outcomes = vec![];
+        while let Ok(RelayCommand::DeliveryAck { outcome, .. }) = self.rx.try_recv() {
+            outcomes.push(outcome);
+        }
+        outcomes
+    }
+}
+
 impl RelayEventPublisher {
+    /// Opt-in feedback is confined to a loopback managed relay by the caller.
+    pub fn delivery_receipt(&self, event: &BuzzEvent, relay_url: &str) -> Option<DeliveryReceipt> {
+        if !literal_loopback(relay_url) {
+            return None;
+        }
+        event.delivery.as_ref().map(|lease| DeliveryReceipt {
+            cmd_tx: self.cmd_tx.clone(),
+            event_id: event.event.id.to_hex(),
+            lease: lease.clone(),
+            native_injected: None,
+        })
+    }
+
     /// Publish a signed event through the relay background task.
     pub async fn publish_event(&self, event: Event) -> Result<(), RelayError> {
         self.cmd_tx
@@ -1136,6 +1392,8 @@ impl TwoGenDedup {
 
 /// State maintained by the background WebSocket task.
 struct BgState {
+    tracked_delivery_enabled: bool,
+    tracked_deliveries: TrackedDeliveries,
     /// Active subscriptions: channel_id → subscription_id string.
     active_subscriptions: HashMap<Uuid, String>,
     /// Most recent `created_at` timestamp seen per channel (for `since` filter).
@@ -1231,6 +1489,8 @@ impl BgState {
             active_subscriptions: HashMap::new(),
             last_seen: HashMap::new(),
             seen_ids: TwoGenDedup::new(SEEN_ID_LIMIT),
+            tracked_delivery_enabled: false,
+            tracked_deliveries: TrackedDeliveries::default(),
             active_filters: HashMap::new(),
             membership_dropped_since: None,
             membership_last_seen: None,
@@ -1282,7 +1542,7 @@ impl BgState {
     fn channel_since(&self, channel_id: &Uuid) -> Option<u64> {
         let last_seen = self.last_seen.get(channel_id).copied();
         let dropped = self.channel_dropped_since.get(channel_id).copied();
-        match (last_seen, dropped) {
+        let replay = match (last_seen, dropped) {
             (Some(l), Some(d)) => Some(l.min(d)),
             (Some(l), None) => Some(l),
             (None, Some(d)) => Some(d),
@@ -1291,6 +1551,24 @@ impl BgState {
                 .get(channel_id)
                 .copied()
                 .or(self.startup_watermark),
+        };
+        // In the coordinated receipt mode, arrival/terminal feedback for a
+        // newer page cannot prove that an unseen older tail was exhausted.
+        // Keep the original ordinary floor across socket generations. The
+        // gateway's single bounded scanner owns page progress and overlap;
+        // advancing this floor from last_seen would compete with that cursor.
+        if self.tracked_delivery_enabled {
+            let origin = self
+                .subscribe_since
+                .get(channel_id)
+                .copied()
+                .or(self.startup_watermark);
+            match (replay, origin) {
+                (Some(r), Some(o)) => Some(r.min(o)),
+                (r, o) => r.or(o),
+            }
+        } else {
+            replay
         }
     }
 
@@ -1487,6 +1765,7 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
                 state.park_gated_observer_frame(event);
             }
         }
+        RelayCommand::DeliveryAck { .. } => {}
         // Already reconnecting — redundant.
         RelayCommand::Reconnect => {}
         // Callers MUST handle Shutdown before calling this function.
@@ -1708,6 +1987,21 @@ async fn execute_connected_command(
             }
             true
         }
+        RelayCommand::DeliveryAck {
+            generation,
+            event_id,
+            outcome,
+        } => {
+            // The ACK belongs to the last socket admission/replay that rebound
+            // its lease. Drop commands queued before that rebind.
+            if generation != state.connection_generation {
+                return true;
+            }
+            let frame = serde_json::json!(["JANET_ACK", event_id, outcome]).to_string();
+            ws_send_timeout(ws, Message::Text(frame.into()), WS_SEND_TIMEOUT_SECS)
+                .await
+                .is_ok()
+        }
         RelayCommand::SetStartupWatermark { ts } => {
             state.startup_watermark = Some(ts);
             if state.membership_last_seen.is_none() {
@@ -1744,6 +2038,7 @@ async fn run_background_task(
     auth_tag: Option<nostr::Tag>,
 ) {
     let mut state = BgState::new();
+    state.tracked_delivery_enabled = local_delivery_enabled(&relay_url);
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -2331,6 +2626,7 @@ async fn handle_ws_message(
                         }
                         let ts = event.created_at.as_secs();
                         let buzz_event = BuzzEvent {
+                            delivery: None,
                             connection_generation: state.connection_generation,
                             channel_id: channel_uuid,
                             event: *event,
@@ -2371,8 +2667,45 @@ async fn handle_ws_message(
                     } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
+                        let delivery = if state.tracked_delivery_enabled {
+                            match state.tracked_deliveries.admit(
+                                &event_id_hex,
+                                state.connection_generation,
+                                SEEN_ID_LIMIT,
+                            ) {
+                                TrackedAdmission::New(lease) => Some(lease),
+                                TrackedAdmission::Replay(outcome) => {
+                                    if let Some(outcome) = outcome {
+                                        return execute_connected_command(
+                                            ws,
+                                            state,
+                                            agent_pubkey_hex,
+                                            RelayCommand::DeliveryAck {
+                                                generation: state.connection_generation,
+                                                event_id: event_id_hex,
+                                                outcome,
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                    return true;
+                                }
+                                TrackedAdmission::Full => {
+                                    warn!("tracked delivery capacity full; refusing admission without ACK");
+                                    return true;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        // Tracked lease/disposition is the authority, not seen_ids.
+                        // Unknown/lost tracked work must bypass historical ID membership.
+                        if delivery.is_some() {
+                            state.seen_ids.remove(&event_id_hex);
+                        }
                         if state.record_event(channel_id, &event) {
                             let buzz_event = BuzzEvent {
+                                delivery,
                                 connection_generation: state.connection_generation,
                                 channel_id,
                                 event: *event,
@@ -4792,6 +5125,343 @@ mod tests {
         (client, server.await.expect("join test websocket server"))
     }
 
+    #[tokio::test]
+    async fn receipt_reconnect_rebinds_active_and_replays_terminal_without_dispatch() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (control_tx, _control_rx) = mpsc::channel(4);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let publisher = RelayEventPublisher { cmd_tx };
+        let mut state = BgState::new();
+        state.tracked_delivery_enabled = true;
+        let sub = channel_sub_id(Uuid::new_v4());
+        let event = make_signed_channel_event(&Keys::generate(), "active", 2_000);
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &control_tx,
+                &mut state,
+                &sub,
+                &event
+            )
+            .await
+        );
+        let received = event_rx.try_recv().unwrap().unwrap();
+        let receipt = publisher
+            .delivery_receipt(&received, "ws://127.0.0.1:1234")
+            .unwrap();
+        drop(received);
+        receipt.accepted();
+        let old_accepted = cmd_rx.try_recv().unwrap();
+        // Actual new socket; the production reconnect handshake increments this
+        // counter before invoking the same verified-event handler.
+        let (new_client, new_server) = test_ws_pair().await;
+        client = new_client;
+        server.close(None).await.unwrap();
+        server = new_server;
+        state.connection_generation += 1;
+        assert!(execute_connected_command(&mut client, &mut state, "agent", old_accepted).await);
+        assert!(timeout(Duration::from_millis(20), server.next())
+            .await
+            .is_err());
+        for _ in 0..3 {
+            assert!(
+                handle_test_relay_event(
+                    &mut client,
+                    &event_tx,
+                    &control_tx,
+                    &mut state,
+                    &sub,
+                    &event
+                )
+                .await
+            );
+            assert_eq!(
+                next_test_frame(&mut server).await,
+                json!(["JANET_ACK", event.id.to_hex(), "accepted"])
+            );
+            assert!(
+                event_rx.try_recv().is_err(),
+                "active side effects must have only one dispatch"
+            );
+        }
+        // Late completion from the ORIGINAL task now targets the rebound socket.
+        receipt.completed();
+        assert!(
+            execute_connected_command(&mut client, &mut state, "agent", cmd_rx.try_recv().unwrap())
+                .await
+        );
+        assert_eq!(
+            next_test_frame(&mut server).await,
+            json!(["JANET_ACK", event.id.to_hex(), "completed"])
+        );
+        drop(receipt);
+        for _ in 0..3 {
+            assert!(
+                handle_test_relay_event(
+                    &mut client,
+                    &event_tx,
+                    &control_tx,
+                    &mut state,
+                    &sub,
+                    &event
+                )
+                .await
+            );
+            assert_eq!(
+                next_test_frame(&mut server).await,
+                json!(["JANET_ACK", event.id.to_hex(), "completed"])
+            );
+            assert!(event_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_lost_work_retries_but_lost_terminal_feedback_does_not() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let publisher = RelayEventPublisher { cmd_tx };
+        let mut state = BgState::new();
+        state.tracked_delivery_enabled = true;
+        let sub = channel_sub_id(Uuid::new_v4());
+        for terminal in ["completed", "rejected"] {
+            let event = make_signed_channel_event(&Keys::generate(), terminal, 2_000);
+            for _ in 0..3 {
+                assert!(
+                    handle_test_relay_event(
+                        &mut client,
+                        &event_tx,
+                        &control_tx,
+                        &mut state,
+                        &sub,
+                        &event
+                    )
+                    .await
+                );
+                let received = event_rx.try_recv().unwrap().unwrap();
+                let receipt = publisher
+                    .delivery_receipt(&received, "ws://127.0.0.1")
+                    .unwrap();
+                receipt.accepted();
+                assert!(state.seen_ids.contains(&event.id.to_hex()));
+                drop(received);
+                drop(receipt); // failed/cancelled/evicted, no work owner survives
+                cmd_rx.try_recv().unwrap();
+                state.connection_generation += 1;
+            }
+            assert!(
+                handle_test_relay_event(
+                    &mut client,
+                    &event_tx,
+                    &control_tx,
+                    &mut state,
+                    &sub,
+                    &event
+                )
+                .await
+            );
+            let received = event_rx.try_recv().unwrap().unwrap();
+            let receipt = publisher
+                .delivery_receipt(&received, "ws://127.0.0.1")
+                .unwrap();
+            receipt.accepted(); // fills bounded command channel
+            if terminal == "completed" {
+                receipt.completed();
+            } else {
+                receipt.rejected();
+            }
+            drop(received);
+            drop(receipt);
+            cmd_rx.try_recv().unwrap(); // deliberately lose both feedbacks
+            state.connection_generation += 1;
+            for _ in 0..3 {
+                assert!(
+                    handle_test_relay_event(
+                        &mut client,
+                        &event_tx,
+                        &control_tx,
+                        &mut state,
+                        &sub,
+                        &event
+                    )
+                    .await
+                );
+                assert_eq!(
+                    next_test_frame(&mut server).await,
+                    json!(["JANET_ACK", event.id.to_hex(), terminal])
+                );
+                assert!(
+                    event_rx.try_recv().is_err(),
+                    "feedback repair must not repeat execution"
+                );
+            }
+        }
+        // Event-mailbox overflow releases its lease too (not a rejection).
+        let first = make_signed_channel_event(&Keys::generate(), "mailbox1", 3_000);
+        let lost = make_signed_channel_event(&Keys::generate(), "mailbox2", 3_000);
+        for e in [&first, &lost] {
+            assert!(
+                handle_test_relay_event(&mut client, &event_tx, &control_tx, &mut state, &sub, e)
+                    .await
+            );
+        }
+        drop(event_rx.try_recv().unwrap());
+        assert!(
+            handle_test_relay_event(&mut client, &event_tx, &control_tx, &mut state, &sub, &lost)
+                .await
+        );
+        assert_eq!(event_rx.try_recv().unwrap().unwrap().event.id, lost.id);
+    }
+
+    #[test]
+    fn receipt_registry_bounded_active_ownership_and_client_isolation() {
+        let mut registry = TrackedDeliveries::default();
+        let TrackedAdmission::New(a) = registry.admit("a", 0, 2) else {
+            panic!()
+        };
+        let TrackedAdmission::New(b) = registry.admit("b", 0, 2) else {
+            panic!()
+        };
+        assert!(matches!(registry.admit("c", 0, 2), TrackedAdmission::Full));
+        for i in 1..20 {
+            assert!(matches!(
+                registry.admit("a", i, 2),
+                TrackedAdmission::Replay(None)
+            ));
+            assert_eq!(a.state.generation.load(Ordering::SeqCst), i);
+        }
+        // A separate authenticated client does not see another tenant's lease.
+        assert!(matches!(
+            TrackedDeliveries::default().admit("a", 0, 2),
+            TrackedAdmission::New(_)
+        ));
+        b.state.disposition.store(3, Ordering::SeqCst);
+        assert!(matches!(
+            registry.admit("c", 0, 2),
+            TrackedAdmission::New(_)
+        ));
+        assert!(registry.entries.contains_key("a"));
+        assert!(!registry.entries.contains_key("b"));
+        assert_eq!(registry.entries.len(), 2);
+        drop(a);
+        assert!(matches!(
+            registry.admit("a", 22, 2),
+            TrackedAdmission::New(_)
+        ));
+        for url in [
+            "ws://127.0.0.1",
+            "wss://127.0.0.1:443/path",
+            "ws://[::1]:1234",
+        ] {
+            assert!(literal_loopback(url), "{url}");
+        }
+        for url in [
+            "ws://localhost",
+            "ws://127.1",
+            "ws://2130706433",
+            "ws://127.0.0.1.evil",
+            "ws://user@127.0.0.1",
+            "ws://192.0.2.1",
+            "http://127.0.0.1",
+        ] {
+            assert!(!literal_loopback(url), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_opt_out_preserves_seen_dedup_across_reconnect() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let sub = channel_sub_id(Uuid::new_v4());
+        let event = make_signed_channel_event(&Keys::generate(), "ordinary", 2_000);
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &control_tx,
+                &mut state,
+                &sub,
+                &event
+            )
+            .await
+        );
+        assert!(event_rx.try_recv().unwrap().unwrap().delivery.is_none());
+        state.connection_generation += 1;
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &control_tx,
+                &mut state,
+                &sub,
+                &event
+            )
+            .await
+        );
+        assert!(event_rx.try_recv().is_err());
+        assert!(state.tracked_deliveries.entries.is_empty());
+        assert!(timeout(Duration::from_millis(20), server.next())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn receipt_wire_generation_fences_and_disconnected_discard() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        state.connection_generation = 7;
+        let (receipt, mut probe) = DeliveryProbe::new("a", 8);
+        receipt.accepted();
+        receipt.completed();
+        receipt.clone().completed();
+        receipt.rejected(); // terminal clones cannot contradict completion
+        for expected in ["accepted", "completed"] {
+            let cmd = probe.rx.try_recv().unwrap();
+            assert!(execute_connected_command(&mut client, &mut state, "agent", cmd).await);
+            assert_eq!(
+                next_test_frame(&mut server).await,
+                serde_json::json!(["JANET_ACK", "a", expected])
+            );
+        }
+        assert!(probe.outcomes().is_empty());
+        state.connection_generation = 8;
+        let (stale, mut old) = DeliveryProbe::new("stale", 8);
+        stale.completed();
+        assert!(
+            execute_connected_command(&mut client, &mut state, "agent", old.rx.try_recv().unwrap())
+                .await
+        );
+        assert!(timeout(Duration::from_millis(20), server.next())
+            .await
+            .is_err());
+        let (disconnected, mut old) = DeliveryProbe::new("offline", 8);
+        disconnected.completed();
+        apply_command_to_state(&mut state, old.rx.try_recv().unwrap());
+        assert!(timeout(Duration::from_millis(20), server.next())
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn receipt_full_or_closed_feedback_never_retries_execution_or_terminal() {
+        let (receipt, mut probe) = DeliveryProbe::new("full", 1);
+        receipt.accepted();
+        receipt.completed(); // refused, not a work retry request
+        assert_eq!(probe.outcomes(), vec!["accepted"]);
+        receipt.completed();
+        assert!(probe.outcomes().is_empty());
+        drop(probe);
+        receipt.completed();
+        let (receipt, probe) = DeliveryProbe::new("closed", 1);
+        drop(probe);
+        receipt.rejected();
+    }
+
     async fn next_test_frame(
         server: &mut WebSocketStream<tokio::net::TcpStream>,
     ) -> serde_json::Value {
@@ -5051,6 +5721,35 @@ mod tests {
                 replay_since: Some(1_000),
             },
         );
+    }
+
+    #[tokio::test]
+    async fn coordinated_ordinary_reconnect_keeps_unseen_tail_floor_on_wire() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        seed_test_subscription(&mut state, channel_id);
+        state.tracked_delivery_enabled = true;
+        state.last_seen.insert(channel_id, 10_000);
+        // No dropped receipt is available for an event the gateway never sent.
+        for _ in 0..2 {
+            let result = resubscribe_after_reconnect(
+                &mut client,
+                &mut cmd_rx,
+                &mut state,
+                "agent-pubkey",
+                true,
+            )
+            .await;
+            assert!(matches!(result, ResubscribeResult::Ok));
+            let frame = next_test_frame(&mut server).await;
+            assert_eq!(frame[2]["since"], 1_000 - SINCE_SKEW_SECS);
+        }
+        state.tracked_delivery_enabled = false;
+        assert_eq!(state.channel_since(&channel_id), Some(10_000));
+        state.clear_channel_state(&channel_id);
+        assert_eq!(state.channel_since(&channel_id), None);
     }
 
     #[tokio::test]

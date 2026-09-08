@@ -747,6 +747,7 @@ mod tests {
         let agent = nostr::Keys::generate().public_key().to_hex();
         let channel_id = Uuid::new_v4();
         let event = relay::BuzzEvent {
+            delivery: None,
             connection_generation: 0,
             channel_id,
             event: crate::author_gate_tests::relay_signed_workflow_dispatch(

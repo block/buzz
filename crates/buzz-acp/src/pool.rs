@@ -505,6 +505,9 @@ pub enum ControlSignal {
 /// write, so the watcher only needs to release nothing and fall back to the
 /// universal `ControlSignal::Steer` cancel+merge path.
 pub struct SteerRequest {
+    /// Private receipt gate opened by the read loop only for injection into
+    /// the turn it is awaiting, never for a detached startedNewTurn response.
+    pub delivery: Option<crate::relay::DeliveryReceipt>,
     /// Prompt body text blocks. Each entry becomes one `text` content
     /// block in `params.prompt`. Built by the main loop via
     /// `queue::native_steer_framing()` + `queue::format_event_block` so
@@ -524,6 +527,12 @@ pub struct SteerRequest {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum SteerError {
+    /// The one-slot mailbox is busy. The caller retains the event in the
+    /// existing bounded event queue for normal turn-boundary dispatch.
+    Backpressure,
+    /// A one-shot control has already been sent to this task. Do not send
+    /// more steering while cancellation/rotation and tool drain are pending.
+    ControlPending,
     /// The agent returned a JSON-RPC error response to the steer request.
     ///
     /// `code` is the JSON-RPC error code:
@@ -1101,10 +1110,10 @@ impl AgentPool {
     ///
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
-    /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
-    /// (already-in-flight write, or read loop torn down). Callers must
-    /// fall back to the universal `ControlSignal::Steer` cancel+merge path
-    /// on `Err`.
+    /// write). `Full` returns `Backpressure`, not a transport failure; the
+    /// caller must leave the event queued for turn-boundary dispatch without
+    /// cancelling. `ControlPending` similarly leaves it queued while a prior
+    /// control drains. `Closed` remains a transport failure.
     ///
     /// This does **not** spawn the ack watcher — the caller owns the
     /// oneshot `ack_tx` inside `SteerRequest` and is responsible for
@@ -1128,29 +1137,47 @@ impl AgentPool {
             .values_mut()
             .find(|m| m.scope.as_ref() == Some(scope))
             .ok_or(SteerError::PromptCompleted)?;
+        if meta.control_tx.is_none() {
+            return Err(SteerError::ControlPending);
+        }
         let tx = meta
             .steer_tx
             .as_ref()
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
-        tx.try_send(request)
-            .map_err(|e| SteerError::Transport(e.to_string()))
+        tx.try_send(request).map_err(|e| match e {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => SteerError::Backpressure,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                SteerError::Transport("steer channel closed".into())
+            }
+        })
     }
 
     /// Durably associate a successful steer with the exact ACP session that
     /// accepted it. Acks may arrive before or after the prompt result: while
     /// the task is in flight we stage the delivery in `TaskMeta`; after return
     /// we write directly to the idle agent's matching live-session ledger.
+    #[cfg(test)]
     pub fn record_successful_steer(
         &mut self,
         scope: &SessionScope,
         event_id: String,
         session_id: String,
     ) -> bool {
-        if let Some(meta) = self
-            .task_map
-            .values_mut()
-            .find(|meta| meta.scope.as_ref() == Some(scope))
-        {
+        self.record_successful_steer_for_turn(scope, "", event_id, session_id)
+    }
+
+    /// Fence watcher feedback to its originating task, or an idle matching
+    /// session after return. Never write a replacement task's ledger.
+    pub fn record_successful_steer_for_turn(
+        &mut self,
+        scope: &SessionScope,
+        turn_id: &str,
+        event_id: String,
+        session_id: String,
+    ) -> bool {
+        if let Some(meta) = self.task_map.values_mut().find(|meta| {
+            meta.scope.as_ref() == Some(scope) && (turn_id.is_empty() || meta.turn_id == turn_id)
+        }) {
             meta.successful_steer_deliveries
                 .insert(SuccessfulSteerDelivery {
                     event_id,
@@ -6571,6 +6598,7 @@ mod tests {
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                delivery: None,
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: std::time::Instant::now(),
@@ -6823,6 +6851,7 @@ done"#
                 channel_id,
                 scope: SessionScope::Conversation { channel_id },
                 events: vec![crate::queue::BatchEvent {
+                    delivery: None,
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
@@ -6906,11 +6935,13 @@ done"#
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                delivery: None,
                 event: new_event.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
             }],
             cancelled_events: vec![crate::queue::BatchEvent {
+                delivery: None,
                 event: carry_over.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -6921,6 +6952,7 @@ done"#
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                delivery: None,
                 event: next_event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -7077,6 +7109,7 @@ done"#
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                delivery: None,
                 event: trigger,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -7434,6 +7467,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             channel_id: scope.channel_id(),
             scope,
             events: vec![crate::queue::BatchEvent {
+                delivery: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -8150,6 +8184,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                delivery: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -9898,6 +9933,7 @@ done"#
             channel_id,
             scope: conv(channel_id),
             events: vec![crate::queue::BatchEvent {
+                delivery: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
