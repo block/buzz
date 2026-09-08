@@ -18,8 +18,8 @@ use crate::{
     managed_agents::{
         agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
         load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-        resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
+        resolve_effective_agent_env, save_global_agent_config, stop_managed_agent_process,
+        storage::save_runtime_metadata_batch, sync_managed_agent_processes, validate_global_config,
         AgentReadiness, BackendKind, GlobalAgentConfig,
     },
 };
@@ -280,7 +280,7 @@ async fn restart_local_agent_on_config_change(
             &current_instance_id(&app_for_stop),
         );
         if sync_changed {
-            save_managed_agents(&app_for_stop, &records)?;
+            save_runtime_metadata_batch(&app_for_stop, &records)?;
         }
 
         // Re-check eligibility under lock with current record state.
@@ -325,7 +325,7 @@ async fn restart_local_agent_on_config_change(
         // Stop the process.
         let record_mut = find_managed_agent_mut(&mut records, &pubkey_owned)?;
         stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
-        save_managed_agents(&app_for_stop, &records)?;
+        save_runtime_metadata_batch(&app_for_stop, &records)?;
 
         Ok(runtime_keys)
     })
@@ -386,7 +386,7 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     record.last_error = Some(error.to_string());
     record.updated_at = crate::util::now_iso();
-    save_managed_agents(app, &records)
+    save_runtime_metadata_batch(app, &records)
 }
 
 /// Pure predicate: should an agent be restarted given resolved readiness and

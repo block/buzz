@@ -31,7 +31,7 @@ mod setup_payload;
 use setup_payload::apply_setup_payload_env;
 
 mod stop;
-pub(crate) use stop::managed_agent_runtime_keys;
+pub(crate) use stop::{managed_agent_runtime_keys, stop_managed_agent_pair};
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
@@ -41,11 +41,13 @@ mod process;
 #[cfg(test)]
 use process::{
     buzz_marker_entry, name_matches_interpreter, name_matches_known_binary,
-    terminate_runtime_receipt_with, valid_agent_runtime_receipt_with,
+    select_pair_runtime_receipt_with, terminate_runtime_receipt_with,
+    valid_agent_runtime_receipt_with,
 };
 pub(crate) use process::{
     current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
     terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    with_pair_runtime_receipt_authority,
 };
 
 mod orphan_sweep;
@@ -108,8 +110,8 @@ fn persona_drift_state(
 /// pin is ignored — see `effective_agent_relay_url`). Returns `None` for
 /// records that cannot form a valid pair key yet (e.g. key-less agents that
 /// mint keys on first start).
-pub(crate) fn workspace_pair_key(
-    app: &AppHandle,
+pub(crate) fn workspace_pair_key<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
 ) -> Option<ManagedAgentRuntimeKey> {
     let state = app.state::<crate::app_state::AppState>();
@@ -133,8 +135,8 @@ pub(crate) fn resolve_workspace_pair_key(
     ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
 }
 
-pub fn build_managed_agent_summary(
-    app: &AppHandle,
+pub fn build_managed_agent_summary<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     personas: &[crate::managed_agents::types::AgentDefinition],
@@ -330,7 +332,25 @@ pub fn build_managed_agent_summary(
         last_error: record.last_error.clone(),
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
-        auto_restart_on_config_change: record.auto_restart_on_config_change,
+        auto_restart_on_config_change: record.auto_restart_on_config_change
+            && pair_runtime
+                .is_none_or(|runtime| runtime.spawn_config.runtime_configuration.is_none())
+            && app
+                .state::<crate::app_state::AppState>()
+                .signing_keys()
+                .ok()
+                .is_some_and(|keys| {
+                    record
+                        .runtime_configurations
+                        .get(
+                            &keys.public_key().to_hex(),
+                            &crate::relay::relay_ws_url_with_override(
+                                app.state::<crate::app_state::AppState>().inner(),
+                            ),
+                        )
+                        .entries
+                        .is_empty()
+                }),
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
@@ -402,11 +422,12 @@ pub(crate) fn configure_runtime_cli(
 #[must_use]
 pub(crate) struct EffortApplied(());
 
-/// Apply effort env to an agent spawn command. Called by `spawn_agent_child`
-/// (production) and `effort_cmd_tests` (test seam). Inner-seam: removing
-/// `apply_spawn_effort_env` below turns the production-sequence tests RED.
-/// Outer-seam: the returned token is consumed by `spawn_with_effort_proof`;
-/// deleting this call leaves `effort` undefined at the spawn site.
+/// Apply effort env to an agent spawn command. Called by
+/// `spawn_agent_child_prepared` (production) and `effort_cmd_tests` (test
+/// seam). Inner-seam: removing `apply_spawn_effort_env` below turns the
+/// production-sequence tests RED. Outer-seam: the returned token is consumed
+/// by `spawn_with_effort_proof`; deleting this call leaves `effort` undefined
+/// at the spawn site.
 pub(crate) fn apply_effort_to_spawn_command(
     cmd: &mut std::process::Command,
     record: &crate::managed_agents::types::ManagedAgentRecord,
@@ -423,8 +444,9 @@ pub(crate) fn apply_effort_to_spawn_command(
 }
 
 /// Spawn the agent command, consuming the `EffortApplied` proof token.
-/// Deleting `apply_effort_to_spawn_command` from `spawn_agent_child` leaves
-/// `effort` undefined here — a compile error CI catches before any test runs.
+/// Deleting `apply_effort_to_spawn_command` from `spawn_agent_child_prepared`
+/// leaves `effort` undefined here — a compile error CI catches before any
+/// test runs.
 pub(crate) fn spawn_with_effort_proof(
     cmd: &mut std::process::Command,
     _effort: EffortApplied,
@@ -444,14 +466,23 @@ pub(crate) fn spawn_with_effort_proof(
 /// publishes the triggering message before this spawn and passes its send
 /// timestamp here so the harness's first REQ replays past that message no
 /// matter how long the spawn takes. buzz-acp clamps stale floors to ~15 min.
-pub fn spawn_agent_child(
-    app: &AppHandle,
+///
+/// `prepared`: the captured, preflighted launch plan. Production callers pass
+/// a `PreparedLaunch`; tests may pass `None` to exercise the refusal paths
+/// that reject an un-preflighted spawn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_agent_child_prepared<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     relay_url: &str,
     lazy: bool,
     owner_hex: Option<&str>,
     replay_floor_unix: Option<u64>,
+    resume: Option<&super::remote_stop::ResumeTicket>,
+    prepared: Option<&super::runtime_configurations::PreparedLaunch>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    super::remote_stop::check_launch(app, &key, relay_url, owner_hex, resume)?;
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
@@ -462,7 +493,6 @@ pub fn spawn_agent_child(
     // command, so we recompute them from the effective value rather than the
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
-    let teams = super::load_teams(app).unwrap_or_default();
     // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
     // and for the env-var merge at spawn time.
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
@@ -478,29 +508,37 @@ pub fn spawn_agent_child(
     // inherits it — no caller can bypass this by reaching `spawn_agent_child`
     // directly. Checked before any side effect (log marker, log file, process
     // spawn) so a refused spawn leaves no trace.
-    let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
-        record, &personas, &global,
-    )
-    .require_resolved()?;
-
-    // Single typed resolver: validates runtime id (dangling harness → Err), resolves
-    // command, args (instance wins over definition default), and the full env layer stack.
-    // This is the sole path for harness-definition lookup — spawn, snapshot,
-    // summary, and model probes all consume this descriptor rather than
-    // assembling values inline.
-    // Like the orphan refusal above, this runs before any side effect so a refused
-    // spawn leaves no trace.
-    let descriptor =
-        crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
-            .map_err(|e| {
-                format!(
-                    "cannot spawn agent {}: {}",
-                    record.pubkey,
-                    crate::managed_agents::user_facing_harness_error(&e)
-                )
-            })?;
+    let plan = prepared.ok_or("Captured preflighted runtime launch required")?;
+    plan.require_preflight()?;
+    plan.check_scope(owner_hex, relay_url)?;
+    plan.revalidate(record, &personas, &global)?;
+    // Keep projected settings immutable, but deliver only the current credential
+    // that just passed revalidation, never the captured plan's copy.
+    let mut launch_record = plan.record.clone();
+    launch_record.private_key_nsec = if plan.configuration().is_some() {
+        let current = super::storage::load_managed_agents_for_launch(app)?
+            .into_iter()
+            .find(|saved| saved.pubkey == record.pubkey)
+            .ok_or("Agent removed before launch")?;
+        plan.revalidate(&current, &personas, &global)?;
+        current.private_key_nsec
+    } else {
+        record.private_key_nsec.clone()
+    };
+    let record = &launch_record;
+    let effective_cfg = plan.effective.clone();
+    let descriptor = &plan.descriptor;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
+    let (team_instructions, acp_session_policy) = plan
+        .app_inputs
+        .as_ref()
+        .ok_or("Launch plan has no app inputs")?;
+    let required_mcp = if super::runtime_configurations::selected(record)?.is_some() {
+        super::runtime_configurations::required_mcp_command(effective_command)?
+    } else {
+        None
+    };
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -542,7 +580,8 @@ pub fn spawn_agent_child(
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // Process identity normalization must not select a different relay tenant.
+    let effective_relay_url = relay_url.to_owned();
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
     //   - nvm-managed node/npm (nvm initializes only in interactive shells)
@@ -601,7 +640,7 @@ pub fn spawn_agent_child(
     // ── Readiness check: set setup-payload if agent is not ready ─────────────
     // `spawned_setup_mode` is stamped on `ManagedAgentProcess` below.
     let spawned_setup_mode =
-        apply_setup_payload_env(&mut command, record, &descriptor, runtime_meta);
+        apply_setup_payload_env(&mut command, record, descriptor, runtime_meta);
     // Emit BUZZ_ACP_IDLE_TIMEOUT only when explicitly set; the harness
     // DEFAULT_IDLE_TIMEOUT_SECS is the single source of truth. The deprecated
     // BUZZ_ACP_TURN_TIMEOUT pinned agents to a stale default (320s).
@@ -623,8 +662,7 @@ pub fn spawn_agent_child(
             }
         }
     }
-    let team_instructions = super::spawn_snapshot::effective_team_instructions(record, &teams);
-    if let Some(instructions) = &team_instructions {
+    if let Some(instructions) = team_instructions {
         command.env("BUZZ_ACP_TEAM_INSTRUCTIONS", instructions);
     } else {
         command.env_remove("BUZZ_ACP_TEAM_INSTRUCTIONS");
@@ -755,8 +793,9 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
-    // Resolve once and stamp the same value onto the snapshot below.
-    let acp_session_policy = super::apply_app_acp_session_policy_env(app, &mut command);
+    // Session partitioning is launch input; operational admission/logging policy
+    // remains live. Default and named both stamp exactly the captured policy.
+    super::session_policy::apply_acp_session_policy_env(&mut command, *acp_session_policy);
 
     crate::build_identity::apply_demo_config_home(&mut command)?;
     // Publish-first replay floor: written AFTER the `descriptor.env` loop, the
@@ -800,14 +839,14 @@ pub fn spawn_agent_child(
     let spawn_config = super::spawn_snapshot::SpawnConfigSnapshot::from_inputs(
         super::spawn_snapshot::SpawnConfigInputs {
             record,
-            descriptor: &descriptor,
+            descriptor,
             relay_url: &effective_relay_url,
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),
             provider: effective_provider.as_deref(),
             enforced_owner_only: super::owner_only_access_build(),
-            session_policy: acp_session_policy,
+            session_policy: *acp_session_policy,
         },
     );
 
@@ -827,6 +866,28 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    // Applied last so inherited environment cannot weaken explicit model selection.
+    let configuration = super::runtime_configurations::selected(record)?;
+    let required_model = configuration
+        .map(|_| {
+            acp_model
+                .as_deref()
+                .ok_or("Named launch has no resolved model")
+        })
+        .transpose()?;
+    super::runtime_configurations::apply_required_model_env(&mut command, required_model)?;
+    if let Some(model) = required_model {
+        if runtime_meta.is_none_or(|runtime| runtime.id != "claude") {
+            command.env("BUZZ_ACP_MODEL", model);
+        }
+    }
+    if let Some(mcp) = required_mcp {
+        // A saved environment cannot replace or disable a declared named tool.
+        command.env("BUZZ_ACP_MCP_COMMAND", mcp);
+    }
+    if let Some(workspace) = configuration.and_then(|config| config.workspace.as_ref()) {
+        command.current_dir(workspace);
+    }
     let child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
@@ -868,21 +929,57 @@ pub fn spawn_agent_child(
     })
 }
 
-/// Spawn (or adopt) the runtime pair for `record` on the caller's bound
-/// workspace relay. `workspace_relay` can only be produced by
-/// `bind_expected_relay_scope`, so this spawn consumes — by construction — the
-/// exact workspace-relay read the caller's scope assertion passed on; it never
-/// re-reads the mutable override (see `relay::scope`). The key comes from
-/// [`bound_runtime_key`] — the seam the spawn-key regressions exercise.
-pub fn start_managed_agent_process(
-    app: &AppHandle,
+/// Test-only seam over [`start_managed_agent_process_prepared`] with no
+/// captured launch: the runtime-authority regressions in
+/// `runtime/authority_tests.rs` use it to prove a spawn without a preflighted
+/// plan is refused before any side effect. Production callers resolve a
+/// `PreparedLaunch` and go through `start_managed_agent_process_prepared`
+/// directly.
+#[cfg(test)]
+pub fn start_managed_agent_process<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     owner_hex: Option<&str>,
     workspace_relay: &crate::relay::ScopedWorkspaceRelay,
     replay_floor_unix: Option<u64>,
+    resume: Option<&super::remote_stop::ResumeTicket>,
+) -> Result<(), String> {
+    start_managed_agent_process_prepared(
+        app,
+        record,
+        runtimes,
+        owner_hex,
+        workspace_relay,
+        replay_floor_unix,
+        resume,
+        None,
+    )
+}
+
+/// Ordinary pair registration using a previously resolved immutable launch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_managed_agent_process_prepared<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    record: &mut ManagedAgentRecord,
+    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    owner_hex: Option<&str>,
+    workspace_relay: &crate::relay::ScopedWorkspaceRelay,
+    replay_floor_unix: Option<u64>,
+    resume: Option<&super::remote_stop::ResumeTicket>,
+    prepared: Option<&super::runtime_configurations::PreparedLaunch>,
 ) -> Result<(), String> {
     let key = bound_runtime_key(record, workspace_relay)?;
+    super::with_pair_runtime_receipt_authority(app, &key, || Ok(()))?;
+    let plan = prepared.ok_or("Captured preflighted runtime launch required")?;
+    plan.require_preflight()?;
+    plan.check_scope(owner_hex, workspace_relay.as_str())?;
+    plan.revalidate(
+        record,
+        &super::load_personas(app)?,
+        &super::load_global_agent_config(app)?,
+    )?;
+    super::remote_stop::check_launch(app, &key, workspace_relay.as_str(), owner_hex, resume)?;
     if let Some(runtime) = runtimes.get_mut(&key) {
         if runtime
             .child
@@ -890,6 +987,10 @@ pub fn start_managed_agent_process(
             .map_err(|error| format!("failed to inspect running process: {error}"))?
             .is_none()
         {
+            let requested = plan.configuration();
+            if runtime.spawn_config.runtime_configuration != requested {
+                return Err("A different configuration is running; Stop before Start".into());
+            }
             return Ok(());
         }
 
@@ -900,21 +1001,28 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(
+    // A prior-session receipt is the only untracked process this pair may
+    // replace. Selection enforces host-preserving authority provenance and
+    // uses the ordinary process-tree termination contract.
+    terminate_untracked_pair_runtime(app, &key)?;
+    let mut process = spawn_agent_child_prepared(
         app,
         record,
-        &key.relay_url,
+        workspace_relay.as_str(),
         false,
         owner_hex,
         replay_floor_unix,
+        resume,
+        prepared,
     )?;
     let now = now_iso();
-    let receipt = super::ManagedAgentRuntimeReceipt {
-        key: key.clone(),
-        pid: process.child.id(),
-        desktop_instance_id: current_instance_id(app),
-        started_at: now.clone(),
-    };
+    let mut receipt = super::ManagedAgentRuntimeReceipt::new(
+        key.clone(),
+        process.child.id(),
+        current_instance_id(app),
+        now.clone(),
+    );
+    receipt.runtime_configuration = process.spawn_config.runtime_configuration.clone();
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
         let _ = terminate_process(process.child.id());
         let _ = process.child.wait();
@@ -928,12 +1036,13 @@ pub fn start_managed_agent_process(
     record.last_error = None;
     record.last_error_code = None;
 
-    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
+    runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
+    super::remote_stop::finish_resume(app, &key, workspace_relay.as_str(), owner_hex, resume)?;
     Ok(())
 }
 
 #[cfg(test)]
-mod test_fixtures;
+pub(super) mod test_fixtures;
 
 #[cfg(test)]
 mod tests;

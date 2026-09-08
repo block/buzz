@@ -97,6 +97,18 @@ pub async fn set_managed_agent_auto_restart(
 
         {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
+            if auto_restart_on_config_change
+                && !record
+                    .runtime_configurations
+                    .get(
+                        &state.signing_keys()?.public_key().to_hex(),
+                        &crate::relay::relay_ws_url_with_override(&state),
+                    )
+                    .entries
+                    .is_empty()
+            {
+                return Err("Named runtime configurations apply on deliberate next Start".into());
+            }
             record.auto_restart_on_config_change = auto_restart_on_config_change;
             record.updated_at = now_iso();
         }

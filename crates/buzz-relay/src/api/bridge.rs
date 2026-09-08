@@ -3839,7 +3839,7 @@ mod postgres_tests {
     /// - Redis pool points at the local dev instance for the admission check.
     ///
     /// Returns `None` when local Postgres is not reachable.
-    async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+    pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
@@ -4239,3 +4239,7 @@ mod postgres_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "desktop_profile_postgres_tests.rs"]
+mod desktop_profile_postgres_tests;

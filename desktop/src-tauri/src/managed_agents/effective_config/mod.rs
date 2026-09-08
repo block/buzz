@@ -15,6 +15,7 @@ pub enum ConfigSource {
     Definition,
     Global,
     InstanceLegacy,
+    RuntimeConfiguration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +24,7 @@ pub struct ResolvedField<T> {
     pub source: ConfigSource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveAgentConfig {
     pub model: ResolvedField<String>,
     pub provider: ResolvedField<String>,
@@ -43,17 +44,9 @@ impl EffectiveAgentConfig {
     /// a blank effective model falls back to "auto", mirroring
     /// `apply_relay_mesh_env`'s own rule.
     pub fn relay_mesh_model_id(&self) -> Option<String> {
-        if self.provider.value.as_deref().map(str::trim) != Some(RELAY_MESH_PROVIDER_ID) {
-            return None;
-        }
-        Some(
-            self.model
-                .value
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(RELAY_MESH_AUTO_MODEL_ID)
-                .to_string(),
+        super::resolved_relay_mesh_model_id(
+            self.provider.value.as_deref(),
+            self.model.value.as_deref(),
         )
     }
 }
@@ -249,7 +242,7 @@ pub fn resolve_effective_config(
     definitions: &[AgentDefinition],
     global: &GlobalAgentConfig,
 ) -> EffectiveConfigResult {
-    match &record.persona_id {
+    let mut result = match &record.persona_id {
         Some(pid) => match definitions.iter().find(|d| d.id == *pid) {
             Some(def) => EffectiveConfigResult::Resolved(resolve_linked(def, global)),
             None => EffectiveConfigResult::OrphanedInstance {
@@ -258,7 +251,17 @@ pub fn resolve_effective_config(
             },
         },
         None => EffectiveConfigResult::Resolved(resolve_definition_less(record, global)),
+    };
+    // Persona still owns identity/instructions, not an explicitly selected runtime.
+    if let (EffectiveConfigResult::Resolved(config), Ok(Some(selected))) =
+        (&mut result, super::runtime_configurations::selected(record))
+    {
+        config.model.value = Some(selected.model.clone());
+        config.model.source = ConfigSource::RuntimeConfiguration;
+        config.provider.source = ConfigSource::RuntimeConfiguration;
+        config.provider.value = selected.provider.clone();
     }
+    result
 }
 
 pub fn resolve_effective_model_provider_pair(
@@ -283,6 +286,11 @@ pub fn resolve_effective_model_provider_pair(
 /// never spawns (see `require_resolved`), so it never needs a mesh preflight
 /// either; the caller's own orphan handling downstream is unaffected, this
 /// just avoids tripping mesh bootstrap for a start that will be refused.
+///
+/// Bound only by `effective_config/tests.rs` now — production mesh preflights
+/// resolve through `PreparedLaunch`'s captured effective config — so the
+/// resolver stays as a `cfg(test)` seam for the mesh-model regression tests.
+#[cfg(test)]
 pub fn resolve_effective_relay_mesh_model_id(
     record: &ManagedAgentRecord,
     definitions: &[AgentDefinition],

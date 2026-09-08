@@ -96,7 +96,13 @@ async function createWorkflow(
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  // "Message text" is also the outgoing trigger pane's condition label while the
+  // inspector exit transition (AnimatePresence mode="wait", 150ms) still mounts
+  // it. Scope to the step textarea id so the fill waits for the intended step
+  // pane instead of racing the outgoing trigger input.
+  await dialog
+    .locator('textarea[id^="wf-step-"][id$="-text"]')
+    .fill("Workflow notification");
   if (options?.stepName) {
     await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);
@@ -700,7 +706,11 @@ test("captures the built editor at desktop and narrow widths", async ({
   await editWorkflowName(dialog, "editor_screenshot");
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Notify the workflow channel");
+  // Step-scoped (see createWorkflow): the label is ambiguous during the
+  // inspector exit transition.
+  await dialog
+    .locator('textarea[id^="wf-step-"][id$="-text"]')
+    .fill("Notify the workflow channel");
   const inspector = dialog.getByTestId("workflow-node-inspector");
 
   for (const viewport of [
@@ -805,7 +815,11 @@ test("pane routes use stable IDs and Form/YAML changes stay synchronized", async
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("first message");
+  // Step-scoped (see createWorkflow): the label is ambiguous during the
+  // inspector exit transition.
+  await dialog
+    .locator('textarea[id^="wf-step-"][id$="-text"]')
+    .fill("first message");
   await expect(page).toHaveURL(/pane=step%3Astep_1/);
 
   await dialog.getByRole("button", { name: "Add after Step 1" }).click();

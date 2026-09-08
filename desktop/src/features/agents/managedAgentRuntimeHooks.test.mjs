@@ -2,109 +2,88 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { restartManagedAgentPair } from "./managedAgentRuntimeHooks.ts";
-
-// ---------------------------------------------------------------------------
-// restartManagedAgentPair: discriminating regression tests for the pair
-// restart lifecycle boundary (stop → relay-scoped clear → start).
-//
-// These tests exercise the exact function called by useManagedAgentRuntimeAction's
-// mutationFn restart branch, so reverting to the old combined Rust command
-// (which cleared only in onSuccess, after the new process was already running)
-// would make tests (a) and (c) fail.
-// ---------------------------------------------------------------------------
+import {
+  captureActiveTurnsForAgentClear,
+  getActiveTurnsForAgent,
+  resetActiveAgentTurnsStore,
+  syncAgentTurnsFromEvents,
+} from "./activeAgentTurnsStore.ts";
 
 const PUBKEY = "deadbeef".repeat(8);
 const RELAY = "wss://relay.example";
+const status = (lifecycle = "running") => ({
+  pubkey: PUBKEY,
+  relayUrl: RELAY,
+  localSetup: true,
+  lifecycle,
+});
 
-/** Returns a resolved-status stub sufficient for the return-type assertion. */
-function makeStatus() {
-  return {
-    pubkey: PUBKEY,
-    relayUrl: RELAY,
-    localSetup: true,
-    lifecycle: "running",
-  };
-}
-
-test("test_pair_restart_stop_success_start_failure_clear_still_ran", async () => {
-  // Stop succeeds, start throws.  The clear must have fired — badge is gone
-  // regardless of the start failure.  On the old combined-command approach,
-  // a rejected command meant onSuccess never ran and the badge survived.
-  let clearFired = false;
-
+test("restart preflight refusal leaves old turns alone", async () => {
+  const calls = [];
   await assert.rejects(
     restartManagedAgentPair(
       PUBKEY,
       RELAY,
-      async () => makeStatus(), // stop succeeds
-      (_pubkey, _relayUrl) => {
-        clearFired = true;
+      async (pubkey, relay) => {
+        assert.equal(pubkey, PUBKEY);
+        assert.equal(relay, RELAY);
+        calls.push("native-restart");
+        throw new Error("selected provider unavailable");
       },
-      async () => {
-        throw new Error("start failed");
+      () => {
+        calls.push("capture-old-turns");
+        return () => calls.push("clear");
       },
     ),
-    /start failed/,
+    /selected provider unavailable/,
   );
-
-  assert.ok(
-    clearFired,
-    "clear must fire at stop-success boundary even when start subsequently fails",
-  );
+  assert.deepEqual(calls, ["capture-old-turns", "native-restart"]);
 });
 
-test("test_pair_restart_stop_failure_neither_clear_nor_start_called", async () => {
-  // Stop throws.  Neither clear nor start should run — clearing on a failed
-  // stop would remove a badge that is still legitimately active.
-  let clearFired = false;
-  let startCalled = false;
-
+test("successful Stop with failed replacement retires old turns and reports failure", async () => {
+  let cleared = false;
   await assert.rejects(
     restartManagedAgentPair(
       PUBKEY,
       RELAY,
-      async () => {
-        throw new Error("stop failed");
-      },
-      (_pubkey, _relayUrl) => {
-        clearFired = true;
-      },
-      async () => {
-        startCalled = true;
-        return makeStatus();
+      async () => ({ ...status("failed"), error: "replacement failed" }),
+      () => () => {
+        cleared = true;
       },
     ),
-    /stop failed/,
+    /replacement failed/,
   );
-
-  assert.ok(!clearFired, "clear must NOT fire when stop itself fails");
-  assert.ok(!startCalled, "start must NOT be called when stop fails");
+  assert.equal(cleared, true);
 });
 
-test("test_pair_restart_strict_stop_clear_start_ordering", async () => {
-  // Verify the operations fire in the guaranteed order: stop → clear → start.
-  // A clear that fires after start begins can tombstone genuine new turns.
-  const events = [];
-
-  await restartManagedAgentPair(
+test("native restart clears only captured turns, not replacement turns", async () => {
+  resetActiveAgentTurnsStore();
+  const event = (turnId, channelId, seq) => ({
+    seq,
+    timestamp: new Date(Date.now() + seq).toISOString(),
+    kind: "turn_started",
+    agentIndex: 0,
+    channelId,
+    sessionId: "session",
+    turnId,
+    payload: null,
+  });
+  syncAgentTurnsFromEvents(PUBKEY, [event("old", "old-channel", 1)]);
+  const result = await restartManagedAgentPair(
     PUBKEY,
     RELAY,
     async () => {
-      events.push("stop");
-      return makeStatus();
+      syncAgentTurnsFromEvents(PUBKEY, [
+        event("replacement", "new-channel", 2),
+      ]);
+      return status();
     },
-    (_pubkey, _relayUrl) => {
-      events.push("clear");
-    },
-    async () => {
-      events.push("start");
-      return makeStatus();
-    },
+    (pubkey) => captureActiveTurnsForAgentClear(pubkey),
   );
-
+  assert.equal(result.lifecycle, "running");
   assert.deepEqual(
-    events,
-    ["stop", "clear", "start"],
-    "operations must fire in stop → clear → start order",
+    getActiveTurnsForAgent(PUBKEY).map((turn) => turn.channelId),
+    ["new-channel"],
   );
+  resetActiveAgentTurnsStore();
 });

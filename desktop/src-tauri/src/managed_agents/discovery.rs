@@ -285,6 +285,10 @@ pub fn try_record_agent_command(
     record: &crate::managed_agents::types::ManagedAgentRecord,
     personas: &[crate::managed_agents::types::AgentDefinition],
 ) -> Result<String, String> {
+    if let Some(config) = super::runtime_configurations::selected(record)? {
+        return presets::command_for_runtime_id(&config.runtime)
+            .ok_or_else(|| format!("DANGLING_HARNESS_ID:{}", config.runtime));
+    }
     // Explicit pin always wins — if the user set a raw override, honour it.
     if let Some(pin) = record
         .agent_command_override
@@ -379,7 +383,7 @@ fn command_search_dirs() -> Vec<PathBuf> {
     })
 }
 
-fn is_executable_file(path: &Path) -> bool {
+pub(super) fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;
     };

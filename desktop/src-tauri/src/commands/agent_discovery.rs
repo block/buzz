@@ -505,7 +505,7 @@ async fn restart_single_agent_after_install(
         managed_agents::{
             agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
             load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-            resolve_effective_agent_env, save_managed_agents, stop_managed_agent_process,
+            resolve_effective_agent_env, stop_managed_agent_process, storage,
             sync_managed_agent_processes, AgentReadiness, BackendKind,
         },
     };
@@ -536,7 +536,7 @@ async fn restart_single_agent_after_install(
             &current_instance_id(&app_for_stop),
         );
         if sync_changed {
-            save_managed_agents(&app_for_stop, &records)?;
+            storage::save_runtime_metadata_batch(&app_for_stop, &records)?;
         }
 
         // Re-verify eligibility under lock.
@@ -590,7 +590,7 @@ async fn restart_single_agent_after_install(
         // Stop the process.
         let record_mut = find_managed_agent_mut(&mut records, &pubkey_owned)?;
         stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
-        save_managed_agents(&app_for_stop, &records)?;
+        storage::save_runtime_metadata_batch(&app_for_stop, &records)?;
 
         Ok(runtime_keys)
     })
@@ -644,7 +644,7 @@ fn persist_last_error_on_install(
 ) -> Result<(), String> {
     use crate::{
         app_state::AppState,
-        managed_agents::{find_managed_agent_mut, load_managed_agents, save_managed_agents},
+        managed_agents::{find_managed_agent_mut, load_managed_agents, storage},
     };
     use tauri::Manager;
     let state = app.state::<AppState>();
@@ -656,7 +656,7 @@ fn persist_last_error_on_install(
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     record.last_error = Some(error.to_string());
     record.updated_at = crate::util::now_iso();
-    save_managed_agents(app, &records)
+    storage::save_runtime_metadata_batch(app, &records)
 }
 
 /// Build the `-l -c` argument list for the install shell.

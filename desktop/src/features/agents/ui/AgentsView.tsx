@@ -1,3 +1,5 @@
+import { RuntimeConfigurations } from "./RuntimeConfigurations";
+import { KnownDesktops } from "./KnownDesktops";
 import * as React from "react";
 import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
 import {
@@ -217,6 +219,8 @@ export function AgentsView() {
             description="Set up and manage your agents."
             title="Agents"
           />
+          <KnownDesktops />
+          <RuntimeConfigurations />
           <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               getAvailability={agents.getAvailability}

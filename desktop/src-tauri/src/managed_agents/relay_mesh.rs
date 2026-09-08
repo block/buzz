@@ -1,5 +1,23 @@
 pub const RELAY_MESH_API_BASE_URL: &str = "http://127.0.0.1:9337/v1";
 pub const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "buzz-mesh-local";
+/// Classify resolved configuration, never a next-launch selection. Used by
+/// preflight/spawn and by recovery over the actual running spawn snapshot.
+pub(crate) fn resolved_relay_mesh_model_id(
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Option<String> {
+    if provider.map(str::trim) != Some(RELAY_MESH_PROVIDER_ID) {
+        return None;
+    }
+    Some(
+        model
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .unwrap_or(RELAY_MESH_AUTO_MODEL_ID)
+            .to_owned(),
+    )
+}
+
 pub const RELAY_MESH_PROVIDER_ID: &str = "relay-mesh";
 /// Stored value for "let the mesh decide", kept as the user-facing word.
 pub const RELAY_MESH_AUTO_MODEL_ID: &str = "auto";

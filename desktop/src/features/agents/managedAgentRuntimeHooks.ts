@@ -5,7 +5,10 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 
-import { clearActiveTurnsForAgent } from "@/features/agents/activeAgentTurnsStore";
+import {
+  clearActiveTurnsForAgent,
+  captureActiveTurnsForAgentClear,
+} from "@/features/agents/activeAgentTurnsStore";
 import {
   loadActiveCommunityId,
   loadCommunities,
@@ -13,6 +16,7 @@ import {
 import {
   listManagedAgentRuntimes,
   reconcileManagedAgentRuntimes,
+  restartManagedAgentRuntime,
   startManagedAgentRuntime,
   stopManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
@@ -147,35 +151,44 @@ export function clearActiveTurnsForAgentOnStop(
   clearActiveTurnsForAgent(pubkey);
 }
 
-/**
- * Execute a pair restart as stop → relay-scoped badge clear → start.
- *
- * Extracted from `useManagedAgentRuntimeAction`'s `mutationFn` so the
- * three-step lifecycle boundary can be tested directly without a hook-render
- * harness.  All three operations are injected, keeping this function free of
- * React and Tauri imports.
- *
- * Guarantees:
- * - Clear fires only when stop succeeds.
- * - A failed start occurs after the clear — the badge is already gone.
- * - No clear can fire after start begins, so genuinely-new turns are safe.
- */
+/** A native restart owns capture → preflight → locked Stop/spawn. Never split
+ * it into frontend Stop/Start, which destroys the old child before validation. */
 export async function restartManagedAgentPair(
   pubkey: string,
   relayUrl: string,
-  stop: (
+  restart: (
     pubkey: string,
     relayUrl: string,
   ) => Promise<ManagedAgentRuntimeStatus>,
-  clear: (pubkey: string, relayUrl: string) => void,
-  start: (
-    pubkey: string,
-    relayUrl: string,
-  ) => Promise<ManagedAgentRuntimeStatus>,
+  captureClear: (pubkey: string, relayUrl: string) => () => void,
 ): Promise<ManagedAgentRuntimeStatus> {
-  await stop(pubkey, relayUrl);
-  clear(pubkey, relayUrl);
-  return start(pubkey, relayUrl);
+  const clearOldTurns = captureClear(pubkey, relayUrl);
+  const status = await restart(pubkey, relayUrl);
+  // Native returns Failed only after successful Stop + failed replacement.
+  // A preflight/admission/Stop failure throws and must not clear live old turns.
+  clearOldTurns();
+  if (status.lifecycle === "failed") {
+    throw new Error(status.error ?? "Agent stopped but replacement failed");
+  }
+  return status;
+}
+
+function capturePairTurnsClear(pubkey: string, relayUrl: string): () => void {
+  const activeId = loadActiveCommunityId();
+  const community = loadCommunities().find((c) => c.id === activeId);
+  const relay = canonicalRelayUrl(relayUrl);
+  if (
+    !activeId ||
+    !community ||
+    !relay ||
+    canonicalRelayUrl(community.relayUrl) !== relay
+  ) {
+    return () => {};
+  }
+  const clear = captureActiveTurnsForAgentClear(pubkey);
+  return () => {
+    if (loadActiveCommunityId() === activeId) clear();
+  };
 }
 
 export function useManagedAgentRuntimeAction() {
@@ -185,26 +198,27 @@ export function useManagedAgentRuntimeAction() {
       action,
       pubkey,
       relayUrl,
+      explicitStart = false,
     }: {
       action: "start" | "stop" | "restart";
       pubkey: string;
       relayUrl: string;
+      explicitStart?: boolean;
     }) => {
       if (action === "stop") return stopManagedAgentRuntime(pubkey, relayUrl);
       if (action === "restart") {
         return restartManagedAgentPair(
           pubkey,
           relayUrl,
-          stopManagedAgentRuntime,
-          clearActiveTurnsForAgentOnStop,
-          startManagedAgentRuntime,
+          restartManagedAgentRuntime,
+          capturePairTurnsClear,
         );
       }
-      return startManagedAgentRuntime(pubkey, relayUrl);
+      return startManagedAgentRuntime(pubkey, relayUrl, explicitStart);
     },
     onSuccess: (runtime, { action }) => {
       // For stop-only: clear stale working badges immediately.  The restart
-      // path already clears at the stop-success boundary inside mutationFn.
+      // path retires only its captured old turns inside mutationFn.
       if (action === "stop") {
         clearActiveTurnsForAgentOnStop(runtime.pubkey, runtime.relayUrl);
       }

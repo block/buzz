@@ -123,10 +123,27 @@ function recoverLiveSubscriptionFromClosed({
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
 }) {
+  const closedClass = classifyRelayClosed(message);
+
+  if (closedClass === "rate-limited") {
+    const hintSeconds = parseRateLimitHint(message);
+    activateRateLimit(hintSeconds);
+  }
+
   subscription.resolveReady?.("closed");
+  subscription.onState?.("closed", {
+    classification: closedClass,
+    retryAfterMs: closedClass === "rate-limited" ? rateLimitRemainingMs() : 0,
+  });
   subscription.resolveReady = undefined;
 
-  const closedClass = classifyRelayClosed(message);
+  if (subscription.closedRecovery === "explicit") {
+    // Command receivers must not survive CLOSED into shared re-subscription.
+    // Their owner presents an explicit fresh-receiver action instead.
+    clearClosedRetry(subscription);
+    subscriptions.delete(subId);
+    return;
+  }
 
   if (closedClass === "terminal") {
     // Auth/access/filter failure — permanently remove the subscription so it
@@ -146,9 +163,7 @@ function recoverLiveSubscriptionFromClosed({
   let delayMs = backoffMs;
 
   if (closedClass === "rate-limited") {
-    // Activate the gate so concurrent operations back off too.
     const hintSeconds = parseRateLimitHint(message);
-    activateRateLimit(hintSeconds);
     // Use the gate's actual remaining time so a shorter hint arriving under a
     // longer active gate does not schedule a premature retry that just gets
     // another CLOSED. The fallback covers the gate-inactive edge case
@@ -259,6 +274,7 @@ export function handleSubscriptionEose({
     if (generation !== undefined)
       markReconnectLiveEose(subscription, generation);
     subscription.resolveReady?.("eose");
+    subscription.onState?.("eose");
     subscription.resolveReady = undefined;
     subscription.closedRetryAttempt = 0;
     clearClosedRetry(subscription);

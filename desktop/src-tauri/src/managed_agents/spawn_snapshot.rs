@@ -101,6 +101,7 @@ pub(crate) struct SpawnConfigInputs<'a> {
 /// [`ManagedAgentProcess`]: super::ManagedAgentProcess
 #[derive(Clone, Serialize)]
 pub(crate) struct SpawnConfigSnapshot {
+    pub runtime_configuration: Option<super::runtime_configurations::RuntimeConfigurationRef>,
     /// The ACP harness binary the desktop launches (`buzz-acp`).
     pub acp_command: String,
     /// The effective agent command the harness drives.
@@ -180,6 +181,14 @@ pub(crate) fn effective_effort(descriptor: &EffectiveHarnessDescriptor) -> Optio
 
 impl SpawnConfigSnapshot {
     /// Assemble the snapshot from values a spawn has already resolved.
+    /// Read by `mesh_llm::recovery` to collect the mesh consumer model ids of
+    /// live pairs; dead only in default-feature builds, where `mesh-llm` is
+    /// off and that consumer is compiled out.
+    #[cfg_attr(not(feature = "mesh-llm"), allow(dead_code))]
+    pub(crate) fn relay_mesh_model_id(&self) -> Option<String> {
+        super::resolved_relay_mesh_model_id(self.provider.as_deref(), self.model.as_deref())
+    }
+
     pub(crate) fn from_inputs(inputs: SpawnConfigInputs<'_>) -> Self {
         let SpawnConfigInputs {
             record,
@@ -195,6 +204,10 @@ impl SpawnConfigSnapshot {
         let (respond_to, respond_to_allowlist) =
             super::projected_access_with_policy(record, enforced_owner_only);
         Self {
+            runtime_configuration: super::runtime_configurations::selected(record)
+                .ok()
+                .flatten()
+                .map(super::runtime_configurations::RuntimeConfiguration::reference),
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),

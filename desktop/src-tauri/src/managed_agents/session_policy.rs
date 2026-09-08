@@ -3,8 +3,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use tauri::{AppHandle, Manager};
-
 use crate::app_state::AppState;
 
 pub(crate) const ACP_SESSION_POLICY_ENV_VAR: &str = "BUZZ_ACP_SESSION_POLICY";
@@ -69,23 +67,12 @@ pub(crate) fn acp_session_policy(state: &AppState) -> AcpSessionPolicy {
     )
 }
 
+/// Apply the captured launch policy after inherited and user environment.
 pub(crate) fn apply_acp_session_policy_env(
     command: &mut std::process::Command,
     policy: AcpSessionPolicy,
 ) {
     command.env(ACP_SESSION_POLICY_ENV_VAR, policy.as_str());
-}
-
-/// Resolve the effective policy, apply it to `command`, and return it so the
-/// caller can stamp the same value onto the spawn snapshot (env and badge can
-/// never disagree about what the child launched with).
-pub(crate) fn apply_app_acp_session_policy_env(
-    app: &AppHandle,
-    command: &mut std::process::Command,
-) -> AcpSessionPolicy {
-    let policy = acp_session_policy(app.state::<AppState>().inner());
-    apply_acp_session_policy_env(command, policy);
-    policy
 }
 
 pub(crate) fn insert_acp_session_policy_env(
@@ -133,8 +120,20 @@ mod tests {
         let mut command = std::process::Command::new("true");
         command.env(ACP_SESSION_POLICY_ENV_VAR, "ambient");
 
-        apply_acp_session_policy_env(&mut command, AcpSessionPolicy::Thread);
+        let mut prepared_env = BTreeMap::new();
+        insert_acp_session_policy_env(&mut prepared_env, AcpSessionPolicy::Thread);
+        command.envs(&prepared_env);
 
         assert_eq!(command_policy(&command), Some("thread"));
+    }
+
+    #[test]
+    fn captured_local_policy_overrides_user_env_without_reading_live_state() {
+        for policy in [AcpSessionPolicy::Channel, AcpSessionPolicy::Thread] {
+            let mut command = std::process::Command::new("true");
+            command.env(ACP_SESSION_POLICY_ENV_VAR, "ambient");
+            apply_acp_session_policy_env(&mut command, policy);
+            assert_eq!(command_policy(&command), Some(policy.as_str()));
+        }
     }
 }

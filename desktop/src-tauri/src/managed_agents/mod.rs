@@ -27,16 +27,19 @@ pub(crate) mod parallelism;
 mod persona_avatars;
 pub(crate) mod persona_events;
 mod personas;
+pub(crate) mod placement;
 #[cfg(windows)]
 mod process_lifecycle;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
 mod relay_mesh;
+pub(crate) mod remote_stop;
 mod repos;
 mod restore;
 pub mod retention;
 mod runtime;
 mod runtime_commands;
+pub(crate) mod runtime_configurations;
 mod runtime_types;
 mod session_policy;
 pub(crate) mod snapshot_avatar;
@@ -49,27 +52,45 @@ pub(crate) use team_repair::team_persona_key;
 mod teams;
 mod types;
 
-// Shared lock for tests that call `lock_path_mutex` or `lock_env_mutex`.
-// Both helpers delegate here so any two tests using either helper are mutually
-// exclusive with each other. Tests in other modules that maintain their own
-// independent locks (app_state_tests, agent_config_tests, reader_tests) are
-// NOT in this domain and are not covered by this mutex.
+// Shared lock for tests that call `lock_path_mutex`, `lock_path_mutex_async`,
+// or `lock_env_mutex`. All helpers delegate here so any two tests using any
+// of them are mutually exclusive with each other. Tests in other modules that
+// maintain their own independent locks (app_state_tests, agent_config_tests,
+// reader_tests) are NOT in this domain and are not covered by this mutex.
+//
+// The lock is a `tokio::sync::Mutex` (same convention as buzz-db's
+// `POOL_METRICS_TEST_LOCK`) so async tests can hold the serialization guard
+// across `.await` points without tripping `clippy::await_holding_lock`, while
+// sync tests acquire it with `blocking_lock()`. One lock domain keeps sync
+// and async env-mutating tests mutually exclusive; the guard scope (the whole
+// test body) is unchanged, so shared-state isolation is preserved exactly.
 #[cfg(test)]
-static PROCESS_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PROCESS_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-// Acquires the shared process-env lock. Call from any test in this module that
-// reads, writes, or removes a process-global environment variable (including PATH).
+// Acquires the shared process-env lock from a synchronous test. Call from any
+// sync test that reads, writes, or removes a process-global environment
+// variable (including PATH). Panics if called from inside an async context —
+// async tests must use `lock_path_mutex_async` instead.
 #[cfg(test)]
-pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
-    PROCESS_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+pub(crate) fn lock_path_mutex() -> tokio::sync::MutexGuard<'static, ()> {
+    PROCESS_ENV_MUTEX.blocking_lock()
+}
+
+// Async twin of `lock_path_mutex`: the same single lock domain, acquired in
+// `async fn` tests. Hold the returned guard for the whole test body, across
+// `.await` points, exactly where the sync guard was previously held — the
+// guard keeps every env-mutating test (sync or async) mutually exclusive.
+#[cfg(test)]
+pub(crate) async fn lock_path_mutex_async() -> tokio::sync::MutexGuard<'static, ()> {
+    PROCESS_ENV_MUTEX.lock().await
 }
 
 // Delegates to the same lock as `lock_path_mutex`. Tests using either helper
 // are mutually exclusive with each other; PATH and env-key mutations that go
 // through these helpers cannot race.
 #[cfg(test)]
-pub(crate) fn lock_env_mutex() -> std::sync::MutexGuard<'static, ()> {
-    PROCESS_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+pub(crate) fn lock_env_mutex() -> tokio::sync::MutexGuard<'static, ()> {
+    PROCESS_ENV_MUTEX.blocking_lock()
 }
 
 pub use backend::*;
@@ -106,8 +127,8 @@ pub use runtime::*;
 pub use runtime_commands::*;
 pub use runtime_types::*;
 pub(crate) use session_policy::{
-    acp_session_policy, apply_app_acp_session_policy_env, insert_acp_session_policy_env,
-    AcpSessionPolicy, ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
+    acp_session_policy, insert_acp_session_policy_env, AcpSessionPolicy,
+    ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
 };
 pub use storage::*;
 pub use teams::*;

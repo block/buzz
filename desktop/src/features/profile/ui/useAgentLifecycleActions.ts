@@ -28,7 +28,9 @@ export function useAgentLifecycleActions({
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
   relayAgents: readonly RelayAgent[] | undefined;
-  startManagedAgent: (pubkey: string) => Promise<unknown>;
+  startManagedAgent: (
+    input: import("@/features/agents/lib/managedAgentControlActions").ManagedAgentStartInput,
+  ) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
   const handleAgentPrimaryAction = React.useCallback(async () => {

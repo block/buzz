@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -275,12 +274,9 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
         .as_ref()
         .map(|runtime| runtime.mode());
     let recovery = recover_stale_mesh_runtime(&state, MeshRecoveryUrgency::Watchdog).await;
-    let active_pubkeys = active_managed_agent_pubkeys(&state);
-    // Mesh participation is resolved through the same definition-authoritative
-    // path as spawn/restore (#1968): definition → global fallback. A linked
-    // instance's own bytes never contribute.
-    let personas = crate::managed_agents::load_personas(app).unwrap_or_default();
-    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    // Runtime snapshots, not durable Default or the next selected configuration.
+    // Keep the pair and generation through asynchronous ingress repair.
+    let consumers = running_mesh_consumers(&state);
 
     match recovery {
         MeshRuntimeRecovery::Live
@@ -294,10 +290,7 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
                 app.request_restart();
                 return Ok(());
             }
-            let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
-            if !records.iter().any(|record| {
-                running_relay_mesh_model_id(record, &active_pubkeys, &personas, &global).is_some()
-            }) {
+            if consumers.is_empty() {
                 // A foreground save may still be bringing up its first ingress.
                 // Only an already-running consumer justifies an automatic app
                 // relaunch from the background watchdog.
@@ -315,26 +308,18 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
             ));
         }
         MeshRuntimeRecovery::Absent => {
-            let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
-            if !records.iter().any(|record| {
-                running_relay_mesh_model_id(record, &active_pubkeys, &personas, &global).is_some()
-            }) {
+            if consumers.is_empty() {
                 return Ok(());
             }
         }
         MeshRuntimeRecovery::Evicted => {}
     }
 
-    let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
-    let mesh_records: Vec<_> = records
-        .into_iter()
-        .filter_map(|record| {
-            running_relay_mesh_model_id(&record, &active_pubkeys, &personas, &global)
-                .map(|mesh_model_id| (record, mesh_model_id))
-        })
-        .collect();
     let mut first_error = None;
-    for (record, mesh_model_id) in &mesh_records {
+    for (key, nonce, mesh_model_id) in &consumers {
+        if !is_current_mesh_consumer(&state, key, nonce) {
+            continue;
+        }
         match crate::commands::mesh_llm::ensure_relay_mesh_for_record(
             app,
             Some(mesh_model_id.as_str()),
@@ -343,15 +328,29 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
         .await
         {
             Ok(()) => {
-                if let Err(error) = clear_mesh_last_error_if_set(app, &record.pubkey) {
+                let _transition = state
+                    .managed_agent_runtime_transition
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                if !is_current_mesh_consumer(&state, key, nonce) {
+                    continue;
+                }
+                if let Err(error) = clear_mesh_last_error_if_set(app, &key.pubkey) {
                     eprintln!("buzz-mesh: failed to clear recovery error: {error}");
                 }
             }
             Err(error) => {
+                let _transition = state
+                    .managed_agent_runtime_transition
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                if !is_current_mesh_consumer(&state, key, nonce) {
+                    continue;
+                }
                 let message = format!(
                     "{MESH_REARM_ERROR_SENTINEL}Buzz shared compute offline — failed to re-arm local ingress for this agent: {error}"
                 );
-                if let Err(persist_error) = persist_mesh_last_error(app, &record.pubkey, &message) {
+                if let Err(persist_error) = persist_mesh_last_error(app, &key.pubkey, &message) {
                     eprintln!("buzz-mesh: failed to persist recovery error: {persist_error}");
                 }
                 first_error.get_or_insert(message);
@@ -361,41 +360,47 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
     first_error.map_or(Ok(()), Err)
 }
 
-fn active_managed_agent_pubkeys(state: &AppState) -> HashSet<String> {
+pub(crate) fn running_mesh_consumers(
+    state: &AppState,
+) -> Vec<(
+    crate::managed_agents::ManagedAgentRuntimeKey,
+    String,
+    String,
+)> {
     state
         .managed_agent_processes
         .lock()
-        .map(|guard| {
-            guard
-                .keys()
-                .map(|key| key.pubkey.to_ascii_lowercase())
+        .map(|mut runtimes| {
+            runtimes
+                .iter_mut()
+                .filter_map(|(key, runtime)| {
+                    if !matches!(runtime.child.try_wait(), Ok(None)) {
+                        return None;
+                    }
+                    runtime
+                        .spawn_config
+                        .relay_mesh_model_id()
+                        .map(|model| (key.clone(), runtime.start_nonce.clone(), model))
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-/// Effective mesh model for a record that is actively running, or `None`
-/// when the record is not a running relay-mesh consumer. Resolution goes
-/// through `resolve_effective_relay_mesh_model_id` (definition → global
-/// fallback, #1968) so the watchdog agrees with spawn/restore about which
-/// agents are mesh-backed.
-fn running_relay_mesh_model_id(
-    record: &crate::managed_agents::ManagedAgentRecord,
-    active_pubkeys: &HashSet<String>,
-    personas: &[crate::managed_agents::AgentDefinition],
-    global: &crate::managed_agents::GlobalAgentConfig,
-) -> Option<String> {
-    let running = record.backend == crate::managed_agents::BackendKind::Local
-        && active_pubkeys.contains(&record.pubkey.to_ascii_lowercase())
-        && record
-            .runtime_pid
-            .is_none_or(crate::managed_agents::process_is_running);
-    if !running {
-        return None;
-    }
-    crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
-        record, personas, global,
-    )
+fn is_current_mesh_consumer(
+    state: &AppState,
+    key: &crate::managed_agents::ManagedAgentRuntimeKey,
+    nonce: &str,
+) -> bool {
+    state
+        .managed_agent_processes
+        .lock()
+        .map(|mut runtimes| {
+            runtimes.get_mut(key).is_some_and(|runtime| {
+                runtime.start_nonce == nonce && matches!(runtime.child.try_wait(), Ok(None))
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn persist_mesh_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), String> {
@@ -408,7 +413,7 @@ fn persist_mesh_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result
     let record = crate::managed_agents::find_managed_agent_mut(&mut records, pubkey)?;
     record.last_error = Some(error.to_string());
     record.updated_at = crate::util::now_iso();
-    crate::managed_agents::save_managed_agents(app, &records)
+    crate::managed_agents::storage::save_runtime_metadata(app, record)
 }
 
 fn clear_mesh_last_error_if_set(app: &AppHandle, pubkey: &str) -> Result<(), String> {
@@ -428,64 +433,12 @@ fn clear_mesh_last_error_if_set(app: &AppHandle, pubkey: &str) -> Result<(), Str
     }
     record.last_error = None;
     record.updated_at = crate::util::now_iso();
-    crate::managed_agents::save_managed_agents(app, &records)
+    crate::managed_agents::storage::save_runtime_metadata(app, record)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn mesh_record(
-        pubkey: &str,
-        runtime_pid: Option<u32>,
-    ) -> crate::managed_agents::ManagedAgentRecord {
-        let mut record = crate::managed_agents::AgentDefinition {
-            id: pubkey.to_string(),
-            display_name: pubkey.to_string(),
-            avatar_url: None,
-            system_prompt: String::new(),
-            runtime: None,
-            model: None,
-            provider: None,
-            name_pool: Vec::new(),
-            is_builtin: false,
-            is_active: true,
-            shared: false,
-            source_team: None,
-            source_team_persona_slug: None,
-            catalog_source: None,
-            team_catalog_source: None,
-            env_vars: std::collections::BTreeMap::from([
-                ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
-                (
-                    "OPENAI_COMPAT_BASE_URL".to_string(),
-                    "http://127.0.0.1:9337/v1/".to_string(),
-                ),
-                ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
-                (
-                    "OPENAI_COMPAT_API_KEY".to_string(),
-                    crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
-                ),
-            ]),
-            respond_to: None,
-            respond_to_allowlist: Vec::new(),
-            parallelism: None,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-        }
-        .into_agent_record();
-        record.pubkey = pubkey.to_string();
-        record.backend = crate::managed_agents::BackendKind::Local;
-        record.runtime_pid = runtime_pid;
-        record
-    }
-
-    fn active_set(pubkeys: &[&str]) -> HashSet<String> {
-        pubkeys
-            .iter()
-            .map(|pubkey| pubkey.to_ascii_lowercase())
-            .collect()
-    }
 
     #[tokio::test]
     async fn closed_port_is_distinct_from_unhealthy_bound_port() {
@@ -620,49 +573,6 @@ mod tests {
             crate::mesh_llm::MeshNodeMode::Client,
             false
         ));
-    }
-
-    #[test]
-    fn only_running_relay_mesh_agents_trigger_rearm() {
-        let personas: Vec<crate::managed_agents::AgentDefinition> = Vec::new();
-        let global = crate::managed_agents::GlobalAgentConfig::default();
-
-        let empty = active_set(&[]);
-        assert!(running_relay_mesh_model_id(
-            &mesh_record("stopped", Some(std::process::id())),
-            &empty,
-            &personas,
-            &global,
-        )
-        .is_none());
-
-        let active = active_set(&["live"]);
-        assert_eq!(
-            running_relay_mesh_model_id(
-                &mesh_record("live", Some(std::process::id())),
-                &active,
-                &personas,
-                &global,
-            )
-            .as_deref(),
-            Some("Qwen3")
-        );
-        assert_eq!(
-            running_relay_mesh_model_id(&mesh_record("live", None), &active, &personas, &global)
-                .as_deref(),
-            Some("Qwen3")
-        );
-
-        let mut non_mesh = mesh_record("plain", Some(std::process::id()));
-        non_mesh.env_vars.clear();
-        non_mesh.relay_mesh = None;
-        assert!(running_relay_mesh_model_id(
-            &non_mesh,
-            &active_set(&["plain"]),
-            &personas,
-            &global,
-        )
-        .is_none());
     }
 
     #[test]

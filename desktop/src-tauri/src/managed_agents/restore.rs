@@ -1,8 +1,7 @@
 use super::{
     bestie_assignment::recover_pending_assignment_cleanup, find_managed_agent_mut,
     kill_stale_tracked_processes, load_managed_agents, load_personas, managed_agents_base_dir,
-    save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
-    ManagedAgentProcess,
+    save_managed_agents, sync_managed_agent_processes, BackendKind, ManagedAgentProcess,
 };
 use crate::app_state::AppState;
 use crate::util;
@@ -21,7 +20,11 @@ use tauri::Manager;
 enum SpawnOutcome {
     /// Boxed: the spawned process carries its full spawn-config snapshot, so an
     /// inline variant would make every `Skipped`/`Failed` outcome pay for it.
-    Spawned(super::ManagedAgentRuntimeKey, Box<ManagedAgentProcess>),
+    Spawned(
+        super::ManagedAgentRuntimeKey,
+        String,
+        Box<ManagedAgentProcess>,
+    ),
     Skipped,
     Failed(String),
 }
@@ -96,6 +99,53 @@ pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
 ) -> Result<(), String> {
+    restore_with(
+        app,
+        shutdown_started,
+        |model, _| async move {
+            #[cfg(feature = "mesh-llm")]
+            crate::commands::ensure_relay_mesh_for_record(app, model.as_deref(), false).await?;
+            #[cfg(not(feature = "mesh-llm"))]
+            let _ = model;
+            Ok(())
+        },
+        |tracked_pids| {
+            super::sweep_orphaned_agent_processes(app, tracked_pids);
+            super::sweep_system_agent_processes(&super::current_instance_id(app), tracked_pids);
+            super::reap_dead_instance_agents(&super::current_instance_id(app), tracked_pids);
+            super::sweep_untracked_bundle_harnesses(tracked_pids);
+        },
+        |pubkey, data| {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                if let Err(error) =
+                    crate::commands::reconcile_agent_profile(&state, &app, &pubkey, &data).await
+                {
+                    eprintln!(
+                        "buzz-desktop: profile reconciliation failed for agent {pubkey}: {error}"
+                    );
+                }
+            });
+        },
+    )
+    .await
+}
+
+// Same restore phases with only external preflight, system sweeps and relay
+// publication injectable. Tests run disk/admission/spawn/receipt code unchanged.
+pub(crate) async fn restore_with<R, F, Fut>(
+    app: &tauri::AppHandle<R>,
+    shutdown_started: &AtomicBool,
+    preflight: F,
+    sweep: impl Fn(&[u32]),
+    reconcile: impl Fn(String, crate::commands::ProfileReconcileData),
+) -> Result<(), String>
+where
+    R: tauri::Runtime,
+    F: Fn(Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -148,28 +198,7 @@ pub async fn restore_managed_agents_on_launch(
                     }),
             )
             .collect();
-        super::sweep_orphaned_agent_processes(app, &tracked_pids);
-
-        // System-wide sweep: enumerate all user processes and kill any known
-        // agent binaries not tracked by this session. Catches orphans whose
-        // PID files were already cleaned up (e.g. agent workers in their own
-        // process group whose parent harness exited).
-        super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
-
-        // Dead-instance reaping: find agents belonging to Buzz instances
-        // whose desktop process is no longer running and reap them.
-        super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
-
-        // Exact-path sweep: kill any buzz-acp process whose executable path
-        // matches this bundle's harness binary but is not in the tracked set.
-        // Complements the env-var sweep above — catches orphans that predate
-        // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
-        //
-        // TODO: the three sweeps above each walk the PID table independently.
-        // A future consolidation should collect a single shared process snapshot
-        // at the top of this block and thread it through all sweep functions,
-        // replacing the three separate kernel enumerations.
-        super::sweep_untracked_bundle_harnesses(&tracked_pids);
+        sweep(&tracked_pids);
 
         let candidates: Vec<String> = records
             .iter()
@@ -246,38 +275,48 @@ pub async fn restore_managed_agents_on_launch(
         .ok()
         .map(|k| k.public_key().to_hex());
 
-    #[cfg(feature = "mesh-llm")]
-    let agents_to_start = {
-        // Preflight against the same resolution spawn uses — `resolve_effective_config`
-        // (definition → global fallback). A linked instance's own `provider`/`model`/
-        // `relay_mesh` bytes never contribute. See `start_local_agent_with_preflight`
-        // in `commands/agents.rs` for the identical rationale on the interactive path.
-        let personas = load_personas(app).unwrap_or_default();
-        let global = super::load_global_agent_config(app).unwrap_or_default();
-        let mut mesh_preflight_failures = std::collections::HashSet::new();
-        for record in &agents_to_start {
-            let mesh_model_id = super::effective_config::resolve_effective_relay_mesh_model_id(
-                record, &personas, &global,
+    // Capture the actual scoped selection before awaiting, never preflight Default
+    // and recapture a different selected model at spawn.
+    let launch_relay = crate::relay::relay_ws_url_with_override(&state);
+    // Capture the whole batch before any provider suspends.
+    let captured = agents_to_start
+        .into_iter()
+        .map(|record| {
+            let plan = super::runtime_configurations::capture_for_app(
+                app,
+                &record,
+                owner_hex.as_deref().unwrap_or(""),
+                &launch_relay,
             );
-            if mesh_model_id.is_none() {
-                continue;
-            }
-            // Auto-start after relaunch: re-resolve a live bootstrap target and
-            // dial it. Skip (with an actionable error) only when no live target
-            // serves this model right now.
-            if let Err(error) =
-                crate::commands::ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false)
-                    .await
-            {
-                persist_restore_error(app, &state, &record.pubkey, error)?;
-                mesh_preflight_failures.insert(record.pubkey.clone());
-            }
+            (record, plan)
+        })
+        .collect::<Vec<_>>();
+    let mut prepared_agents = Vec::new();
+    for (record, preparation) in captured {
+        let result = async {
+            let mut plan = preparation?;
+            super::runtime_configurations::preflight_with(
+                &mut plan,
+                owner_hex.as_deref().ok_or("Desktop owner unavailable")?,
+                &launch_relay,
+                false,
+                &preflight,
+            )
+            .await?;
+            Ok::<_, String>(plan)
         }
-        agents_to_start
-            .into_iter()
-            .filter(|record| !mesh_preflight_failures.contains(&record.pubkey))
-            .collect::<Vec<_>>()
-    };
+        .await;
+        match result {
+            Ok(plan) => prepared_agents.push((record, plan)),
+            Err(error) => persist_restore_error(app, &state, &record.pubkey, error)?,
+        }
+    }
+    let agents_to_start = prepared_agents;
+    if crate::relay::relay_ws_url_with_override(&state) != launch_relay
+        || state.signing_keys()?.public_key().to_hex() != owner_hex.as_deref().unwrap_or("")
+    {
+        return Err("Desktop scope changed during restore preflight".into());
+    }
     if agents_to_start.is_empty() {
         return Ok(());
     }
@@ -297,17 +336,13 @@ pub async fn restore_managed_agents_on_launch(
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
+        let state = &state;
         let handles: Vec<_> = agents_to_start
             .iter()
             .filter(|_| !shutdown_started.load(Ordering::SeqCst))
-            .map(|record| {
+            .map(|(record, prepared)| {
+                let relay_url = launch_relay.clone();
                 let handle = scope.spawn(move || {
-                    let workspace_relay =
-                        crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
-                    let relay_url = crate::relay::effective_agent_relay_url(
-                        &record.relay_url,
-                        &workspace_relay,
-                    );
                     let outcome =
                         match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
                         {
@@ -330,25 +365,51 @@ pub async fn restore_managed_agents_on_launch(
                                 if already_live {
                                     SpawnOutcome::Skipped
                                 } else {
-                                    match super::terminate_untracked_pair_runtime(app, &key)
-                                        .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
-                                            spawn_agent_child(
-                                                app,
-                                                record,
-                                                &key.relay_url,
-                                                true,
-                                                owner_hex_ref,
-                                                None,
-                                            )
-                                        }) {
+                                    let result = (|| {
+                                        let _store = state
+                                            .managed_agents_store_lock
+                                            .lock()
+                                            .map_err(|error| error.to_string())?;
+                                        let records = load_managed_agents(app)?;
+                                        let current = records
+                                            .iter()
+                                            .find(|r| r.pubkey == record.pubkey)
+                                            .ok_or("Agent removed during restore preflight")?;
+                                        super::runtime_configurations::check_selection(
+                                            current,
+                                            owner_hex_ref,
+                                            &relay_url,
+                                            prepared.configuration().as_ref(),
+                                        )?;
+                                        prepared.check_continuation(current)?;
+                                        prepared.require_preflight()?;
+                                        prepared.revalidate(
+                                            current,
+                                            &load_personas(app)?,
+                                            &super::load_global_agent_config(app)?,
+                                        )?;
+                                        super::remote_stop::check_launch(
+                                            app,
+                                            &key,
+                                            &relay_url,
+                                            owner_hex_ref,
+                                            None,
+                                        )?;
+                                        super::terminate_untracked_pair_runtime(app, &key)?;
+                                        super::runtime::spawn_agent_child_prepared(
+                                            app,
+                                            current,
+                                            &relay_url,
+                                            true,
+                                            owner_hex_ref,
+                                            None,
+                                            None,
+                                            Some(prepared),
+                                        )
+                                    })();
+                                    match result {
                                         Ok(process) => {
-                                            SpawnOutcome::Spawned(key, Box::new(process))
+                                            SpawnOutcome::Spawned(key, relay_url, Box::new(process))
                                         }
                                         Err(error) => SpawnOutcome::Failed(error),
                                     }
@@ -387,17 +448,18 @@ pub async fn restore_managed_agents_on_launch(
             // Skipped means a concurrent reconcile already owns a live child for
             // this pair; leave its runtime and record state untouched.
             SpawnOutcome::Skipped => continue,
-            SpawnOutcome::Spawned(key, mut process) => {
+            SpawnOutcome::Spawned(key, relay_url, mut process) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
                     continue;
                 };
                 let now = util::now_iso();
-                let receipt = super::ManagedAgentRuntimeReceipt {
-                    key: key.clone(),
-                    pid: process.child.id(),
-                    desktop_instance_id: super::current_instance_id(app),
-                    started_at: now.clone(),
-                };
+                let mut receipt = super::ManagedAgentRuntimeReceipt::new(
+                    key.clone(),
+                    process.child.id(),
+                    super::current_instance_id(app),
+                    now.clone(),
+                );
+                receipt.runtime_configuration = process.spawn_config.runtime_configuration.clone();
                 if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
                     let _ = super::terminate_process(process.child.id());
                     let _ = process.child.wait();
@@ -415,11 +477,11 @@ pub async fn restore_managed_agents_on_launch(
                     key.clone(),
                     super::ManagedAgentPairRuntime::starting(*process),
                 );
-                // Carry the spawn key's relay into profile reconciliation so
+                // Carry the original launch community into profile reconciliation so
                 // the background task queries/publishes on the relay this
                 // spawn was actually keyed to — not whatever workspace is
                 // active when the task eventually executes.
-                successfully_spawned.push((pubkey, key.relay_url.clone()));
+                successfully_spawned.push((pubkey, relay_url));
             }
             SpawnOutcome::Failed(error) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
@@ -470,7 +532,7 @@ pub async fn restore_managed_agents_on_launch(
             })
             .collect();
 
-    save_managed_agents(app, &records)?;
+    super::storage::save_runtime_metadata_batch(app, &records)?;
     drop(runtimes);
     drop(_store_guard);
     drop(restore_transition);
@@ -479,16 +541,7 @@ pub async fn restore_managed_agents_on_launch(
     // Spawn background tasks to ensure each restored agent's kind:0 profile is
     // published on the relay. Same pattern as the UI start path.
     for (pubkey, data) in reconcile_items {
-        let reconcile_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = reconcile_app.state::<AppState>();
-            if let Err(e) =
-                crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
-                    .await
-            {
-                eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
-            }
-        });
+        reconcile(pubkey, data);
     }
 
     Ok(())
@@ -545,6 +598,23 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
     }
 }
 
+fn persist_restore_error<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    pubkey: &str,
+    error: String,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let record = find_managed_agent_mut(&mut records, pubkey)?;
+    record.updated_at = util::now_iso();
+    record.last_error = Some(error);
+    super::storage::save_runtime_metadata(app, record)
+}
+
 #[cfg(test)]
 mod profile_reconcile_tests {
     use super::profile_reconcile_completed;
@@ -559,22 +629,4 @@ mod profile_reconcile_tests {
             ProfileReconcileOutcome::SkippedDisabled
         ));
     }
-}
-
-#[cfg(feature = "mesh-llm")]
-fn persist_restore_error(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    pubkey: &str,
-    error: String,
-) -> Result<(), String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let record = find_managed_agent_mut(&mut records, pubkey)?;
-    record.updated_at = util::now_iso();
-    record.last_error = Some(error);
-    save_managed_agents(app, &records)
 }

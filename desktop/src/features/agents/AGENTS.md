@@ -308,6 +308,31 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+## Remote Desktop Stop
+
+Known Desktops exposes an owner-private, explicitly selected agent+Desktop Stop,
+not inferred agent location. The app-scoped receiver subscribes live only;
+reopening never replays commands. Receiver initialization reports a safe failure
+stage without exposing raw transport/IPC exceptions. Transient initialization
+failures and transient CLOSED states recover through a bounded receiver-owner
+budget; each attempt uses a fresh live-only subscription and repeats
+projection-only sync before admission. Terminal closure or exhausted recovery
+stays in the scope-owned notification, whose deliberate retry resets the receiver
+budget. A known latched-terminal relay session also reports immediately during
+initialization without consuming that budget; unknown and transient failures
+remain bounded retries. Recovery must discard queued callbacks from the retired
+receiver, not retry an operation, and must respect the relay rate-limit gate.
+A readiness timeout is unconfirmed delivery, not a failed initialization; late
+EOSE clears that warning after successful projection. An explicit operation retry republishes the exact request;
+the relay redelivers stored Stop duplicates without repeating relay side effects.
+The receiver returns saved results or Unknown, never repeats a consumed Stop.
+Native owner-delegation and community checks
+precede durable admission and ordinary pair Stop. A delivery ACK is not success.
+All local spawn paths consume the durable Stop fence at the shared native
+spawn boundary. Only a deliberate **Start agent** action can supersede that
+fence; config/restore/reconcile and Restart continuations cannot. Explicit Start
+captures its fence before preflight and fails if a newer Stop arrives.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness
@@ -389,3 +414,71 @@ matches the code is worse than no rule; a new pattern that isn't written down
 here will be broken by the next agent that never learns it existed. Reviewers:
 treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 "no rules changed" note) as incomplete.
+
+## Named runtime configurations
+
+The Agents-page editor manages one exact agent in an owner + community scope.
+Durable configuration sets live on the global agent record keyed by that scope;
+IPC reads/replaces only the authorized set and preserves every other scope.
+Host is a configuration field, not the scope of the whole global record.
+A local editor may preserve another host's entries but cannot edit/delete/select
+them. Missing legacy sets mean Default, with the existing inheritance behavior.
+
+Selection/editing is next-launch state, never a model switch or a running receipt.
+Start sends the exact `{id, revision}` (null explicitly means Default). Native
+preparation projects immutable launch inputs without persisting over identity or
+persona fields, checks local identity access and destination prerequisites, then
+revalidates after async readiness and at shared spawn. A stale revision or missing
+prerequisite fails rather than falling back. Auto-restart is suppressed in the
+active scoped summary while named configurations or a named running launch exist;
+saving one scope does not change the global auto-restart preference.
+
+The editor's running revision comes from the live pair's spawn snapshot, not its
+selection. Unavailable choices never remove independent Stop controls. Model IDs
+are explicit authored values; credentials are provisioned locally, never entered
+or copied by this editor. See `docs/named-runtime-configurations.md` for the native
+contract and the distinction between fixture checks and real execution evidence.
+
+All ordinary launch consumers (including Default, bulk restart, direct pairs and
+restore) capture configuration before async provider preflight. Shared native
+spawn requires that preflighted plan; it never reselects a configuration.
+Recovery reads the actual running pair snapshot, not next-launch selection.
+Pair Restart is one native preflight/locked Stop/spawn operation, never frontend
+Stop then Start. A refused preflight leaves the old process and turns intact;
+a successful Stop followed by failed launch returns an existing Failed status.
+The frontend clears only turn IDs captured before that native operation, so new
+replacement turns are safe even when its result arrives after they start.
+
+## Runtime configuration lifecycle consumer
+
+Known Desktops discovers named choices through owner-private, community+agent+host
+scoped Catalog responses, never host inventory or another community's configuration
+store. One bounded summary per encrypted response, at most 32 pages per host;
+unknown, incomplete and expired readiness cannot offer Start. Mounted options
+expire without a manual refresh. This never removes ordinary existing Stop.
+
+Start binds the exact configuration ID **and revision**, not the destination's
+current selection. Switch (including same-host switching) checks the target first,
+confirms source Stop, then requests a fresh Start of that exact revision. Preflight
+and Catalog cannot write placement intent or stop a process. The native consumer
+uses ordinary asynchronous preflight outside the transition lock, revalidates the
+immutable plan inside it, and delegates to the shared prepared launcher under the
+existing admission/Stop fences. Only explicit Start captures the shared Stop-fence
+resume ticket before preflight; probes and Restart never receive that authority.
+Shared admission checks the captured runtime generation before destructive Restart,
+and a post-Stop Failed status must never become a Running response. No second spawn
+path or launch authority is allowed. Missing/edited targets fail rather than
+substitute another configuration. Remote Start uses ordinary destination-local
+credentials: a matching agent key must already be independently provisioned on the
+host. Catalog/preflight and execution recheck that local access; missing, unreadable
+or wrong identity excludes launch choices before source Stop. No key transfer,
+broker issuer, enrollment or provisioning wizard is part of this flow. Readiness
+never hides an existing running process or its ordinary Stop control.
+
+Running identity comes only from the actual live process snapshot, never the next
+selection. A different or unknown running configuration cannot satisfy an explicit
+Start. Exact retries preserve signed bytes and saved results. Cancel, scope changes,
+and disconnected/retired receivers cannot resume a later destination Start.
+Regression seams: desktopLifecycle.test.mjs, mounted DesktopLifecycleControl.test.mjs,
+core desktop_lifecycle/protocol_tests.rs and native placement/tests.rs. Mock IPC
+passing is not evidence of a native successful launch or two-Desktop switching.

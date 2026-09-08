@@ -306,6 +306,7 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    desktopLifecycleObservationError?: string;
     /** Result returned by the mocked `add_agent_to_huddle` command. */
     addAgentToHuddleResult?: {
       ephemeral_added: boolean;
@@ -11273,6 +11274,13 @@ function sendToMockSocket(args: {
       return;
     }
 
+    // Desktop inventory/control records are global-only. Native IPC owns their
+    // encryption and result validation; smoke fixtures supply that boundary.
+    if ([30180, 30181, 30182, 50180, 50181].includes(event.kind)) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
     const channelId = getChannelIdFromTags(event.tags);
     if (!channelId) {
       sendWsText(socket.handler, [
@@ -13909,6 +13917,11 @@ export function maybeInstallE2eTauriMocks() {
             },
           ],
         };
+      }
+      case "observe_desktop_placement": {
+        const error = activeConfig?.mock?.desktopLifecycleObservationError;
+        if (error) throw new Error(error);
+        return null;
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);

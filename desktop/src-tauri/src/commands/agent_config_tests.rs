@@ -69,6 +69,7 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
 
 fn agent_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        runtime_configurations: Default::default(),
         description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),

@@ -217,6 +217,10 @@ impl Drop for BlobLockGuard {
 /// single JSON blob entry (one OS prompt per process lifetime).
 pub struct SecretStore {
     service: String,
+    // Isolated production-boundary fixtures can supply a synthetic backend.
+    // No OS keyring operation is reachable when this is set.
+    #[cfg(test)]
+    test_backend: Option<std::sync::Arc<Mutex<HashMap<String, String>>>>,
     /// In-memory cache of the deserialized blob. `None` means "not yet loaded".
     cache: Mutex<Option<HashMap<String, String>>>,
 }
@@ -228,6 +232,8 @@ impl SecretStore {
     pub fn keyring(service: impl Into<String>) -> Self {
         SecretStore {
             service: service.into(),
+            #[cfg(test)]
+            test_backend: None,
             cache: Mutex::new(None),
         }
     }
@@ -474,6 +480,14 @@ impl SecretStore {
 
     /// Probe whether `key` exists and whether the backend is reachable.
     pub fn probe(&self, key: &str) -> KeyringProbe {
+        #[cfg(test)]
+        if let Some(backend) = &self.test_backend {
+            return if backend.lock().unwrap().contains_key(key) {
+                KeyringProbe::Present
+            } else {
+                KeyringProbe::ReachableButEmpty
+            };
+        }
         #[cfg(feature = "system-keyring")]
         {
             match self.load_blob() {
@@ -547,6 +561,12 @@ impl SecretStore {
     /// migration fires when the blob exists but the key is absent, covering
     /// partial-migration scenarios (e.g. identity migrated first, agents not yet).
     pub fn load(&self, key: &str) -> Result<Option<String>, String> {
+        #[cfg(test)]
+        if let Some(backend) = &self.test_backend {
+            let mut cache = self.cache.lock().map_err(|e| e.to_string())?;
+            let map = cache.get_or_insert_with(|| backend.lock().unwrap().clone());
+            return Ok(map.get(key).cloned());
+        }
         #[cfg(feature = "system-keyring")]
         {
             match self.load_blob() {
@@ -590,6 +610,29 @@ impl SecretStore {
         #[cfg(not(feature = "system-keyring"))]
         {
             Err("system-keyring feature disabled".to_string())
+        }
+    }
+
+    /// Read one already-provisioned secret from the backend, bypassing the cache.
+    /// Launch admission must observe revocation and outages; never migrate or write.
+    pub(crate) fn load_fresh_readonly(&self, key: &str) -> Result<Option<String>, String> {
+        #[cfg(test)]
+        if let Some(backend) = &self.test_backend {
+            return Ok(backend.lock().map_err(|e| e.to_string())?.get(key).cloned());
+        }
+        #[cfg(feature = "system-keyring")]
+        {
+            let Some(raw) = self.read_blob_raw()? else {
+                return Ok(None);
+            };
+            let mut map: HashMap<String, String> =
+                serde_json::from_slice(&raw).map_err(|_| "Invalid secret store".to_string())?;
+            Ok(map.remove(key))
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            let _ = key;
+            Err("system-keyring feature disabled".into())
         }
     }
 
@@ -727,6 +770,13 @@ impl SecretStore {
     /// Store `value` for `key`. Reports `Err` on availability failures — callers
     /// decide whether to fall back to file storage.
     pub fn store(&self, key: &str, value: &str) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(backend) = &self.test_backend {
+            let mut map = backend.lock().map_err(|e| e.to_string())?;
+            map.insert(key.into(), value.into());
+            *self.cache.lock().map_err(|e| e.to_string())? = Some(map.clone());
+            return Ok(());
+        }
         #[cfg(feature = "system-keyring")]
         {
             self.mutate_blob(|map| {
@@ -930,6 +980,7 @@ mod tests {
         fn with_cache(service: &str, cache: Option<HashMap<String, String>>) -> Self {
             SecretStore {
                 service: service.to_string(),
+                test_backend: None,
                 cache: Mutex::new(cache),
             }
         }
@@ -1302,5 +1353,17 @@ mod tests {
         );
         // Agent key should also be gone.
         assert_eq!(store3.load("agent:abc123").unwrap(), None);
+    }
+}
+
+#[cfg(all(test, unix, not(feature = "system-keyring")))]
+impl SecretStore {
+    /// Synthetic backend with an independent warm cache; never opens a keyring.
+    pub(crate) fn synthetic(backend: std::sync::Arc<Mutex<HashMap<String, String>>>) -> Self {
+        Self {
+            service: "synthetic-agent-credentials".into(),
+            cache: Mutex::new(None),
+            test_backend: Some(backend),
+        }
     }
 }

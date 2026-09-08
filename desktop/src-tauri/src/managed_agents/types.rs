@@ -110,6 +110,7 @@ impl AgentDefinition {
     /// event coordinate (`d_tag = slug`) across the fold.
     pub fn into_agent_record(self) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            runtime_configurations: Default::default(),
             pubkey: String::new(),
             name: self.display_name.clone(),
             persona_id: None,
@@ -229,6 +230,9 @@ pub struct RelayAgentInfo {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
+    /// Named launch choices; absence preserves the existing Default behavior.
+    #[serde(default)]
+    pub runtime_configurations: super::runtime_configurations::RuntimeConfigurationStore,
     pub pubkey: String,
     pub name: String,
     #[serde(default)]
