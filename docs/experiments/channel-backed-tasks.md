@@ -31,6 +31,10 @@ branch: null
 
 ## Agent decision flow
 
+Whenever an agent creates a task channel, it replies where the creation was triggered with a link to the new channel:
+
+> I've created the task in [#channel-name](buzz://channel/00000000-0000-0000-0000-000000000000).
+
 ### When asked to create a task
 
 1. Is the current channel scoped only to this feature?
@@ -53,6 +57,7 @@ branch: null
 - Start with a bare channel, then add a task or branch view.
 - Start with a branch channel, then add a task view.
 - Represent work requiring multiple implementation branches as a parent task with branch-backed subtasks.
+- Have the task-creation API record the originating conversation and automatically post a link to the new task channel there.
 - Turn this decision flow into an API so agents declare their intent and Buzz creates or reuses the correct channel and bindings.
 
 We will update this document with what each experiment teaches us and which behavior requires native client or relay support.
