@@ -135,6 +135,13 @@
     font-weight: var(--type-weight-semibold);
   }
 
+  /* Glass is meaningful only with a scene behind it. These documentation
+     canvases deliberately use the first paired backdrop, so the same specimen
+     reveals Sky field in light mode and Night garden in dark mode. */
+  .glass-scene {
+    background: var(--gradient-1);
+  }
+
   .component-page-heading {
     display: flex;
     flex-direction: column;
