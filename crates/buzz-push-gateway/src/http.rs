@@ -279,48 +279,6 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         .into_response()
 }
 
-async fn recover_installation(State(s): State<AppState>, body: Bytes) -> Response {
-    let r: RecoverInstallationRequest = match crate::strict_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
-    };
-    let token = match endpoint_bytes(&r.endpoint) {
-        Some(token) => token,
-        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
-    };
-    let grant = match s.grant_keyring.open(&r.endpoint_grant) {
-        Ok(grant) => grant,
-        Err(_) => return error(StatusCode::NOT_FOUND, "not_authorized"),
-    };
-    let now = (s.now)();
-    if r.v != WIRE_VERSION
-        || grant.v != WIRE_VERSION
-        || grant.app_profile != r.app_profile
-        || !valid_relay_pubkey(&grant.relay_pubkey)
-        || grant.endpoint_epoch < 1
-        || grant.generation < 1
-        || grant.expires_at < now
-    {
-        return error(StatusCode::NOT_FOUND, "not_authorized");
-    }
-    if let Err(e) = s
-        .authority
-        .recover_installation(
-            grant.delegation_id,
-            &grant.relay_pubkey,
-            grant.endpoint_epoch,
-            grant.generation,
-            r.app_profile,
-            endpoint_fingerprint(r.app_profile, &token),
-            now,
-        )
-        .await
-    {
-        return authority_error(e);
-    }
-    (StatusCode::OK, Json(MutationResponse { status: "revoked" })).into_response()
-}
-
 struct AssertionChallenge<'a> {
     id: uuid::Uuid,
     text: &'a str,
@@ -866,7 +824,6 @@ pub fn router_with_metrics(
         .layer(RequestBodyLimitLayer::new(MAX_ENROLL_REQUEST_BYTES));
     let standard_requests = Router::new()
         .route("/v1/installations/challenges", post(challenge))
-        .route("/v1/installations/recover", post(recover_installation))
         .route("/v1/delegations", post(delegate))
         .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/endpoint", post(rotate_endpoint))
@@ -1008,85 +965,6 @@ mod request_limit_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    }
-
-    #[tokio::test]
-    async fn legacy_recovery_requires_gateway_grant_and_matching_endpoint() {
-        let authority = Arc::new(MemoryAuthorityStore::default());
-        let endpoint = vec![7; 32];
-        let fingerprint = endpoint_fingerprint(AppProfile::BuzzIosDogfood, &endpoint);
-        authority
-            .create_installation(
-                NewInstallation {
-                    id: uuid::Uuid::from_u128(1),
-                    app_attest_key_id: vec![1],
-                    app_attest_public_key: vec![2; 33],
-                    assertion_counter: 0,
-                    profile: AppProfile::BuzzIosDogfood,
-                    token_ciphertext: vec![3],
-                    token_fingerprint: fingerprint,
-                    endpoint_epoch: 1,
-                    expires_at: fixed_now() + 60,
-                },
-                fixed_now(),
-            )
-            .await
-            .unwrap();
-        let delegation_id = uuid::Uuid::from_u128(2);
-        let relay_pubkey = "11".repeat(32);
-        authority
-            .upsert_delegation(Delegation {
-                id: delegation_id,
-                installation_id: uuid::Uuid::from_u128(1),
-                relay_pubkey: relay_pubkey.clone(),
-                endpoint_epoch: 1,
-                generation: 1,
-                not_before: fixed_now() - 1,
-                expires_at: fixed_now() + 60,
-                revoked: false,
-            })
-            .await
-            .unwrap();
-        let grant_keyring =
-            Arc::new(GrantKeyring::new(vec![GrantKey::new("test", &[1; 32]).unwrap()]).unwrap());
-        let endpoint_grant = grant_keyring
-            .issue(&EndpointGrant {
-                v: WIRE_VERSION,
-                delegation_id,
-                relay_pubkey,
-                app_profile: AppProfile::BuzzIosDogfood,
-                endpoint_epoch: 1,
-                generation: 1,
-                expires_at: fixed_now() + 60,
-            })
-            .unwrap();
-        let mut app_state = state();
-        app_state.authority = authority.clone();
-        app_state.grant_keyring = grant_keyring;
-        let (public, _) = router(app_state);
-        let body = serde_json::to_vec(&RecoverInstallationRequest {
-            v: WIRE_VERSION,
-            endpoint_grant,
-            app_profile: AppProfile::BuzzIosDogfood,
-            endpoint: hex::encode(endpoint),
-        })
-        .unwrap();
-
-        let response = public
-            .oneshot(
-                Request::post("/v1/installations/recover")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(authority
-            .installation(uuid::Uuid::from_u128(1), fixed_now())
-            .await
-            .is_err());
     }
 
     #[test]

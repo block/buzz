@@ -116,10 +116,12 @@ flutter build ios --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 flutter build apk --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
-The iOS and Android build gates fail when the define is absent. The app binds
-enrollment state to this origin and discards legacy or mismatched grants and
-pending enrollment journals before enrolling again. Notification permission is
-not reset.
+The iOS and Android build gates fail when the define is absent. Enrollment
+grants and crash-recovery journals are scoped to this origin. Push has not
+shipped to existing users, so there is no legacy-state or cross-gateway
+migration. Changing gateways requires fresh enrollment; old installations
+expire under their original gateway's lease policy. Current-gateway response
+loss is still retried from the exact journaled request.
 
 Relay rollout remains an explicit deployment opt-in. Only deployments with
 `BUZZ_PUSH_ENABLED=true` advertise the descriptor and process push. See

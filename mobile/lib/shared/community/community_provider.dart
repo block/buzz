@@ -416,7 +416,6 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     String id, {
     required List<BuzzPushSubscription> subscriptions,
     required int generation,
-    String? gatewayOrigin,
   }) => _serializePushMutation(() async {
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? await storage.loadAll();
@@ -439,7 +438,6 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       pushSubscriptionState: community.pushSubscriptionState.withAccepted(
         subscriptions: subscriptions,
         generation: generation,
-        gatewayOrigin: gatewayOrigin,
       ),
     );
     await storage.save(updated);

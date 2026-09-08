@@ -179,20 +179,6 @@ pub trait AuthorityStore: Send + Sync {
         expected_epoch: i64,
         new_epoch: i64,
     ) -> Result<(), AuthorityError>;
-    /// Revoke the live installation named by a gateway-issued delegation only
-    /// when it still owns the submitted APNs token. This is the recovery seam
-    /// for clients whose legacy state omitted gateway and App Attest identity.
-    #[allow(clippy::too_many_arguments)]
-    async fn recover_installation(
-        &self,
-        delegation_id: Uuid,
-        relay_pubkey: &str,
-        endpoint_epoch: i64,
-        generation: i64,
-        profile: AppProfile,
-        token_fingerprint: [u8; 32],
-        now: i64,
-    ) -> Result<(), AuthorityError>;
     /// Atomically validate and lock installation then delegation authority,
     /// reserve quota/replay state, and commit. That durable commit is the
     /// delivery send-begin linearization point seen by revocation.
@@ -527,64 +513,6 @@ impl AuthorityStore for MemoryAuthorityStore {
         }
         i.endpoint_epoch = new;
         i.revoked = true;
-        Ok(())
-    }
-
-    async fn recover_installation(
-        &self,
-        delegation_id: Uuid,
-        relay_pubkey: &str,
-        endpoint_epoch: i64,
-        generation: i64,
-        profile: AppProfile,
-        token_fingerprint: [u8; 32],
-        now: i64,
-    ) -> Result<(), AuthorityError> {
-        let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
-        let (installation_id, stored_relay) = s
-            .delegation_ids
-            .get(&delegation_id)
-            .cloned()
-            .ok_or(AuthorityError::Rejected)?;
-        if stored_relay != relay_pubkey {
-            return Err(AuthorityError::Rejected);
-        }
-        let delegation = s
-            .delegations
-            .get(&(installation_id, stored_relay))
-            .ok_or(AuthorityError::Rejected)?;
-        if delegation.revoked
-            || delegation.endpoint_epoch != endpoint_epoch
-            || delegation.generation != generation
-            || delegation.expires_at < now
-        {
-            return Err(AuthorityError::Rejected);
-        }
-        let installation = s
-            .installations
-            .get_mut(&installation_id)
-            .ok_or(AuthorityError::Rejected)?;
-        let revoked_epoch = endpoint_epoch
-            .checked_add(1)
-            .ok_or(AuthorityError::Rejected)?;
-        if installation.revoked
-            && installation.endpoint_epoch == revoked_epoch
-            && installation.expires_at >= now
-            && installation.profile == profile
-            && installation.token_fingerprint == token_fingerprint
-        {
-            return Ok(());
-        }
-        if installation.revoked
-            || installation.expires_at < now
-            || installation.profile != profile
-            || installation.token_fingerprint != token_fingerprint
-            || installation.endpoint_epoch != endpoint_epoch
-        {
-            return Err(AuthorityError::Rejected);
-        }
-        installation.endpoint_epoch = revoked_epoch;
-        installation.revoked = true;
         Ok(())
     }
 
@@ -1043,61 +971,6 @@ mod tests {
         assert_eq!(
             store.revoke_installation(id, 2, 3).await,
             Err(AuthorityError::Rejected)
-        );
-    }
-
-    #[tokio::test]
-    async fn legacy_grant_and_matching_token_recover_only_the_named_installation() {
-        let store = store().await;
-
-        assert_eq!(
-            store
-                .recover_installation(
-                    Uuid::from_u128(2),
-                    &"11".repeat(32),
-                    1,
-                    1,
-                    AppProfile::BuzzIosDogfood,
-                    [9; 32],
-                    1_000,
-                )
-                .await,
-            Err(AuthorityError::Rejected),
-            "an opaque grant cannot recover a different APNs token"
-        );
-        assert!(store.installation(Uuid::from_u128(1), 1_000).await.is_ok());
-
-        store
-            .recover_installation(
-                Uuid::from_u128(2),
-                &"11".repeat(32),
-                1,
-                1,
-                AppProfile::BuzzIosDogfood,
-                [4; 32],
-                1_000,
-            )
-            .await
-            .expect("the gateway-issued grant and matching token identify legacy authority");
-        store
-            .recover_installation(
-                Uuid::from_u128(2),
-                &"11".repeat(32),
-                1,
-                1,
-                AppProfile::BuzzIosDogfood,
-                [4; 32],
-                1_000,
-            )
-            .await
-            .expect("an exact recovery retry is idempotent after response loss");
-        assert!(store.installation(Uuid::from_u128(1), 1_000).await.is_err());
-        assert!(
-            store
-                .installation_for_revocation(Uuid::from_u128(1), 1_000)
-                .await
-                .expect("recovery retains the installation tombstone")
-                .revoked
         );
     }
 }

@@ -329,17 +329,7 @@ The gateway verifies Apple's attestation chain, configured application identifie
 
 The client MUST durably journal the exact attested enrollment request before its first send and retain it until delegation state is durable. If that exact request is replayed after the installation commit, the gateway MUST return the same success response after re-verifying the attestation, even though the challenge was already consumed. Idempotency requires exact equality of attested key, profile, endpoint fingerprint, epoch, and expiration, and the recovered public key MUST equal the committed key; any mismatch remains indistinguishable from other authority rejection. This recovery rule grants no authority beyond replaying the already authenticated request.
 
-Invalid attestation is `401 invalid_attestation`; a consumed or expired challenge is `404 not_authorized`. After successful attestation verification, a key or token owned by a different live installation is `409 installation_conflict`; clients use this distinct authenticated result to discover and revoke response-loss legacy enrollment before retrying. A fresh verified enrollment may replace expired or revoked ownership so an app that missed its renewal window can recover.
-
-### Gateway-neutral legacy recovery
-
-`POST /v1/installations/recover`
-
-```json
-{"v":1,"endpoint_grant":"<opaque-capability>","app_profile":"buzz-ios-dogfood","endpoint":"<lowercase APNs-token hex>"}
-```
-
-This narrowly recovers clients whose older durable schema retained a gateway-issued capability and APNs token but omitted the gateway origin and App Attest key associated with the installation. The gateway MUST decrypt the capability itself and atomically revoke only the live installation named by its current delegation when the capability profile, relay key, endpoint epoch, generation, expiry, and the installation's `(app_profile, SHA-256(token))` fingerprint all match. Thus neither a capability from another gateway nor a capability paired with another token grants recovery authority. When legacy state contains only a response-loss enrollment journal, the client may instead replay that exact attested request to candidate gateways and use the returned handle only on the gateway that cryptographically accepts it. The client MUST durably retain every affected relay origin for replacement publication before either recovery path and MUST retain the legacy record until a replacement grant is durable. Success, including an exact retry after response loss, is `200 {"status":"revoked"}`; invalid, expired, or mismatched proof is `404 not_authorized`.
+Invalid attestation is `401 invalid_attestation`; a consumed or expired challenge is `404 not_authorized`. After successful attestation verification, a key or token owned by a different live installation is `409 installation_conflict`; the conflicting request does not replace existing live authority. A fresh verified enrollment may replace expired or revoked ownership so an app that missed its renewal window can recover.
 
 ### Relay delegation and capability issuance
 

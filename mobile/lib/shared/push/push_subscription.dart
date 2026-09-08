@@ -185,9 +185,6 @@ class BuzzPushLeaseSubscriptionState {
   /// Monotonic generation of the relay-facing kind-30350 lease.
   final int? acceptedGeneration;
 
-  /// Canonical gateway origin whose endpoint grant backs the accepted lease.
-  final String? acceptedGatewayOrigin;
-
   /// Highest lease generation durably reserved by the client. This advances
   /// before relay publication so a relay commit followed by a local failure
   /// cannot make the next retry reuse a stale generation.
@@ -204,7 +201,6 @@ class BuzzPushLeaseSubscriptionState {
     this.desired = const [],
     this.accepted,
     this.acceptedGeneration,
-    this.acceptedGatewayOrigin,
     this.generationCursor,
     this.pendingTombstoneGeneration,
   }) : assert(
@@ -219,7 +215,6 @@ class BuzzPushLeaseSubscriptionState {
     required Iterable<BuzzPushSubscription> desired,
     required Iterable<BuzzPushSubscription> acceptedSubscriptions,
     required this.acceptedGeneration,
-    this.acceptedGatewayOrigin,
     this.generationCursor,
     this.pendingTombstoneGeneration,
   }) : authority = BuzzPushLeaseSubscriptionAuthority.accepted,
@@ -265,7 +260,6 @@ class BuzzPushLeaseSubscriptionState {
           desired: updated,
           accepted: accepted,
           acceptedGeneration: acceptedGeneration,
-          acceptedGatewayOrigin: acceptedGatewayOrigin,
           generationCursor: generationCursor,
           pendingTombstoneGeneration: pendingTombstoneGeneration,
         ),
@@ -274,7 +268,6 @@ class BuzzPushLeaseSubscriptionState {
           desired: updated,
           acceptedSubscriptions: accepted!,
           acceptedGeneration: acceptedGeneration,
-          acceptedGatewayOrigin: acceptedGatewayOrigin,
           generationCursor: generationCursor,
           pendingTombstoneGeneration: pendingTombstoneGeneration,
         ),
@@ -284,12 +277,10 @@ class BuzzPushLeaseSubscriptionState {
   BuzzPushLeaseSubscriptionState withAccepted({
     required Iterable<BuzzPushSubscription> subscriptions,
     required int generation,
-    String? gatewayOrigin,
   }) => BuzzPushLeaseSubscriptionState.accepted(
     desired: desired,
     acceptedSubscriptions: subscriptions,
     acceptedGeneration: generation,
-    acceptedGatewayOrigin: gatewayOrigin ?? acceptedGatewayOrigin,
     generationCursor: generationCursor == null || generation > generationCursor!
         ? generation
         : generationCursor,
@@ -312,7 +303,6 @@ class BuzzPushLeaseSubscriptionState {
           desired: desired,
           accepted: accepted,
           acceptedGeneration: acceptedGeneration,
-          acceptedGatewayOrigin: acceptedGatewayOrigin,
           generationCursor: generation,
           pendingTombstoneGeneration: pendingTombstoneGeneration,
         ),
@@ -321,7 +311,6 @@ class BuzzPushLeaseSubscriptionState {
           desired: desired,
           acceptedSubscriptions: accepted!,
           acceptedGeneration: acceptedGeneration,
-          acceptedGatewayOrigin: acceptedGatewayOrigin,
           generationCursor: generation,
           pendingTombstoneGeneration: pendingTombstoneGeneration,
         ),
@@ -338,7 +327,6 @@ class BuzzPushLeaseSubscriptionState {
       desired: desired,
       accepted: accepted,
       acceptedGeneration: acceptedGeneration,
-      acceptedGatewayOrigin: acceptedGatewayOrigin,
       generationCursor: generation,
       pendingTombstoneGeneration: generation,
     );
@@ -355,7 +343,6 @@ class BuzzPushLeaseSubscriptionState {
       desired: desired,
       accepted: accepted,
       acceptedGeneration: acceptedGeneration,
-      acceptedGatewayOrigin: acceptedGatewayOrigin,
       generationCursor: generation,
       pendingTombstoneGeneration: generation,
     );
@@ -369,7 +356,6 @@ class BuzzPushLeaseSubscriptionState {
     return BuzzPushLeaseSubscriptionState.desired(
       desired: desired,
       acceptedGeneration: generation,
-      acceptedGatewayOrigin: acceptedGatewayOrigin,
       generationCursor:
           generationCursor == null || generation > generationCursor!
           ? generation
@@ -383,8 +369,6 @@ class BuzzPushLeaseSubscriptionState {
     if (accepted != null)
       'accepted': [for (final subscription in accepted!) subscription.toJson()],
     if (acceptedGeneration != null) 'acceptedGeneration': acceptedGeneration,
-    if (acceptedGatewayOrigin != null)
-      'acceptedGatewayOrigin': acceptedGatewayOrigin,
     if (generationCursor != null) 'generationCursor': generationCursor,
     if (pendingTombstoneGeneration != null)
       'pendingTombstoneGeneration': pendingTombstoneGeneration,
@@ -396,7 +380,6 @@ class BuzzPushLeaseSubscriptionState {
       'desired',
       'accepted',
       'acceptedGeneration',
-      'acceptedGatewayOrigin',
       'generationCursor',
       'pendingTombstoneGeneration',
     }, 'push subscription state');
@@ -411,17 +394,11 @@ class BuzzPushLeaseSubscriptionState {
         ? null
         : _subscriptionList(acceptedRaw, 'accepted');
     final acceptedGeneration = json['acceptedGeneration'];
-    final acceptedGatewayOrigin = json['acceptedGatewayOrigin'];
     final generationCursor = json['generationCursor'];
     final pendingTombstoneGeneration = json['pendingTombstoneGeneration'];
     if (acceptedGeneration != null && acceptedGeneration is! int) {
       throw const FormatException(
         'Accepted push lease generation must be an integer.',
-      );
-    }
-    if (acceptedGatewayOrigin != null && acceptedGatewayOrigin is! String) {
-      throw const FormatException(
-        'Accepted push gateway origin must be a string.',
       );
     }
     if (generationCursor != null && generationCursor is! int) {
@@ -449,7 +426,6 @@ class BuzzPushLeaseSubscriptionState {
         desired: desired,
         accepted: accepted,
         acceptedGeneration: acceptedGeneration as int?,
-        acceptedGatewayOrigin: acceptedGatewayOrigin as String?,
         generationCursor: generationCursor as int?,
         pendingTombstoneGeneration: pendingTombstoneGeneration as int?,
       ),
@@ -458,7 +434,6 @@ class BuzzPushLeaseSubscriptionState {
           desired: desired,
           acceptedSubscriptions: accepted,
           acceptedGeneration: acceptedGeneration,
-          acceptedGatewayOrigin: acceptedGatewayOrigin as String?,
           generationCursor: generationCursor as int?,
           pendingTombstoneGeneration: pendingTombstoneGeneration as int?,
         ),
