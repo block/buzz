@@ -758,6 +758,43 @@ class ComposeBar extends HookConsumerWidget {
       focusNode.requestFocus();
     }
 
+    /// Starts a GFM task item on its own line and parks the caret after the
+    /// marker.
+    ///
+    /// Not routed through [applyFormat]: that wraps a selection with a
+    /// prefix/suffix pair, whereas a task marker is a *line* prefix — dropping
+    /// `- [ ] ` in the middle of a sentence produces text, not a checkbox. The
+    /// syntax written here is the same one `task_markers.dart` counts and
+    /// rewrites when the box is later tapped.
+    void insertTaskItem() {
+      final text = controller.text;
+      final sel = controller.selection;
+      if (!sel.isValid) return;
+
+      final offset = sel.baseOffset;
+      final lineStart = offset == 0
+          ? 0
+          : text.lastIndexOf('\n', offset - 1) + 1;
+      final lineSoFar = text.substring(lineStart, offset);
+      // Only break the line when there is something on it already, so the
+      // first tap on an empty composer does not leave a blank row above.
+      final insertion = lineSoFar.trim().isEmpty ? '- [ ] ' : '\n- [ ] ';
+
+      isModifyingText.value = true;
+      try {
+        controller.text =
+            '${text.substring(0, offset)}$insertion${text.substring(offset)}';
+        controller.selection = TextSelection.collapsed(
+          offset: offset + insertion.length,
+        );
+      } finally {
+        isModifyingText.value = false;
+      }
+      focusNode.requestFocus();
+    }
+
+    // ----- Widget tree ----------------------------------------------------
+
     void chooseAttachment(
       Future<void> Function() choose, {
       String? errorMessage,
@@ -963,6 +1000,7 @@ class ComposeBar extends HookConsumerWidget {
               motionDuration: motionDuration,
               resizeDuration: resizeDuration,
               onFormat: applyFormat,
+              onInsertTask: insertTaskItem,
               onMention: () {
                 attachmentSurface.value = _AttachmentSurface.closed;
                 triggerMention();

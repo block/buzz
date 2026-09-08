@@ -21,6 +21,7 @@ class _ComposeBarLayout extends HookWidget {
   final Duration motionDuration;
   final Duration resizeDuration;
   final void Function(String prefix, [String? suffix]) onFormat;
+  final VoidCallback onInsertTask;
   final VoidCallback onMention;
   final VoidCallback onChannel;
   final VoidCallback onEmoji;
@@ -50,6 +51,7 @@ class _ComposeBarLayout extends HookWidget {
     required this.motionDuration,
     required this.resizeDuration,
     required this.onFormat,
+    required this.onInsertTask,
     required this.onMention,
     required this.onChannel,
     required this.onEmoji,
@@ -207,7 +209,10 @@ class _ComposeBarLayout extends HookWidget {
                         children: [...previousChildren, ?currentChild],
                       ),
                       child: formattingOpen
-                          ? _FormattingToolbar(onFormat: onFormat)
+                          ? _FormattingToolbar(
+                              onFormat: onFormat,
+                              onInsertTask: onInsertTask,
+                            )
                           : Row(
                               key: const ValueKey('standard-actions'),
                               children: [

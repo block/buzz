@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ALargeSmall, Mic, Paperclip, X } from "lucide-react";
+import { ALargeSmall, ListChecks, Mic, Paperclip, X } from "lucide-react";
 
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
@@ -16,6 +16,33 @@ import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
+/**
+ * Starts a Markdown task item (`- [ ] `) at the cursor.
+ *
+ * TipTap's StarterKit has no TaskList node, so a checklist is authored as an
+ * ordinary bullet list whose text begins with `[ ]`. That is not a workaround
+ * for its own sake: it is exactly the syntax `rehypeTaskIndex` numbers and
+ * `toggleTaskMarker` rewrites, and the composer's serializer deliberately
+ * un-escapes brackets (see `getMarkdownFromEditor`), so what is typed here is
+ * what the timeline renders as a checkbox.
+ */
+function insertTaskItem(editor: Editor) {
+  // Separate synchronous commands, not one chain: clicking the button blurs
+  // the editor, and a chained `focus()` is only applied at `run()` — the
+  // list checks below would then read a stale selection and silently splice a
+  // second marker into the current line. Each command here observes the state
+  // the previous one left, the same way the Shift-Enter keymap does.
+  editor.commands.focus();
+  if (!editor.isActive("listItem")) {
+    editor.commands.toggleBulletList();
+  } else if (editor.state.selection.$from.parent.content.size > 0) {
+    // Mid-item with text already in it: begin the next task rather than
+    // splice a marker into the middle of the current one.
+    editor.commands.splitListItem("listItem");
+  }
+  editor.commands.insertContent("[ ] ");
+}
+
 const presenceSpring = {
   type: "spring",
   stiffness: 400,
@@ -259,6 +286,34 @@ export const MessageComposerToolbar = React.memo(
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Attach file</TooltipContent>
+                </Tooltip>
+                <Tooltip disableHoverableContent>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label="Add a task"
+                      data-testid="message-insert-task"
+                      disabled={composerDisabled || !editor}
+                      onClick={() => {
+                        if (editor) insertTaskItem(editor);
+                      }}
+                      onMouseDown={(event) => {
+                        // Keep focus inside the editor. Unlike its neighbours,
+                        // which hand off to a picker, this button writes into
+                        // the document: letting it take focus makes the
+                        // contenteditable restore its pre-click selection
+                        // afterwards, dropping the caret in front of the
+                        // marker just inserted.
+                        event.preventDefault();
+                        onCaptureSelection();
+                      }}
+                      size="icon"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <ListChecks />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Add a task</TooltipContent>
                 </Tooltip>
                 {onVoiceNote ? (
                   <Tooltip disableHoverableContent>

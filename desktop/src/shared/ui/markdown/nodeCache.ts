@@ -9,6 +9,7 @@ import remarkEntityLinks from "@/features/messages/lib/remarkEntityLinks";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
 import rehypeLeadingInlineContent from "@/shared/lib/rehypeLeadingInlineContent";
 import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
+import { rehypeTaskIndex } from "@/shared/lib/rehypeTaskIndex";
 import remarkChannelLinks from "@/shared/lib/remarkChannelLinks";
 import remarkCustomEmoji, {
   type CustomEmoji,
@@ -89,8 +90,11 @@ function listSegment(values: readonly string[] | undefined): string {
 
 function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   markdownParseCount += 1;
+  // `rehypeTaskIndex` is unconditional and depends only on the content, so it
+  // needs no cache-key segment: an identical parse always stamps identical
+  // ordinals.
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
-  const rehypePlugins: any[] = [rehypeImageGallery];
+  const rehypePlugins: any[] = [rehypeImageGallery, rehypeTaskIndex];
   if (input.leadingInlineContent) {
     rehypePlugins.push(rehypeLeadingInlineContent);
   }

@@ -94,6 +94,11 @@ type MessageTimelineProps = {
   isMessageUnreadById?: (messageId: string) => boolean;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onToggleTask?: (
+    message: TimelineMessage,
+    taskIndex: number,
+    checked: boolean,
+  ) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
@@ -195,6 +200,7 @@ const MessageTimelineBase = React.forwardRef<
     ownerProfiles,
     onDelete,
     onEdit,
+    onToggleTask,
     onMarkUnread,
     onMarkRead,
     onReply,
@@ -677,6 +683,7 @@ const MessageTimelineBase = React.forwardRef<
       messages={renderedMessages}
       onDelete={onDelete}
       onEdit={onEdit}
+      onToggleTask={onToggleTask}
       onMarkUnread={onMarkUnread}
       onMarkRead={onMarkRead}
       onReply={onReply}

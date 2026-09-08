@@ -77,6 +77,7 @@ import 'small_avatar.dart';
 import 'sticky_date_header.dart';
 import 'thread_detail_page.dart';
 import 'timeline_message.dart';
+import '../../shared/markdown/task_markers.dart';
 
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/system_rows.dart';

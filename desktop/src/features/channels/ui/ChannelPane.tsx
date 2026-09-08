@@ -134,6 +134,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onDelete,
   onEdit,
   onEditSave,
+  onToggleTask,
   onFollowThread,
   onMarkUnread,
   onMarkRead,
@@ -673,6 +674,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               unreadCount={unreadCount}
               onDelete={onDelete}
               onEdit={handleRoutedEdit}
+              onToggleTask={onToggleTask}
               onMarkUnread={onMarkUnread}
               onMarkRead={onMarkRead}
               onReply={timelineReplyHandler}
@@ -861,6 +863,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onClose={onCloseThread}
                 onDelete={onDelete}
                 onEdit={handleRoutedEdit}
+                onToggleTask={onToggleTask}
                 onEditLastOwnMessage={handleEditLastOwnThreadMessage}
                 onEditSave={onEditSave}
                 onFollowThread={onFollowThread}

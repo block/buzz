@@ -70,6 +70,11 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   onClose: () => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onToggleTask?: (
+    message: TimelineMessage,
+    taskIndex: number,
+    checked: boolean,
+  ) => void;
   onEditLastOwnMessage?: () => boolean;
   onEditSave?: (
     content: string,
@@ -172,6 +177,7 @@ export function MessageThreadPanel({
   onResizeStart,
   onDelete,
   onEdit,
+  onToggleTask,
   onEditLastOwnMessage,
   onEditSave,
   onFollowThread,
@@ -554,6 +560,16 @@ export function MessageThreadPanel({
                     ? onDelete
                     : undefined
                 }
+                onToggleTask={
+                  onToggleTask &&
+                  canManageMessageForCurrentUser(
+                    threadHead,
+                    currentPubkey,
+                    profiles,
+                  )
+                    ? onToggleTask
+                    : undefined
+                }
                 onEdit={
                   onEdit &&
                   canManageMessageForCurrentUser(
@@ -722,6 +738,16 @@ export function MessageThreadPanel({
                               profiles,
                             )
                               ? onDelete
+                              : undefined
+                          }
+                          onToggleTask={
+                            onToggleTask &&
+                            canManageMessageForCurrentUser(
+                              entry.message,
+                              currentPubkey,
+                              profiles,
+                            )
+                              ? onToggleTask
                               : undefined
                           }
                           onEdit={

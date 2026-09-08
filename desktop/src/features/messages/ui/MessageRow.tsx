@@ -99,6 +99,7 @@ export const MessageRow = React.memo(
     onMarkUnread,
     onMarkRead,
     onToggleReaction,
+    onToggleTask,
     onReply,
     onSendToChannel,
     onEntranceComplete,
@@ -142,6 +143,16 @@ export const MessageRow = React.memo(
     ) => void;
     onDelete?: (message: TimelineMessage) => void;
     onEdit?: (message: TimelineMessage) => void;
+    /**
+     * Persists a task-list checkbox toggle. Supplied only when the viewer may
+     * edit this message (`canManageMessageForCurrentUser`); absent leaves the
+     * checkboxes rendered but inert.
+     */
+    onToggleTask?: (
+      message: TimelineMessage,
+      taskIndex: number,
+      checked: boolean,
+    ) => void;
     onFollowThread?: (message: TimelineMessage) => void;
     onMarkUnread?: (message: TimelineMessage) => void;
     onMarkRead?: (message: TimelineMessage) => void;
@@ -236,6 +247,18 @@ export const MessageRow = React.memo(
         await onSendToChannel?.(target);
       },
       [currentPubkey, onSendToChannel, profiles],
+    );
+    // Bind the message so the Markdown runtime only has to carry the ordinal
+    // and the requested state. Left undefined when the viewer cannot edit, so
+    // the checkbox stays inert rather than offering a write that would fail.
+    const handleToggleTask = React.useMemo(
+      () =>
+        onToggleTask
+          ? (taskIndex: number, checked: boolean) => {
+              onToggleTask(message, taskIndex, checked);
+            }
+          : undefined,
+      [message, onToggleTask],
     );
     const { mentionNames, mentionPubkeysByName } = React.useMemo(
       () => resolveMentionProps(message.tags, profiles, message.body),
@@ -436,6 +459,7 @@ export const MessageRow = React.memo(
               linkPreviewTags={message.tags}
               leadingInlineContent={agentAddressPrefix}
               onRemoveLinkPreviewsForEveryone={removeLinkPreviewsForEveryone}
+              onToggleTask={handleToggleTask}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
               agentMentionPubkeysByName={agentMentionPubkeysByName}

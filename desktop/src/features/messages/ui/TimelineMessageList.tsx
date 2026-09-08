@@ -70,6 +70,11 @@ type TimelineMessageListProps = {
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onToggleTask?: (
+    message: TimelineMessage,
+    taskIndex: number,
+    checked: boolean,
+  ) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
@@ -144,6 +149,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   messages,
   onDelete,
   onEdit,
+  onToggleTask,
   onMarkUnread,
   onMarkRead,
   onReply,
@@ -269,6 +275,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               onEntranceComplete={onEntranceMessageComplete}
               onDelete={onDelete}
               onEdit={onEdit}
+              onToggleTask={onToggleTask}
               onMarkRead={onMarkRead}
               onMarkUnread={onMarkUnread}
               onReply={onReply}
@@ -303,6 +310,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       messageFooters,
       onDelete,
       onEdit,
+      onToggleTask,
       onMarkRead,
       onMarkUnread,
       onReply,

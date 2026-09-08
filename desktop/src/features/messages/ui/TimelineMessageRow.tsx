@@ -77,6 +77,11 @@ type MessageRowItemProps = {
   onEntranceComplete?: (messageId: string) => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onToggleTask?: (
+    message: TimelineMessage,
+    taskIndex: number,
+    checked: boolean,
+  ) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
@@ -109,6 +114,7 @@ export function MessageRowItem({
   onEntranceComplete,
   onDelete,
   onEdit,
+  onToggleTask,
   onMarkUnread,
   onMarkRead,
   onReply,
@@ -130,6 +136,8 @@ export function MessageRowItem({
   );
   const canDelete = canManage && onDelete ? onDelete : undefined;
   const canEdit = canManage && onEdit ? onEdit : undefined;
+  // Same authz as editing: toggling a checkbox *is* an edit of the message.
+  const canToggleTask = canManage && onToggleTask ? onToggleTask : undefined;
 
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;
@@ -160,6 +168,7 @@ export function MessageRowItem({
           message={message}
           onDelete={canDelete}
           onEdit={canEdit}
+          onToggleTask={canToggleTask}
           onFollowThread={
             followThreadById ? () => followThreadById(message.id) : undefined
           }
@@ -213,6 +222,7 @@ export function MessageRowItem({
         message={message}
         onDelete={canDelete}
         onEdit={canEdit}
+        onToggleTask={canToggleTask}
         onMarkRead={onMarkRead}
         onMarkUnread={onMarkUnread}
         onToggleReaction={onToggleReaction}
