@@ -897,63 +897,13 @@ mod postgres_tests {
             .connect(&database_url)
             .await
             .expect("connect isolated-schema pool");
-        // Real DDL from migration 0010 (minus the _operator_global_tables audit
-        // insert, which lives outside the isolated schema).
-        sqlx::raw_sql(
-            "CREATE TABLE push_gateway_challenges (
-                 id UUID PRIMARY KEY,
-                 challenge_hash BYTEA NOT NULL CHECK (length(challenge_hash) = 32),
-                 expires_at TIMESTAMPTZ NOT NULL,
-                 created_at TIMESTAMPTZ NOT NULL
-             );
-             CREATE TABLE push_gateway_installations (
-                 id UUID PRIMARY KEY,
-                 app_attest_key_id BYTEA NOT NULL UNIQUE,
-                 app_attest_public_key BYTEA NOT NULL,
-                 assertion_counter BIGINT NOT NULL,
-                 app_profile TEXT NOT NULL,
-                 token_ciphertext BYTEA NOT NULL,
-                 token_fingerprint BYTEA NOT NULL CHECK (length(token_fingerprint) = 32),
-                 endpoint_epoch BIGINT NOT NULL,
-                 expires_at TIMESTAMPTZ NOT NULL,
-                 revoked_at TIMESTAMPTZ,
-                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                 UNIQUE (app_profile, token_fingerprint)
-             );
-             CREATE TABLE push_gateway_delegations (
-                 id UUID PRIMARY KEY,
-                 installation_id UUID NOT NULL REFERENCES push_gateway_installations(id),
-                 relay_pubkey BYTEA NOT NULL CHECK (length(relay_pubkey) = 32),
-                 endpoint_epoch BIGINT NOT NULL,
-                 generation BIGINT NOT NULL,
-                 not_before TIMESTAMPTZ NOT NULL,
-                 expires_at TIMESTAMPTZ NOT NULL,
-                 revoked_at TIMESTAMPTZ,
-                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                 UNIQUE (installation_id, relay_pubkey)
-             );
-             CREATE TABLE push_gateway_endpoint_quotas (
-                 token_fingerprint BYTEA PRIMARY KEY CHECK (length(token_fingerprint) = 32),
-                 window_started_at TIMESTAMPTZ NOT NULL,
-                 admitted BIGINT NOT NULL,
-                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-             );
-             CREATE TABLE push_gateway_delivery_auth_replays (
-                 relay_pubkey BYTEA NOT NULL CHECK (length(relay_pubkey) = 32),
-                 auth_event_id BYTEA NOT NULL CHECK (length(auth_event_id) = 32),
-                 expires_at TIMESTAMPTZ NOT NULL,
-                 PRIMARY KEY (relay_pubkey, auth_event_id)
-             );
-             CREATE TABLE push_gateway_delivery_request_replays (
-                 relay_pubkey BYTEA NOT NULL CHECK (length(relay_pubkey) = 32),
-                 request_id UUID NOT NULL,
-                 expires_at TIMESTAMPTZ NOT NULL,
-                 PRIMARY KEY (relay_pubkey, request_id)
-             );",
-        )
-        .execute(&pool)
-        .await
-        .expect("create authority admission tables");
+        // Exercise the same scoped migrations as production, including active-only
+        // uniqueness and future schema changes. The isolated search_path keeps
+        // these tables and SQLx's history separate from other tests.
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply gateway migrations");
         (pool, schema)
     }
 
