@@ -274,7 +274,9 @@ import os.log
     viewController: UIViewController?,
     result: @escaping FlutterResult
   ) {
-    if call.method == "cancelAgeSignalRequest" {
+    // iOS can retire the request in process. The generation fence prevents
+    // a late result from the cancelled task from completing a fresh request.
+    if call.method == "cancelAgeSignalRequest" || call.method == "restartForAgeSignal" {
       cancelAgeSignalRequest()
       result(true)
       return

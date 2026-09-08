@@ -20,7 +20,9 @@ typedef AgeSignalRequest = Future<Map<Object?, Object?>?> Function();
 /// Waits before retrying a failed native age-signal request.
 typedef AgeSignalDelay = Future<void> Function(Duration duration);
 typedef AgeSignalCancel = Future<bool> Function();
-typedef AgeSignalRestart = Future<void> Function();
+
+/// Returns true only when native state is retired for an in-process retry.
+typedef AgeSignalRestart = Future<bool> Function();
 
 Future<Map<Object?, Object?>?> _requestPlatformAgeSignal() =>
     ageSignalChannel.invokeMapMethod<Object?, Object?>('requestAgeSignal');
@@ -30,8 +32,15 @@ Future<void> _delayAgeSignalRetry(Duration duration) =>
 Future<bool> _cancelPlatformAgeSignal() async =>
     await ageSignalChannel.invokeMethod<bool>('cancelAgeSignalRequest') ??
     false;
-Future<void> _restartForPlatformAgeSignal() =>
-    ageSignalChannel.invokeMethod<void>('restartForAgeSignal');
+Future<bool> _restartForPlatformAgeSignal() async {
+  final retired = await ageSignalChannel.invokeMethod<bool>(
+    'restartForAgeSignal',
+  );
+  if (retired == null) {
+    throw StateError('Missing age signal reset acknowledgement.');
+  }
+  return retired;
+}
 
 bool shouldBlockForAgeSignal(Map<Object?, Object?> response) {
   if (response.length != 2 ||
@@ -98,11 +107,6 @@ class AgeSignalNotifier extends Notifier<AgeSignalState> {
 
   Future<void> request() async {
     if (_completed) return;
-    if (_restartRequired) {
-      await _restartSignal();
-      return;
-    }
-
     final requestInFlight = _requestInFlight;
     if (requestInFlight != null) {
       await requestInFlight;
@@ -122,6 +126,28 @@ class AgeSignalNotifier extends Notifier<AgeSignalState> {
   }
 
   Future<void> _requestWithRetry() async {
+    if (_restartRequired) {
+      var retired = false;
+      try {
+        retired = await _restartSignal().timeout(_cancellationTimeout);
+      } on TimeoutException {
+        // Keep the retry affordance when native recovery does not acknowledge.
+      } on MissingPluginException {
+        // A missing recovery handler must not allow access.
+      } on PlatformException {
+        // A failed reset must not start an overlapping native request.
+      } on TypeError {
+        // A malformed acknowledgement is not evidence of retirement.
+      } on StateError {
+        // A missing acknowledgement is not evidence of retirement.
+      }
+      if (!retired) {
+        state = AgeSignalState.retryableFailure;
+        return;
+      }
+      _nativeRequestInFlight = null;
+      _restartRequired = false;
+    }
     for (var attempt = 0; attempt < _maxAttempts; attempt += 1) {
       final Map<Object?, Object?>? response;
       try {

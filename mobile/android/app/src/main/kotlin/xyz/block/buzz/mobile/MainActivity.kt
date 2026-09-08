@@ -252,7 +252,7 @@ class MainActivity : FlutterFragmentActivity() {
             result.error("age_signal_restart_failed", "Buzz could not restart.", null)
             return
         }
-        result.success(null)
+        result.success(false)
         window.decorView.post {
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
             startActivity(launchIntent)

@@ -27,6 +27,90 @@ void main() {
     return container.read(ageSignalProvider);
   }
 
+  for (final failure in ['missing', 'malformed', 'timeout']) {
+    test('failed native recovery stays retryable: $failure', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      var requests = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ageSignalChannel, (call) async {
+            if (call.method == 'requestAgeSignal') {
+              requests += 1;
+              return Completer<Object?>().future;
+            }
+            if (call.method == 'cancelAgeSignalRequest') return false;
+            if (failure == 'malformed') return 'invalid';
+            if (failure == 'timeout') return Completer<Object?>().future;
+            throw MissingPluginException();
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(ageSignalChannel, null),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          ageSignalProvider.overrideWith(
+            () => AgeSignalNotifier(
+              delay: (_) async {},
+              requestTimeout: const Duration(milliseconds: 1),
+              cancellationTimeout: const Duration(milliseconds: 1),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(ageSignalProvider.notifier);
+      await notifier.request();
+      await notifier.request();
+      expect(requests, 1);
+      expect(
+        container.read(ageSignalProvider),
+        AgeSignalState.retryableFailure,
+      );
+    });
+  }
+
+  test('native recovery acknowledgement permits a fresh request', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    var requests = 0;
+    var resets = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(ageSignalChannel, (call) async {
+          if (call.method == 'requestAgeSignal') {
+            requests += 1;
+            if (requests == 1) return Completer<Object?>().future;
+            return {'status': 'signal', 'ageUpper': 17};
+          }
+          if (call.method == 'cancelAgeSignalRequest') return false;
+          if (call.method == 'restartForAgeSignal') {
+            resets += 1;
+            return true;
+          }
+          throw MissingPluginException();
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ageSignalChannel, null),
+    );
+    final container = ProviderContainer(
+      overrides: [
+        ageSignalProvider.overrideWith(
+          () => AgeSignalNotifier(
+            delay: (_) async {},
+            requestTimeout: const Duration(milliseconds: 1),
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    final notifier = container.read(ageSignalProvider.notifier);
+    await notifier.request();
+    expect(container.read(ageSignalProvider), AgeSignalState.retryableFailure);
+    await notifier.request();
+    expect(resets, 1);
+    expect(requests, 2);
+    expect(container.read(ageSignalProvider), AgeSignalState.restricted);
+  });
+
   test('blocks when the signal upper bound is 17', () async {
     expect(
       await requestWithResponse({'status': 'signal', 'ageUpper': 17}),
@@ -218,6 +302,7 @@ void main() {
         cancelSignal: () async => false,
         restartSignal: () async {
           restarts += 1;
+          return false;
         },
         requestTimeout: const Duration(milliseconds: 1),
       ),
@@ -246,6 +331,7 @@ void main() {
         },
         restartSignal: () async {
           restarts += 1;
+          return false;
         },
         requestTimeout: const Duration(milliseconds: 1),
         cancellationTimeout: const Duration(milliseconds: 1),
