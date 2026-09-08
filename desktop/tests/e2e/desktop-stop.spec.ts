@@ -9,6 +9,8 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
 }) => {
   test.setTimeout(60_000);
   const agent = "a7".repeat(32);
+  const remoteDesktop = "22222222-2222-4222-8222-222222222222";
+  const standardRuntime = { id: "standard-runtime", revision: "3" };
   await installMockBridge(page, {
     managedAgents: [],
     relayAgents: [
@@ -25,7 +27,7 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
   });
   await page.goto("/");
   await expect(page.getByTestId("open-agents-view")).toBeVisible();
-  await page.evaluate(() => {
+  await page.evaluate((configuration: { id: string; revision: string }) => {
     const w = window as typeof window & {
       __STOP_FIXTURE__: {
         confirmed: boolean;
@@ -49,6 +51,22 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
     const now = Math.floor(Date.now() / 1000);
     const local = "11111111-1111-4111-8111-111111111111";
     const remote = "22222222-2222-4222-8222-222222222222";
+    // The mounted control issues status and catalog actions over the same
+    // lifecycle IPC before any launch. Identify each signed request by its
+    // event id so launch accounting stays scoped to the destination Start.
+    const lifecycleRequests = new Map<
+      string,
+      { action: string; desktop: string }
+    >();
+    const eligibleCatalogEntry = {
+      configuration,
+      name: "Standard runtime",
+      host: remote,
+      runtime: "acp",
+      model: "claude-opus-4-6",
+      provider: null,
+      eligible: true,
+    };
     const sign = async (kind: number, tags: string[][] = []) =>
       JSON.parse(
         await original("sign_event", {
@@ -87,14 +105,44 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
         case "read_desktop_placement":
         case "receive_desktop_lifecycle":
           return null;
-        case "prepare_desktop_lifecycle":
-          w.__STOP_FIXTURE__.lifecyclePrepared++;
-          return sign(50182, [
+        case "prepare_desktop_lifecycle": {
+          const request = await sign(50182, [
             ["p", payload.owner],
             ["d", payload.desktop],
           ]);
-        case "read_desktop_lifecycle_results":
-          return "provisioning_unavailable";
+          lifecycleRequests.set(request.id, {
+            action: payload.action,
+            desktop: payload.desktop,
+          });
+          if (payload.action === "start")
+            w.__STOP_FIXTURE__.lifecyclePrepared++;
+          return request;
+        }
+        case "read_desktop_lifecycle_results": {
+          const request = lifecycleRequests.get(payload.request.id);
+          if (request?.action === "preflight")
+            return {
+              outcome: "ready",
+              observation: {
+                valid_until: now + 600,
+                running_configuration: null,
+                catalog: null,
+              },
+            };
+          if (request?.action !== "catalog")
+            return { outcome: "provisioning_unavailable" };
+          return {
+            outcome: "ready",
+            observation: {
+              valid_until: now + 600,
+              running_configuration: null,
+              catalog: {
+                entry: request.desktop === remote ? eligibleCatalogEntry : null,
+                next: null,
+              },
+            },
+          };
+        }
         case "prepare_desktop_stop":
           w.__STOP_FIXTURE__.prepared++;
           return sign(50180, [
@@ -109,14 +157,18 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
           const wire = JSON.parse(payload.message.data);
           if (wire[0] === "EVENT" && wire[1]?.kind === 50180)
             w.__STOP_FIXTURE__.sends.push(JSON.stringify(wire[1]));
-          if (wire[0] === "EVENT" && wire[1]?.kind === 50182)
+          if (
+            wire[0] === "EVENT" &&
+            wire[1]?.kind === 50182 &&
+            lifecycleRequests.get(wire[1].id)?.action === "start"
+          )
             w.__STOP_FIXTURE__.lifecycleSends.push(JSON.stringify(wire[1]));
           break;
         }
       }
       return original(command, payload, options);
     };
-  });
+  }, standardRuntime);
   await page.getByTestId("open-agents-view").click();
   const desktops = page.getByRole("region", { name: "Known Desktops" });
   await desktops.getByRole("button", { name: "Refresh", exact: true }).click();
@@ -184,22 +236,32 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
     path: "test-results/desktop-stop/04-confirmed.png",
   });
 
-  // The mounted lifecycle selector shares host labels with the Stop rows.
+  // The mounted lifecycle controls share host labels with the Stop rows.
   // IPC explicitly refuses launch; no native process is created by this fixture.
   const controls = desktops.getByRole("region", {
     name: "Agent placement controls",
   });
+  // Operation outcomes are announced in the unnamed status region; its
+  // labeled sibling reports the observed running configuration.
+  const outcome = controls
+    .getByRole("status")
+    .and(controls.locator("p:not([aria-label])"));
   await controls
     .getByRole("combobox", { name: "Agent to place" })
     .selectOption(agent);
+  await expect(outcome).toHaveText(
+    "Choose a configuration for the next Start. This does not change an existing process.",
+  );
   await controls
-    .getByRole("combobox", { name: "Destination Desktop" })
-    .selectOption("22222222-2222-4222-8222-222222222222");
+    .getByRole("combobox", { name: "Runtime configuration" })
+    .selectOption(
+      `${remoteDesktop}:${standardRuntime.id}:${standardRuntime.revision}`,
+    );
   await controls
     .getByRole("button", { name: "Start on destination", exact: true })
     .click();
-  await expect(controls.getByRole("status")).toHaveText(
-    "Destination keyless launch provisioning is unavailable. No new process was started.",
+  await expect(outcome).toHaveText(
+    "Destination cannot launch this agent. No new process was started.",
   );
   await waitForAnimations(page);
   await desktops.screenshot({
@@ -208,8 +270,8 @@ test("remote Stop distinguishes delivery, uncertainty, and confirmed result", as
   await controls
     .getByRole("button", { name: "Retry same request", exact: true })
     .click();
-  await expect(controls.getByRole("status")).toHaveText(
-    "Destination keyless launch provisioning is unavailable. No new process was started.",
+  await expect(outcome).toHaveText(
+    "Destination cannot launch this agent. No new process was started.",
   );
   const lifecycle = await page.evaluate(
     () =>
