@@ -485,7 +485,9 @@ impl Db {
         // Do not resurrect it from the outbox's retained signed payload.
         sqlx::query("DELETE FROM interaction_outbox WHERE (community_id,event_id) IN (SELECT o.community_id,o.event_id FROM interaction_outbox o WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.community_id=o.community_id AND e.id=o.event_id AND e.deleted_at IS NULL) ORDER BY o.queued_at LIMIT 100)")
             .execute(&mut *tx).await?;
-        let rows = sqlx::query("SELECT o.community_id,c.host,o.channel_id,o.event FROM interaction_outbox o JOIN communities c ON c.id=o.community_id JOIN channels ch ON ch.community_id=o.community_id AND ch.id=o.channel_id WHERE c.deletion_state='active' AND c.archived_at IS NULL AND ch.archived_at IS NULL AND ch.deleted_at IS NULL ORDER BY o.queued_at LIMIT 100").fetch_all(&mut *tx).await?;
+        // Pruning is bounded, so more removed rows may remain in the queue.
+        // Independently require a live event for every delivery in this batch.
+        let rows = sqlx::query("SELECT o.community_id,c.host,o.channel_id,o.event FROM interaction_outbox o JOIN events e ON e.community_id=o.community_id AND e.id=o.event_id AND e.deleted_at IS NULL JOIN communities c ON c.id=o.community_id JOIN channels ch ON ch.community_id=o.community_id AND ch.id=o.channel_id WHERE c.deletion_state='active' AND c.archived_at IS NULL AND ch.archived_at IS NULL AND ch.deleted_at IS NULL ORDER BY o.queued_at LIMIT 100").fetch_all(&mut *tx).await?;
         let deliveries = rows
             .into_iter()
             .map(|r| {

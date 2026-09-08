@@ -206,3 +206,85 @@ fn same_second_tie_break_is_independent_of_arrival_order() {
         .respond(&p, events[1].clone(), p.answer(&events[1]).unwrap(), 1000)
         .is_err());
 }
+
+/// A hand-authored control trace: Discord-style multi-choice selection, then
+/// GroupMe-style vote replacement before close. Expected counts are independent
+/// of the implementation's tally calculation; see docs/interaction-controls.md.
+#[test]
+fn poll_control_trace_replaces_the_entire_selection_and_keeps_evidence() {
+    let asker = Keys::generate();
+    let prompt_event = event(
+        KIND_INTERACTION_PROMPT,
+        "Choose a thumbnail",
+        &[
+            &["itype", "poll"],
+            &["opt", "a", "Door"],
+            &["opt", "b", "Key"],
+            &["opt", "c", "Hall"],
+            &["min", "1"],
+            &["max", "2"],
+            &["closes", "manual"],
+            &["deadline", "2000"],
+        ],
+        &asker,
+        1000,
+    );
+    let p = Prompt::parse(&prompt_event).unwrap();
+    let alice = Keys::generate();
+    let bob = Keys::generate();
+    let make = |key: &Keys, choices: &[&str], time| {
+        let mut tags = vec![vec![
+            "e".to_string(),
+            prompt_event.id.to_hex(),
+            "".into(),
+            "prompt".into(),
+        ]];
+        tags.extend(choices.iter().map(|id| vec!["choice".into(), (*id).into()]));
+        let tags: Vec<Vec<&str>> = tags
+            .iter()
+            .map(|t| t.iter().map(String::as_str).collect())
+            .collect();
+        event(
+            KIND_INTERACTION_RESPONSE,
+            "",
+            &tags.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            key,
+            time,
+        )
+    };
+    for choices in [vec![], vec!["a", "b", "c"], vec!["a", "a"], vec!["unknown"]] {
+        assert!(p.answer(&make(&alice, &choices, 1001)).is_err());
+    }
+    let first = make(&alice, &["a", "b"], 1001);
+    let other = make(&bob, &["b"], 1001);
+    let revised = make(&alice, &["c"], 1002);
+    let mut state = InteractionState::default();
+    for (ev, tally) in [
+        (&first, serde_json::json!({"a":1,"b":1,"c":0})),
+        (&other, serde_json::json!({"a":1,"b":2,"c":0})),
+        (&revised, serde_json::json!({"a":0,"b":1,"c":1})),
+    ] {
+        ev.verify().unwrap();
+        state
+            .respond(&p, ev.clone(), p.answer(ev).unwrap(), 1002)
+            .unwrap();
+        let summary = state.summary(&p);
+        assert_eq!(summary["tally"], tally);
+        assert_eq!(summary["status"], "open");
+        assert!(summary["winner"].is_null());
+    }
+    assert_eq!(state.votes.len(), 2);
+    assert_eq!(
+        state.votes[&alice.public_key().to_hex()].source.id,
+        revised.id
+    );
+    state.close("manual");
+    let late = make(&bob, &["a"], 1003);
+    assert!(state
+        .respond(&p, late.clone(), p.answer(&late).unwrap(), 1003)
+        .is_err());
+    assert_eq!(
+        state.summary(&p)["tally"],
+        serde_json::json!({"a":0,"b":1,"c":1})
+    );
+}

@@ -41,16 +41,37 @@ export function InteractionCard({
   const [choices, setChoices] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState(false);
+  const [now, setNow] = useState(Date.now);
+  const submitting = useRef(false);
   const generation = useRef(0);
   const inputId = useId();
   const myAnswer = state?.responders.find((r) => r.pubkey === currentPubkey);
-  const expired = prompt ? Date.now() / 1000 >= prompt.deadline : false;
+  const expired = prompt ? now / 1000 >= prompt.deadline : false;
   const closed = state?.status === "closed" || expired;
   const disabled = pending || closed || !state || !currentPubkey;
 
   useEffect(() => {
     if (!dirty) setChoices(myAnswer?.choices ?? []);
   }, [myAnswer, dirty]);
+
+  useEffect(() => {
+    if (!prompt) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      clearTimeout(timer);
+      const current = Date.now();
+      setNow(current);
+      const remaining = prompt.deadline * 1000 - current;
+      if (remaining > 0) timer = setTimeout(tick, Math.min(remaining, 60_000));
+    };
+    tick();
+    // Recheck after sleep/background throttling as well as at the deadline.
+    window.addEventListener("focus", tick);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("focus", tick);
+    };
+  }, [prompt]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: retry explicitly restarts a failed subscription.
   useEffect(() => {
@@ -112,7 +133,12 @@ export function InteractionCard({
   }, [promptId, channelId, signer, relay, retry]);
 
   async function submit(selected: string[], close = false) {
-    if (!prompt || !relay || disabled) return;
+    if (!prompt || !relay || disabled || submitting.current) return;
+    if (Date.now() / 1000 >= prompt.deadline) {
+      setNow(Date.now());
+      return;
+    }
+    submitting.current = true;
     const version = generation.current;
     const tags = [
       ["h", channelId],
@@ -163,6 +189,7 @@ export function InteractionCard({
     } catch (reason) {
       if (generation.current === version) setError(String(reason));
     } finally {
+      submitting.current = false;
       if (generation.current === version) setPending(false);
     }
   }
@@ -221,6 +248,11 @@ export function InteractionCard({
           <legend className="sr-only">Your answer</legend>
           {prompt.type === "poll" && (
             <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">
+                {prompt.max === 1
+                  ? "Choose one answer."
+                  : `Choose ${prompt.min}–${prompt.max} answers.`}
+              </p>
               {prompt.options.map((option) => (
                 <label
                   key={option.id}
@@ -230,6 +262,11 @@ export function InteractionCard({
                     type={prompt.max === 1 ? "radio" : "checkbox"}
                     name={`${inputId}-choice`}
                     checked={choices.includes(option.id)}
+                    disabled={
+                      prompt.max > 1 &&
+                      !choices.includes(option.id) &&
+                      choices.length >= prompt.max
+                    }
                     onChange={(e) => {
                       setDirty(true);
                       setChoices(
@@ -331,11 +368,13 @@ export function InteractionCard({
       >
         {pending
           ? "Sending answer…"
-          : closed
+          : state?.status === "closed"
             ? `Closed${state?.winner ? ` · ${prompt.options.find((o) => o.id === state.winner)?.label ?? state.winner}` : ""}${state?.close_reason ? ` (${state.close_reason})` : ""}`
-            : !state
-              ? "Loading decision state…"
-              : `${state.responders.length} answered${myAnswer ? " · Your answer is recorded" : ""}`}
+            : expired
+              ? "Voting ended · Waiting for the relay’s final result"
+              : !state
+                ? "Loading decision state…"
+                : `${state.responders.length} answered${myAnswer ? " · Your answer is recorded" : ""}`}
       </p>
       {!eligible && (
         <p className="text-xs text-muted-foreground">

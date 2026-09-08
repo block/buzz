@@ -182,6 +182,9 @@ workflow editor, ACP/Hermes transport adapters, interaction-specific push
 navigation, native mobile cards, and any encrypted/private ballot protocol.
 Agents can already use the CLI's ask/answer/wait path without an adapter.
 An automatic agent action must still enforce its existing author allow list.
+The initial card shows your recorded choice and the outcome; named responder
+history and rehydrating previously submitted form fields after a remount are
+follow-up UI work. Signed responses remain queryable through the bridge/CLI.
 
 Before removing the experiment gate, settle kind allocation with maintainers,
 define prompt/projection moderation as one user-visible action, add relay-key
@@ -195,8 +198,9 @@ both tables and the outbox. Community deletion includes both tables.
 Core tests exercise schema errors, form types, replacement, deduplication,
 first/quorum/expiry and deterministic equal-timestamp ordering. PostgreSQL tests
 bind `Db::accept_interaction` and cover concurrent first-close, authorization,
-tenant/channel isolation, fallback identity, rollback on failed state writes
-and expiry before the worker runs. Run them with the repository's real database:
+tenant/channel isolation, fallback identity, rollback on failed state writes,
+expiry before the worker runs, and removed outbox backlogs larger than one
+cleanup batch. Run them with the repository's real database:
 
 ```sh
 BUZZ_TEST_DATABASE_URL=postgres://... \

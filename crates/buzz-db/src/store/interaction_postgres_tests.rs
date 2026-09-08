@@ -327,3 +327,50 @@ async fn outbox_retains_unacknowledged_work_and_discards_removed_events() {
         .iter()
         .any(|e| e.community == f.community && e.event.id == answer.id));
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn removed_outbox_backlog_cannot_escape_the_bounded_prune() {
+    let f = Fixture::new().await;
+    let p = f.prompt("first", "members");
+    f.accept(&p).await.unwrap();
+    let mut tx = f.db.begin_event_write_transaction().await.unwrap();
+    let mut removed = Vec::new();
+    for index in 0..105 {
+        let event = f.event(
+            &f.alice,
+            KIND_STREAM_MESSAGE,
+            &format!("removed {index}"),
+            vec![],
+        );
+        store(&mut tx, f.community, f.channel, &event, None)
+            .await
+            .unwrap();
+        removed.push(event.id.to_bytes().to_vec());
+    }
+    sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=ANY($2)")
+        .bind(f.community.as_uuid())
+        .bind(&removed)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let pending = f.db.pending_interaction_events().await.unwrap();
+    assert!(pending.iter().any(|row| row.event.id == p.id));
+    assert!(pending
+        .iter()
+        .all(|row| !removed.contains(&row.event.id.to_bytes().to_vec())));
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM interaction_outbox WHERE community_id=$1 AND event_id=ANY($2)",
+    )
+    .bind(f.community.as_uuid())
+    .bind(&removed)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining, 5,
+        "the regression must exceed the 100-row pruning batch"
+    );
+}
