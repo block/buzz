@@ -1674,11 +1674,13 @@ test("contract-dto-mutation-evidence-nested-message: removing message block hide
 
 // ── NIP-11 auto-discovery ─────────────────────────────────────────────────
 
-test("discovery-success: a discovered origin is auto-saved and auto-probed — panel renders without Save", async () => {
+test("discovery-success: a same-host discovered origin is auto-saved and auto-probed — panel renders without Save", async () => {
   // Verifies item 1 (render without Save): when get_admin_origin returns null,
-  // the card discovers the relay's admin_api, auto-saves it via set_admin_origin
-  // (same validation path as an explicit Save), then probes it. The panel
-  // renders immediately without the operator clicking Save.
+  // the card discovers the relay's admin_api and — because it is same-host
+  // (sameHost === true, the advertised host matches the connected relay) —
+  // auto-saves it via set_admin_origin (same validation path as an explicit
+  // Save), then probes it. The panel renders immediately without the operator
+  // clicking Save. The cross-host gate is covered by discovery-cross-host.
   //
   // The relay we are already connected to is a trusted source; the Rust
   // AdminOrigin::parse gate validates the discovered value before storing or
@@ -1696,7 +1698,7 @@ test("discovery-success: a discovered origin is auto-saved and auto-probed — p
   let discoverCalls = 0;
   setIpcHandler("admin_discover_origin", () => {
     discoverCalls += 1;
-    return Promise.resolve(discovered);
+    return Promise.resolve({ origin: discovered, sameHost: true });
   });
   let saveCalls = 0;
   setIpcHandler("set_admin_origin", (args) => {
@@ -1752,6 +1754,81 @@ test("discovery-success: a discovered origin is auto-saved and auto-probed — p
   await unmount();
 });
 
+test("discovery-cross-host: a cross-host advertisement is pre-filled only — no auto-save, no auto-probe (unconsented-signature gate)", async () => {
+  // Security gate (F1): a relay may advertise an admin_api on a host it does
+  // not own. Auto-probing signs a NIP-98 header with the operator's key, so a
+  // cross-host advertisement (sameHost === false) must NOT be saved or probed
+  // automatically — it is pre-filled under Advanced for explicit operator
+  // review. Same-host advertisements keep the auto-save + auto-probe UX
+  // (covered by discovery-success).
+  //
+  // Falsifiable: if the sameHost gate is removed, the effect would auto-save
+  // and auto-probe the cross-host origin exactly like discovery-success — so
+  // set_admin_origin and admin_probe would fire. Both are asserted absent here,
+  // and the pre-filled input + open Advanced disclosure are asserted present.
+
+  const pubkey = "6".repeat(64);
+  const discovered = "https://evil.attacker.example.com";
+
+  setIpcHandler("get_admin_origin", () => Promise.resolve(null));
+  let discoverCalls = 0;
+  setIpcHandler("admin_discover_origin", () => {
+    discoverCalls += 1;
+    return Promise.resolve({ origin: discovered, sameHost: false });
+  });
+  let saveCalls = 0;
+  setIpcHandler("set_admin_origin", (args) => {
+    saveCalls += 1;
+    return Promise.resolve(args?.rawOrigin ?? discovered);
+  });
+  const probeOrigins = [];
+  setIpcHandler("admin_probe", (args) => {
+    probeOrigins.push(args?.origin ?? "(none)");
+    return Promise.resolve({ state: "nip98Authorized", role: "operator" });
+  });
+
+  const qc = makeQueryClient(pubkey);
+  const { container, doRender, unmount } = mountCard(qc);
+  await doRender();
+  await settle(50);
+
+  assert.equal(
+    discoverCalls,
+    1,
+    "admin_discover_origin must be called once when no origin is saved",
+  );
+  assert.equal(
+    saveCalls,
+    0,
+    "set_admin_origin must NOT be called for a cross-host advertisement — the operator saves explicitly",
+  );
+  assert.deepEqual(
+    probeOrigins,
+    [],
+    `no probe (and no NIP-98 signature) must fire for a cross-host advertisement; got: ${JSON.stringify(probeOrigins)}`,
+  );
+
+  const input = container.querySelector("[data-testid='admin-origin-input']");
+  assert.equal(
+    input?.value,
+    discovered,
+    `the cross-host origin must be pre-filled for manual review; got: "${input?.value}"`,
+  );
+  const disclosure = container.querySelector("details.group\\/advanced");
+  assert.ok(
+    disclosure?.open,
+    "the Advanced disclosure must be open so the operator can see the pre-filled value awaiting Save",
+  );
+  const panel = container.querySelector("[data-testid='admin-console-panel']");
+  assert.equal(
+    panel,
+    null,
+    "admin-console-panel must NOT render for an unsaved, unprobed cross-host origin",
+  );
+
+  await unmount();
+});
+
 test("discovery-save-fails-falls-back: if set_admin_origin rejects for discovered origin, falls back to pre-fill only", async () => {
   // When AdminOrigin::parse rejects the discovered value (e.g. invalid URL),
   // set_admin_origin throws. The code must fall back to pre-fill + Advanced
@@ -1764,7 +1841,9 @@ test("discovery-save-fails-falls-back: if set_admin_origin rejects for discovere
   const discovered = "not-a-valid-origin";
 
   setIpcHandler("get_admin_origin", () => Promise.resolve(null));
-  setIpcHandler("admin_discover_origin", () => Promise.resolve(discovered));
+  setIpcHandler("admin_discover_origin", () =>
+    Promise.resolve({ origin: discovered, sameHost: true }),
+  );
   setIpcHandler("set_admin_origin", () =>
     Promise.reject(new Error("invalid origin format")),
   );
@@ -1909,7 +1988,7 @@ test("discovery-skipped: a saved origin takes precedence and discovery is not at
   let discoverCalls = 0;
   setIpcHandler("admin_discover_origin", () => {
     discoverCalls += 1;
-    return Promise.resolve("http://127.0.0.1:3000");
+    return Promise.resolve({ origin: "http://127.0.0.1:3000", sameHost: true });
   });
   const probeOrigins = [];
   setIpcHandler("admin_probe", (args) => {

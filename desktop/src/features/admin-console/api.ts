@@ -97,13 +97,27 @@ export async function setAdminOrigin(
 
 /**
  * Auto-discover the admin console origin from the connected relay's NIP-11
- * document (`admin_api` field). Returns the canonical origin when the relay
- * advertises a valid one, or `null` when it does not — the caller falls back
- * to manual entry. Rejects only on a transport or relay error; an absent or
- * invalid advertised value resolves to `null`, never throws.
+ * document (`admin_api` field). Returns the canonical origin plus a `sameHost`
+ * flag when the relay advertises a valid one, or `null` when it does not — the
+ * caller falls back to manual entry. Rejects only on a transport or relay
+ * error; an absent or invalid advertised value resolves to `null`, never throws.
+ *
+ * `sameHost` is true when the advertised admin_api host matches the connected
+ * relay's host (case-insensitive). It gates unconsented signing: a same-host
+ * advertisement is trusted, so the caller may auto-save and auto-probe it
+ * (which signs a NIP-98 header with the operator's key). A cross-host
+ * advertisement (`sameHost === false`) must be treated as pre-fill only — the
+ * caller shows the value for manual review and never saves or probes it
+ * automatically, so a malicious relay cannot coax an unconsented signature for
+ * an origin it does not own.
  */
-export async function discoverAdminOrigin(): Promise<string | null> {
-  return invokeTauri<string | null>("admin_discover_origin");
+export async function discoverAdminOrigin(): Promise<{
+  origin: string;
+  sameHost: boolean;
+} | null> {
+  return invokeTauri<{ origin: string; sameHost: boolean } | null>(
+    "admin_discover_origin",
+  );
 }
 
 // ── Wire DTO types ────────────────────────────────────────────────────────

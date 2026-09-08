@@ -1126,3 +1126,53 @@ async fn body_bearing_put_sets_content_type_and_signs_body() {
         "body-bearing request must sign over the sha256 of the exact body"
     );
 }
+
+// ── Discovery same-host binding ───────────────────────────────────────────
+//
+// `advertised_host_matches_relay` is the production seam that decides whether a
+// relay-advertised admin origin is trusted for auto-save + auto-probe. It gates
+// the `same_host` flag returned by `discover_admin_origin_at`; the TypeScript
+// layer only auto-probes (signing a NIP-98 header with the operator key) when
+// that flag is set, so a mismatch here is the difference between offering a
+// pre-fill and handing an attacker-advertised host an unconsented signature.
+
+#[test]
+fn same_host_when_advertised_host_matches_relay_host() {
+    let advertised = AdminOrigin::parse("https://admin.example.com").unwrap();
+    assert!(
+        discovery::advertised_host_matches_relay(&advertised, "https://admin.example.com"),
+        "identical host must bind for auto-probe"
+    );
+}
+
+#[test]
+fn same_host_ignores_scheme_and_port_differences() {
+    // The binding is host identity only: an operator may run the admin console
+    // on a different port/scheme than the relay and still be same-host-bound.
+    let advertised = AdminOrigin::parse("https://admin.example.com:8443").unwrap();
+    assert!(
+        discovery::advertised_host_matches_relay(&advertised, "https://admin.example.com/query"),
+        "host match must bind regardless of port"
+    );
+}
+
+#[test]
+fn not_same_host_when_advertised_host_differs_from_relay_host() {
+    let advertised = AdminOrigin::parse("https://attacker.example.com").unwrap();
+    assert!(
+        !discovery::advertised_host_matches_relay(&advertised, "https://admin.example.com"),
+        "a cross-host advertisement must not bind for auto-probe"
+    );
+}
+
+#[test]
+fn same_host_binding_is_case_insensitive() {
+    // `AdminOrigin::parse` lowercases the advertised host; the relay-URL side is
+    // compared case-insensitively rather than trusting the `url` crate to have
+    // lowercased it. Mixed-case forms of the same host must still bind.
+    let advertised = AdminOrigin::parse("https://Admin.Example.Com").unwrap();
+    assert!(
+        discovery::advertised_host_matches_relay(&advertised, "https://ADMIN.EXAMPLE.COM"),
+        "case-only differences must still bind the same host"
+    );
+}

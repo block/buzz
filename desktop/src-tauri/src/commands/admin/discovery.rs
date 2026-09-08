@@ -1,9 +1,36 @@
-//! NIP-11 admin-origin discovery.
+//! NIP-11 admin-origin discovery with same-host trust binding.
 //!
 //! Fetches the relay's information document and extracts a validated admin
-//! console origin that is safe to *offer* to the operator (pre-fill only —
-//! never auto-probed without explicit confirmation). Separated from `mod.rs`
-//! to keep the parent file under the repository's line-count gate.
+//! console origin from its `admin_api` field, together with a `same_host` flag
+//! recording whether that advertised origin targets the same host as the
+//! connected relay.
+//!
+//! # Trust model
+//!
+//! The `admin_api` value is untrusted relay input. On first mount with no saved
+//! origin the desktop auto-saves and auto-probes a discovered origin, and
+//! `admin_probe` signs a NIP-98 (kind-27235) header with the operator's key as
+//! soon as the origin answers `401 WWW-Authenticate: Nostr`. Auto-probing a
+//! *cross-host* advertisement would hand an attacker-controlled server an
+//! unconsented signature proving the operator's key ownership and intent.
+//!
+//! The binding closes that gap: an origin whose host matches the connected
+//! relay's host is trusted for auto-save + auto-probe (`same_host == true`); a
+//! cross-host advertisement is still surfaced but marked `same_host == false`,
+//! and the TypeScript layer treats it as pre-fill-only, requiring the operator
+//! to review and explicitly save before anything is signed. Host identity is
+//! the binding — scheme and port are not compared, so an operator can legitimately
+//! run the admin console on a different port or scheme than the relay.
+//!
+//! Residual exposure is bounded even for a same-host relay the operator does not
+//! fully trust: the NIP-98 header binds the exact request URL, method, and
+//! payload, so a captured signature is neither replayable against another
+//! endpoint nor usable as a general credential.
+//!
+//! Discovery still rejects private/reserved hosts and DNS-rebinding
+//! (`advertised_host_is_reserved`, `advertised_hostname_resolves_private`)
+//! regardless of the same-host flag. Separated from `mod.rs` to keep the parent
+//! file under the repository's line-count gate.
 
 use super::origin;
 
@@ -18,8 +45,7 @@ pub(super) struct AdminApiInfo {
     pub(super) admin_api: Option<String>,
 }
 
-/// Validate a relay-advertised `admin_api` value into a canonical origin that
-/// is safe to *offer* to the operator (pre-fill only — never auto-probed).
+/// Validate a relay-advertised `admin_api` value into a canonical origin.
 ///
 /// The value is untrusted relay input, so this is stricter than manual entry:
 /// it is accepted only if it passes the same `AdminOrigin` structural
@@ -29,6 +55,11 @@ pub(super) struct AdminApiInfo {
 /// origin must never point the operator at an internal target. Hostname
 /// targets are additionally DNS-checked by `discover_admin_origin_at` to reject
 /// a public name that resolves to a private address (DNS-rebinding-safe).
+///
+/// Passing this gate does not by itself authorise auto-probing: whether the
+/// discovered origin is auto-saved and auto-probed or only pre-filled is
+/// governed by the same-host binding (`advertised_host_matches_relay`), which
+/// the caller records in the returned `same_host` flag.
 ///
 /// An absent, structurally invalid, or reserved-literal value yields `None` so
 /// the desktop falls back to manual entry rather than offering an unsafe origin.
@@ -55,6 +86,40 @@ pub(super) fn advertised_host_is_reserved(origin: &origin::AdminOrigin) -> bool 
     }
 }
 
+/// Whether the advertised admin origin targets the same host as the relay
+/// reachable at `relay_http_base`.
+///
+/// Host identity is the trust binding for auto-save + auto-probe (see the module
+/// docs); scheme and port are deliberately excluded so an operator can run the
+/// admin console on a different port or scheme than the relay. The comparison is
+/// ASCII-case-insensitive on the host string forms: `AdminOrigin` already
+/// lowercases the advertised host, but the relay-URL side is compared defensively
+/// rather than trusting the `url` crate to have lowercased it. IPv6 literals are
+/// compared unbracketed on both sides. A relay base that fails to parse or has no
+/// host yields `false`, so an unparseable relay URL never binds.
+pub(super) fn advertised_host_matches_relay(
+    advertised: &origin::AdminOrigin,
+    relay_http_base: &str,
+) -> bool {
+    let Ok(relay_url) = url::Url::parse(relay_http_base) else {
+        return false;
+    };
+    let Some(relay_host) = relay_url.host_str() else {
+        return false;
+    };
+    let relay_host = relay_host.trim_start_matches('[').trim_end_matches(']');
+    advertised_host_string(&advertised.resolution_target().0).eq_ignore_ascii_case(relay_host)
+}
+
+/// The bare host string of a parsed `url::Host`, without IPv6 brackets.
+fn advertised_host_string(host: &url::Host<String>) -> String {
+    match host {
+        url::Host::Domain(name) => name.clone(),
+        url::Host::Ipv4(ip) => ip.to_string(),
+        url::Host::Ipv6(ip) => ip.to_string(),
+    }
+}
+
 /// Resolve an advertised hostname and reject if any address is private/reserved.
 ///
 /// Split out with an injectable resolver so the DNS-rebinding case (a public
@@ -74,8 +139,9 @@ where
     };
     match resolve(name, port).await {
         Ok(addrs) => addrs.is_empty() || addrs.iter().any(buzz_core_pkg::network::is_private_ip),
-        // A resolution failure is not a positive private verdict; the origin is
-        // only pre-filled, and the operator's explicit save re-validates it.
+        // A resolution failure is not a positive private verdict; the reserved
+        // check has already run, and a same-host auto-probe or the operator's
+        // explicit save re-validates the origin against the live network.
         Err(_) => false,
     }
 }
@@ -93,17 +159,20 @@ pub(super) async fn resolve_host_addrs(
     Ok(addrs)
 }
 
-/// Fetch the relay's NIP-11 document and extract a validated admin origin.
+/// Fetch the relay's NIP-11 document and extract a validated admin origin
+/// together with its same-host binding flag.
 ///
-/// Returns `Ok(Some(origin))` when the relay advertises a valid `admin_api`,
-/// `Ok(None)` when the field is absent, fails validation, or resolves to a
-/// private/reserved address, and `Err` on a transport or non-2xx failure.
-/// Split from the Tauri command so it can be exercised against a live test
-/// server without constructing `AppState`.
+/// Returns `Ok(Some(DiscoveredAdminOrigin))` when the relay advertises a valid
+/// `admin_api`, `Ok(None)` when the field is absent, fails validation, or
+/// resolves to a private/reserved address, and `Err` on a transport or non-2xx
+/// failure. The `same_host` flag records whether the advertised origin's host
+/// matches `relay_http_base`'s host — the caller (TypeScript) uses it to gate
+/// auto-save + auto-probe versus pre-fill-only. Split from the Tauri command so
+/// it can be exercised against a live test server without constructing `AppState`.
 pub(super) async fn discover_admin_origin_at(
     client: &reqwest::Client,
     relay_http_base: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<super::DiscoveredAdminOrigin>, String> {
     discover_admin_origin_at_with(client, relay_http_base, resolve_host_addrs).await
 }
 
@@ -112,7 +181,7 @@ pub(super) async fn discover_admin_origin_at_with<R, Fut>(
     client: &reqwest::Client,
     relay_http_base: &str,
     resolve: R,
-) -> Result<Option<String>, String>
+) -> Result<Option<super::DiscoveredAdminOrigin>, String>
 where
     R: Fn(String, u16) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<std::net::IpAddr>, String>>,
@@ -138,7 +207,11 @@ where
     if advertised_hostname_resolves_private(&origin, resolve).await {
         return Ok(None);
     }
-    Ok(Some(origin.as_str().to_string()))
+    let same_host = advertised_host_matches_relay(&origin, relay_http_base);
+    Ok(Some(super::DiscoveredAdminOrigin {
+        origin: origin.as_str().to_string(),
+        same_host,
+    }))
 }
 
 #[cfg(test)]
@@ -269,8 +342,15 @@ mod tests {
                 Box::pin(async { Ok(vec!["93.184.216.34".parse().unwrap()]) })
             })
             .await
-            .unwrap();
-        assert_eq!(result.as_deref(), Some("https://admin.example.com"));
+            .unwrap()
+            .expect("a valid public admin_api is discovered");
+        assert_eq!(result.origin, "https://admin.example.com");
+        // The relay under test is on 127.0.0.1; the advertised host differs, so
+        // the origin is surfaced but not same-host-bound for auto-probe.
+        assert!(
+            !result.same_host,
+            "cross-host advertisement must not be same-host-bound"
+        );
     }
 
     #[tokio::test]
@@ -286,7 +366,7 @@ mod tests {
         let result = discover_admin_origin_at(&client, &format!("http://{addr}"))
             .await
             .unwrap();
-        assert_eq!(result, None);
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -302,7 +382,7 @@ mod tests {
         let result = discover_admin_origin_at(&client, &format!("http://{addr}"))
             .await
             .unwrap();
-        assert_eq!(result, None);
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -321,8 +401,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            result, None,
+        assert!(
+            result.is_none(),
             "a public name resolving to a private address must not be offered"
         );
     }

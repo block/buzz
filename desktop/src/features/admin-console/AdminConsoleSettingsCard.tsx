@@ -290,10 +290,16 @@ function AdminConsoleSettingsSession({ pubkeyHex }: { pubkeyHex: string }) {
   // is keyed by pubkeyHex — re-mount = new pubkey). When nothing is saved,
   // attempt NIP-11 auto-discovery of the admin origin from the connected
   // relay. A discovered origin is auto-saved and probed without requiring an
-  // explicit Save — the relay we are already connected to is a trusted source,
-  // and AdminOrigin::parse validates the value on the Rust side before it is
-  // stored or signed against. The operator only needs to interact with the
-  // Advanced disclosure to change or clear the origin.
+  // explicit Save ONLY when it is same-host (its admin_api host matches the
+  // connected relay's host): that relay is a trusted source and
+  // AdminOrigin::parse validates the value on the Rust side before it is
+  // stored or signed against. A cross-host advertisement is pre-fill only — we
+  // never auto-save or auto-probe it, because probing signs a NIP-98 header
+  // with the operator's key and a malicious relay must not coax an unconsented
+  // signature for an origin it does not own (the operator reviews the pre-filled
+  // value under Advanced and Saves explicitly if they trust it). The operator
+  // only needs to interact with the Advanced disclosure to change or clear the
+  // origin.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional mount-once effect; identity boundary is the key prop on this component — it unmounts/remounts on pubkey change, so [] is correct.
   useEffect(() => {
     let active = true;
@@ -312,7 +318,7 @@ function AdminConsoleSettingsSession({ pubkeyHex }: { pubkeyHex: string }) {
         // No saved origin: auto-discover from the relay's NIP-11 `admin_api`.
         // Best-effort — a relay error, an absent field, or an advertised value
         // that fails validation falls back to manual entry, never an error.
-        let discovered: string | null = null;
+        let discovered: { origin: string; sameHost: boolean } | null = null;
         try {
           discovered = await discoverAdminOrigin();
         } catch {
@@ -320,13 +326,27 @@ function AdminConsoleSettingsSession({ pubkeyHex }: { pubkeyHex: string }) {
         }
         if (!active) return;
         if (discovered) {
-          // Auto-save the discovered origin (same path as an explicit Save),
-          // then probe. This lets the panel render immediately on first open
-          // when the relay advertises its admin_api, with no Save required.
-          // The operator still sees the Advanced disclosure if they need to
-          // change or clear the value.
+          if (!discovered.sameHost) {
+            // Cross-host advertisement: the relay points the admin_api at a
+            // host it does not own. Never auto-save or auto-probe it — probing
+            // would sign a NIP-98 header with the operator's key for an origin
+            // the connected relay cannot vouch for. Pre-fill the manual field
+            // and open Advanced so the operator can review and Save explicitly.
+            setOriginInput(discovered.origin);
+            setAdvancedOpen(true);
+            setSavedOrigin(null);
+            return;
+          }
+          // Same-host advertisement: auto-save the discovered origin (same path
+          // as an explicit Save), then probe. This lets the panel render
+          // immediately on first open when the relay advertises its own
+          // admin_api, with no Save required. The operator still sees the
+          // Advanced disclosure if they need to change or clear the value.
           try {
-            const canonical = await setAdminOrigin(discovered, pubkeyHex);
+            const canonical = await setAdminOrigin(
+              discovered.origin,
+              pubkeyHex,
+            );
             if (!active) return;
             if (canonical) {
               setSavedOrigin(canonical);
@@ -340,7 +360,7 @@ function AdminConsoleSettingsSession({ pubkeyHex }: { pubkeyHex: string }) {
           }
           if (!active) return;
           // Save failed: pre-fill only so the operator can review and Save manually.
-          setOriginInput(discovered);
+          setOriginInput(discovered.origin);
           setAdvancedOpen(true);
         }
         setSavedOrigin(null);

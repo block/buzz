@@ -935,16 +935,39 @@ fn validate_pubkey_hex(hex: String) -> Result<String, String> {
 
 mod discovery;
 
+/// A discovered admin console origin plus its same-host trust binding.
+///
+/// Serialised for the webview as `{ origin, sameHost }`. `sameHost` is `true`
+/// only when the advertised origin's host matches the connected relay's host;
+/// the TypeScript layer auto-saves + auto-probes a same-host origin but treats a
+/// cross-host advertisement (`sameHost == false`) as pre-fill-only, so the
+/// operator's key never signs a NIP-98 challenge against an unrelated,
+/// relay-advertised host without explicit confirmation. See `discovery.rs` for
+/// the full trust model.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredAdminOrigin {
+    origin: String,
+    same_host: bool,
+}
+
 /// Auto-discover the admin console origin from the connected relay's NIP-11
-/// document. Returns the canonical origin when the relay advertises a valid
-/// `admin_api` that does not resolve to a private/reserved target, or `None`
-/// otherwise. The returned origin only pre-fills the operator's origin field;
-/// nothing probes it until the operator explicitly saves. Mirrors the native
-/// NIP-11 fetch used by `relay_requires_membership`.
+/// document. Returns the canonical origin and its `sameHost` flag when the relay
+/// advertises a valid `admin_api` that does not resolve to a private/reserved
+/// target, or `None` otherwise.
+///
+/// `sameHost` binds the discovered origin to the connected relay's host: a
+/// same-host origin is auto-saved and auto-probed by design (intentional
+/// first-mount UX), while a cross-host advertisement is surfaced only as a
+/// pre-fill the operator must explicitly save. This prevents a malicious relay
+/// from advertising an attacker-controlled `admin_api` and harvesting an
+/// unconsented NIP-98 signature the moment `admin_probe` runs; residual exposure
+/// is bounded because the NIP-98 header binds the exact URL, method, and payload.
+/// Mirrors the native NIP-11 fetch used by `relay_requires_membership`.
 #[tauri::command]
 pub async fn admin_discover_origin(
     state: tauri::State<'_, crate::app_state::AppState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<DiscoveredAdminOrigin>, String> {
     let base = crate::relay::relay_api_base_url_with_override(&state);
     discovery::discover_admin_origin_at(&state.http_client, &base).await
 }
