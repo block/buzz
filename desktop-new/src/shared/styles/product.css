@@ -261,7 +261,7 @@
     display: flex;
     flex-direction: column;
     gap: 1px;
-    padding-left: var(--space-4);
+    padding-left: var(--space-3);
   }
 
   /* This connector expresses the channel → Session relationship and therefore
@@ -275,13 +275,23 @@
     position: absolute;
     top: 0;
     bottom: 50%;
-    left: calc(var(--space-4) * -0.5);
-    width: calc(var(--space-4) * 0.5);
+    left: calc(var(--space-3) * -0.5);
+    width: calc(var(--space-3) * 0.5);
     border-bottom: 1px solid var(--border-primary);
     border-left: 1px solid var(--border-primary);
     border-bottom-left-radius: var(--radius-row);
     content: "";
     pointer-events: none;
+  }
+
+  /* Rooms do not carry unread treatment yet. Sessions do: the dot is a compact
+     status signal inside the child row, not a second kind of navigation item. */
+  .session-unread-indicator {
+    display: block;
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: var(--radius-pill);
+    background: var(--purple-8);
   }
 
   .empty-workspace-panel {
@@ -297,17 +307,28 @@
   .session-header {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.75rem;
+    gap: var(--space-2);
   }
 
   .session-title-block {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .session-title-block > div {
     min-width: 0;
   }
 
   .session-header-actions {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-1);
+  }
+
+  .session-header-actions > :first-child {
+    color: var(--text-secondary);
   }
 
   .session-scroll {
@@ -361,17 +382,21 @@
   .conversation-composer-dock {
     display: grid;
     flex: 0 0 auto;
-    height: 13rem;
+    height: 7.75rem;
     grid-template-rows: minmax(0, 1fr) auto;
     gap: var(--space-1);
     padding: 0 1.5rem 1.5rem;
     background: var(--bg-panel);
   }
 
+  .conversation-composer-dock[data-activity] {
+    height: 9.375rem;
+  }
+
   /* Activity is an auto-sized grid row, not an estimated absolute rail. Its
      arrival takes room from the Composer's bottom edge while grid keeps the
      Composer's top edge fixed. The 4px grid gap is the only separation. */
-  .conversation-activity-rail {
+  .agent-activity-rail {
     display: flex;
     width: min(100%, 47rem);
     gap: var(--space-2);
@@ -379,15 +404,46 @@
     overflow-x: auto;
   }
 
-  .conversation-activity-rail-item {
-    display: flex;
-    min-width: 0;
-    flex: 1 1 16rem;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-row);
-    background: var(--neutral-2);
+  .agent-activity-rail-status {
+    min-width: max-content;
+    color: var(--text-secondary);
+  }
+
+  /* The base text is always painted. The pseudo-element is only a clipped
+     highlight travelling over it, which makes shimmer additive rather than a
+     replacement for legibility. */
+  .buzz-shimmer-text {
+    position: relative;
+    display: inline-block;
+  }
+
+  .buzz-shimmer-text::after {
+    position: absolute;
+    inset: 0;
+    background-image: linear-gradient(
+      100deg,
+      transparent calc(50% - var(--shimmer-spread)),
+      var(--text-primary) 50%,
+      transparent calc(50% + var(--shimmer-spread))
+    );
+    background-position: 130% center;
+    background-size: 250% 100%;
+    background-repeat: no-repeat;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    content: attr(data-shimmer-text);
+    pointer-events: none;
+    animation: agent-activity-shimmer 2.2s linear 0.35s infinite;
+  }
+
+  @keyframes agent-activity-shimmer {
+    from {
+      background-position: 130% center;
+    }
+    to {
+      background-position: -30% center;
+    }
   }
 
   /* An authoring surface is inset into the conversation panel, not another
@@ -400,12 +456,12 @@
     height: 100%;
     min-height: 0;
     grid-template-rows: minmax(0, 1fr) auto;
-    gap: var(--space-2);
+    gap: var(--space-1);
     margin: auto;
     border: 1px solid var(--border-primary);
     border-radius: var(--radius-control);
-    padding: var(--space-3);
-    background: var(--neutral-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-panel);
     transition:
       height var(--duration-settle) var(--easing-settle),
       border-color var(--duration-state) var(--easing-state),
@@ -431,12 +487,12 @@
     width: 100%;
     height: 100%;
     max-height: 10rem;
-    min-height: 4.5lh;
+    min-height: 1.5lh;
     overflow-y: auto;
     resize: none;
     border: 0;
     outline: 0;
-    padding: 0.375rem 0.5rem;
+    padding: 0.375rem 0;
     background: transparent;
     color: var(--text-primary);
     font: inherit;
@@ -465,8 +521,7 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
-    padding-top: var(--space-2);
-    border-top: 1px solid var(--border-primary);
+    padding-top: var(--space-1);
   }
 
   .message-composer-actions-start,
@@ -562,6 +617,12 @@
     background: var(--neutral-2);
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    .buzz-shimmer-text::after {
+      display: none;
+    }
+  }
+
   @media (max-width: 48rem) {
     .conversation-composer-dock {
       padding: 0 0.75rem 0.75rem;
@@ -581,6 +642,20 @@
     }
 
     .workspace-identity > span {
+      display: none;
+    }
+
+    .session-header {
+      min-height: auto;
+      align-items: start;
+      padding-block: var(--space-2);
+    }
+
+    .session-header-actions {
+      padding-top: 0.125rem;
+    }
+
+    .session-header-actions > :first-child span {
       display: none;
     }
 

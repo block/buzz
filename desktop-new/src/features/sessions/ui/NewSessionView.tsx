@@ -84,7 +84,7 @@ export function NewSessionView({
           disabled={Boolean(pending && pending.pending !== "failed")}
           onDraftChange={onDraftChange}
           onSend={onCreate}
-          placeholder="Start a Session"
+          placeholder="Start a new session"
         />
       </div>
     </main>

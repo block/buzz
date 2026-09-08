@@ -4,7 +4,8 @@ import { COMPONENT_SPECIMENS } from "./componentSpecimens";
 
 export function ComponentsPage() {
   const topLevelComponents = COMPONENTS.filter(
-    (component) => component.parent === undefined,
+    (component) =>
+      component.collection === "components" && component.parent === undefined,
   );
 
   return (

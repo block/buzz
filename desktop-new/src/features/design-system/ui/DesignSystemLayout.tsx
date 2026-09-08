@@ -1,34 +1,33 @@
+import { IconMoon, IconSun } from "@tabler/icons-react";
 import { Link, Outlet } from "@tanstack/react-router";
 import { Fragment, type ReactNode } from "react";
 
 import { useColorScheme } from "@/shared/theme/useColorScheme";
+import { IconButton } from "@/shared/ui/IconButton";
 import { COMPONENTS } from "@/shared/ui/registry";
 
-/** A nav entry, optionally with children shown indented beneath it. */
 type NavItem = [label: string, to: string, children?: NavItem[]];
 
-function componentNavItems(parent?: string): NavItem[] {
-  return COMPONENTS.filter((component) => component.parent === parent).map(
-    (component) => [
-      component.name,
-      `/design/components/${component.slug}`,
-      componentNavItems(component.slug),
-    ],
-  );
+type NavSection = { heading: string; items: NavItem[] };
+
+function componentNavItems(
+  collection: "components" | "product-ui",
+  parent?: string,
+): NavItem[] {
+  return COMPONENTS.filter(
+    (component) =>
+      component.collection === collection && component.parent === parent,
+  ).map((component) => [
+    component.name,
+    `/design/components/${component.slug}`,
+    componentNavItems(collection, component.slug),
+  ]);
 }
 
-const COMPONENT_NAV_ITEMS: NavItem[] = [
-  ["Overview", "/design/components", componentNavItems()],
-  ["Base UI backing", "/design/components/base-ui"],
-];
-
-const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
+const SECTIONS: NavSection[] = [
   {
     heading: "Foundations",
     items: [
-      // "Color" in the interface. The code still says `Colour` in places —
-      // registry types, the ColourPage component — and renaming those is a
-      // separate change from what the nav says.
       ["Color", "/design/color", [["Token table", "/design/color/table"]]],
       ["Typography", "/design/typography"],
       ["Spacing", "/design/spacing"],
@@ -36,22 +35,26 @@ const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
       ["Elevation", "/design/elevation"],
       ["Glass", "/design/glass"],
       ["Motion", "/design/motion"],
+      ["Base UI backing", "/design/components/base-ui"],
     ],
-  },
-  {
-    heading: "Product compositions",
-    items: [["Composer", "/design/composer"]],
   },
   {
     heading: "System",
     items: [
-      ["Vocabulary", "/design/vocabulary"],
-      ["Growing the system", "/design/growth"],
+      ["Maintaining the system", "/design/maintaining"],
+      ["DESIGN.md", "/design/design-guide"],
+      ["AGENTS.md", "/design/agents-guide"],
     ],
   },
   {
     heading: "Components",
-    items: COMPONENT_NAV_ITEMS,
+    items: [
+      ["Overview", "/design/components", componentNavItems("components")],
+    ],
+  },
+  {
+    heading: "Product UI",
+    items: componentNavItems("product-ui"),
   },
 ];
 
@@ -61,7 +64,6 @@ function NavLink({
   children,
 }: {
   to: string;
-  /** Set on a parent that has children, so it does not stay lit on a subpage. */
   exact?: boolean;
   children: ReactNode;
 }) {
@@ -69,10 +71,10 @@ function NavLink({
     <Link
       to={to}
       activeOptions={exact ? { exact: true } : undefined}
-      className="block rounded-lg px-3 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
+      className="design-system-nav-link text-body text-primary"
       activeProps={{
         className:
-          "block rounded-lg px-3 py-2 text-body bg-purple-3 text-purple-12",
+          "design-system-nav-link design-system-nav-link-active text-body text-primary",
       }}
     >
       {children}
@@ -82,10 +84,10 @@ function NavLink({
 
 function NavItems({ items, depth = 0 }: { items: NavItem[]; depth?: number }) {
   return (
-    <div className="flex flex-wrap gap-1 lg:flex-col">
+    <div className="design-system-nav-items">
       {items.map(([label, to, children]) => (
         <Fragment key={to}>
-          <div className={depth === 0 ? undefined : "lg:pl-3"}>
+          <div className={depth ? "design-system-nav-child" : undefined}>
             <NavLink
               to={to}
               exact={children !== undefined && children.length > 0}
@@ -93,7 +95,7 @@ function NavItems({ items, depth = 0 }: { items: NavItem[]; depth?: number }) {
               {label}
             </NavLink>
           </div>
-          {children && children.length > 0 ? (
+          {children?.length ? (
             <NavItems items={children} depth={depth + 1} />
           ) : null}
         </Fragment>
@@ -106,53 +108,41 @@ export function DesignSystemLayout() {
   const { scheme, toggle } = useColorScheme();
 
   return (
-    /* Narrow: the nav stacks above the content as a wrapped list, because a
-       256px column beside a reading column leaves neither enough room. From lg
-       it becomes the sticky side rail. */
-    <div className="flex min-h-screen flex-col bg-panel lg:flex-row">
-      <nav
-        aria-label="Design system"
-        className="flex shrink-0 flex-col gap-8 px-4 py-8 lg:sticky lg:top-0 lg:h-screen lg:w-64 lg:overflow-y-auto"
-      >
-        <div className="px-3">
-          <Link to="/design" className="text-body text-primary">
-            Buzz Design System
-          </Link>
-          <p className="mt-1 text-body-sm text-tertiary">
-            Rendered from the tokens themselves
-          </p>
-        </div>
-
-        <div className="flex flex-1 flex-col gap-6 lg:gap-7">
+    <div className="design-system-shell">
+      <nav aria-label="Design system" className="design-system-nav">
+        <Link
+          to="/design"
+          className="design-system-nav-title design-system-nav-link text-body text-primary"
+        >
+          Buzz Design System
+        </Link>
+        <div aria-hidden="true" className="design-system-nav-rule" />
+        <div className="design-system-nav-sections">
           {SECTIONS.map((section) => (
-            <div key={section.heading} className="flex flex-col gap-1">
-              <h2 className="px-3 pb-1.5 text-body-sm text-tertiary">
-                {section.heading}
-              </h2>
-              {section.items.length === 0 ? (
-                <p className="max-w-prose px-3 py-1 text-body-sm text-tertiary">
-                  None yet — the primitive layer gets built one component at a
-                  time, as the product repeats something.
-                </p>
-              ) : (
-                <NavItems items={section.items} />
-              )}
-            </div>
+            <section
+              className="design-system-nav-section"
+              key={section.heading}
+            >
+              <h2 className="text-body text-tertiary">{section.heading}</h2>
+              <NavItems items={section.items} />
+            </section>
           ))}
         </div>
-
-        <button
-          type="button"
-          onClick={toggle}
-          aria-label={`Switch to ${scheme === "light" ? "dark" : "light"} mode`}
-          className="mx-3 self-start rounded-lg bg-neutral-2 px-3 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
-        >
-          {scheme === "light" ? "Dark mode" : "Light mode"}
-        </button>
       </nav>
-
-      <main className="min-w-0 flex-1 px-6 py-10 sm:px-10 lg:px-16">
-        <div className="mx-auto max-w-3xl">
+      <main className="design-system-content">
+        <IconButton
+          aria-label={scheme === "dark" ? "Use light mode" : "Use dark mode"}
+          icon={
+            scheme === "dark" ? (
+              <IconSun size={16} aria-hidden="true" />
+            ) : (
+              <IconMoon size={16} aria-hidden="true" />
+            )
+          }
+          size="toolbar"
+          onClick={toggle}
+        />
+        <div className="design-system-reading-column">
           <Outlet />
         </div>
       </main>

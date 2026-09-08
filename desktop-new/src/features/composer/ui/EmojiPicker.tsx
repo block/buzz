@@ -53,7 +53,8 @@ export function EmojiPicker({
           <IconButton
             aria-label="Choose emoji"
             disabled={disabled}
-            icon={<IconMoodSmile size={18} stroke={1.8} aria-hidden="true" />}
+            icon={<IconMoodSmile size={16} stroke={2} aria-hidden="true" />}
+            size="toolbar"
             variant="ghost"
             onMouseDown={(event) => event.preventDefault()}
           />

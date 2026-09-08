@@ -1,7 +1,5 @@
-import { IconLoader2 } from "@tabler/icons-react";
-
-import { latestActivityItem } from "@/features/agent-activity/activityProjection";
 import type { AgentTurn } from "@/features/agent-activity/types";
+import { AgentActivityRail } from "@/features/agent-activity/ui/AgentActivityRail";
 import { MessageComposer } from "@/features/composer/ui/MessageComposer";
 
 /**
@@ -16,11 +14,18 @@ export function ConversationComposerDock({
   onDraftChange,
   onSend,
   turns,
+  placeholder,
+  responseControl,
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
   onSend: (content: string) => Promise<void>;
   turns: AgentTurn[];
+  placeholder?: string;
+  responseControl?: {
+    state: "responding" | "stopping";
+    onStop?: () => void;
+  };
 }) {
   const workingTurns = turns.filter(
     (turn) => turn.status === "pending" || turn.status === "running",
@@ -35,30 +40,10 @@ export function ConversationComposerDock({
         draft={draft}
         onDraftChange={onDraftChange}
         onSend={onSend}
+        placeholder={placeholder}
+        responseControl={responseControl}
       />
-      {workingTurns.length > 0 ? (
-        <div className="conversation-activity-rail" role="status">
-          {workingTurns.map((turn) => {
-            const current = latestActivityItem(turn);
-            return (
-              <div className="conversation-activity-rail-item" key={turn.key}>
-                <IconLoader2
-                  className="animate-spin"
-                  size={15}
-                  stroke={1.7}
-                  aria-hidden="true"
-                />
-                <span className="min-w-0 text-body-sm text-secondary">
-                  <span className="font-semibold text-primary">
-                    {turn.agentName}
-                  </span>{" "}
-                  is working{current ? ` · ${current.label}` : ""}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
+      <AgentActivityRail turns={workingTurns} />
     </div>
   );
 }

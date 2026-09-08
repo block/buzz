@@ -3,6 +3,7 @@ import {
   IconHash,
   IconMessageCircle,
   IconPlus,
+  IconUsers,
   IconSettings,
 } from "@tabler/icons-react";
 import type { ReactNode } from "react";
@@ -10,6 +11,7 @@ import { useState } from "react";
 import { Avatar } from "@/shared/ui/Avatar";
 import { InlineChip } from "@/shared/ui/InlineChip";
 import { Button } from "@/shared/ui/Button";
+import { ConversationHeader } from "@/shared/ui/ConversationHeader";
 import { IconButton } from "@/shared/ui/IconButton";
 import { NavigationItem } from "@/shared/ui/NavigationItem";
 import { NavigationSection } from "@/shared/ui/NavigationSection";
@@ -18,6 +20,10 @@ import { SearchField } from "@/shared/ui/SearchField";
 import { Tabs } from "@/shared/ui/Tabs";
 
 import { ComponentAnatomy } from "./ComponentAnatomy";
+import {
+  ActivityRailSpecimen,
+  MessageComposerSpecimen,
+} from "./composerSpecimens";
 import { Panel } from "@/shared/ui/Panel";
 import { PreviewCard } from "@/shared/ui/PreviewCard";
 import type { ChipAddress } from "@/shared/chips/address";
@@ -167,6 +173,14 @@ function IconButtonSpecimen() {
               variant="solid"
             />
           </Specimen>
+          <Specimen prop='variant="tint" shape="round"'>
+            <IconButton
+              aria-label="Round tinted send"
+              icon={icons.add}
+              shape="round"
+              variant="tint"
+            />
+          </Specimen>
         </div>
       </SpecimenGroup>
       <section className="component-specimen-group">
@@ -197,6 +211,14 @@ function IconButtonSpecimen() {
               icon={icons.settings}
               variant="quiet"
               size="compact"
+            />
+          </Specimen>
+          <Specimen prop='size="toolbar"'>
+            <IconButton
+              aria-label="Toolbar settings"
+              icon={icons.settings}
+              variant="quiet"
+              size="toolbar"
             />
           </Specimen>
           <Specimen prop='size="default"'>
@@ -437,6 +459,53 @@ function TabsSpecimen() {
           />
         </SpecimenFrame>
       </section>
+    </div>
+  );
+}
+
+function ConversationHeaderSpecimen() {
+  const people = (
+    <IconButton
+      aria-label="View conversation participants"
+      icon={<IconUsers size={16} stroke={1.7} aria-hidden="true" />}
+      size="compact"
+    />
+  );
+  return (
+    <div className="component-specimen-stack">
+      <SpecimenGroup label="Channel — identity and people action">
+        <ConversationHeader
+          icon={<IconHash size={16} stroke={1.7} />}
+          title="design"
+          actions={people}
+        />
+      </SpecimenGroup>
+      <SpecimenGroup label="Session — title status and contextual action">
+        <ConversationHeader
+          icon={<IconMessageCircle size={16} stroke={1.7} />}
+          title="Review agent setup"
+          metadata={<span className="device-label">On this device</span>}
+          actions={
+            <>
+              {people}
+              <Button variant="quiet" size="compact">
+                Start session
+              </Button>
+            </>
+          }
+        />
+      </SpecimenGroup>
+      <SpecimenGroup label="Origin context — only when the title alone is ambiguous">
+        <ConversationHeader
+          icon={<IconMessageCircle size={16} stroke={1.7} />}
+          title="New session"
+          context={
+            <>
+              <IconHash size={13} stroke={1.6} aria-hidden="true" /> From design
+            </>
+          }
+        />
+      </SpecimenGroup>
     </div>
   );
 }
@@ -751,8 +820,11 @@ export const COMPONENT_SPECIMENS: Record<string, () => ReactNode> = {
   "inline-chip": InlineChipSpecimen,
   panel: PanelSpecimen,
   tabs: TabsSpecimen,
+  "conversation-header": ConversationHeaderSpecimen,
   "panel-header": PanelHeaderSpecimen,
   "search-field": SearchFieldSpecimen,
   "navigation-section": NavigationSectionSpecimen,
   "navigation-item": NavigationItemSpecimen,
+  composer: MessageComposerSpecimen,
+  "activity-rail": ActivityRailSpecimen,
 };

@@ -201,8 +201,7 @@ Deliberately, so nobody assumes it was forgotten:
 
 ## Architecture
 
-This client is built on **composable capabilities** — see the plan in Morgan's
-vault. A capability owns a durable product truth: it may be behavior-only,
+This client is built on **composable capabilities**. A capability owns a durable product truth: it may be behavior-only,
 UI-bearing, or both. A feature is an organizational boundary, a surface/view
 owns spatial arrangement, and shared UI owns generic visual and interaction
 primitives.

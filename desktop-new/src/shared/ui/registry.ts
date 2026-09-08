@@ -1,5 +1,8 @@
 export type ComponentStatus = "core" | "proposed";
 
+/** Documentation location, independent from the source folder. */
+export type ComponentCollection = "components" | "product-ui";
+
 /**
  * A Base UI part a component is built on. `name` is the export as documented;
  * `docs` is the path segment on base-ui.com/react/components, and `module` is
@@ -43,6 +46,8 @@ export type ComponentDefinition = {
   behavior: string;
   variants: readonly string[];
   status: ComponentStatus;
+  /** Where this component appears in the design-system navigation. */
+  collection: ComponentCollection;
   owner?: string;
   /**
    * The component whose frame this component belongs inside in the design
@@ -73,6 +78,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Base UI Button",
     variants: ["primary", "quiet", "ghost"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/Button.tsx",
     baseUi: [BASE_UI_PARTS.button],
@@ -83,8 +89,18 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     name: "IconButton",
     purpose: "A compact icon-only action that always owns an accessible label.",
     behavior: "Composes Buzz Button",
-    variants: ["quiet", "ghost", "solid", "chrome"],
+    variants: [
+      "quiet",
+      "ghost",
+      "solid",
+      "tint",
+      "chrome",
+      "shape: control | round",
+      "compact: 16px artwork, 30px target, Tabler stroke 2",
+      "toolbar: 16px artwork, 32px target, Tabler stroke 2",
+    ],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/IconButton.tsx",
     baseUi: [],
@@ -97,6 +113,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Base UI Avatar",
     variants: ["small", "default", "large"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/Avatar.tsx",
     baseUi: [BASE_UI_PARTS.avatar],
@@ -110,6 +127,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Base UI Preview Card",
     variants: ["default"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/PreviewCard.tsx",
     baseUi: [BASE_UI_PARTS.previewCard],
@@ -132,6 +150,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
       "unresolved",
     ],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/InlineChip.tsx",
     baseUi: [],
@@ -145,6 +164,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Semantic native region",
     variants: ["panel"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/Panel.tsx",
     baseUi: [],
@@ -158,9 +178,24 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Base UI Tabs",
     variants: ["chrome", "panel"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/Tabs.tsx",
     baseUi: [BASE_UI_PARTS.tabs],
+    composes: [],
+  },
+  {
+    slug: "conversation-header",
+    name: "ConversationHeader",
+    purpose:
+      "The orientation row for a message-bearing conversation surface. It arranges the conversation identity, one short status or contextual line, and feature-owned actions without interpreting channel or session data.",
+    behavior: "Semantic native header",
+    variants: ["default"],
+    status: "proposed",
+    collection: "components",
+    owner: "desktop-new Messages",
+    source: "shared/ui/ConversationHeader.tsx",
+    baseUi: [],
     composes: [],
   },
   {
@@ -171,6 +206,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Semantic native header",
     variants: ["default", "compact"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     parent: "panel",
     source: "shared/ui/PanelHeader.tsx",
@@ -184,6 +220,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Base UI Field and Input",
     variants: ["default"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/SearchField.tsx",
     baseUi: [BASE_UI_PARTS.field, BASE_UI_PARTS.input],
@@ -196,6 +233,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Semantic native section",
     variants: ["default"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/NavigationSection.tsx",
     baseUi: [],
@@ -208,9 +246,39 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     behavior: "Base UI Button",
     variants: ["default", "inset", "selected"],
     status: "proposed",
+    collection: "components",
     owner: "desktop-new Messages",
     source: "shared/ui/NavigationItem.tsx",
     baseUi: [BASE_UI_PARTS.button],
+    composes: [],
+  },
+  {
+    slug: "composer",
+    name: "Composer",
+    purpose:
+      "A conversation authoring surface that keeps a draft, accepts a message, and exposes contribution tools.",
+    behavior: "Semantic native form and textarea",
+    variants: ["ready", "sending", "failed", "responding", "stopping"],
+    status: "proposed",
+    collection: "product-ui",
+    owner: "desktop-new Messages",
+    source: "features/composer/ui/MessageComposer.tsx",
+    baseUi: [],
+    composes: ["icon-button"],
+  },
+  {
+    slug: "activity-rail",
+    name: "Activity rail",
+    purpose:
+      "A compact, readable status line for agent work that continues beside a conversation.",
+    behavior: "Semantic native status",
+    variants: ["working"],
+    status: "proposed",
+    collection: "product-ui",
+    owner: "desktop-new Messages",
+    parent: "composer",
+    source: "features/agent-activity/ui/AgentActivityRail.tsx",
+    baseUi: [],
     composes: [],
   },
 ];

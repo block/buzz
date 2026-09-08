@@ -1,3 +1,5 @@
+import { ShimmerText } from "@/shared/ui/ShimmerText";
+
 import { latestActivityItem } from "../activityProjection";
 import type { AgentTurn } from "../types";
 
@@ -21,9 +23,8 @@ export function AgentActivityRail({ turns }: { turns: AgentTurn[] }) {
           <span
             key={turn.key}
             className="agent-activity-rail-status text-body-sm"
-            aria-label={label}
           >
-            {label}
+            <ShimmerText>{label}</ShimmerText>
           </span>
         );
       })}

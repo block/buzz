@@ -74,7 +74,11 @@ export function ParticipantDialog({
 
   return (
     <Dialog.Root>
-      <Dialog.Trigger className="participant-trigger">
+      <Dialog.Trigger
+        className="buzz-button"
+        data-variant="ghost"
+        data-size="compact"
+      >
         <IconUsers size={16} stroke={1.6} aria-hidden="true" />
         <span>
           {participants.length <= 1

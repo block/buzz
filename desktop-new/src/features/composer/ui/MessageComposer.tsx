@@ -1,8 +1,9 @@
 import {
   IconArrowUp,
-  IconPaperclip,
-  IconTypography,
+  IconLetterCase,
   IconMicrophone,
+  IconPaperclip,
+  IconPlayerStopFilled,
 } from "@tabler/icons-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
@@ -24,12 +25,17 @@ export function MessageComposer({
   onDraftChange,
   onSend,
   placeholder = "Message the session",
+  responseControl,
 }: {
   disabled?: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
   onSend: (content: string) => Promise<void>;
   placeholder?: string;
+  responseControl?: {
+    state: "responding" | "stopping";
+    onStop?: () => void;
+  };
 }) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +105,7 @@ export function MessageComposer({
         <textarea
           ref={textarea}
           value={draft}
-          rows={3}
+          rows={1}
           disabled={disabled}
           aria-label={placeholder}
           aria-describedby={error ? "composer-send-error" : undefined}
@@ -147,7 +153,8 @@ export function MessageComposer({
         <div className="message-composer-actions-start">
           <IconButton
             aria-label="Attach file"
-            icon={<IconPaperclip size={18} stroke={1.8} aria-hidden="true" />}
+            icon={<IconPaperclip size={16} stroke={2} aria-hidden="true" />}
+            size="toolbar"
             variant="ghost"
           />
           <EmojiPicker
@@ -157,23 +164,44 @@ export function MessageComposer({
           />
           <IconButton
             aria-label="Toggle formatting"
-            icon={<IconTypography size={18} stroke={1.8} aria-hidden="true" />}
+            icon={<IconLetterCase size={16} stroke={2} aria-hidden="true" />}
+            size="toolbar"
             variant="ghost"
           />
         </div>
         <div className="message-composer-actions-end">
           <IconButton
             aria-label="Record voice note"
-            icon={<IconMicrophone size={18} stroke={1.8} aria-hidden="true" />}
+            icon={<IconMicrophone size={16} stroke={2} aria-hidden="true" />}
+            size="toolbar"
             variant="ghost"
           />
-          <IconButton
-            type="submit"
-            aria-label={sending ? "Sending message" : "Send message"}
-            icon={<IconArrowUp size={18} stroke={1.8} aria-hidden="true" />}
-            variant="solid"
-            disabled={!canSend}
-          />
+          {responseControl ? (
+            <IconButton
+              aria-label={
+                responseControl.state === "stopping"
+                  ? "Stopping response"
+                  : "Stop response"
+              }
+              aria-busy={responseControl.state === "stopping" || undefined}
+              icon={<IconPlayerStopFilled size={14} aria-hidden="true" />}
+              shape="round"
+              size="toolbar"
+              variant="tint"
+              disabled={responseControl.state === "stopping"}
+              onClick={responseControl.onStop}
+            />
+          ) : (
+            <IconButton
+              type="submit"
+              aria-label={sending ? "Sending message" : "Send message"}
+              icon={<IconArrowUp size={16} stroke={2} aria-hidden="true" />}
+              shape="round"
+              size="toolbar"
+              variant="tint"
+              disabled={!canSend}
+            />
+          )}
         </div>
       </div>
     </form>

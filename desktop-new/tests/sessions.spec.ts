@@ -136,7 +136,7 @@ test("keeps the composer usable above live agent activity", async ({
   const composer = page.getByRole("textbox", { name: "Message the session" });
 
   await expect(dock).toHaveAttribute("data-activity", "true");
-  await expect(dock.locator(".conversation-activity-rail")).toContainText(
+  await expect(dock.locator(".agent-activity-rail")).toContainText(
     "Vogue is working",
   );
   await composer.fill("Keep writing while Vogue works");
@@ -144,7 +144,7 @@ test("keeps the composer usable above live agent activity", async ({
 
   const positions = await page.evaluate(() => {
     const composer = document.querySelector(".message-composer");
-    const rail = document.querySelector(".conversation-activity-rail");
+    const rail = document.querySelector(".agent-activity-rail");
     if (!composer || !rail) throw new Error("Composer dock is incomplete");
     return {
       composerBottom: composer.getBoundingClientRect().bottom,

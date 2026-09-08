@@ -34,7 +34,7 @@ export function useNavigation() {
     setMessagesDestination({ type: "session", channelId });
   }, []);
 
-  const startSession = useCallback((originChannelId?: string) => {
+  const startSession = useCallback((originChannelId: string) => {
     setDestination("channels");
     setMessagesDestination({ type: "new", originChannelId });
   }, []);

@@ -148,15 +148,49 @@ export function AppShell() {
       }
     }
     const rememberedSessions = listSessions(nextScope);
-    // Rich browser fixtures give the navigation a real standalone Session to
-    // arrange and open without claiming the current native parent-required
-    // bootstrap contract can create one yet.
+    // Mock sessions model the intended channel-first navigation shape: a
+    // Session always lives below its originating Room. They are fixtures for
+    // the browser preview only; the native relay remains authoritative.
     const fixtureSessions = isMockRuntime
       ? [
           {
+            channelId: "session-navigation",
+            originChannelId: "design",
+            createdAt: Date.now() - 1_800_000,
+            updatedAt: Date.now() - 1_800_000,
+            hasUnread: true,
+          },
+          {
             channelId: "session-agent-setup",
+            originChannelId: "design",
             createdAt: Date.now() - 10_800_000,
             updatedAt: Date.now() - 10_800_000,
+          },
+          {
+            channelId: "session-interface-review",
+            originChannelId: "buzz-interface",
+            createdAt: Date.now() - 4_500_000,
+            updatedAt: Date.now() - 4_500_000,
+            hasUnread: true,
+          },
+          {
+            channelId: "session-release-brief",
+            originChannelId: "buzz-interface",
+            createdAt: Date.now() - 7_200_000,
+            updatedAt: Date.now() - 7_200_000,
+          },
+          {
+            channelId: "session-launch-checklist",
+            originChannelId: "launch-planning",
+            createdAt: Date.now() - 2_700_000,
+            updatedAt: Date.now() - 2_700_000,
+            hasUnread: true,
+          },
+          {
+            channelId: "session-announcement-draft",
+            originChannelId: "launch-planning",
+            createdAt: Date.now() - 9_000_000,
+            updatedAt: Date.now() - 9_000_000,
           },
         ]
       : [];
@@ -306,7 +340,6 @@ export function AppShell() {
       <SessionView
         channel={activeChannel}
         identity={identity}
-        origin={origin}
         turns={agentActivity.forChannel(activeChannel.id)}
         mode={view.type}
         onStartSession={
@@ -380,7 +413,6 @@ export function AppShell() {
                     onOpenDirectMessage={openChannel}
                     onOpenSession={openSession}
                     onStartSession={startSession}
-                    onStartStandaloneSession={() => startSession()}
                     query={channelQuery}
                     onQueryChange={setChannelQuery}
                   />

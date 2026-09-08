@@ -1,10 +1,4 @@
-import {
-  IconHash,
-  IconMessageCircle,
-  IconMessagePlus,
-  IconMessages,
-  IconPlus,
-} from "@tabler/icons-react";
+import { IconHash, IconPlus } from "@tabler/icons-react";
 import { IconButton } from "@/shared/ui/IconButton";
 import { NavigationItem } from "@/shared/ui/NavigationItem";
 import { NavigationSection } from "@/shared/ui/NavigationSection";
@@ -18,7 +12,8 @@ type NavigatorConversation = {
 
 type NavigatorSession = {
   channelId: string;
-  originChannelId?: string;
+  originChannelId: string;
+  hasUnread?: boolean;
 };
 
 export function MessagesNavigator({
@@ -29,7 +24,6 @@ export function MessagesNavigator({
   onOpenDirectMessage,
   onOpenSession,
   onStartSession,
-  onStartStandaloneSession,
   query,
   onQueryChange,
 }: {
@@ -40,7 +34,6 @@ export function MessagesNavigator({
   onOpenDirectMessage: (channelId: string) => void;
   onOpenSession: (channelId: string) => void;
   onStartSession: (channelId: string) => void;
-  onStartStandaloneSession: () => void;
   query: string;
   onQueryChange: (query: string) => void;
 }) {
@@ -60,26 +53,13 @@ export function MessagesNavigator({
   const directMessages = conversations.filter(
     (conversation) => conversation.channelType === "dm",
   );
-  const sessionConversations = sessions
-    .map((session) => ({
-      session,
-      conversation: conversationsById.get(session.channelId),
-    }))
-    .filter(
-      (
-        entry,
-      ): entry is {
-        session: NavigatorSession;
-        conversation: NavigatorConversation;
-      } => Boolean(entry.conversation),
-    );
-
   return (
     <aside className="workspace-navigator" aria-label="Messages">
       <header className="panel-heading navigator-heading">
         <SearchField
           label="Find a Room, person, or Session"
           placeholder="Search"
+          variant="navigator"
           value={query}
           onValueChange={onQueryChange}
         />
@@ -137,11 +117,19 @@ export function MessagesNavigator({
                   </div>
                   {roomSessions.length ? (
                     <div className="session-children">
-                      {roomSessions.map(({ conversation }) => (
+                      {roomSessions.map(({ session, conversation }) => (
                         <div className="session-child" key={conversation.id}>
                           <NavigationItem
                             label={conversation.name}
                             inset
+                            trailing={
+                              session.hasUnread ? (
+                                <span
+                                  className="session-unread-indicator"
+                                  aria-hidden="true"
+                                />
+                              ) : undefined
+                            }
                             selected={selectedId === conversation.id}
                             onClick={() => onOpenSession(conversation.id)}
                           />
@@ -166,13 +154,6 @@ export function MessagesNavigator({
               <NavigationItem
                 key={message.id}
                 label={message.name}
-                icon={
-                  <IconMessageCircle
-                    size={15}
-                    stroke={1.6}
-                    aria-hidden="true"
-                  />
-                }
                 selected={selectedId === message.id}
                 onClick={() => onOpenDirectMessage(message.id)}
               />
@@ -181,47 +162,6 @@ export function MessagesNavigator({
           0 ? (
             <p className="navigation-empty text-body-sm text-tertiary">
               {normalizedQuery ? "No people match." : "No direct messages yet."}
-            </p>
-          ) : null}
-        </NavigationSection>
-
-        <NavigationSection
-          label="Sessions"
-          action={
-            <IconButton
-              aria-label="Start a standalone Session"
-              icon={
-                <IconMessagePlus size={14} stroke={1.7} aria-hidden="true" />
-              }
-              size="compact"
-              onClick={onStartStandaloneSession}
-            />
-          }
-        >
-          {sessionConversations
-            .filter(
-              ({ conversation, session }) =>
-                !session.originChannelId && matches(conversation.name),
-            )
-            .map(({ conversation }) => (
-              <NavigationItem
-                key={conversation.id}
-                label={conversation.name}
-                icon={
-                  <IconMessages size={15} stroke={1.6} aria-hidden="true" />
-                }
-                selected={selectedId === conversation.id}
-                onClick={() => onOpenSession(conversation.id)}
-              />
-            ))}
-          {sessionConversations.filter(
-            ({ conversation, session }) =>
-              !session.originChannelId && matches(conversation.name),
-          ).length === 0 ? (
-            <p className="navigation-empty text-body-sm text-tertiary">
-              {normalizedQuery
-                ? "No Sessions match."
-                : "Start a Session for focused work."}
             </p>
           ) : null}
         </NavigationSection>

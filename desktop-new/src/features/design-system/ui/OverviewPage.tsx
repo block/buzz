@@ -43,11 +43,12 @@ export function OverviewPage() {
           <code className="text-body text-neutral-1">{GRAMMAR}</code>
         </div>
         <p className="text-body-sm text-secondary">
-          The order is fixed, so there is one correct spelling. See{" "}
-          <Link to="/design/vocabulary" className="text-purple-12 underline">
-            the vocabulary
-          </Link>{" "}
-          for every word a token can be built from.
+          The order is fixed, so there is one correct spelling. The practical
+          guidance for using and evolving it lives in{" "}
+          <Link to="/design/maintaining" className="text-purple-12 underline">
+            Maintaining the system
+          </Link>
+          .
         </p>
       </Section>
 
@@ -75,10 +76,10 @@ export function OverviewPage() {
             Glass
           </Link>
           <Link
-            to="/design/growth"
+            to="/design/maintaining"
             className="rounded-lg bg-neutral-2 px-4 py-2 text-body text-secondary transition-colors hover:bg-neutral-4 hover:text-primary"
           >
-            Growing the system
+            Maintaining the system
           </Link>
         </div>
       </Section>

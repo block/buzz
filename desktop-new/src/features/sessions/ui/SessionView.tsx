@@ -2,6 +2,8 @@ import { IconAlertCircle, IconHash, IconRefresh } from "@tabler/icons-react";
 import { useCallback, useMemo } from "react";
 import { useConversation } from "@/features/conversation/useConversation";
 import { ConversationComposerDock } from "@/features/conversation/ui/ConversationComposerDock";
+import { Button } from "@/shared/ui/Button";
+import { ConversationHeader } from "@/shared/ui/ConversationHeader";
 import type { AgentTurn } from "@/features/agent-activity/types";
 import type { Channel, Identity, Message, Participant } from "../types";
 import { AgentActivity } from "./AgentActivity";
@@ -85,7 +87,6 @@ function MessageRow({
 export function SessionView({
   channel,
   identity,
-  origin,
   turns,
   mode,
   onStartSession,
@@ -94,7 +95,6 @@ export function SessionView({
 }: {
   channel: Channel;
   identity: Identity;
-  origin?: Channel;
   turns: AgentTurn[];
   mode: "channel" | "session";
   onStartSession?: () => void;
@@ -134,46 +134,29 @@ export function SessionView({
 
   return (
     <main className="session-view">
-      <header className="session-header">
-        <div className="session-title-block">
-          <div className="flex items-center gap-2">
-            <h1 className="text-heading text-primary">
-              {mode === "channel" ? `#${channel.name}` : channel.name}
-            </h1>
-            {mode === "session" ? (
-              <span className="device-label">On this device</span>
+      <ConversationHeader
+        icon={<IconHash size={16} stroke={1.7} />}
+        title={channel.name}
+        metadata={
+          mode === "session" ? (
+            <span className="device-label">On this device</span>
+          ) : undefined
+        }
+        actions={
+          <>
+            <ParticipantDialog
+              channelId={channel.id}
+              participants={participants}
+              onChanged={refreshParticipants}
+            />
+            {mode === "channel" && onStartSession ? (
+              <Button variant="quiet" size="compact" onClick={onStartSession}>
+                Start Session
+              </Button>
             ) : null}
-          </div>
-          {origin ? (
-            <span className="origin-label text-body-sm text-secondary">
-              <IconHash size={13} stroke={1.6} aria-hidden="true" />
-              From {origin.name}
-            </span>
-          ) : (
-            <span className="text-body-sm text-tertiary">
-              {mode === "channel"
-                ? channel.description || "Channel"
-                : "Private Session"}
-            </span>
-          )}
-        </div>
-        <div className="session-header-actions">
-          <ParticipantDialog
-            channelId={channel.id}
-            participants={participants}
-            onChanged={refreshParticipants}
-          />
-          {mode === "channel" && onStartSession ? (
-            <button
-              type="button"
-              className="quiet-button"
-              onClick={onStartSession}
-            >
-              Start Session
-            </button>
-          ) : null}
-        </div>
-      </header>
+          </>
+        }
+      />
       <div className="session-scroll">
         <div className="conversation-column">
           {loading && messages.length === 0 ? (
@@ -213,6 +196,7 @@ export function SessionView({
         draft={draft}
         onDraftChange={onDraftChange}
         onSend={send}
+        placeholder="Reply in this session"
         turns={turns}
       />
     </main>

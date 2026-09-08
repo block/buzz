@@ -33,8 +33,11 @@ export type Message = {
 
 export type SessionRecord = {
   channelId: string;
-  originChannelId?: string;
+  /** A session is focused work inside one originating room. */
+  originChannelId: string;
   connectedChannelId?: string;
+  /** Unread state is intentionally scoped to sessions while room unread design is pending. */
+  hasUnread?: boolean;
   createdAt: number;
   updatedAt: number;
   incompleteDraft?: string;

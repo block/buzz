@@ -74,9 +74,21 @@
     border-radius: var(--radius-row);
   }
 
+  /* Toolbars need a less dense hit area than navigator-row actions while
+     keeping the same 16px icon artwork. */
+  .buzz-button[data-icon-size="toolbar"] {
+    width: 2rem;
+    height: 2rem;
+    border-radius: var(--radius-row);
+  }
+
   .buzz-button[data-icon-size="large"] {
     width: 2.5rem;
     height: 2.5rem;
+    border-radius: var(--radius-pill);
+  }
+
+  .buzz-button[data-icon-shape="round"] {
     border-radius: var(--radius-pill);
   }
 
@@ -98,6 +110,17 @@
 
   .buzz-button[data-icon-variant="solid"]:hover:not([data-disabled]) {
     background: var(--purple-10);
+  }
+
+  /* A gentle acknowledgement/submit action on a quiet surface. This cannot be
+     the primary fill: its job is available without pulling focus from writing. */
+  .buzz-button[data-icon-variant="tint"] {
+    background: var(--purple-3);
+    color: var(--purple-12);
+  }
+
+  .buzz-button[data-icon-variant="tint"]:hover:not([data-disabled]) {
+    background: var(--purple-4);
   }
 
   /* Chrome sits on the backdrop and is clickable, so it takes the interactive
@@ -415,6 +438,91 @@
     white-space: nowrap;
   }
 
+  /* ConversationHeader identifies a message-bearing surface. Unlike PanelHeader,
+     it gives the title an optional status/context layer and reserves the end for
+     feature-owned conversation actions. */
+  .conversation-header {
+    position: relative;
+    display: flex;
+    width: 100%;
+    min-height: var(--size-panel-header);
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: 0 var(--space-panel-inset);
+  }
+
+  .conversation-header::after {
+    position: absolute;
+    right: var(--space-panel-inset);
+    bottom: 0;
+    left: var(--space-panel-inset);
+    height: 1px;
+    background: var(--border-primary);
+    content: "";
+    pointer-events: none;
+  }
+
+  .conversation-header-identity,
+  .conversation-header-title-row,
+  .conversation-header-actions {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+  }
+
+  .conversation-header-identity {
+    flex: 1;
+    gap: var(--space-row-gap);
+  }
+
+  .conversation-header-icon {
+    display: flex;
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+  }
+
+  .conversation-header-title-block {
+    min-width: 0;
+  }
+
+  .conversation-header-title-row {
+    gap: var(--space-1);
+  }
+
+  .conversation-header-title-row > h1,
+  .conversation-header-context {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .conversation-header-metadata {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+  }
+
+  .conversation-header-context {
+    margin-top: var(--space-1);
+  }
+
+  .conversation-header-actions {
+    flex: 0 0 auto;
+    gap: var(--space-1);
+  }
+
+  @media (max-width: 48rem) {
+    .conversation-header {
+      min-height: auto;
+      align-items: start;
+      padding-block: var(--space-2);
+    }
+
+    .conversation-header-actions {
+      padding-top: 0.125rem;
+    }
+  }
+
   .search-field {
     display: flex;
     width: 100%;
@@ -425,6 +533,10 @@
     padding: 0 var(--space-control-inset);
     background: var(--neutral-2);
     color: var(--text-tertiary);
+  }
+
+  .search-field[data-variant="navigator"] {
+    border-radius: var(--radius-panel);
   }
 
   .search-field input {
@@ -503,7 +615,7 @@
     border-radius: var(--radius-row);
     padding: 0 var(--space-control-inset);
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     font: inherit;
     text-align: left;
     cursor: pointer;

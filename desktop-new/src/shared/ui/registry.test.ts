@@ -11,11 +11,14 @@ import {
  * The component sources as text, read through Vite rather than `node:fs` so the
  * paths resolve the same way the app resolves them and no Node types are needed.
  */
-const SOURCES = import.meta.glob("/src/shared/ui/*.tsx", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-}) as Record<string, string>;
+const SOURCES = import.meta.glob(
+  "/src/{shared/ui,features/composer/ui,features/agent-activity/ui}/*.tsx",
+  {
+    query: "?raw",
+    import: "default",
+    eager: true,
+  },
+) as Record<string, string>;
 
 function read(source: string): string {
   const contents = SOURCES[`/src/${source}`];
@@ -74,7 +77,8 @@ describe("component registry — Base UI backing", () => {
         const sibling = COMPONENTS.find((candidate) => candidate.slug === slug);
         expect(sibling, `${component.slug} composes ${slug}`).toBeDefined();
         expect(
-          source.includes(`from "./${sibling?.name}"`),
+          source.includes(`from "./${sibling?.name}"`) ||
+            source.includes(`from "@/shared/ui/${sibling?.name}"`),
           `${component.slug} imports ${sibling?.name}`,
         ).toBe(true);
       }
