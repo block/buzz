@@ -60,6 +60,8 @@ bool shouldBlockForAgeSignal(Map<Object?, Object?> response) {
     throw StateError('Unexpected age signal status.');
   }
 
+  // Native adapters provide an inclusive upper age. iOS converts its
+  // exclusive age gate (18 for a minor) to 17 before sending this payload.
   final ageUpper = response['ageUpper'];
   if (ageUpper == null) {
     return false;

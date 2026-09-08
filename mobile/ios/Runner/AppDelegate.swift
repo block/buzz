@@ -313,10 +313,9 @@ import os.log
         case .declinedSharing:
           self?.completeAgeSignalRequest(requestID, value: Self.noAgeSignalResponse)
         case .sharing(let range):
-          let ageUpper = range.upperBound.map { $0 as Any } ?? NSNull()
           self?.completeAgeSignalRequest(
             requestID,
-            value: ["status": "signal", "ageUpper": ageUpper]
+            value: BuzzAgeSignalPayload.sharing(exclusiveUpperBound: range.upperBound)
           )
         @unknown default:
           self?.completeAgeSignalRequest(
