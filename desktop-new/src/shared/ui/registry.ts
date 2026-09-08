@@ -39,6 +39,12 @@ export type ComponentDefinition = {
   variants: readonly string[];
   status: ComponentStatus;
   owner?: string;
+  /**
+   * The component whose frame this component belongs inside in the design
+   * system navigation. This is documentation hierarchy, not an import graph:
+   * a child remains independently usable and documented on its own page.
+   */
+  parent?: string;
   /** The file this component lives in, relative to `src/`. */
   source: string;
   /**
@@ -107,9 +113,10 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
   {
     slug: "panel",
     name: "Panel",
-    purpose: "A major panel sitting on the atmospheric workspace backdrop.",
+    purpose:
+      "An independently legible workspace surface sitting on the atmospheric workspace backdrop. It owns only the rounded surface — fill, border, shadow, and clipping — never a header, content, or resize behaviour.",
     behavior: "Semantic native region",
-    variants: ["panel", "connected-left", "connected-right"],
+    variants: ["panel"],
     status: "proposed",
     owner: "desktop-new Messages",
     source: "shared/ui/Panel.tsx",
@@ -133,11 +140,12 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     slug: "panel-header",
     name: "PanelHeader",
     purpose:
-      "The identity and action boundary at the top of a workspace panel.",
+      "A panel's header row: optional icon, title, and actions. It composes controls supplied through actions but owns neither the panel container nor the content below it.",
     behavior: "Semantic native header",
     variants: ["default", "compact"],
     status: "proposed",
     owner: "desktop-new Messages",
+    parent: "panel",
     source: "shared/ui/PanelHeader.tsx",
     baseUi: [],
     composes: [],

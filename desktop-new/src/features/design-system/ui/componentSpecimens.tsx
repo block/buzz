@@ -288,30 +288,13 @@ function AvatarSpecimen() {
 function PanelSpecimen() {
   return (
     <div className="component-specimen-stack">
-      <SpecimenGroup label='variant="panel" — the default, rounded on every edge'>
+      <SpecimenGroup label="Panel — the surface by itself">
+        {/* No invented header or copy inside this specimen. Panel owns a surface,
+            not what a product chooses to put on it, so an empty Panel is the
+            honest live component. The gradient is the surrounding context it is
+            designed to sit on, not content supplied by the specimen. */}
         <div className="component-single-surface-demo">
-          <Panel aria-label="Standalone panel example">
-            <PanelHeader variant="compact" title="Standalone panel" />
-          </Panel>
-        </div>
-      </SpecimenGroup>
-      {/* The connected pair reads only side by side: each variant squares off
-          the edge it meets so the seam between them is a single line. */}
-      <SpecimenGroup label='variant="connected-right" and variant="connected-left"'>
-        <div className="component-surface-demo">
-          <Panel
-            as="aside"
-            variant="connected-right"
-            aria-label="Right-connected surface example"
-          >
-            <PanelHeader variant="compact" title="Navigator" />
-          </Panel>
-          <Panel
-            variant="connected-left"
-            aria-label="Left-connected surface example"
-          >
-            <PanelHeader variant="compact" title="Conversation" />
-          </Panel>
+          <Panel aria-label="Panel surface" />
         </div>
       </SpecimenGroup>
     </div>
@@ -467,21 +450,20 @@ function PanelHeaderSpecimen() {
   );
   return (
     <div className="component-specimen-stack">
-      <SpecimenGroup label='variant="default" — with icon and actions'>
-        <Panel aria-label="Default panel header example">
-          <PanelHeader
-            title="Conversation"
-            icon={
-              <IconMessageCircle size={16} stroke={1.7} aria-hidden="true" />
-            }
-            actions={actions}
-          />
-        </Panel>
+      {/* PanelHeader is the header row itself — optional icon, title, and actions.
+          Panel is intentionally not wrapped around it: Panel owns the surface and
+          PanelHeader owns neither its container nor the content below it. The end
+          control is the existing IconButton component, composed through `actions`
+          rather than rebuilt as a raw button. */}
+      <SpecimenGroup label="Default — icon, title, and IconButton action">
+        <PanelHeader
+          title="Conversation"
+          icon={<IconMessageCircle size={16} stroke={1.7} aria-hidden="true" />}
+          actions={actions}
+        />
       </SpecimenGroup>
-      <SpecimenGroup label='variant="compact" — shorter, for a nested panel'>
-        <Panel aria-label="Compact panel header example">
-          <PanelHeader variant="compact" title="Thread" actions={actions} />
-        </Panel>
+      <SpecimenGroup label="Compact — title and IconButton action">
+        <PanelHeader variant="compact" title="Thread" actions={actions} />
       </SpecimenGroup>
     </div>
   );

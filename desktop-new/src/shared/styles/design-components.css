@@ -91,8 +91,16 @@
     white-space: nowrap;
   }
 
+  /* A Panel is a workspace surface, not a header-shaped wrapper. The specimen
+     gives it a definite canvas: percentage height only resolves against a
+     definite parent, so the previous min-height let this panel collapse to its
+     PanelHeader and made the component invisible as a surface. */
+  /* Panel's specimen supplies only the context it is designed for — the
+     atmospheric backdrop — and the component supplies only its own surface.
+     A former two-panel pseudo-workspace was deleted: resize seams and layout
+     geometry belong to DockWorkspace, not to Panel. */
   .component-single-surface-demo {
-    min-height: 10rem;
+    height: 16rem;
     padding: var(--space-workspace-inset);
     border-radius: var(--radius-panel);
     background: var(--bg-app);
@@ -100,38 +108,6 @@
 
   .component-single-surface-demo .panel {
     height: 100%;
-  }
-
-  .component-surface-demo {
-    display: grid;
-    min-height: 12rem;
-    grid-template-columns: minmax(10rem, var(--size-navigator)) minmax(
-        18rem,
-        1fr
-      );
-    gap: var(--space-panel-gap);
-    padding: var(--space-workspace-inset);
-    border-radius: var(--radius-panel);
-    background: var(--bg-app);
-  }
-
-  .component-surface-demo .panel {
-    height: 100%;
-  }
-
-  .panel[data-variant="navigator-demo"] {
-    width: min(100%, var(--size-navigator));
-    padding: var(--space-2);
-  }
-
-  .component-navigator-search {
-    margin-bottom: var(--space-4);
-  }
-
-  .panel[data-variant="navigator-demo"]
-    .navigator-section
-    + .navigator-section {
-    margin-top: var(--space-4);
   }
 
   .component-field-demo {
