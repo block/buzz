@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod interaction_author;
 mod observer;
 mod pi_launcher;
 mod pool;
@@ -39,6 +40,7 @@ use config::{
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
+use interaction_author::effective_prompt_author;
 use nostr::{PublicKey, ToBech32};
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
@@ -307,16 +309,6 @@ fn verified_workflow_owner(
     }
 
     Some(owner)
-}
-
-/// Resolve the author principal used by the inbound author gate.
-fn effective_prompt_author(
-    event: &nostr::Event,
-    relay_self: Option<&str>,
-    agent_pubkey_hex: &str,
-) -> String {
-    verified_workflow_owner(event, relay_self, agent_pubkey_hex)
-        .unwrap_or_else(|| event.pubkey.to_hex())
 }
 
 /// Owns the verified relay signing identity for a listener's lifetime and

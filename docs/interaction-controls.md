@@ -49,6 +49,9 @@ mobile cards or runtime permission prompts.
   the custom kinds; exact whole-reply fallback retains original signed evidence.
 - Isolation/privacy: channel and tenant boundaries, unauthorized replies remain
   comments, relay-only state, and rejection of unsupported private/secret forms.
+- Agent authority: a verified text projection is attributed to its original
+  asker before the harness applies its existing owner/allowlist policy. An
+  allowlisted relay signer must not confer its authority on an unlisted asker.
 - Delivery: bounded expiry work, durable at-least-once outbox, and pruning of
   queued events removed by moderation or addressable replacement.
 

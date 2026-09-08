@@ -182,6 +182,10 @@ workflow editor, ACP/Hermes transport adapters, interaction-specific push
 navigation, native mobile cards, and any encrypted/private ballot protocol.
 Agents can already use the CLI's ask/answer/wait path without an adapter.
 An automatic agent action must still enforce its existing author allow list.
+Upgrade `buzz-acp` with the relay before targeting agents: this slice verifies
+the relay's text projection and applies the existing author gate to its original
+asker. It does not treat the relay signer as the person making the request.
+Structured ACP question/permission tool-result handling remains follow-up work.
 The initial card shows your recorded choice and the outcome; named responder
 history and rehydrating previously submitted form fields after a remount are
 follow-up UI work. Signed responses remain queryable through the bridge/CLI.

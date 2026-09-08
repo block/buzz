@@ -535,3 +535,7 @@ pub struct InteractionDelivery {
 #[cfg(test)]
 #[path = "interaction_postgres_tests.rs"]
 mod postgres_tests;
+
+#[cfg(test)]
+#[path = "interaction_unit_tests.rs"]
+mod tests;
