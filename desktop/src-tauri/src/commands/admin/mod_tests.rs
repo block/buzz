@@ -408,7 +408,7 @@ fn pubkey_hex_63_chars_rejected() {
 /// Build a fake Response using a live TCP listener.
 async fn fake_response(status: u16, headers: &str, body: &str) -> reqwest::Response {
     use std::io::{Read, Write};
-    client::init_admin_client();
+    client::init_admin_client().expect("client builds");
     let client = client::ADMIN_CLIENT.get().unwrap();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -446,7 +446,7 @@ async fn serve_sequence_inspect(
     inspect: Option<RequestInspector>,
 ) -> std::net::SocketAddr {
     use std::io::{Read, Write};
-    client::init_admin_client();
+    client::init_admin_client().expect("client builds");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -497,7 +497,7 @@ async fn serve_gated_nip98(
     Arc<std::sync::Mutex<Vec<RequestRecord>>>,
 ) {
     use std::io::{Read, Write};
-    client::init_admin_client();
+    client::init_admin_client().expect("client builds");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let records: Arc<std::sync::Mutex<Vec<RequestRecord>>> =
@@ -886,7 +886,7 @@ async fn probe_inner_no_sign_on_nostr_challenge_is_nip98_denied() {
 async fn dot_localhost_origin_parses_and_probe_inner_reaches_loopback_via_nip98() {
     use std::sync::{Arc, Mutex};
 
-    client::init_admin_client();
+    client::init_admin_client().expect("client builds");
 
     // Serve: slot-0 = 401 Nostr challenge, slot-1 = 200 authorized nip98 response.
     let probe_body = probe_json("nip98", "\"operator\"", "\"db\"", true, true);

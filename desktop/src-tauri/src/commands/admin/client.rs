@@ -15,33 +15,44 @@ pub(crate) const ADMIN_TIMEOUT: std::time::Duration = std::time::Duration::from_
 
 /// The module-level singleton admin HTTP client.
 ///
-/// Built once via `OnceLock` — panics on build failure so there is no
-/// silent fallback to a redirect-following client.
+/// Built once via `OnceLock`. On build failure no client is stored: admin
+/// commands then hit the "admin client not initialised" guard rather than ever
+/// falling back to a redirect-following client.
 pub static ADMIN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Initialise the admin client singleton. Must be called from `setup()` before
 /// any admin command can be invoked. Subsequent calls are no-ops.
-pub fn init_admin_client() {
-    ADMIN_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            // Pin bare `localhost` to loopback (exact-hostname override).
-            .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            // Pin `.localhost` subdomain names (e.g. `admin.localhost`) to loopback.
-            // RFC 6761 §6.3 requires this but system getaddrinfo is unreliable on
-            // Linux/Windows CI runners; the custom resolver makes it deterministic
-            // across all supported platforms without changing non-localhost resolution.
-            .dns_resolver(LocalhostDnsResolver)
-            .pool_idle_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(2)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(ADMIN_TIMEOUT)
-            .build()
-            .expect(
-                "admin HTTP client must build with redirect::Policy::none(); \
-                 a redirect-following fallback would forward the NIP-98 \
-                 Authorization header across origins (redirect-hop SSRF)",
+///
+/// Returns `Err` if the client fails to build. The caller must propagate this
+/// so setup aborts — a redirect-following fallback would forward the NIP-98
+/// `Authorization` header across origins (redirect-hop SSRF).
+pub fn init_admin_client() -> Result<(), String> {
+    if ADMIN_CLIENT.get().is_some() {
+        return Ok(());
+    }
+    let client = reqwest::Client::builder()
+        // Pin bare `localhost` to loopback (exact-hostname override).
+        .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        // Pin `.localhost` subdomain names (e.g. `admin.localhost`) to loopback.
+        // RFC 6761 §6.3 requires this but system getaddrinfo is unreliable on
+        // Linux/Windows CI runners; the custom resolver makes it deterministic
+        // across all supported platforms without changing non-localhost resolution.
+        .dns_resolver(LocalhostDnsResolver)
+        .pool_idle_timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(2)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(ADMIN_TIMEOUT)
+        .build()
+        .map_err(|e| {
+            format!(
+                "admin HTTP client must build with redirect::Policy::none() \
+                 (redirect-hop SSRF): {e}"
             )
-    });
+        })?;
+    // Ignore the result: a concurrent initialiser may have won the race, which
+    // is fine — either way a no-redirect client is stored.
+    let _ = ADMIN_CLIENT.set(client);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -53,7 +64,15 @@ mod tests {
     /// test in `media_download.rs`.
     #[test]
     fn admin_client_builds_with_no_redirect_policy() {
-        init_admin_client();
+        init_admin_client().expect("client builds");
+        assert!(ADMIN_CLIENT.get().is_some());
+    }
+
+    /// Repeated initialisation is a no-op and stays `Ok`.
+    #[test]
+    fn init_admin_client_is_idempotent() {
+        init_admin_client().expect("client builds");
+        init_admin_client().expect("second call is a no-op");
         assert!(ADMIN_CLIENT.get().is_some());
     }
 
@@ -68,7 +87,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
-        init_admin_client();
+        init_admin_client().expect("client builds");
         let client = ADMIN_CLIENT.get().expect("client initialised");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

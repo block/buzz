@@ -24,10 +24,15 @@ use super::routes::{AdminQuery, AdminRoute};
 
 /// A validated canonical admin console origin: `scheme://host[:port]`.
 ///
-/// Constructed only through `AdminOrigin::parse`; the inner string is
-/// guaranteed to be a valid canonical origin.
+/// Constructed only through `AdminOrigin::parse`; `canonical` is guaranteed to
+/// be a valid canonical origin, and `host`/`port` are the components parsed out
+/// of it so no consumer has to re-parse (and re-handle parse failure).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdminOrigin(String);
+pub struct AdminOrigin {
+    canonical: String,
+    host: url::Host<String>,
+    port: u16,
+}
 
 impl AdminOrigin {
     /// Parse and validate an operator-supplied URL into a canonical origin.
@@ -87,25 +92,34 @@ impl AdminOrigin {
             None => format!("{}://{}", parsed.scheme(), host),
         };
 
-        Ok(AdminOrigin(canonical))
+        // Store the parsed host/port so consumers never re-parse the canonical
+        // string. `host()` is `Some` here — a host-less URL already returned Err
+        // above — and `port_or_known_default()` falls back to the scheme default
+        // (443 for the only remaining unknown-scheme case, which cannot occur
+        // since the scheme match above accepts only https/http).
+        let host = parsed
+            .host()
+            .ok_or_else(|| "admin console URL has no host".to_string())?
+            .to_owned();
+        let port = parsed.port_or_known_default().unwrap_or(443);
+
+        Ok(AdminOrigin {
+            canonical,
+            host,
+            port,
+        })
     }
 
     /// The canonical origin string, e.g. `https://admin.example.com`.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.canonical
     }
 
     /// The parsed host and effective port, used to SSRF-resolve an untrusted
-    /// relay-advertised origin before it is offered to the operator. Re-derived
-    /// from the validated canonical string, which is guaranteed to parse.
+    /// relay-advertised origin before it is offered to the operator. Stored at
+    /// parse time, so this never re-parses or panics.
     pub fn resolution_target(&self) -> (url::Host<String>, u16) {
-        let parsed = url::Url::parse(&self.0).expect("canonical AdminOrigin is always a valid URL");
-        let host = parsed
-            .host()
-            .expect("canonical AdminOrigin always has a host")
-            .to_owned();
-        let port = parsed.port_or_known_default().unwrap_or(443);
-        (host, port)
+        (self.host.clone(), self.port)
     }
 
     /// Build the full request URL for `route` with `query`.
@@ -113,9 +127,9 @@ impl AdminOrigin {
         let path = route.path();
         let qs = query.to_query_string();
         if qs.is_empty() {
-            format!("{}/api/admin/v1{path}", self.0)
+            format!("{}/api/admin/v1{path}", self.canonical)
         } else {
-            format!("{}/api/admin/v1{path}?{qs}", self.0)
+            format!("{}/api/admin/v1{path}?{qs}", self.canonical)
         }
     }
 }
@@ -274,6 +288,29 @@ mod tests {
         );
         assert!(url.contains("/api/admin/v1/feedback/"));
         assert!(url.contains("/attachments/"));
+    }
+
+    // ── resolution_target returns the stored components ───────────────────────
+
+    #[test]
+    fn resolution_target_returns_stored_host_and_port() {
+        let https = AdminOrigin::parse("https://admin.example.com").unwrap();
+        assert_eq!(
+            https.resolution_target(),
+            (url::Host::Domain("admin.example.com".to_string()), 443)
+        );
+
+        let localhost = AdminOrigin::parse("http://localhost:3000").unwrap();
+        assert_eq!(
+            localhost.resolution_target(),
+            (url::Host::Domain("localhost".to_string()), 3000)
+        );
+
+        let ipv6 = AdminOrigin::parse("http://[::1]:3000").unwrap();
+        assert_eq!(
+            ipv6.resolution_target(),
+            (url::Host::Ipv6(std::net::Ipv6Addr::LOCALHOST), 3000)
+        );
     }
 
     // ── Host case pin test ────────────────────────────────────────────────────

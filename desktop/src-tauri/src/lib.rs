@@ -244,7 +244,7 @@ pub fn run() {
 
             // Initialise the no-redirect admin HTTP client singleton before any
             // admin command can be invoked. Must run before setup completes.
-            commands::admin::client::init_admin_client();
+            commands::admin::client::init_admin_client()?;
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
