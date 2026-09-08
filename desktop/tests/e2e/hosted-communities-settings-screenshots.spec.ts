@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -6,14 +7,28 @@ import { openSettings } from "../helpers/settings";
 
 const OUTDIR = "test-results/hosted-communities";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
+/** A second valid identity key, used only as a contradictory hosted npub. */
+const OTHER_HEX = "b".repeat(64);
 
-test.beforeEach(async ({ page }) => {
+/**
+ * Install the default hosted-communities fixture and open its settings
+ * section. `builderlabIdentity` overrides the bound account identity so a
+ * spec can drive independent — even contradictory — `pubkey_hex`/`npub`
+ * fields; the mock bridge passes both through verbatim, like the native
+ * command.
+ */
+async function openHostedCommunitiesSettings(
+  page: Page,
+  builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null,
+) {
   await installMockBridge(page, {
     builderlabAuth: {
       email: "owner@example.com",
       expiresAt: "2099-01-01T00:00:00Z",
     },
-    builderlabIdentity: { pubkey_hex: DEFAULT_MOCK_PUBKEY },
+    builderlabIdentity: builderlabIdentity ?? {
+      pubkey_hex: DEFAULT_MOCK_PUBKEY,
+    },
     builderlabCommunities: [
       {
         id: "active-community",
@@ -29,6 +44,91 @@ test.beforeEach(async ({ page }) => {
   });
   await page.goto("/");
   await openSettings(page, "hosted-communities");
+}
+
+test.beforeEach(async ({ page }) => {
+  await openHostedCommunitiesSettings(page);
+});
+
+test("identity: mismatch rows follow pubkey_hex, never the hosted npub or raw hex", async ({
+  page,
+}) => {
+  await openHostedCommunitiesSettings(page, {
+    pubkey_hex: "f".repeat(64),
+    npub: npubEncode(OTHER_HEX),
+  });
+
+  await expect(
+    page.getByText("This account is connected to a different Buzz identity"),
+  ).toBeVisible();
+  const settingsView = page.getByTestId("settings-view");
+  await expect(
+    page
+      .getByText("Account uses", { exact: true })
+      .locator("xpath=following-sibling::dd[1]"),
+  ).toHaveText(npubEncode("f".repeat(64)));
+  await expect(
+    page
+      .getByText("This device", { exact: true })
+      .locator("xpath=following-sibling::dd[1]"),
+  ).toHaveText(npubEncode(DEFAULT_MOCK_PUBKEY));
+  // The independently valid but contradictory hosted npub, and the raw hex
+  // it would stand in for, must never render.
+  await expect(settingsView.getByText(npubEncode(OTHER_HEX))).toHaveCount(0);
+  await expect(settingsView.getByText("f".repeat(64))).toHaveCount(0);
+});
+
+test("identity: connected row follows pubkey_hex when the hosted npub encodes another key", async ({
+  page,
+}) => {
+  await openHostedCommunitiesSettings(page, {
+    pubkey_hex: DEFAULT_MOCK_PUBKEY,
+    npub: npubEncode(OTHER_HEX),
+  });
+
+  const connectedNpub = page
+    .getByText("Buzz identity connected")
+    .locator("span.font-mono");
+  await expect(connectedNpub).toHaveText(npubEncode(DEFAULT_MOCK_PUBKEY));
+  await expect(
+    page.getByTestId("settings-view").getByText(npubEncode(OTHER_HEX)),
+  ).toHaveCount(0);
+});
+
+test("identity: unusable bound hex renders the neutral label, not the hosted npub or raw hex", async ({
+  page,
+}) => {
+  await openHostedCommunitiesSettings(page, {
+    // Valid hex alphabet, wrong length — unusable as an identity key.
+    pubkey_hex: "f".repeat(63),
+    npub: npubEncode(OTHER_HEX),
+  });
+
+  await expect(
+    page.getByText("This account is connected to a different Buzz identity"),
+  ).toBeVisible();
+  const settingsView = page.getByTestId("settings-view");
+  await expect(
+    page
+      .getByText("Account uses", { exact: true })
+      .locator("xpath=following-sibling::dd[1]"),
+  ).toHaveText("Unavailable");
+  await expect(settingsView.getByText(npubEncode(OTHER_HEX))).toHaveCount(0);
+  await expect(settingsView.getByText("f".repeat(63))).toHaveCount(0);
+});
+
+test("identity: consistent hosted identity renders its canonical npub", async ({
+  page,
+}) => {
+  await openHostedCommunitiesSettings(page, {
+    pubkey_hex: DEFAULT_MOCK_PUBKEY,
+    npub: npubEncode(DEFAULT_MOCK_PUBKEY),
+  });
+
+  const connectedNpub = page
+    .getByText("Buzz identity connected")
+    .locator("span.font-mono");
+  await expect(connectedNpub).toHaveText(npubEncode(DEFAULT_MOCK_PUBKEY));
 });
 
 test("capture: community icon picker sits beside its hosted community", async ({

@@ -23,7 +23,7 @@ import {
 } from "@/features/communities/hostedCommunityApi";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { safeNpub } from "@/shared/lib/nostrUtils";
+import { canonicalNpub, UNAVAILABLE_KEY_LABEL } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
@@ -202,7 +202,14 @@ export function HostedCommunityOnboarding({
       localPubkey &&
       boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
   );
-  const localNpub = localPubkey ? safeNpub(localPubkey) : null;
+  // Identity rows display npubs derived from the same key the mismatch gate
+  // and recovery actions act on: the account row from the authoritative
+  // bound `pubkey_hex` — the server-sent `npub` is an independent field that
+  // nothing on this path proves encodes the same key — and the device row
+  // from the local key. An unencodable or non-identity-length key renders the
+  // neutral label instead of leaking raw hex or the unverified npub.
+  const localNpub = localPubkey ? canonicalNpub(localPubkey) : null;
+  const boundNpub = boundPubkey ? canonicalNpub(boundPubkey) : null;
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {
@@ -543,9 +550,9 @@ export function HostedCommunityOnboarding({
                 this device, or sign out to use a different email.
               </DialogDescription>
               <p className="mt-4 w-full break-all rounded-xl bg-[rgb(var(--buzz-hosted-community-identity-bg)/0.5)] px-4 py-3 text-left font-mono text-xs text-foreground">
-                Account: {identity.npub ?? boundPubkey}
+                Account: {boundNpub ?? UNAVAILABLE_KEY_LABEL}
                 <br />
-                This device: {localNpub ?? localPubkey}
+                This device: {localNpub ?? UNAVAILABLE_KEY_LABEL}
               </p>
               {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
               <div className="mt-6 flex flex-col items-stretch gap-2">

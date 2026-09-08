@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test, type Page } from "@playwright/test";
-import { nsecEncode } from "nostr-tools/nip19";
+import { nsecEncode, npubEncode } from "nostr-tools/nip19";
 
 import {
   installMockBridge,
@@ -1482,7 +1482,12 @@ test("first-community owner can replace a mismatched account identity", async ({
         email: "old-owner@example.com",
         expiresAt: "2099-01-01T00:00:00Z",
       },
-      builderlabIdentity: { pubkey_hex: "f".repeat(64) },
+      builderlabIdentity: {
+        pubkey_hex: "f".repeat(64),
+        // Contradiction: the server npub spells this device's key, not the
+        // bound pubkey_hex the mismatch gate and recovery actions use.
+        npub: npubEncode(BLANK_TYLER_IDENTITY.pubkey),
+      },
     },
     {
       relayWsUrl: "ws://localhost:3000",
@@ -1498,6 +1503,19 @@ test("first-community owner can replace a mismatched account identity", async ({
       name: "This account uses a different Buzz identity",
     }),
   ).toBeVisible();
+  // The account row must show the authoritative bound key's npub, never the
+  // contradictory hosted npub (which here spells the device key) or raw hex.
+  const identityRows = page.getByText(/^Account: npub1/);
+  await expect(identityRows).toContainText(
+    `Account: ${npubEncode("f".repeat(64))}`,
+  );
+  await expect(identityRows).toContainText(
+    `This device: ${npubEncode(BLANK_TYLER_IDENTITY.pubkey)}`,
+  );
+  await expect(identityRows).not.toContainText(
+    `Account: ${npubEncode(BLANK_TYLER_IDENTITY.pubkey)}`,
+  );
+  await expect(page.getByText("f".repeat(64))).toHaveCount(0);
   await page
     .getByRole("button", { name: "Use this device's identity" })
     .click();
