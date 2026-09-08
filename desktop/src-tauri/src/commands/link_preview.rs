@@ -467,7 +467,7 @@ where
             .await
             .map_err(|_| ImageFetchError::Transient {
                 retry_after: None,
-                retry_inline: true,
+                retry_inline: !waited_for_cooldown,
             })?;
         if response.status().is_redirection() {
             if redirect_count == MAX_REDIRECTS {

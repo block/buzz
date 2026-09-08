@@ -254,6 +254,44 @@ async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() 
     assert_eq!(*attempts.lock().unwrap(), 3);
 }
 
+#[tokio::test(start_paused = true)]
+async fn transport_failure_after_cooldown_does_not_renew_wait_on_outer_retry() {
+    let cooldown = std::time::Duration::from_secs(20);
+    let url = Url::parse("https://transport-after-cooldown.example/image.png").unwrap();
+    super::set_image_host_cooldown(&url, cooldown);
+    let attempts = Arc::new(Mutex::new(0));
+
+    let result = super::image_retry::retry_transient_image_fetch(|| {
+        let url = url.clone();
+        let attempts = Arc::clone(&attempts);
+        async move {
+            fetch_sanitized_image_using(
+                url,
+                false,
+                |_url| async { Ok(()) },
+                move |_url, _accept| {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        *attempts.lock().unwrap() += 1;
+                        Err("connection failed".to_string())
+                    }
+                },
+            )
+            .await
+        }
+    })
+    .await;
+
+    assert_eq!(
+        result,
+        Err(ImageFetchError::Transient {
+            retry_after: None,
+            retry_inline: false,
+        })
+    );
+    assert_eq!(*attempts.lock().unwrap(), 1);
+}
+
 #[test]
 fn image_cooldown_wait_is_short_and_one_shot() {
     let url = Url::parse("https://bounded-cooldown.example/image.png").unwrap();
