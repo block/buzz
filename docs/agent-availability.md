@@ -20,7 +20,12 @@ successful snapshot retry. No per-row polling is needed, and
 there is no second availability cache or substrate poller. Lifecycle controls
 remain separate: a deployed provider agent still offers Shutdown while offline.
 Shutdown sends a request, not a confirmed termination, and absence of presence
-is not permission to deploy a duplicate body. Local Stop/Start routing is unchanged.
+is not permission to deploy a duplicate body. An owned deployed provider record
+also offers an explicit **Deploy again** action,
+independent of presence. It repeats the existing one-shot provider handoff for
+the same identity; the provider must converge to one live instance or fail
+closed. It neither sends Shutdown nor confirms a new body was created.
+Local Stop/Start routing is unchanged.
 
 A locally stopped record with current exact-key Online or Away presence does
 not establish local process ownership. Its card replaces Start (including a
