@@ -223,7 +223,12 @@ pub async fn handle_req(
         let _liveness_permit = match conn.nip_fi_gate.acquire_effect().await {
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
-                conn.send(RelayMessage::closed(&sub_id, "restricted: session expired"));
+                // Fix 4: [FI-TRACE-DENIAL-ORACLE] gate is off_mode when no assertion
+                // exists, so SessionExpired here always implies an active FI session.
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "restricted: authorization denied",
+                ));
                 return;
             }
         };
@@ -292,7 +297,11 @@ pub async fn handle_req(
         let _search_permit = match conn.nip_fi_gate.acquire_effect().await {
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
-                conn.send(RelayMessage::closed(&sub_id, "restricted: session expired"));
+                // Fix 4: [FI-TRACE-DENIAL-ORACLE]
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "restricted: authorization denied",
+                ));
                 return;
             }
         };
@@ -323,7 +332,11 @@ pub async fn handle_req(
     let _req_permit = match conn.nip_fi_gate.acquire_effect().await {
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
-            conn.send(RelayMessage::closed(&sub_id, "restricted: session expired"));
+            // Fix 4: [FI-TRACE-DENIAL-ORACLE]
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: authorization denied",
+            ));
             return;
         }
     };
@@ -2698,15 +2711,15 @@ mod tests {
             "W3: expired gate must prevent subscription registration; subs = {subs:?}"
         );
 
-        // A CLOSED frame must have been sent with the session-expired message.
+        // A CLOSED frame must have been sent with the authorization denied message.
         let frame = send_rx
             .try_recv()
             .expect("W3: handler must send CLOSED on expired gate");
         match frame {
             axum::extract::ws::Message::Text(t) => {
                 assert!(
-                    t.contains("session expired"),
-                    "W3: CLOSED message must contain 'session expired'; got: {t}"
+                    t.contains("authorization denied"),
+                    "W3: CLOSED message must contain 'authorization denied'; got: {t}"
                 );
             }
             other => panic!("W3: expected Text CLOSED frame, got {other:?}"),
@@ -2720,7 +2733,7 @@ mod tests {
     // `handle_req` with a KIND_HUDDLE_LIVENESS filter with an authorized `#h` channel
     // (pre-populated in accessible_channels_cache so no DB call is needed) and a live
     // gate. Waits for the hook, fires expiry, then releases. The handler must return
-    // CLOSED "session expired" and the `liveness_query_counter` must remain 0 —
+    // CLOSED "authorization denied" and the `liveness_query_counter` must remain 0 —
     // proving the permit gate stopped execution before the `huddle_started_links` DB
     // call boundary, not merely at the denial-text seam.
     //
@@ -2853,15 +2866,15 @@ mod tests {
         );
         crate::nip_fi_test_hooks::liveness_query_counter::deregister(community);
 
-        // A CLOSED frame must have been sent with the session-expired message.
+        // A CLOSED frame must have been sent with the authorization denied message.
         let frame = send_rx
             .try_recv()
             .expect("P1-a: handler must send CLOSED on expired gate");
         match frame {
             axum::extract::ws::Message::Text(t) => {
                 assert!(
-                    t.contains("session expired"),
-                    "P1-a: CLOSED message must contain 'session expired'; got: {t}"
+                    t.contains("authorization denied"),
+                    "P1-a: CLOSED message must contain 'authorization denied'; got: {t}"
                 );
             }
             other => panic!("P1-a: expected Text CLOSED frame, got {other:?}"),

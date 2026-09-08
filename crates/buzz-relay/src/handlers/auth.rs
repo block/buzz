@@ -193,8 +193,18 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     // which uses the data channel and would race the cancel), so
                     // the send loop drains it ahead of the Close it emits on
                     // cancel. Then cancel to close the socket immediately.
+                    //
+                    // Fix 4: when an FI assertion is present, NIP-FI §758-776
+                    // requires local-policy denials to expose only
+                    // `restricted: authorization denied` — the specific reason
+                    // (ban vs. error) must not distinguish itself to the caller.
+                    let ws_deny_text = if conn.nip_fi_assertion.is_some() {
+                        "restricted: authorization denied"
+                    } else {
+                        deny_reason
+                    };
                     let _ = conn.ctrl_tx.try_send(WsMessage::Text(
-                        RelayMessage::ok(&event_id_hex, false, deny_reason).into(),
+                        RelayMessage::ok(&event_id_hex, false, ws_deny_text).into(),
                     ));
                     conn.cancel.cancel();
                     return;
@@ -247,11 +257,15 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
                         .increment(1);
                     *conn.auth_state.write().await = AuthState::Failed;
-                    conn.send(RelayMessage::ok(
-                        &event_id_hex,
-                        false,
-                        "restricted: not a relay member",
-                    ));
+                    // Fix 4: when an FI assertion is present, use the uniform
+                    // NIP-FI denial text so relay-membership status is not
+                    // distinguishable from a ban. [FI-TRACE-DENIAL-ORACLE]
+                    let deny_text = if conn.nip_fi_assertion.is_some() {
+                        "restricted: authorization denied"
+                    } else {
+                        "restricted: not a relay member"
+                    };
+                    conn.send(RelayMessage::ok(&event_id_hex, false, deny_text));
                     return;
                 }
             };
@@ -453,58 +467,6 @@ mod tests {
         Arc::new(state)
     }
 
-    /// Like `auth_test_state` but connects to the real local DB at port 5432.
-    ///
-    /// Required for W1: the ban-check path is fail-closed, so a lazy-pool error
-    /// causes the handler to deny before reaching `before_auth_commit`. With the
-    /// real DB, an unknown pubkey/community returns `BanOutcome::Clear`.
-    ///
-    /// Returns `None` if the local DB is not reachable — callers should skip the
-    /// test in that case rather than fail.
-    async fn auth_test_state_real_db() -> Option<std::sync::Arc<crate::state::AppState>> {
-        use std::sync::Arc;
-        let db_url = "postgres://buzz:buzz_dev@127.0.0.1:5432/buzz";
-        // Probe connectivity before constructing the full state.
-        if sqlx::PgPool::connect(db_url).await.is_err() {
-            return None;
-        }
-        let mut config = crate::config::Config::from_env().expect("default config loads");
-        config.require_relay_membership = false;
-        config.database_url = db_url.to_string();
-        config.redis_url = "redis://127.0.0.1:1".to_string();
-        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-        let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
-        let pubsub = Arc::new(
-            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
-                .await
-                .expect("pubsub manager"),
-        );
-        let audit = buzz_audit::AuditService::new(pool.clone());
-        let auth = buzz_auth::AuthService::new(config.auth.clone());
-        let search = buzz_search::SearchService::new(pool.clone());
-        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
-            db.clone(),
-            buzz_workflow::WorkflowConfig::default(),
-        ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = crate::state::AppState::new(
-            config,
-            db,
-            redis_pool,
-            audit,
-            pubsub,
-            auth,
-            search,
-            workflow_engine,
-            nostr::Keys::generate(),
-            media_storage,
-        );
-        Some(Arc::new(state))
-    }
-
     #[tokio::test]
     async fn handle_auth_pairing_mismatch_runs_full_root_denial_path() {
         use buzz_auth::VerifiedAssertion;
@@ -694,134 +656,186 @@ mod tests {
 
     // ── W1 (auth barrier): expiry fired mid-flight blocks AUTH commit ─────────
     //
-    // Arms `before_auth_commit` — the hook immediately before `acquire_effect()`
-    // in the AUTH commit path. Dispatches `handle_auth` with a live (not-yet-
-    // expired) gate, waits for the hook to signal the handler reached the
-    // permit boundary, fires the gate expiry (cancel), then releases the hook.
-    // The handler tries `acquire_effect()` and gets `SessionExpired`, returns
-    // without committing `AuthState::Authenticated`.
-    //
-    // This is the real barrier test Paul requires: the handler runs through
-    // NIP-42 verification, pairing check, ban check, allowlist, and membership
-    // gates, then stalls at `before_auth_commit`. Expiry fires *in that async
-    // gap*. The permit acquisition fails, and no auth commit occurs.
-    //
-    // Hook location: `handlers/auth.rs`, immediately before `acquire_effect()`
-    // at the B2 AUTH commit seam.
-    //
-    // Mutation evidence:
-    //   A) Delete `#[cfg(test)] before_auth_commit(...)` from auth.rs → handler
-    //      never stalls at the hook → cancel fires before handler reaches
-    //      acquire_effect → handler completes auth before cancel is checked
-    //      (race) OR the gate denies anyway on cancel check. The test is
-    //      non-deterministic without the hook; WITH the hook the barrier is exact.
-    //   B) Remove `acquire_effect()` from auth.rs → handler commits
-    //      AuthState::Authenticated despite the cancel → assertion panics.
-    //   C) Change gate from deadline-with-cancel to off_mode → acquire_effect
-    //      succeeds even after cancel → handler commits auth → assertion panics.
-    //
-    // Requires a local DB (default postgres://buzz:buzz_dev@localhost:5432/buzz)
-    // for the ban-check path that precedes the hook. The DB call returns
-    // "not banned" for an unknown community/pubkey — a real result, not mocked.
-    #[tokio::test]
-    async fn w1_auth_barrier_expiry_mid_flight_blocks_auth_commit() {
-        use buzz_auth::VerifiedAssertion;
-        use chrono::{Duration, Utc};
-        use std::collections::HashMap;
-        use std::sync::Arc;
-        use tokio::sync::{mpsc, RwLock};
-        use tokio_util::sync::CancellationToken;
-        use uuid::Uuid;
+    // This test requires a real PostgreSQL instance. It lives in `postgres_tests`
+    // and is gated with `#[ignore]` so it does not run in unit-test mode where no
+    // DB is available. The postgres-ci nextest lane discovers it via the `ignore`
+    // attribute — do not remove the ignore even if a local DB is reachable.
+    // [Fix 8: FI-TRACE-ISOLATED-DB]
+    mod postgres_tests {
+        use super::*;
 
-        // Same key for assertion and NIP-42 event — pairing passes.
-        let key = Keys::generate();
-        let deadline = Utc::now() + Duration::hours(1);
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        async fn auth_test_state_real_db_expect() -> std::sync::Arc<crate::state::AppState> {
+            use std::sync::Arc;
+            let db_url = crate::test_support::database_url();
+            // Fail hard on infrastructure errors — the postgres lane guarantees a DB.
+            let pool = sqlx::PgPool::connect(&db_url)
+                .await
+                .expect("W1: PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL");
+            let mut config = crate::config::Config::from_env().expect("default config loads");
+            config.require_relay_membership = false;
+            config.database_url = db_url.clone();
+            config.redis_url = "redis://127.0.0.1:1".to_string();
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub manager"),
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _audit_shutdown) = crate::state::AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Arc::new(state)
+        }
 
-        let challenge = "w1-barrier-challenge".to_string();
-        let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
-        let (ctrl_tx, _ctrl_rx) = mpsc::channel::<WsMessage>(8);
-        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
+        /// W1 (auth barrier): expiry fired mid-flight blocks AUTH commit.
+        ///
+        /// Arms `before_auth_commit` — the hook immediately before `acquire_effect()`
+        /// in the AUTH commit path. Dispatches `handle_auth` with a live (not-yet-
+        /// expired) gate, waits for the hook to signal the handler reached the
+        /// permit boundary, fires the gate expiry (cancel), then releases the hook.
+        /// The handler tries `acquire_effect()` and gets `SessionExpired`, returns
+        /// without committing `AuthState::Authenticated`.
+        ///
+        /// This is the real barrier test Paul requires: the handler runs through
+        /// NIP-42 verification, pairing check, ban check, allowlist, and membership
+        /// gates, then stalls at `before_auth_commit`. Expiry fires *in that async
+        /// gap*. The permit acquisition fails, and no auth commit occurs.
+        ///
+        /// Hook location: `handlers/auth.rs`, immediately before `acquire_effect()`
+        /// at the B2 AUTH commit seam.
+        ///
+        /// Mutation evidence:
+        ///   A) Delete `#[cfg(test)] before_auth_commit(...)` from auth.rs → handler
+        ///      never stalls at the hook → cancel fires before handler reaches
+        ///      acquire_effect → handler completes auth before cancel is checked
+        ///      (race) OR the gate denies anyway on cancel check. The test is
+        ///      non-deterministic without the hook; WITH the hook the barrier is exact.
+        ///   B) Remove `acquire_effect()` from auth.rs → handler commits
+        ///      AuthState::Authenticated despite the cancel → assertion panics.
+        ///   C) Change gate from deadline-with-cancel to off_mode → acquire_effect
+        ///      succeeds even after cancel → handler commits auth → assertion panics.
+        ///
+        /// Requires a real DB (ban-check is fail-closed; lazy pool errors → deny
+        /// before hook). DB call returns "not banned" for an unknown
+        /// community/pubkey — a real result, not mocked.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn w1_auth_barrier_expiry_mid_flight_blocks_auth_commit() {
+            use buzz_auth::VerifiedAssertion;
+            use chrono::{Duration, Utc};
+            use std::collections::HashMap;
+            use std::sync::Arc;
+            use tokio::sync::{mpsc, RwLock};
+            use tokio_util::sync::CancellationToken;
+            use uuid::Uuid;
 
-        // Live gate — NOT pre-cancelled. acquire_effect succeeds unless we fire expiry.
-        let cancel = CancellationToken::new();
-        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+            // Same key for assertion and NIP-42 event — pairing passes.
+            let key = Keys::generate();
+            let deadline = Utc::now() + Duration::hours(1);
+            let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
 
-        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            let challenge = "w1-barrier-challenge".to_string();
+            let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel::<WsMessage>(8);
+            let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
 
-        let conn = Arc::new(crate::connection::ConnectionState {
-            conn_id: Uuid::new_v4(),
-            tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
-            remote_addr: "127.0.0.1:1234".parse().unwrap(),
-            auth_state: RwLock::new(AuthState::Pending {
-                challenge: challenge.clone(),
-            }),
-            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            send_tx,
-            ctrl_tx,
-            terminal_ctrl_tx,
-            cancel: cancel.clone(),
-            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            grace_limit: 3,
-            nip_fi_assertion: Some(assertion),
-            session_deadline: Some(deadline),
-            nip_fi_gate: gate,
-        });
+            // Live gate — NOT pre-cancelled. acquire_effect succeeds unless we fire expiry.
+            let cancel = CancellationToken::new();
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
 
-        // W1 requires a real DB (ban-check is fail-closed; lazy pool errors → deny before hook).
-        let state = match auth_test_state_real_db().await {
-            Some(s) => s,
-            None => {
-                eprintln!("W1: skipping — local DB not available at postgres://buzz:buzz_dev@127.0.0.1:5432/buzz");
-                return;
-            }
-        };
-        let relay_url = "ws://test.local";
-        let auth_event = EventBuilder::new(Kind::Authentication, "")
-            .tag(Tag::parse(["relay", relay_url]).unwrap())
-            .tag(Tag::parse(["challenge", &challenge]).unwrap())
-            .sign_with_keys(&key)
-            .unwrap();
+            let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
 
-        // Arm the barrier: fires when handle_auth reaches before_auth_commit.
-        let (arrived_rx, release) = crate::nip_fi_test_hooks::auth_commit_hook::arm(community);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    community,
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: RwLock::new(AuthState::Pending {
+                    challenge: challenge.clone(),
+                }),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: Some(assertion),
+                session_deadline: Some(deadline),
+                nip_fi_gate: gate,
+            });
 
-        // Spawn handle_auth — it will stall at the hook.
-        let conn2 = Arc::clone(&conn);
-        let state2 = Arc::clone(&state);
-        let handle = tokio::spawn(async move { handle_auth(auth_event, conn2, state2).await });
+            let state = auth_test_state_real_db_expect().await;
+            let relay_url = "ws://test.local";
+            let auth_event = EventBuilder::new(Kind::Authentication, "")
+                .tag(Tag::parse(["relay", relay_url]).unwrap())
+                .tag(Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&key)
+                .unwrap();
 
-        // Wait for the handler to reach the permit boundary.
-        tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
-            .await
-            .expect("W1: handler must reach before_auth_commit within 5s")
-            .expect("arrived channel closed");
+            // Arm the barrier: fires when handle_auth reaches before_auth_commit.
+            let (arrived_rx, release) = crate::nip_fi_test_hooks::auth_commit_hook::arm(community);
 
-        // Fire expiry: cancel the gate's token so acquire_effect returns SessionExpired.
-        cancel.cancel();
+            // Spawn handle_auth — it will stall at the hook.
+            let conn2 = Arc::clone(&conn);
+            let state2 = Arc::clone(&state);
+            let handle = tokio::spawn(async move { handle_auth(auth_event, conn2, state2).await });
 
-        // Release the hook — handler resumes and calls acquire_effect().
-        release.notify_one();
+            // Wait for the handler to reach the permit boundary.
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+                .await
+                .expect("W1: handler must reach before_auth_commit within 5s")
+                .expect("arrived channel closed");
 
-        // Wait for handle_auth to return.
-        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
-            .await
-            .expect("W1: handle_auth must return within 5s after hook release")
-            .expect("handle_auth task must not panic");
+            // Fire expiry: cancel the gate's token so acquire_effect returns SessionExpired.
+            cancel.cancel();
 
-        // Auth state must NOT be Authenticated — the permit was denied.
-        assert!(
-            !matches!(*conn.auth_state.read().await, AuthState::Authenticated(_)),
-            "W1: auth_state must NOT be Authenticated after mid-flight expiry"
-        );
+            // Release the hook — handler resumes and calls acquire_effect().
+            release.notify_one();
 
-        // No OK(true) must be on the data channel — auth was not committed.
-        while let Ok(frame) = send_rx.try_recv() {
-            if let WsMessage::Text(t) = &frame {
-                assert!(
-                    !t.contains("\"true\"") && !t.contains(r#"[true"#),
-                    "W1: no OK(true) must be sent when auth is denied by gate; got: {t}"
-                );
+            // Wait for handle_auth to return.
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("W1: handle_auth must return within 5s after hook release")
+                .expect("handle_auth task must not panic");
+
+            // Auth state must NOT be Authenticated — the permit was denied.
+            assert!(
+                !matches!(*conn.auth_state.read().await, AuthState::Authenticated(_)),
+                "W1: auth_state must NOT be Authenticated after mid-flight expiry"
+            );
+
+            // No OK(true) must be on the data channel — auth was not committed.
+            while let Ok(frame) = send_rx.try_recv() {
+                if let WsMessage::Text(t) = &frame {
+                    assert!(
+                        !t.contains("\"true\"") && !t.contains(r#"[true"#),
+                        "W1: no OK(true) must be sent when auth is denied by gate; got: {t}"
+                    );
+                }
             }
         }
     }

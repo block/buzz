@@ -113,7 +113,12 @@ pub async fn handle_count(
     let _count_permit = match conn.nip_fi_gate.acquire_effect().await {
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
-            conn.send(RelayMessage::closed(&sub_id, "restricted: session expired"));
+            // Fix 4: [FI-TRACE-DENIAL-ORACLE] gate is off_mode when no assertion
+            // exists, so SessionExpired here always implies an active FI session.
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: authorization denied",
+            ));
             return;
         }
     };
@@ -353,7 +358,7 @@ mod tests {
     //      hook never fires → `arrived_rx` times out → test panics.
     //   B) Remove `acquire_effect()` from count.rs → handler falls through to the
     //      DB path. With a lazy pool the query errors out, but the gate boundary is
-    //      gone — the CLOSED message changes from "session expired" → assertion panics.
+    //      gone — the CLOSED message changes from "authorization denied" → assertion panics.
     //   C) Change gate to `off_mode` → `acquire_effect()` succeeds after cancel
     //      → handler proceeds, no CLOSED sent at all → `try_recv()` returns `Err`
     //      → assertion panics.
@@ -436,7 +441,7 @@ mod tests {
             .expect("W4: handle_count must return within 5s after hook release")
             .expect("handle_count task must not panic");
 
-        // A CLOSED frame must have been sent with the session-expired message —
+        // A CLOSED frame must have been sent with the authorization denied message —
         // no DB query was issued.
         let frame = send_rx
             .try_recv()
@@ -444,8 +449,8 @@ mod tests {
         match frame {
             axum::extract::ws::Message::Text(t) => {
                 assert!(
-                    t.contains("session expired"),
-                    "W4: CLOSED message must contain 'session expired'; got: {t}"
+                    t.contains("authorization denied"),
+                    "W4: CLOSED message must contain 'authorization denied'; got: {t}"
                 );
             }
             other => panic!("W4: expected Text CLOSED frame, got {other:?}"),

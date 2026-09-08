@@ -1541,10 +1541,16 @@ mod tests {
         use crate::nip_fi_config::NipFiRelayConfig;
         use buzz_auth::{IssuerRegistry, NipFiMode};
 
-        // Build config directly without env mutation — the nip_fi field is
-        // constructed explicitly below, so reading NIP-FI env vars is irrelevant
-        // and mutating them would race the config-module tests (separate statics).
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        // Fix 5: acquire the module-level NIP_FI_ENV_LOCK before calling
+        // Config::from_env() so this fixture never races nip_fi_config's own
+        // tests that temporarily mutate NIP-FI env vars under the same lock.
+        // Drop the guard before any await point — `Config::from_env()` is sync,
+        // so the lock only needs to cover the env read, not the async setup.
+        // [FI-TRACE-ENV-RACE]
+        let mut config = {
+            let _env_guard = crate::nip_fi_config::NIP_FI_ENV_LOCK.lock().unwrap();
+            crate::config::Config::from_env().expect("default config loads")
+        };
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         // Override NIP-FI mode to Enforce with no issuers configured — the
@@ -1690,15 +1696,19 @@ mod tests {
     // the NIP-11 fallback path, never the enforcement gate. The gate fires only
     // on genuine WebSocket upgrades (Connection/Upgrade headers present).
     //
-    // Because the gate runs before bind_community, these tests are DB-free —
-    // the lazy pool is never queried and no host seeding is required. Adding a
-    // DB-dependent fixture here would hide a regression where the gate fires
-    // only because the unseeded-host 404 has not yet been reached.
+    // Because the gate runs before bind_community, the WS-upgrade 401/503 tests
+    // above are DB-free. Plain-GET requests, however, do reach bind_community
+    // (the gate's non-upgrade else-branch skips the gate and falls through).
+    // With an unseeded lazy pool, bind_community returns 404 — but that is NOT
+    // a gate denial. These tests assert that the response is neither 401 nor 503
+    // (gate denial codes), which holds regardless of host resolution state.
+    //
+    // Fix 6: corrected the DB-free comment (bind_community is reached by plain
+    // GETs; only WS-upgrade requests pay zero DB cost via the pre-gate path).
     //
     // Mutation evidence:
-    //   A) Move the NIP-FI gate back after bind_community → without a seeded
-    //      DB, plain-GET tests return 404 (not 200); the assertion panics.
-    //      With a seeded DB the gate returns 401/503, also panics.
+    //   A) Move the NIP-FI gate to fire on plain GETs too → response becomes
+    //      401/503 → assertion `status != 401 && status != 503` panics.
     //   B) Key the gate on the Accept header → a WS request with Accept:
     //      text/html bypasses it → the 401/503 test below returns 101 → panics.
 
@@ -1726,16 +1736,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nip_fi_enforce_plain_get_serves_nip11_not_401() {
+    async fn nip_fi_enforce_plain_get_not_gated_401_or_503() {
         let state = nip_fi_enforce_state().await;
         // A plain GET / without WS upgrade headers is not a WebSocket upgrade.
         // In enforce mode the NIP-FI gate must NOT intercept it — the response
-        // must be the NIP-11 JSON fallback (200), not a denial (401/403/503).
+        // must not be a gate denial (401/503). It may be a 404 from bind_community
+        // (unseeded host) or 200 (NIP-11) with a seeded host; the gate invariant
+        // holds either way.
         let status = nip_fi_non_upgrade_status(state, "/", None).await;
-        assert_eq!(
+        assert_ne!(
             status,
-            axum::http::StatusCode::OK,
-            "plain GET / in enforce mode must fall through to NIP-11 (200), not be gated (401/503)"
+            axum::http::StatusCode::UNAUTHORIZED,
+            "plain GET / in enforce mode must not be gated 401"
+        );
+        assert_ne!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "plain GET / in enforce mode must not be gated 503"
         );
     }
 

@@ -38,6 +38,13 @@ pub struct AudioPeer {
     /// Pinned wire version used to shape outbound relay prefixes without
     /// taking the admission mutex on the per-frame audio hot path.
     pub protocol_version: u8,
+    /// True once the admission transaction has committed. Pending (pre-commit)
+    /// peers are excluded from roster snapshots so a concurrent joiner cannot
+    /// observe a peer that may later fail to commit.
+    ///
+    /// Set to `true` by [`Room::mark_committed`] after `commit_participant_join`
+    /// succeeds. [Fix 7: FI-TRACE-PENDING-PEER-LEAK]
+    pub committed: bool,
 }
 
 /// Control message for a single peer (separate from audio frames).
@@ -323,6 +330,7 @@ impl Room {
                 peer_index,
                 epoch,
                 protocol_version: requested_version,
+                committed: false, // marked true by mark_committed after tx commit
             },
         );
         g.roster_revision = g.roster_revision.wrapping_add(1);
@@ -384,6 +392,7 @@ impl Room {
                 peer_index,
                 epoch,
                 protocol_version: requested_version,
+                committed: false, // marked true by mark_committed after tx commit
             },
         );
         g.roster_revision = g.roster_revision.wrapping_add(1);
@@ -423,6 +432,17 @@ impl Room {
         let _ = self.roster_tx.send(delta.clone());
         drop(g);
         Some(delta)
+    }
+
+    /// Mark a peer as committed after its admission transaction succeeds.
+    ///
+    /// Committed peers appear in [`Self::roster_snapshot`]; pending (pre-commit)
+    /// peers are excluded so a concurrent joiner's snapshot cannot contain a
+    /// peer that may later fail to commit. [Fix 7: FI-TRACE-PENDING-PEER-LEAK]
+    pub fn mark_committed(&self, peer_id: Uuid) {
+        if let Some(mut peer) = self.peers.get_mut(&peer_id) {
+            peer.committed = true;
+        }
     }
 
     /// Remove a peer AND atomically check if the room should end.
@@ -538,11 +558,17 @@ impl Room {
     /// Capture a complete roster and its revision atomically with respect to
     /// admission/removal. Subscribe before calling this to close the
     /// snapshot-to-delta race; stale deltas at or below `revision` are ignored.
+    ///
+    /// Only includes peers that have been committed (via [`Self::mark_committed`]).
+    /// Pending (pre-commit) peers are excluded so a concurrent joiner's snapshot
+    /// cannot leak a peer that may later fail admission.
+    /// [Fix 7: FI-TRACE-PENDING-PEER-LEAK]
     pub fn roster_snapshot(&self) -> RosterSnapshot {
         let g = self.guard.lock().unwrap_or_else(|e| e.into_inner());
         let mut peers = self
             .peers
             .iter()
+            .filter(|e| e.committed)
             .map(|e| RosterPeer {
                 pubkey: e.pubkey.clone(),
                 peer_index: e.peer_index,
@@ -694,7 +720,10 @@ mod tests {
         let room = fresh_room();
         let mut deltas = room.subscribe_roster();
         let (alice, alice_index, ..) = room.add_peer("alice".into(), 2).unwrap();
-        let (_bob, bob_index, ..) = room.add_peer("bob".into(), 2).unwrap();
+        let (bob, bob_index, ..) = room.add_peer("bob".into(), 2).unwrap();
+        // Mark both peers committed so they appear in snapshots.
+        room.mark_committed(alice);
+        room.mark_committed(bob);
         room.remove_peer(alice);
 
         assert_eq!(deltas.try_recv().unwrap().revision, 1);

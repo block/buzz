@@ -324,14 +324,24 @@ impl NipFiRelayConfig {
     }
 }
 
+/// Process-global mutex serializing all reads and writes to NIP-FI environment
+/// variables. Both `NipFiRelayConfig::from_env()` callers and test code that
+/// temporarily mutates NIP-FI env vars must hold this lock to prevent
+/// cross-test races when the suite runs with multiple threads.
+///
+/// Exposed at module level (not just `#[cfg(test)]`) so `router.rs` test
+/// fixtures that call `Config::from_env()` can hold it across the NIP-FI
+/// env-var window without racing this module's own tests.
+/// [Fix 5: FI-TRACE-ENV-RACE]
+#[cfg(test)]
+pub(crate) static NIP_FI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Env vars are process-global — serialize tests that mutate them to prevent
-    // cross-test races when the suite runs with multiple threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Use the module-level NIP_FI_ENV_LOCK (re-exported so test code can name
+    // it via `super::NIP_FI_ENV_LOCK`). No local duplicate needed.
 
     /// RAII guard: removes a set of env vars when dropped, restoring a clean
     /// state even on test panic.
@@ -358,7 +368,7 @@ mod tests {
 
     #[test]
     fn off_mode_requires_no_other_config() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         // NipFiMode::Off is the default: no issuers, no age limit.
@@ -370,7 +380,7 @@ mod tests {
 
     #[test]
     fn deny_protected_requires_no_other_config() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "deny_protected");
@@ -380,7 +390,7 @@ mod tests {
 
     #[test]
     fn enforce_without_issuers_fails_closed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
@@ -397,7 +407,7 @@ mod tests {
 
     #[test]
     fn enforce_without_assertion_age_fails_closed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
@@ -412,7 +422,7 @@ mod tests {
 
     #[test]
     fn unknown_mode_is_rejected() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "permissive");

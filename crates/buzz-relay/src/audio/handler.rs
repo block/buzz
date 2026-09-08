@@ -39,6 +39,17 @@ use buzz_pubsub::EventTopic;
 use crate::audio::room::PeerCtrl;
 use crate::state::{run_registered_community_connection, AppState, CommunityConnectionControl};
 
+/// Pre-built NIP-FI session components created before the `is_community_active`
+/// bootstrap await. Passed from the HTTP-layer wrapper into the active handler so
+/// the session deadline is enforced from the true upgrade instant.
+/// [FI-TRACE-LEASE-BOUND, Fix 3]
+type PreBuiltNipFiBundle = (
+    Arc<crate::nip_fi_gate::SessionAdmissionGate>,
+    mpsc::Sender<WsMessage>,
+    mpsc::Receiver<WsMessage>,
+    Option<tokio::task::JoinHandle<()>>,
+);
+
 /// Maximum binary frame size: 4 KB is generous for a single Opus packet.
 const MAX_AUDIO_FRAME_BYTES: usize = 4096;
 
@@ -182,6 +193,39 @@ async fn handle_audio_connection(
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     let cancel = CancellationToken::new();
+
+    // Fix 3: Arm the NIP-FI session gate and expiry task BEFORE the
+    // `is_community_active` bootstrap await so the session deadline is
+    // enforced even when the DB check is delayed. The deadline is computed
+    // from `connection_time` and `nip_fi_assertion` — both are available here,
+    // before bootstrap. [FI-TRACE-LEASE-BOUND, NIP-FI §"terminated no later than"]
+    let audio_session_deadline = nip_fi_assertion.as_ref().map(|a| {
+        crate::connection::compute_session_deadline(
+            a,
+            connection_time,
+            state.config.nip_fi.max_connection_lifetime(),
+        )
+    });
+    let pre_gate = if let Some(deadline) = audio_session_deadline {
+        crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone())
+    } else {
+        crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone())
+    };
+    // The terminal channel carries the final denial frame from the expiry
+    // task to ws_send before cancellation. Created here (pre-bootstrap) so
+    // any expiry that fires during the bootstrap await can queue its frame;
+    // the inner handler drains it via ws_send.
+    let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) =
+        tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
+    let pre_expiry_task = audio_session_deadline.map(|deadline| {
+        crate::nip_fi_session::spawn_nip_fi_expiry_task(
+            deadline,
+            Arc::clone(&pre_gate),
+            pre_terminal_ctrl_tx.clone(),
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+        )
+    });
+
     let control = CommunityConnectionControl::new(cancel);
     let community_id = tenant.community();
     let registry = Arc::clone(&state.community_connections);
@@ -202,12 +246,19 @@ async fn handle_audio_connection(
                 control,
                 nip_fi_assertion,
                 connection_time,
+                Some((
+                    pre_gate,
+                    pre_terminal_ctrl_tx,
+                    pre_terminal_ctrl_rx,
+                    pre_expiry_task,
+                )),
             )
         },
     )
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_active_audio_connection(
     socket: WebSocket,
     state: Arc<AppState>,
@@ -216,6 +267,10 @@ pub(crate) async fn handle_active_audio_connection(
     control: CommunityConnectionControl,
     nip_fi_assertion: Option<VerifiedAssertion>,
     connection_time: chrono::DateTime<chrono::Utc>,
+    // Fix 3: pre-built gate/expiry/channels from the outer `handle_audio_connection`,
+    // which arms them BEFORE the `is_community_active` bootstrap await.
+    // `None` is used by test call sites that bypass the outer wrapper.
+    pre_built: Option<PreBuiltNipFiBundle>,
 ) {
     let cancel = control.cancellation_token();
     let disconnect_reason = control.disconnect_reason();
@@ -224,15 +279,18 @@ pub(crate) async fn handle_active_audio_connection(
     // instant, not the post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
     let (mut ws_send, mut ws_recv) = socket.split();
 
-    // P2: Arm the NIP-FI session gate and expiry task BEFORE the NIP-42
-    // authentication select. The deadline is computed from `connection_time`
-    // (captured at HTTP upgrade) and `nip_fi_assertion` — both available
-    // without waiting for auth. Arming first ensures the deadline fences
-    // verify_auth_event (up to 5s) and all subsequent pre-session work.
-    // [FI-TRACE-LEASE-BOUND, NIP-FI §Admission pairing sequence]
+    // P2 / Fix 3: Arm the NIP-FI session gate and expiry task.
     //
-    // Partition is rooted at `connection_time` captured before NIP-42 auth
-    // (same three-term formula as main relay). [FI-TRACE-LEASE-BOUND]
+    // When called from the production path (`pre_built = Some`), the gate and
+    // expiry task were created in `handle_audio_connection` BEFORE the
+    // `is_community_active` bootstrap await, so the deadline is enforced even
+    // when bootstrap is delayed. [NIP-FI §"terminated no later than"]
+    //
+    // When called from test paths (`pre_built = None`), the gate is created
+    // here as before; no bootstrap await precedes this point in the test path
+    // so the invariant is preserved. [FI-TRACE-LEASE-BOUND]
+    //
+    // Partition is rooted at `connection_time` captured before NIP-42 auth.
     let audio_session_deadline = nip_fi_assertion.as_ref().map(|a| {
         crate::connection::compute_session_deadline(
             a,
@@ -241,31 +299,28 @@ pub(crate) async fn handle_active_audio_connection(
         )
     });
 
-    // B1: Arm the NIP-FI expiry task before any side effect — including the
-    // NIP-42 handshake. The terminal channel is created here so that a denial
-    // frame queued during auth can be drained via ws_send (still owned by this
-    // scope). Once the send_loop spawns at commit-won, it takes ownership of
-    // terminal_ctrl_rx and drains it on cancellation. [FI-TRACE-LEASE-BOUND]
-    let (terminal_ctrl_tx, mut terminal_ctrl_rx) =
-        tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
-
-    // One gate per audio connection (one-gate-per-connection invariant).
-    // Enforce mode: gate has a deadline; expiry task fires at that deadline.
-    // Off-mode: off_mode() gate never self-expires; acquire_effect always succeeds.
-    let audio_gate = if let Some(deadline) = audio_session_deadline {
-        crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone())
-    } else {
-        crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone())
-    };
-
-    let mut _nip_fi_admission_expiry = audio_session_deadline.map(|deadline| {
-        crate::nip_fi_session::spawn_nip_fi_expiry_task(
-            deadline,
-            std::sync::Arc::clone(&audio_gate),
-            terminal_ctrl_tx.clone(),
-            crate::nip_fi_session::NipFiWsRoute::Audio,
-        )
-    });
+    let (audio_gate, _terminal_ctrl_tx, mut terminal_ctrl_rx, mut _nip_fi_admission_expiry) =
+        if let Some((gate, tx, rx, expiry)) = pre_built {
+            // Production path: gate already armed pre-bootstrap.
+            (gate, tx, rx, expiry)
+        } else {
+            // Test path: create gate + expiry here (no bootstrap gap to bridge).
+            let (tx, rx) = tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
+            let gate = if let Some(deadline) = audio_session_deadline {
+                crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone())
+            } else {
+                crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone())
+            };
+            let expiry = audio_session_deadline.map(|deadline| {
+                crate::nip_fi_session::spawn_nip_fi_expiry_task(
+                    deadline,
+                    std::sync::Arc::clone(&gate),
+                    tx.clone(),
+                    crate::nip_fi_session::NipFiWsRoute::Audio,
+                )
+            });
+            (gate, tx, rx, expiry)
+        };
 
     // Already-expired fast path: catch a deadline already past at upgrade time
     // before spending the AUTH_TIMEOUT window. Send the canonical denial frame
@@ -494,9 +549,17 @@ pub(crate) async fn handle_active_audio_connection(
     .is_err()
     {
         warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio: relay membership denied");
+        // Fix 4: when an FI assertion is present, use the uniform NIP-FI denial
+        // text so relay-membership status is not distinguishable.
+        // [FI-TRACE-DENIAL-ORACLE, NIP-FI §authorization_denied]
+        let deny_msg = if nip_fi_assertion.is_some() {
+            "restricted: authorization denied"
+        } else {
+            "restricted: not a relay member"
+        };
         let _ = ws_send
             .send(WsMessage::Text(
-                serde_json::json!({"type": "error", "message": "restricted: not a relay member"})
+                serde_json::json!({"type": "error", "message": deny_msg})
                     .to_string()
                     .into(),
             ))
@@ -518,9 +581,17 @@ pub(crate) async fn handle_active_audio_connection(
         Ok(admission) => admission,
         Err(e) => {
             warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio membership denied: {e}");
+            // Fix 4: when an FI assertion is present, use the uniform NIP-FI
+            // denial text so channel-membership status is not distinguishable.
+            // [FI-TRACE-DENIAL-ORACLE, NIP-FI §authorization_denied]
+            let deny_msg = if nip_fi_assertion.is_some() {
+                "restricted: authorization denied"
+            } else {
+                "not a member"
+            };
             let _ = ws_send
                 .send(WsMessage::Text(
-                    serde_json::json!({"type":"error","message":"not a member"})
+                    serde_json::json!({"type":"error","message": deny_msg})
                         .to_string()
                         .into(),
                 ))
@@ -785,7 +856,7 @@ pub(crate) async fn handle_active_audio_connection(
                 if let Some(t) = _nip_fi_admission_expiry.take() {
                     let _ = t.await;
                 }
-                guard.release_before_commit().await;
+                let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
                 state
                     .audio_rooms
                     .cleanup_if_empty(tenant.community(), channel_id);
@@ -808,7 +879,7 @@ pub(crate) async fn handle_active_audio_connection(
                 if let Some(t) = _nip_fi_admission_expiry.take() {
                     let _ = t.await;
                 }
-                guard.release_before_commit().await;
+                let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
                 state
                     .audio_rooms
                     .cleanup_if_empty(tenant.community(), channel_id);
@@ -824,7 +895,7 @@ pub(crate) async fn handle_active_audio_connection(
                 let _ = t.await;
             }
             use futures_util::SinkExt as _;
-            guard.release_before_commit().await;
+            let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
             while let Ok(msg) = terminal_ctrl_rx.try_recv() {
                 let _ = ws_send.send(msg).await;
             }
@@ -847,7 +918,7 @@ pub(crate) async fn handle_active_audio_connection(
                     let _ = t.await;
                 }
                 use futures_util::SinkExt as _;
-                guard.release_before_commit().await;
+                let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
                 while let Ok(msg) = terminal_ctrl_rx.try_recv() {
                     let _ = ws_send.send(msg).await;
                 }
@@ -882,7 +953,7 @@ pub(crate) async fn handle_active_audio_connection(
                 if let Some(t) = _nip_fi_admission_expiry.take() {
                     let _ = t.await;
                 }
-                guard.release_before_commit().await;
+                let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
                 return;
             }
             Err(crate::audio::room::AdmissionError::Ended) => {
@@ -893,7 +964,7 @@ pub(crate) async fn handle_active_audio_connection(
                 if let Some(t) = _nip_fi_admission_expiry.take() {
                     let _ = t.await;
                 }
-                guard.release_before_commit().await;
+                let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
                 return;
             }
             Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
@@ -908,7 +979,7 @@ pub(crate) async fn handle_active_audio_connection(
                 if let Some(t) = _nip_fi_admission_expiry.take() {
                     let _ = t.await;
                 }
-                guard.release_before_commit().await;
+                let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
                 return;
             }
         };
@@ -936,7 +1007,7 @@ pub(crate) async fn handle_active_audio_connection(
             let _ = t.await;
         }
         use futures_util::SinkExt as _;
-        guard.release_before_commit().await;
+        let _ = guard.release_before_commit().await; // owner_generation not yet set at this point
         while let Ok(msg) = terminal_ctrl_rx.try_recv() {
             let _ = ws_send.send(msg).await;
         }
@@ -1075,6 +1146,7 @@ pub(crate) async fn handle_active_audio_connection(
         &pubkey_bytes,
         peer_id,
         lifecycle_revision,
+        &lifecycle_generation,
         &membership_admission,
         &audio_gate,
         joined_msg,
@@ -1124,7 +1196,7 @@ pub(crate) async fn handle_active_audio_connection(
                 .audio_rooms
                 .cleanup_if_empty(tenant.community(), channel_id);
             // Release the guard-owned lease (peer_id and remote already taken above).
-            guard.release_before_commit().await;
+            let _ = guard.release_before_commit().await;
             return;
         }
         Err(JoinCommitError::Expired) => {
@@ -1141,7 +1213,15 @@ pub(crate) async fn handle_active_audio_connection(
             }
             // I1: lease is still guard-owned (attach_signals not yet called).
             // `guard.release_before_commit()` directly awaits directory.release().
-            guard.release_before_commit().await;
+            // Fix 7: if the pending peer empties the room, fence owners.release
+            // on the owner generation so a stale teardown cannot release a newer
+            // epoch. [FI-TRACE-OWNER-CLEANUP-GAP]
+            let room_cleaned = guard.release_before_commit().await;
+            if room_cleaned {
+                if let (Some(mesh), Some(generation)) = (state.mesh(), owner_generation) {
+                    mesh.owners.release(channel_id, generation);
+                }
+            }
             // Drain the terminal denial frame (already queued by expiry task).
             use futures_util::SinkExt as _;
             while let Ok(msg) = terminal_ctrl_rx.try_recv() {
@@ -1159,7 +1239,13 @@ pub(crate) async fn handle_active_audio_connection(
                 let _ = t.await;
             }
             // I1: lease is still guard-owned; guard.release_before_commit() releases it.
-            guard.release_before_commit().await;
+            // Fix 7: [FI-TRACE-OWNER-CLEANUP-GAP]
+            let room_cleaned = guard.release_before_commit().await;
+            if room_cleaned {
+                if let (Some(mesh), Some(generation)) = (state.mesh(), owner_generation) {
+                    mesh.owners.release(channel_id, generation);
+                }
+            }
             let _ = ws_send
                 .send(WsMessage::Text(
                     serde_json::json!({"type":"error","message":"huddle has ended"})
@@ -1179,7 +1265,13 @@ pub(crate) async fn handle_active_audio_connection(
                 let _ = t.await;
             }
             // I1: lease is still guard-owned; guard.release_before_commit() releases it.
-            guard.release_before_commit().await;
+            // Fix 7: [FI-TRACE-OWNER-CLEANUP-GAP]
+            let room_cleaned = guard.release_before_commit().await;
+            if room_cleaned {
+                if let (Some(mesh), Some(generation)) = (state.mesh(), owner_generation) {
+                    mesh.owners.release(channel_id, generation);
+                }
+            }
             let _ = ws_send
                 .send(WsMessage::Text(
                     serde_json::json!({"type":"error","message":"error: not a member"})
@@ -1200,7 +1292,13 @@ pub(crate) async fn handle_active_audio_connection(
                 let _ = t.await;
             }
             // I1: lease is still guard-owned; guard.release_before_commit() releases it.
-            guard.release_before_commit().await;
+            // Fix 7: [FI-TRACE-OWNER-CLEANUP-GAP]
+            let room_cleaned = guard.release_before_commit().await;
+            if room_cleaned {
+                if let (Some(mesh), Some(generation)) = (state.mesh(), owner_generation) {
+                    mesh.owners.release(channel_id, generation);
+                }
+            }
             let _ = ws_send
                 .send(WsMessage::Text(
                     serde_json::json!({"type":"error","message":"huddle has ended"})
@@ -1220,7 +1318,13 @@ pub(crate) async fn handle_active_audio_connection(
                 let _ = t.await;
             }
             // I1: lease is still guard-owned; guard.release_before_commit() releases it.
-            guard.release_before_commit().await;
+            // Fix 7: [FI-TRACE-OWNER-CLEANUP-GAP]
+            let room_cleaned = guard.release_before_commit().await;
+            if room_cleaned {
+                if let (Some(mesh), Some(generation)) = (state.mesh(), owner_generation) {
+                    mesh.owners.release(channel_id, generation);
+                }
+            }
             let _ = ws_send
                 .send(WsMessage::Text(
                     serde_json::json!({"type":"error","message":"error: join commit failed"})
@@ -1912,7 +2016,13 @@ impl HuddleAdmissionGuard {
     ///   literal — no detached task). Warns on release error.
     /// - Remote registration: UnregisterPeer + Goodbye(SessionEnded) on stream.
     /// - Peer in room: remove_peer + cleanup_if_empty.
-    async fn release_before_commit(&mut self) {
+    ///
+    /// Returns `true` when the room was cleaned up (i.e., the peer removal
+    /// left it empty and it was removed from the manager). Used by pre-commit
+    /// exit paths to fence `owners.release` against the pending peer's owner
+    /// generation when the committed owner has already left.
+    /// [Fix 7: FI-TRACE-OWNER-CLEANUP-GAP]
+    async fn release_before_commit(&mut self) -> bool {
         // Release the unattached lease by calling directory.release directly.
         // This is an awaited call, so "release before return" is guaranteed —
         // no detached renewer task that could outlive the caller.
@@ -1937,9 +2047,12 @@ impl HuddleAdmissionGuard {
         // Remove the peer from the room.
         if let Some(pid) = self.peer_id.take() {
             self.room.remove_peer(pid);
-            self.audio_rooms
+            let cleaned = self
+                .audio_rooms
                 .cleanup_if_empty(self.community, self.channel_id);
+            return cleaned;
         }
+        false
     }
 
     /// Take the remote session (consumed at commit-won for the send-loop task).
@@ -2158,16 +2271,23 @@ async fn commit_participant_join(
     pubkey_bytes: &[u8],
     peer_id: Uuid,
     roster_revision: u64,
+    lifecycle_generation: &str,
     membership_admission: &MembershipAdmission,
     gate: &std::sync::Arc<crate::nip_fi_gate::SessionAdmissionGate>,
     joined_msg: String,
     room: &std::sync::Arc<crate::audio::room::Room>,
 ) -> Result<CommitJoinOutcome, JoinCommitError> {
     // 1. Sign the 48101 event synchronously.
+    //
+    // Fix 1: include `generation` so desktop can fence the first liveness
+    // refresh correctly. The replaced producer at base `88687876f` carried it;
+    // omitting it caused `huddlePresenceRuntime.ts` to record the join as
+    // "pending" and clear the participant on the first real-generation delta.
     let content = serde_json::json!({
         "ephemeral_channel_id": channel_id.to_string(),
         "roster_revision": roster_revision,
         "admission_id": peer_id.to_string(),
+        "generation": lifecycle_generation,
     })
     .to_string();
 
@@ -2195,26 +2315,30 @@ async fn commit_participant_join(
     let mut tx = state.db.begin_event_write_transaction().await?;
 
     // 3. Archive re-check (ALL paths): re-read archived_at inside the
-    //    transaction before any write, taking a row-level write lock (`FOR UPDATE`)
-    //    on the channels row. This serializes all join commits against archive:
-    //    `archive_channel`'s `UPDATE channels SET archived_at = NOW()` must wait
-    //    until this transaction commits or rolls back before it can proceed —
-    //    closing the READ COMMITTED race on both the `Existing` and
-    //    `AutoAddRequired` paths.
+    //    transaction before any write, taking a row-level write lock
+    //    (`FOR NO KEY UPDATE`) on the channels row. This serializes all join
+    //    commits against archive: `archive_channel`'s
+    //    `UPDATE channels SET archived_at = NOW()` must wait until this
+    //    transaction commits or rolls back before it can proceed — closing the
+    //    READ COMMITTED race on both the `Existing` and `AutoAddRequired` paths.
     //
-    //    `FOR UPDATE` is safe here: the channels row is a single row identified
+    //    The channels row is a single row identified
     //    by primary key; the lock is held only for the duration of the join
-    //    transaction (typically sub-millisecond). No deadlock risk: joins lock
-    //    the channel row first, archive also locks it first (no other write
-    //    orders these two objects differently).
+    //    transaction (typically sub-millisecond).
     //
-    //    The `AutoAddRequired` path below re-reads archive state a second time
-    //    under the advisory membership lock — that re-read provides defence-in-
-    //    depth and is kept as-is.
+    //    `FOR NO KEY UPDATE` vs `FOR UPDATE`: using `FOR UPDATE` here inverts
+    //    the lock order against the normal `add_member` path, which takes the
+    //    advisory membership lock first and then its membership INSERT needs a
+    //    `KEY SHARE` on `channels` for the FK (`channel_members.community_id`
+    //    references `channels.community_id`). `FOR UPDATE` blocks `KEY SHARE`
+    //    → deadlock when a normal `add_member` is in-flight concurrently.
+    //    `FOR NO KEY UPDATE` still conflicts with archive's non-key row update
+    //    (`archived_at` is not a FK key column) and blocks it correctly, but is
+    //    compatible with `KEY SHARE`, closing the lock-inversion window.
     let channel_archived_early: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
         "SELECT archived_at FROM channels \
          WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
-         FOR UPDATE",
+         FOR NO KEY UPDATE",
     )
     .bind(tenant.community().as_uuid())
     .bind(channel_id)
@@ -2369,6 +2493,12 @@ async fn commit_participant_join(
     if let Err(e) = tx.commit().await {
         return Err(JoinCommitError::Db(e.into()));
     }
+
+    // Fix 7: mark the peer as committed so future roster snapshots include it.
+    // Pending (pre-commit) peers are excluded from snapshots to prevent a
+    // concurrent joiner from observing a peer that may later fail admission.
+    // [FI-TRACE-PENDING-PEER-LEAK]
+    room.mark_committed(peer_id);
 
     // 8. Fan-out while permit is still held — expiry cannot complete between
     //    row visibility and fan-out.
@@ -2940,6 +3070,7 @@ mod tests {
                                     control_inner,
                                     Some(assertion_i),
                                     conn_time,
+                                    None,
                                 )
                                 .await
                             })
@@ -3135,6 +3266,7 @@ mod tests {
                                     control_inner,
                                     Some(assertion_i),
                                     conn_time,
+                                    None,
                                 )
                                 .await
                             })
@@ -3285,6 +3417,7 @@ mod tests {
                                     control_inner,
                                     Some(assertion_i),
                                     conn_time,
+                                    None,
                                 )
                                 .await
                             })
@@ -3486,6 +3619,7 @@ mod tests {
                                     control_inner,
                                     Some(assertion_i),
                                     conn_time,
+                                    None,
                                 )
                                 .await
                             })
@@ -3928,6 +4062,7 @@ mod tests {
                 &member_bytes2,
                 peer_id,
                 roster_revision,
+                "1",
                 &membership,
                 &gate2,
                 String::new(),
@@ -4061,6 +4196,7 @@ mod tests {
                 &member_bytes_a,
                 Uuid::new_v4(),
                 1,
+                "1",
                 &MembershipAdmission::Existing {
                     parent_channel_id: channel_id,
                 },
@@ -4102,6 +4238,7 @@ mod tests {
                 &member_bytes_b,
                 Uuid::new_v4(),
                 2,
+                "1",
                 &MembershipAdmission::Existing {
                     parent_channel_id: channel_id,
                 },
@@ -4209,6 +4346,7 @@ mod tests {
                 &bytes1,
                 Uuid::new_v4(),
                 1,
+                "1",
                 &MembershipAdmission::Existing {
                     parent_channel_id: channel_id,
                 },
@@ -4250,6 +4388,7 @@ mod tests {
                 &bytes2,
                 Uuid::new_v4(),
                 2,
+                "1",
                 &MembershipAdmission::Existing {
                     parent_channel_id: channel_id,
                 },
@@ -4485,6 +4624,7 @@ mod tests {
                 &joiner_bytes2,
                 Uuid::new_v4(),
                 1,
+                "1",
                 &membership,
                 &gate2,
                 String::new(),
@@ -4678,6 +4818,7 @@ mod tests {
                 &joiner_bytes2,
                 Uuid::new_v4(),
                 1,
+                "1",
                 &membership,
                 &gate2,
                 String::new(),
@@ -4863,6 +5004,7 @@ mod tests {
                                     control_inner,
                                     Some(assertion_i),
                                     conn_time,
+                                    None,
                                 )
                                 .await
                             })
@@ -5048,6 +5190,7 @@ mod tests {
                                     control_inner,
                                     Some(assertion_i),
                                     conn_time,
+                                    None,
                                 )
                                 .await
                             })
@@ -5239,6 +5382,7 @@ mod tests {
                 &bytes2,
                 peer_id,
                 1,
+                "1",
                 &membership,
                 &gate2,
                 String::new(),
@@ -5435,6 +5579,7 @@ mod tests {
                                     control_inner,
                                     Some(assertion_i),
                                     conn_time,
+                                    None,
                                 )
                                 .await
                             })
@@ -5678,7 +5823,7 @@ mod tests {
             channel_id,
         };
 
-        guard.release_before_commit().await;
+        let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
 
         // `release_before_commit` now calls `directory.release` directly and
         // awaits it — no detached renewer task. Release is complete by the time
@@ -5691,7 +5836,7 @@ mod tests {
 
         // Guard is idempotent — calling release_before_commit again must not
         // trigger a second release (lease field is now None).
-        guard.release_before_commit().await;
+        let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
         let release_calls_after = *dir.release_calls.lock().unwrap();
         assert_eq!(
             release_calls_after, 1,
@@ -5788,7 +5933,7 @@ mod tests {
             channel_id,
         };
 
-        guard.release_before_commit().await;
+        let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
 
         // Stream must have received UnregisterPeer (Data) then Goodbye, then finish.
         let sent = frames.lock().unwrap().clone();
@@ -5937,6 +6082,7 @@ mod tests {
                 &member_bytes,
                 peer_id,
                 roster_revision,
+                "1",
                 &membership,
                 &gate,
                 String::new(),
@@ -6035,6 +6181,7 @@ mod tests {
                     &member_bytes,
                     peer_id,
                     1,
+                    "1",
                     &MembershipAdmission::Existing {
                         parent_channel_id: channel_id,
                     },
@@ -6237,6 +6384,7 @@ mod tests {
                     &joiner_bytes2,
                     Uuid::new_v4(),
                     1,
+                    "1",
                     &MembershipAdmission::AutoAddRequired {
                         parent_channel_id,
                         channel_created_by: creator_bytes.clone(),

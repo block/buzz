@@ -32,6 +32,17 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
 
+/// Pre-built NIP-FI session components created before the `is_community_active`
+/// bootstrap await. Passed from the HTTP-layer wrapper into the active handler so
+/// the session deadline is enforced from the true upgrade instant.
+/// [FI-TRACE-LEASE-BOUND, Fix 3]
+type PreBuiltNipFiBundle = (
+    Arc<crate::nip_fi_gate::SessionAdmissionGate>,
+    mpsc::Sender<WsMessage>,
+    mpsc::Receiver<WsMessage>,
+    Option<tokio::task::JoinHandle<()>>,
+);
+
 /// Request for the writer to flush a restart close and report the result.
 pub(crate) struct RestartClose {
     pub(crate) flushed: tokio::sync::oneshot::Sender<bool>,
@@ -212,6 +223,34 @@ pub async fn handle_connection(
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
+
+    // Fix 3: Arm the NIP-FI gate and expiry task BEFORE the `is_community_active`
+    // bootstrap await so the session deadline is enforced even when the DB check
+    // is delayed. The deadline is computed from `connection_time` and
+    // `nip_fi_assertion` — both are available here, before bootstrap.
+    // [FI-TRACE-LEASE-BOUND, NIP-FI §"terminated no later than"]
+    let pre_session_deadline = nip_fi_assertion.as_ref().map(|a| {
+        compute_session_deadline(
+            a,
+            connection_time,
+            state.config.nip_fi.max_connection_lifetime(),
+        )
+    });
+    let pre_gate = if let Some(deadline) = pre_session_deadline {
+        crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone())
+    } else {
+        crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone())
+    };
+    let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
+    let pre_expiry_task = pre_session_deadline.map(|deadline| {
+        crate::nip_fi_session::spawn_nip_fi_expiry_task(
+            deadline,
+            Arc::clone(&pre_gate),
+            pre_terminal_ctrl_tx.clone(),
+            crate::nip_fi_session::NipFiWsRoute::Root,
+        )
+    });
+
     let control = CommunityConnectionControl::new(cancel);
     let community_id = tenant.community();
     let registry = Arc::clone(&state.community_connections);
@@ -233,6 +272,12 @@ pub async fn handle_connection(
                 control,
                 nip_fi_assertion,
                 connection_time,
+                Some((
+                    pre_gate,
+                    pre_terminal_ctrl_tx,
+                    pre_terminal_ctrl_rx,
+                    pre_expiry_task,
+                )),
             )
         },
     )
@@ -252,6 +297,10 @@ async fn handle_active_connection(
     control: CommunityConnectionControl,
     nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
     connection_time: chrono::DateTime<chrono::Utc>,
+    // Fix 3: pre-built gate/expiry/channels from `handle_connection`, armed
+    // BEFORE the `is_community_active` bootstrap await. `None` is not currently
+    // produced by any caller but retained for future test extensibility.
+    pre_built: Option<PreBuiltNipFiBundle>,
 ) {
     let cancel = control.cancellation_token();
     let disconnect_reason = control.disconnect_reason();
@@ -275,7 +324,15 @@ async fn handle_active_connection(
 
     // Dedicated one-slot channel for the terminal NIP-FI denial frame.
     // Cannot be saturated by ordinary traffic — only one terminal event fires.
-    let (terminal_ctrl_tx, terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
+    // Fix 3: Use the pre-built terminal channel from `handle_connection` (armed
+    // before bootstrap) if available; otherwise create fresh here.
+    let (terminal_ctrl_tx, terminal_ctrl_rx, pre_nip_fi_gate, pre_nip_fi_expiry_task) =
+        if let Some((gate, tx, rx, expiry)) = pre_built {
+            (tx, rx, Some(gate), expiry)
+        } else {
+            let (tx, rx) = mpsc::channel::<WsMessage>(1);
+            (tx, rx, None, None)
+        };
 
     // Dedicated restart-close channel carries a flush acknowledgement. Keeping
     // ordinary control frames unchanged avoids coupling heartbeat/ban traffic
@@ -316,11 +373,17 @@ async fn handle_active_connection(
     // Off-mode (no assertion): gate has no deadline and never self-expires;
     // acquire_effect() always succeeds unless the outer cancel token fires.
     // [FI-TRACE-LEASE-BOUND, one-gate-per-connection]
-    let nip_fi_gate = if let Some(deadline) = session_deadline {
-        crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone())
-    } else {
-        crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone())
-    };
+    //
+    // Fix 3: when pre_built, use the already-armed pre_nip_fi_gate (created
+    // before bootstrap in `handle_connection`) so the deadline is enforced
+    // across the full session lifecycle.
+    let nip_fi_gate = pre_nip_fi_gate.unwrap_or_else(|| {
+        if let Some(deadline) = session_deadline {
+            crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone())
+        } else {
+            crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone())
+        }
+    });
 
     let conn = Arc::new(ConnectionState {
         conn_id,
@@ -424,13 +487,18 @@ async fn handle_active_connection(
     // Uses gate.expire() so the quiescence barrier (write lock) ensures
     // connection teardown cannot start until all pre-expiry effects have
     // finished. [FI-TRACE-LEASE-BOUND]
-    let nip_fi_expiry_task = conn.session_deadline.map(|deadline| {
-        crate::nip_fi_session::spawn_nip_fi_expiry_task(
-            deadline,
-            Arc::clone(&nip_fi_gate),
-            conn.terminal_ctrl_tx.clone(),
-            crate::nip_fi_session::NipFiWsRoute::Root,
-        )
+    //
+    // Fix 3: if the expiry task was already spawned pre-bootstrap
+    // (`pre_nip_fi_expiry_task`), use it directly; otherwise spawn fresh.
+    let nip_fi_expiry_task = pre_nip_fi_expiry_task.or_else(|| {
+        conn.session_deadline.map(|deadline| {
+            crate::nip_fi_session::spawn_nip_fi_expiry_task(
+                deadline,
+                Arc::clone(&nip_fi_gate),
+                conn.terminal_ctrl_tx.clone(),
+                crate::nip_fi_session::NipFiWsRoute::Root,
+            )
+        })
     });
 
     recv_loop(

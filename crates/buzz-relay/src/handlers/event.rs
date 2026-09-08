@@ -702,10 +702,14 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         let _observer_permit = match conn.nip_fi_gate.acquire_effect().await {
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
+                // Fix 4: post-upgrade expiry is an authorization_denied event when
+                // an FI assertion is present. Gate is off_mode when no assertion
+                // exists, so SessionExpired here always implies an active FI session.
+                // [FI-TRACE-DENIAL-ORACLE, NIP-FI §authorization_denied]
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
                     false,
-                    "restricted: session expired",
+                    "restricted: authorization denied",
                 ));
                 return;
             }
@@ -759,10 +763,11 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         let _event_permit = match conn.nip_fi_gate.acquire_effect().await {
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
+                // Fix 4: [FI-TRACE-DENIAL-ORACLE]
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
                     false,
-                    "restricted: session expired",
+                    "restricted: authorization denied",
                 ));
                 return;
             }
@@ -808,10 +813,11 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     let _event_permit = match conn.nip_fi_gate.acquire_effect().await {
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
+            // Fix 4: [FI-TRACE-DENIAL-ORACLE]
             conn.send(RelayMessage::ok(
                 &event_id_hex,
                 false,
-                "restricted: session expired",
+                "restricted: authorization denied",
             ));
             return;
         }
@@ -2699,12 +2705,12 @@ mod tests {
             // ── Frame assertions ───────────────────────────────────────────────────
             let frame = send_rx
                 .try_recv()
-                .expect("W2: a 'session expired' OK(false) must be sent on gate denial");
+                .expect("W2: an 'authorization denied' OK(false) must be sent on gate denial");
             match frame {
                 axum::extract::ws::Message::Text(t) => {
                     assert!(
-                        t.contains("session expired"),
-                        "W2: frame must contain 'session expired'; got: {t}"
+                        t.contains("authorization denied"),
+                        "W2: frame must contain 'authorization denied'; got: {t}"
                     );
                     assert!(t.contains("false"), "W2: frame must be OK(false); got: {t}");
                 }
@@ -2770,12 +2776,12 @@ mod tests {
     // `handle_event` with a valid NIP-44-encrypted agent telemetry event and the
     // authenticated session's `agent_owner_pubkey` set to the event's owner (fast
     // path: skips DB ownership lookup). Waits for the hook, fires expiry, then
-    // releases. The handler must return OK(false, "restricted: session expired").
+    // releases. The handler must return OK(false, "restricted: authorization denied").
     //
     // With the permit REMOVED, the handler proceeds into `handle_agent_observer_event`:
     // owner fast-path succeeds → rate limit passes → `mark_local_event` + `publish_event`
     // + `fan_out_event_to_local_subscribers` + `conn.send(OK(true, ""))` are reached.
-    // The OK(true) response differs from the expected "session expired" → assertion panics.
+    // The OK(true) response differs from the expected "authorization denied" → assertion panics.
     // This proves the permit gate blocked at the real fan-out + ack seam.
     //
     // Hook location: `handlers/event.rs`, immediately before `acquire_effect()`
@@ -2786,7 +2792,7 @@ mod tests {
     //      hook never fires → `arrived_rx` times out → test panics.
     //   B) Remove `acquire_effect()` from the observer branch →
     //      handler proceeds to fan-out → OK(true, "") sent →
-    //      `t.contains("session expired")` assertion panics.
+    //      `t.contains("authorization denied")` assertion panics.
     //   C) Change gate to `off_mode` → `acquire_effect()` always succeeds →
     //      same as (B).
     #[tokio::test]
@@ -2895,17 +2901,17 @@ mod tests {
             .expect("P1-b: handle_event must return within 5s after hook release")
             .expect("handle_event task must not panic");
 
-        // An OK(false, "restricted: session expired") frame must have been sent.
+        // An OK(false, "restricted: authorization denied") frame must have been sent.
         // Mutation-red (remove acquire_effect): handler reaches fan-out → OK(true, "") →
-        // `t.contains("session expired")` fails → test panics.
+        // `t.contains("authorization denied")` fails → test panics.
         let frame = send_rx
             .try_recv()
             .expect("P1-b: handler must send OK(false) on expired gate");
         match frame {
             axum::extract::ws::Message::Text(t) => {
                 assert!(
-                    t.contains("session expired"),
-                    "P1-b: OK frame must contain 'session expired'; got: {t}"
+                    t.contains("authorization denied"),
+                    "P1-b: OK frame must contain 'authorization denied'; got: {t}"
                 );
                 assert!(
                     t.contains("false"),
