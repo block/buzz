@@ -214,12 +214,15 @@ export function HostedCommunitiesSettingsCard() {
       boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
   );
   // Identity rows display npubs; an unencodable or non-identity-length key
-  // renders the neutral label instead of leaking raw hex. The hosted metadata
-  // is server-provided, so its npub spelling is validated too — a malformed
-  // hosted npub never renders raw and falls back to the hex-derived npub.
+  // renders the neutral label instead of leaking raw hex. The account's
+  // `pubkey_hex` is the authoritative binding key — the mismatch gate and
+  // every hosted-community operation act on it — so the displayed account
+  // npub is derived from it, not from the server-provided `npub` spelling.
+  // Nothing on this path proves the two fields encode the same key, and two
+  // individually valid but contradictory values must never make the screen
+  // show one identity while binding decisions act on another.
   const localNpub = localPubkey ? canonicalNpub(localPubkey) : null;
   const boundNpub = boundPubkey ? canonicalNpub(boundPubkey) : null;
-  const hostedNpub = identity?.npub ? canonicalNpub(identity.npub) : null;
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {
@@ -528,7 +531,7 @@ export function HostedCommunitiesSettingsCard() {
                     <div className="flex flex-wrap gap-x-2">
                       <dt className="text-muted-foreground">Account uses</dt>
                       <dd className="font-mono">
-                        {hostedNpub ?? boundNpub ?? UNAVAILABLE_KEY_LABEL}
+                        {boundNpub ?? UNAVAILABLE_KEY_LABEL}
                       </dd>
                     </div>
                     <div className="flex flex-wrap gap-x-2">
@@ -556,8 +559,8 @@ export function HostedCommunitiesSettingsCard() {
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <CheckCircle2 className="h-4 w-4 text-emerald-500" /> Buzz
                 identity connected
-                {hostedNpub ? (
-                  <span className="font-mono text-xs">{hostedNpub}</span>
+                {boundNpub ? (
+                  <span className="font-mono text-xs">{boundNpub}</span>
                 ) : null}
               </div>
               <UnpairIdentityButton
