@@ -86,6 +86,32 @@ export type TimeoutState = {
   expiresAtMs: number | null;
 };
 
+/**
+ * Subscribe to only the boolean "is a timeout in effect" flag. Unlike
+ * {@link useTimeoutState}, this never starts an interval, so it re-renders its
+ * subscriber only when `active` flips (record, clear, or the expiry-driven
+ * clear) — not once a second.
+ *
+ * Use this in an expensive subtree (e.g. a channel pane hosting an
+ * un-memoized message list) that needs to know *whether* the member is timed
+ * out but not the live countdown. Mount the countdown UI
+ * ({@link ComposerTimeoutBanner}) behind this flag; that component owns the
+ * per-second tick and the clear-at-expiry effect, so the tick is scoped to its
+ * lifetime and the flag flips (unmounting it) exactly when the block lifts.
+ *
+ * The snapshot is the raw `active` flag. When a known expiry passes, the flag
+ * stays `true` until the mounted banner's effect calls `clearTimeoutState`,
+ * which flips it to `false` on the next render — so a subscriber gated on this
+ * boolean keeps the composer blocked until the store is actually cleared.
+ */
+export function useTimeoutActive(): boolean {
+  return React.useSyncExternalStore(
+    subscribe,
+    () => snapshot.active,
+    () => false,
+  );
+}
+
 const INACTIVE: TimeoutState = { active: false, expiresAtMs: null };
 
 function currentState(state: TimeoutState, nowMs: number): TimeoutState {
