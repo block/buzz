@@ -398,7 +398,12 @@ pub(crate) fn preflight(
     Ok(())
 }
 
-fn verify_owner(record: &ManagedAgentRecord, owner: &str) -> Result<(), String> {
+/// Ownership authority shared by launch preparation and explicit
+/// existing-agent admission: a local record must carry a saved NIP-OA
+/// attestation that verifies for the exact agent pubkey and resolves to
+/// `owner`. One predicate fences both, so admission can never report success
+/// for a record that later refuses to run as unowned.
+pub(crate) fn verify_owner(record: &ManagedAgentRecord, owner: &str) -> Result<(), String> {
     let verified = record.auth_tag.as_deref().and_then(|tag| {
         let agent = nostr::PublicKey::from_hex(&record.pubkey).ok()?;
         buzz_sdk_pkg::nip_oa::verify_auth_tag(tag, &agent).ok()

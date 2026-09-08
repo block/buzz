@@ -1,3 +1,5 @@
+mod existing_agent;
+pub use existing_agent::*;
 mod agent_access;
 mod agent_auth;
 mod agent_config;
