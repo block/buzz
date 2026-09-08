@@ -410,6 +410,8 @@ function ChannelReferenceChip({
     <ChannelMetadataTooltip channel={channel}>
       <BuzzLinkChip
         data-channel-link=""
+        // The chip drops the `#` for display; copy restores it from here.
+        data-channel-label={channelName}
         href={channel ? buildChannelLink(channel.id) : undefined}
         icon="channel"
         aria-label={

@@ -42,6 +42,7 @@ import {
   hasRenderedVideoAttachment,
 } from "@/features/messages/lib/videoReviewContext";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
@@ -694,6 +695,11 @@ function InboxMessageDetailPane({
           aria-busy={isThreadContextLoading}
           className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 pt-13 [overflow-anchor:none]"
           data-testid="home-inbox-detail-scroll"
+          // Selection copy across a rendered mention chip: restores the sigil
+          // and the identity sidecar the browser's default copy would drop.
+          // Covers only the messages — the composer is a sibling overlay, so
+          // its own copy handler is untouched.
+          onCopy={handleTimelineMentionCopy}
           onScroll={onScroll}
           ref={scrollContainerRef}
         >
@@ -768,6 +774,7 @@ function InboxMessageDetailPane({
                   onEdit={canEditMessage ? handleSelectEditTarget : undefined}
                   onSelectReplyTarget={handleSelectReplyTarget}
                   onToggleReaction={onToggleReaction}
+                  profiles={profiles}
                   showUnreadBoundary={hasUnreadBoundary}
                   videoReviewCommentRootId={videoReviewPresentation.commentRootIdsByMessageId.get(
                     message.id,

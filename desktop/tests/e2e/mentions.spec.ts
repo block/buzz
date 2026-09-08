@@ -15,6 +15,20 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await testInfo.attach("outgoing-diagnostic", {
+      body: JSON.stringify(
+        await page.evaluate(() => ({
+          events: window.__BUZZ_E2E_SIGNED_EVENTS__,
+          commands: window.__BUZZ_E2E_COMMAND_LOG__,
+        })),
+      ),
+      contentType: "application/json",
+    });
+  }
+});
+
 const IN_CHANNEL_MANAGED_AGENT_PUBKEY =
   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY =
@@ -572,6 +586,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     // In-channel selections send immediately without opening the prompt.
   }
   await expect
+    // Sending the first root message clears its draft-local label reservation.
     .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
     .toEqual([relayPubkey]);
 
@@ -1109,6 +1124,14 @@ test("selecting a person mention inserts @Name into input", async ({
     ),
   );
   expect(iconMask).toContain("data:image/svg+xml");
+  expect(
+    await mentionChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("inline-block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "@" }),
+  ).toHaveCSS("opacity", "0");
   await expect(mentionChip).toHaveCSS("line-height", "18px");
   const scrollViewport = page.getByTestId("message-input-scroll");
   const paintedBounds = await mentionChip.evaluate((element) => {
@@ -1411,6 +1434,14 @@ test("channel references keep caret movement through the channel name", async ({
     ),
   );
   expect(iconMask).toContain("data:image/svg+xml");
+  expect(
+    await channelChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("inline-block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "#" }),
+  ).toHaveCSS("opacity", "0");
 
   await input.focus();
   await input.press("ArrowLeft");
@@ -1452,6 +1483,14 @@ test("selecting a managed agent mention inserts @Name into input", async ({
   await expect(agentMentionChip).toHaveText("alice");
   await expect(agentMentionChip).toHaveCSS("display", "inline");
   await expect(agentMentionChip).toHaveCSS("border-top-width", "0px");
+  expect(
+    await agentMentionChip.evaluate(
+      (element) => getComputedStyle(element, "::before").display,
+    ),
+  ).toBe("inline-block");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "@" }),
+  ).toHaveCSS("opacity", "0");
 });
 
 test("selecting a persona mention creates a channel agent before sending and starts it detached", async ({
@@ -1833,6 +1872,25 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
   await page.getByRole("button", { name: "Start a new post..." }).click();
 
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels", channelId, "members"],
+      });
+    },
+    {
+      channelId: "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11",
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
   await page.getByTestId("mention-autocomplete").getByText("quinn").click();
@@ -1863,12 +1921,11 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   await expect(input).not.toContainText("later edit");
 
   const outgoingContent = `@quinn hello\n[forum-race.pdf](https://mock.relay/media/${"f".repeat(64)}.pdf)`;
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toContainText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, outgoingContent)).toBeNull();
 });
 
 test("managed agents use the channel roster for membership labels", async ({
@@ -2143,16 +2200,15 @@ test("targeted revocation before send causes no agent side effects", async ({
   const baselineCommands = await readCommandLog(page);
   await page.getByTestId("send-message").click();
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
   const commands = await readCommandLog(page);
   // Admission pass plus the unconditional publish-boundary pass.
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
-    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
   );
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
@@ -2173,7 +2229,7 @@ test("deferred-upload sends revalidate agent authorization at the publish bounda
   page,
 }) => {
   // A background media upload can hold the publish open for arbitrarily long —
-  // authorization revoked during that window must still strip the p tag. This
+  // authorization revoked during that window must block publication. This
   // pins the publish-boundary revalidation on the deferred path.
   await installMockBridge(page, {
     deferredComposerUploads: true,
@@ -2258,15 +2314,20 @@ test("deferred-upload sends revalidate agent authorization at the publish bounda
   });
 
   const outgoingContent = `@quinn hello\n![video](https://mock.relay/media/${"c".repeat(64)}.mp4)`;
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText("Could not authorize a mentioned agent.", { exact: false }),
+  ).toBeVisible();
+  expect(await readOutgoingMentionPubkeys(page, outgoingContent)).toBeNull();
+  await expect(input).toHaveText("@quinn hello");
+  await expect(
+    page.getByTestId("composer-queued-media-attachment"),
+  ).toBeVisible();
   const commands = await readCommandLog(page);
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
     commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
+  expect(commandCount(commands, "start_managed_agent")).toBe(
+    commandCount(baselineCommands, "start_managed_agent"),
   );
 });
 
@@ -2275,7 +2336,7 @@ test("sends that attach a mentioned agent revalidate at the publish boundary", a
 }) => {
   // The awaited membership write for a non-member managed agent is a relay
   // round-trip between the pre-side-effect authorization pass and the publish
-  // — authorization revoked during that window must still strip the p tag.
+  // — authorization revoked during that window must block publication.
   await installMockBridge(page, {
     managedAgents: [
       {
@@ -2354,15 +2415,13 @@ test("sends that attach a mentioned agent revalidate at the publish boundary", a
     window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [pubkey];
   }, ALLOWLIST_RELAY_AGENT_PUBKEY);
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn @fizz hello"))
-    .not.toBeNull();
-  const outgoingPubkeys = await readOutgoingMentionPubkeys(
-    page,
-    "@quinn @fizz hello",
-  );
-  expect(outgoingPubkeys).toContain(OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY);
-  expect(outgoingPubkeys).not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText("Could not authorize a mentioned agent.", { exact: false }),
+  ).toBeVisible();
+  expect(
+    await readOutgoingMentionPubkeys(page, "@quinn @fizz hello"),
+  ).toBeNull();
+  await expect(input).toHaveText("@quinn @fizz hello");
   const commands = await readCommandLog(page);
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
     commandCount(baselineCommands, "revalidate_relay_agents") + 2,
@@ -2371,6 +2430,9 @@ test("sends that attach a mentioned agent revalidate at the publish boundary", a
   // relay round-trip holding the publish open for the revocation to land in.
   expect(commandCount(commands, "update_managed_agent")).toBe(
     commandCount(baselineCommands, "update_managed_agent"),
+  );
+  expect(commandCount(commands, "start_managed_agent")).toBe(
+    commandCount(baselineCommands, "start_managed_agent"),
   );
 });
 
@@ -2446,7 +2508,7 @@ test("a send held open by a no-write step still revalidates at the publish bound
   // here the only thing separating the authorization pass from the publish is
   // the huddle sync — which with no active huddle writes nothing to the relay
   // — and the revocation is released with zero further hold. A revocation
-  // landing in any admission-to-publish gap must strip the p tag; this is the
+  // landing in any admission-to-publish gap must block publication; this is the
   // reviewer's sub-threshold probe of the since-removed elapsed-time bound,
   // which deliberately accepted this very staleness.
   await installMockBridge(page, {
@@ -2520,12 +2582,11 @@ test("a send held open by a no-write step still revalidates at the publish bound
     )
     .toBeGreaterThan(0);
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText("Could not authorize a mentioned agent.", { exact: false }),
+  ).toBeVisible();
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
+  await expect(input).toHaveText("@quinn hello");
 
   const commands = await readCommandLog(page);
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
@@ -2636,12 +2697,11 @@ test("selected relay agents revoked after the invite prompt cause no side effect
   const baselineCommands = await readCommandLog(page);
   await inviteButton.click();
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
   const commands = await readCommandLog(page);
   for (const command of [
     "add_channel_members",
@@ -2691,12 +2751,11 @@ test("selected relay agents revoked during send emit no p tag", async ({
     );
   });
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
 });
 
 test("owner-only builds admit cross-owner relay agents authorized by allowlist", async ({
@@ -3019,7 +3078,9 @@ test("a second mention while the first wake is in flight does not start the agen
   await input.fill("Hey @fizz");
   await expect(dropdown.getByText("fizz")).toBeVisible();
   await input.press("Enter");
-  await page.keyboard.type(" do X");
+  await expect(input.locator(".mention-chip")).toHaveText("fizz");
+  await page.keyboard.type("do X");
+  await expect(input).toHaveText("Hey @fizz do X");
   await page.getByTestId("send-message").click();
   await expect(
     page.getByTestId("message-row").filter({ hasText: "do X" }),
@@ -3033,7 +3094,9 @@ test("a second mention while the first wake is in flight does not start the agen
   await input.fill("Hey @fizz");
   await expect(dropdown.getByText("fizz")).toBeVisible();
   await input.press("Enter");
-  await page.keyboard.type(" also Y");
+  await expect(input.locator(".mention-chip")).toHaveText("fizz");
+  await page.keyboard.type("also Y");
+  await expect(input).toHaveText("Hey @fizz also Y");
   await page.getByTestId("send-message").click();
 
   // The second message publishes on its own — suppression is of the wake, not
@@ -3041,6 +3104,12 @@ test("a second mention while the first wake is in flight does not start the agen
   await expect(
     page.getByTestId("message-row").filter({ hasText: "also Y" }),
   ).toBeVisible();
+  expect(await readOutgoingMentionPubkeys(page, "Hey @fizz do X")).toContain(
+    IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+  );
+  expect(await readOutgoingMentionPubkeys(page, "Hey @fizz also Y")).toContain(
+    IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+  );
   // One wake serves both messages: its replay floor predates the first
   // message, and the floor is a lower bound, so one harness boot covers both.
   expect(commandCount(await readCommandLog(page), "start_managed_agent")).toBe(

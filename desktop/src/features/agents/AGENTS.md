@@ -293,7 +293,11 @@ with a TypeScript lookup table or an id comparison in a component.
     managed agent. Independently operated relay agents with NIP-OA ownership
     remain eligible in every build when their verified owner's signed
     `respond_to` policy admits the viewer and relay membership includes the
-    target channel. Marked builds require that verified owner coordinate but do
+    target channel at publication. Owned nonmembers may be offered for preparation
+    and Invite; this is not permission to publish. Final authorization refreshes
+    the exact destination and retains captured selected identities across uploads
+    and edits. Denial preserves the draft, never silently removes a selected key.
+    See `docs/remote-mention-routing.md`. Marked builds require that verified owner coordinate but do
     not require it to equal the viewer; OSS builds retain compatibility with
     self-authored legacy directory records. Keep native discovery and send-time
     revalidation fail closed on invalid ownership or managed policy evidence,
