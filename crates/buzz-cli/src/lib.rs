@@ -183,6 +183,9 @@ enum Cmd {
     /// Create, configure, and manage channels
     #[command(subcommand)]
     Channels(ChannelsCmd),
+    /// Manage identity-scoped sidebar preferences
+    #[command(subcommand)]
+    Sidebar(SidebarCmd),
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
@@ -714,6 +717,106 @@ pub enum ChannelsCmd {
         /// Policy: anyone | owner_only | nobody
         #[arg(long)]
         policy: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SidebarCmd {
+    /// List or atomically replace synced channel sections
+    #[command(subcommand)]
+    Sections(SidebarSectionsCmd),
+}
+
+#[derive(Subcommand)]
+pub enum SidebarSectionsCmd {
+    /// List the current identity's decrypted synced channel-section layout
+    List,
+    /// Create a section at the end of the current layout
+    Create {
+        /// Section name
+        #[arg(long)]
+        name: String,
+        /// Optional section icon
+        #[arg(long)]
+        icon: Option<String>,
+        /// Current revision event ID, or 'none' when no layout exists
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Move one or more channels into a section
+    Assign {
+        /// Section UUID or exact case-insensitive name
+        #[arg(long)]
+        section: String,
+        /// Channel UUID or exact case-insensitive name; repeat for multiple channels
+        #[arg(long, required = true)]
+        channel: Vec<String>,
+        /// Current revision event ID
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Remove one or more channels from their sections
+    Unassign {
+        /// Channel UUID or exact case-insensitive name; repeat for multiple channels
+        #[arg(long, required = true)]
+        channel: Vec<String>,
+        /// Current revision event ID
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Rename a section or change its icon
+    Rename {
+        /// Section UUID or exact case-insensitive name
+        #[arg(long)]
+        section: String,
+        /// Replacement section name
+        #[arg(long, required_unless_present_any = ["icon", "clear_icon"])]
+        name: Option<String>,
+        /// Replacement section icon
+        #[arg(long, conflicts_with = "clear_icon")]
+        icon: Option<String>,
+        /// Remove the current icon
+        #[arg(long, conflicts_with = "icon")]
+        clear_icon: bool,
+        /// Current revision event ID
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Replace the complete section order
+    Reorder {
+        /// Section UUID or exact name, in desired order; repeat for every section
+        #[arg(long, required = true)]
+        section: Vec<String>,
+        /// Current revision event ID
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Delete a section and unassign its channels
+    Delete {
+        /// Section UUID or exact case-insensitive name
+        #[arg(long)]
+        section: String,
+        /// Current revision event ID
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Replace the complete layout after checking its expected revision
+    #[command(
+        after_help = "The input is JSON from `buzz sidebar sections list`, or a layout with\n\
+sections shaped as {id?, name, icon?, channels}. Channel entries may be UUIDs,\n\
+exact names, or {id, name?} objects. The input revision is used as the\n\
+compare-and-set token; omit it (or set it to null) only when no remote layout\n\
+exists. --expected-revision may supply the token explicitly; use 'none' for\n\
+an expected-absent layout.\n\n\
+Examples:\n  buzz sidebar sections list > layout.json\n  buzz sidebar sections apply --input layout.json\n  buzz sidebar sections apply --input - --expected-revision none"
+    )]
+    Apply {
+        /// Layout JSON file, or '-' to read stdin
+        #[arg(long)]
+        input: String,
+        /// Remote revision override: 64-char event ID or 'none'
+        #[arg(long)]
+        expected_revision: Option<String>,
     },
 }
 
@@ -2105,6 +2208,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
+        Cmd::Sidebar(sub) => commands::sidebar::dispatch(sub, &client).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
@@ -2271,6 +2375,7 @@ mod tests {
             "projects",
             "reactions",
             "repos",
+            "sidebar",
             "social",
             "upload",
             "users",
@@ -2361,6 +2466,25 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(names(&cmd, "sidebar"), vec!["sections"]);
+        let sidebar = cmd
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "sidebar")
+            .expect("sidebar command");
+        let sections = sidebar
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "sections")
+            .expect("sidebar sections command");
+        let mut section_names: Vec<String> = sections
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_string())
+            .filter(|name| name != "help")
+            .collect();
+        section_names.sort();
+        assert_eq!(
+            section_names,
+            vec!["apply", "assign", "create", "delete", "list", "rename", "reorder", "unassign"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -2477,6 +2601,7 @@ mod tests {
             ("projects", 8),
             ("reactions", 3),
             ("repos", 5),
+            ("sidebar", 1),
             ("social", 7),
             ("upload", 1),
             ("users", 5),
