@@ -801,6 +801,14 @@ impl Config {
             );
         }
 
+        if !require_relay_membership {
+            warn!(
+                "BUZZ_REQUIRE_RELAY_MEMBERSHIP is false — the relay member roster is not \
+                 enforced, so any pubkey that authenticates may join. BUZZ_PUBKEY_ALLOWLIST, \
+                 if enabled, still applies. Set to true for production."
+            );
+        }
+
         let cors_origins = std::env::var("BUZZ_CORS_ORIGINS")
             .unwrap_or_default()
             .split(',')
@@ -1797,6 +1805,46 @@ mod tests {
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("must be valid Unicode")
         ));
+    }
+
+    /// The membership gate is opt-in and fails **open**: only an exact `true`
+    /// or `1` enables it, so a typo'd `TRUE` or a plausible `yes` silently
+    /// leaves the roster unenforced. That fail-open direction is why
+    /// `Config::from_env` warns whenever the flag resolves to false.
+    #[test]
+    fn require_relay_membership_enables_only_on_true_or_one() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_REQUIRE_RELAY_MEMBERSHIP");
+
+        std::env::set_var("BUZZ_REQUIRE_RELAY_MEMBERSHIP", "true");
+        let word = Config::from_env().expect("config").require_relay_membership;
+
+        std::env::set_var("BUZZ_REQUIRE_RELAY_MEMBERSHIP", "1");
+        let numeric = Config::from_env().expect("config").require_relay_membership;
+
+        std::env::set_var("BUZZ_REQUIRE_RELAY_MEMBERSHIP", "false");
+        let disabled = Config::from_env().expect("config").require_relay_membership;
+
+        std::env::set_var("BUZZ_REQUIRE_RELAY_MEMBERSHIP", "TRUE");
+        let uppercase = Config::from_env().expect("config").require_relay_membership;
+
+        std::env::remove_var("BUZZ_REQUIRE_RELAY_MEMBERSHIP");
+        let unset = Config::from_env().expect("config").require_relay_membership;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_REQUIRE_RELAY_MEMBERSHIP", value);
+        } else {
+            std::env::remove_var("BUZZ_REQUIRE_RELAY_MEMBERSHIP");
+        }
+
+        assert!(word, "`true` must enforce the member roster");
+        assert!(numeric, "`1` must enforce the member roster");
+        assert!(!disabled, "`false` must leave the relay open");
+        assert!(
+            !uppercase,
+            "`TRUE` is not recognized and must leave the relay open"
+        );
+        assert!(!unset, "unset must leave the relay open");
     }
 
     #[test]
