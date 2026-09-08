@@ -6,7 +6,6 @@ import {
   normalizePubkey,
   truncateNpub,
   truncatePubkey,
-  UNAVAILABLE_KEY_LABEL,
 } from "./pubkey.ts";
 
 const PUBKEY =
@@ -33,6 +32,7 @@ test("normalizePubkey trims and lowercases", () => {
 test("truncateNpub compacts the hex pubkey's npub, not its hex form", () => {
   assert.equal(truncateNpub(PUBKEY), "npub1gju…9xj6");
   assert.equal(truncateNpub(HEX), "npub1a2d…yp60");
+  assert.equal(truncateNpub(HEX.toUpperCase()), "npub1a2d…yp60");
 });
 
 test("truncateNpub accepts already-npub strings", () => {
@@ -40,33 +40,22 @@ test("truncateNpub accepts already-npub strings", () => {
   assert.equal(truncateNpub(`  ${HEX_NPUB} `), "npub1a2d…yp60");
 });
 
-test("truncateNpub accepts uppercase hex", () => {
-  assert.equal(truncateNpub(HEX.toUpperCase()), "npub1a2d…yp60");
-});
-
 test("truncateNpub renders the neutral label for invalid identities", () => {
   // Never the raw hex/input fallback: a wrong-length or non-hex string is not
   // a displayable identity.
-  assert.equal(truncateNpub(""), UNAVAILABLE_KEY_LABEL);
-  assert.equal(truncateNpub("not a pubkey"), UNAVAILABLE_KEY_LABEL);
-  assert.equal(truncateNpub(`${HEX.slice(0, 63)}`), UNAVAILABLE_KEY_LABEL);
-  assert.equal(truncateNpub(`z${HEX.slice(1)}`), UNAVAILABLE_KEY_LABEL);
+  assert.equal(truncateNpub(""), "Unavailable");
+  assert.equal(truncateNpub("not a pubkey"), "Unavailable");
+  assert.equal(truncateNpub(`${HEX.slice(0, 63)}`), "Unavailable");
+  assert.equal(truncateNpub(`z${HEX.slice(1)}`), "Unavailable");
   // Corrupted npub checksum is not a valid identity either.
-  assert.equal(
-    truncateNpub(`${HEX_NPUB.slice(0, -1)}q`),
-    UNAVAILABLE_KEY_LABEL,
-  );
+  assert.equal(truncateNpub(`${HEX_NPUB.slice(0, -1)}q`), "Unavailable");
   // Other bech32 entities are not pubkeys.
   assert.equal(
     truncateNpub(
       "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
     ),
-    UNAVAILABLE_KEY_LABEL,
+    "Unavailable",
   );
-});
-
-test("UNAVAILABLE_KEY_LABEL stays the existing neutral vocabulary", () => {
-  assert.equal(UNAVAILABLE_KEY_LABEL, "Unavailable");
 });
 
 test("canonicalNpub returns the full npub for valid identities only", () => {
