@@ -31,8 +31,6 @@ branch: null
 ---
 ```
 
-Channel IDs are UUIDs. Message IDs are Nostr event IDs. Agents must copy these references from Buzz context or canonical Buzz links and must not guess them. A client can display `parent_channel` and `originating_thread` as friendly Markdown-style links while preserving the canonical URIs as the underlying values.
-
 ## Agent decision flow
 
 ### When asked to create a task
