@@ -74,6 +74,7 @@ export default defineConfig({
         "**/composer-selection-formatting.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
         "**/mentions.spec.ts",
+        "**/mention-picker.spec.ts",
         "**/remote-owned-mentions.spec.ts",
         "**/mention-spacing.spec.ts",
         "**/mention-recipients.spec.ts",

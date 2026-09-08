@@ -40,7 +40,10 @@ async function install(page: Page) {
 async function select(page: Page) {
   await page.getByTestId("message-input").fill("@Remote");
   const row = page.getByTestId(`mention-suggestion-${REMOTE}`);
-  await expect(row).toContainText("RemoteScout");
+  // New DMs have no destination roster yet. Do not let PR6's five-second
+  // evidence expiry conceal a disabled-query readiness deadlock in PR5.
+  await expect(row).toContainText("RemoteScout", { timeout: 4000 });
+  await expect(row.locator("button").first()).toBeEnabled();
   await row.locator("button").first().click();
   await page.keyboard.type("hello");
 }

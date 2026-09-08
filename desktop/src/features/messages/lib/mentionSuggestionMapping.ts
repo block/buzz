@@ -19,6 +19,7 @@ export type MentionSuggestionCandidate = {
   isMember: boolean;
   role?: ChannelRole | null;
   ownerPubkey?: string | null;
+  hasNameCollision?: boolean;
 };
 
 export function mapMentionCandidateToSuggestion(opts: {
@@ -44,6 +45,7 @@ export function mapMentionCandidateToSuggestion(opts: {
     : null;
 
   return {
+    hasNameCollision: candidate.hasNameCollision,
     pubkey: candidate.pubkey,
     personaId: candidate.personaId ?? undefined,
     teamId: candidate.teamId,
@@ -92,7 +94,7 @@ export function pickDefaultAgentSuggestion(opts: {
     opts.activePersonaIds,
     opts.recentMentionPubkeys,
   );
-  if (!candidate) return null;
+  if (!candidate || candidate.hasNameCollision) return null;
   return mapMentionCandidateToSuggestion({
     ...opts,
     candidate,

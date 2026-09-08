@@ -35,6 +35,7 @@ export type TeamMentionMember = {
 
 export type MentionCandidate = {
   action?: MentionAction;
+  hasNameCollision?: boolean;
   kind: "identity" | "persona" | "team";
   pubkey?: string;
   personaId?: string;
@@ -69,11 +70,7 @@ export function globalSearchIdentityKey(candidate: MentionCandidate) {
     return null;
   }
 
-  const label = candidate.displayName?.trim().toLowerCase();
-  if (!label) return null;
-
-  const secondaryLabel = candidate.secondaryLabel?.trim().toLowerCase() ?? "";
-  return `global-person:${label}:${secondaryLabel}`;
+  return candidate.pubkey ? `pubkey:${candidate.pubkey.toLowerCase()}` : null;
 }
 
 function findTeamMemberTarget(
