@@ -38,6 +38,9 @@ test("truncateNpub compacts the hex pubkey's npub, not its hex form", () => {
 test("truncateNpub accepts already-npub strings", () => {
   assert.equal(truncateNpub(PUBKEY_NPUB), "npub1gju…9xj6");
   assert.equal(truncateNpub(`  ${HEX_NPUB} `), "npub1a2d…yp60");
+  // All-uppercase Bech32 is a valid identity per the parser; render the
+  // canonical form, never the neutral label.
+  assert.equal(truncateNpub(HEX_NPUB.toUpperCase()), "npub1a2d…yp60");
 });
 
 test("truncateNpub renders the neutral label for invalid identities", () => {
@@ -62,6 +65,15 @@ test("canonicalNpub returns the full npub for valid identities only", () => {
   assert.equal(canonicalNpub(HEX), HEX_NPUB);
   assert.equal(canonicalNpub(HEX.toUpperCase()), HEX_NPUB);
   assert.equal(canonicalNpub(HEX_NPUB), HEX_NPUB);
+  // All-uppercase Bech32 is valid and returns the canonical lowercase npub
+  // (parser agreement); a mixed-case npub is invalid Bech32.
+  assert.equal(canonicalNpub(HEX_NPUB.toUpperCase()), HEX_NPUB);
+  assert.equal(
+    canonicalNpub(
+      `${HEX_NPUB.slice(0, 10)}${HEX_NPUB.slice(10).toUpperCase()}`,
+    ),
+    null,
+  );
   // Strict identity keys only — short/degenerate payloads never encode.
   assert.equal(canonicalNpub(""), null);
   assert.equal(canonicalNpub("deadbeef"), null);

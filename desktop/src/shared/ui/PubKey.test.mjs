@@ -69,6 +69,16 @@ test("compact PubKey renders the truncated npub, never the hex", async () => {
   assert.equal(text.getByText(COMPACT_NPUB).tagName, "SPAN");
   assert.equal(text.queryByRole("button"), null);
   assert.equal(text.queryByText(HEX), null);
+
+  // An all-uppercase Bech32 npub is a valid identity (parsePubkeyInput
+  // accepts it); the gate must render its canonical compact form, not the
+  // neutral label.
+  const upper = await renderPubKey({ pubkey: NPUB.toUpperCase() });
+  assert.equal(
+    upper.getByRole("button", { name: "Show full public key" }).textContent,
+    COMPACT_NPUB,
+  );
+  assert.equal(upper.queryByText("Unavailable"), null);
 });
 
 test("full PubKey renders the complete npub with a copy affordance", async () => {
