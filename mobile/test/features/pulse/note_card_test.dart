@@ -1,5 +1,5 @@
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/pulse/note_card.dart';
 import 'package:buzz/features/pulse/pulse_models.dart';
 import 'package:buzz/shared/theme/theme.dart';

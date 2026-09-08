@@ -126,6 +126,10 @@ class HomePage extends HookConsumerWidget {
           ),
         ),
         ValueListenableBuilder<double>(
+          key: const ValueKey('home-settings-transition-progress'),
+          // Keep one stable listenable for Home. Swapping in the route's
+          // animation can briefly rebuild with its completed value before the
+          // new controller starts, which makes the background scale twice.
           valueListenable: settingsTransitionProgress,
           child: Scaffold(
             backgroundColor: Colors.transparent,
@@ -219,7 +223,10 @@ class HomePage extends HookConsumerWidget {
                 : Curves.easeOutCubic.transform(progress);
             return Opacity(
               key: const ValueKey('home-settings-transition-opacity'),
-              opacity: 1 - curvedProgress,
+              // Settings supplies the crossfade. Keeping Home opaque beneath
+              // it prevents the bare backdrop showing through two partially
+              // transparent layers.
+              opacity: 1,
               child: Transform.scale(
                 key: const ValueKey('home-settings-transition-scale'),
                 scale: lerpDouble(1, _settingsBackgroundScale, curvedProgress),

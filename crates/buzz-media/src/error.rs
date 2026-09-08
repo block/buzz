@@ -72,8 +72,10 @@ pub enum MediaError {
     /// Video duration exceeds the 600-second limit.
     #[error("video too long: duration exceeds 600 seconds")]
     DurationTooLong,
-    /// Video resolution exceeds 3840×2160.
-    #[error("video resolution too high: maximum is 3840x2160")]
+    /// Video resolution exceeds the 2160 short-edge / 3840 long-edge envelope.
+    #[error(
+        "video resolution too high: maximum is 2160 on the short edge and 3840 on the long edge"
+    )]
     ResolutionTooHigh,
     /// MP4 moov atom appears after mdat — not fast-start.
     #[error("moov atom not at front of file (not fast-start)")]

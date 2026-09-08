@@ -24,6 +24,18 @@ test("presents missing and network failures clearly", () => {
     projectCloneErrorPresentation(new Error("Repository not found")).title,
     "Repository not found",
   );
+  assert.deepEqual(
+    projectCloneErrorPresentation(
+      new Error("Repository not found"),
+      "https://relay.example/git/owner/repo",
+      "access",
+    ),
+    {
+      title: "Repository access restricted",
+      description:
+        "You need access to the repository’s channel before you can clone it.",
+    },
+  );
   assert.equal(
     projectCloneErrorPresentation(new Error("Could not resolve host")).title,
     "Couldn’t reach the repository",

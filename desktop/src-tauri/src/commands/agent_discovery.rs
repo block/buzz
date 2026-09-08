@@ -1,16 +1,10 @@
-use tauri::State;
-
-use crate::{
-    app_state::AppState,
-    managed_agents::{
-        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
-        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
-        RelayAgentInfo, DEFAULT_ACP_COMMAND,
-    },
-    nostr_convert,
-    relay::query_relay,
+use crate::managed_agents::{
+    command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
+    DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
+    DEFAULT_ACP_COMMAND,
 };
 
+mod forced_single_flight;
 mod post_install_verification;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -23,7 +17,6 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// Returns the adapter install commands that `install_acp_runtime_blocking` would
 /// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or `None` if not found).
 /// Returns `None` when no install is needed; `Some(cmds)` when adapter is missing or outdated.
-///
 /// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
 /// then install `@agentclientprotocol/codex-acp` (npm ≥7 refuses to overwrite a bin from another pkg).
 /// For the **missing** case, catalog's `adapter_install_commands` are used as-is.
@@ -56,23 +49,15 @@ pub(crate) fn plan_adapter_install<'c>(
     }
 }
 
+/// Discover the ACP runtime catalog. `force: false` (the default) serves the
+/// cheap cached path; `force: true` runs the expensive re-discovery. See
+/// [`forced_single_flight`] for the split and single-flight coalescing.
 #[tauri::command]
 pub async fn discover_acp_providers(
     app: tauri::AppHandle,
+    force: Option<bool>,
 ) -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
-    tokio::task::spawn_blocking(move || {
-        use tauri::Manager;
-        crate::managed_agents::clear_resolve_cache();
-        crate::managed_agents::refresh_login_shell_path();
-        let custom_dir = app
-            .path()
-            .app_data_dir()
-            .ok()
-            .map(|d| d.join("custom_harnesses"));
-        crate::managed_agents::discover_acp_runtimes_from(custom_dir.as_deref())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))
+    forced_single_flight::discover(app, force.unwrap_or(false)).await
 }
 
 /// Write a user-defined harness definition to `<app-data>/custom_harnesses/<id>.json`.
@@ -164,6 +149,7 @@ pub async fn save_custom_harness(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        effort_canonical_values: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
         max_rounds_env_var: None,
@@ -1037,30 +1023,30 @@ pub async fn discover_managed_agent_prereqs(
     .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
-#[tauri::command]
-pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
-    // Query kind:10100 agent profile events from the relay.
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [10100],
-        })],
-    )
-    .await?;
-
-    // The convert helper returns `{"agents": [...]}`. Extract and re-deserialize
-    // into the strongly-typed `Vec<RelayAgentInfo>` the frontend expects.
-    let value = nostr_convert::agents_from_events(&events);
-    let agents = value
-        .get("agents")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
-}
+mod relay_directory;
+#[cfg(test)]
+use relay_directory::advance_relay_cursor;
+pub use relay_directory::{list_relay_agents, revalidate_relay_agents};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_directory_cursor_uses_timestamp_and_event_id() {
+        use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+        let event = EventBuilder::new(Kind::Custom(30177), "{}")
+            .custom_created_at(Timestamp::from(42))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign cursor event");
+        let mut filter = serde_json::json!({"kinds": [30177]});
+
+        advance_relay_cursor(&mut filter, std::slice::from_ref(&event));
+
+        assert_eq!(filter["until"], 42);
+        assert_eq!(filter["before_id"], event.id.to_hex());
+    }
 
     // ── is_npm_global_install ─────────────────────────────────────────────────
 

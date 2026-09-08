@@ -21,34 +21,60 @@ import {
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useChannelsQuery, useOpenDmMutation } from "@/features/channels/hooks";
+import { normalizeRelayUrl } from "@/features/communities/communityStorage";
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   useChannelMessagesQuery,
   useChannelSubscription,
+  useToggleReactionMutation,
 } from "@/features/messages/hooks";
+import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import {
   type LinkSelectionInfo,
   useRichTextEditor,
 } from "@/features/messages/lib/useRichTextEditor";
 import { FormattingToolbar } from "@/features/messages/ui/FormattingToolbar";
+import { MessageThreadTranscript } from "@/features/messages/ui/MessageThreadTranscript";
+import { ThreadRepliesErrorCard } from "@/features/messages/ui/MessageThreadReplyState";
+import type { TimelineMessage } from "@/features/messages/types";
+import { useThreadRepliesForRoots } from "@/features/messages/useThreadReplies";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Project } from "@/features/projects/hooks";
+import { pickDefaultProjectsAgent } from "@/features/projects/lib/projectAgentSelection";
+import { AgentContextPayloadPreview } from "./AgentContextPayloadPreview";
 import {
+  PROJECT_WORKSPACE_CONTEXT_MARKER,
+  splitProjectDetailAgentContext,
+  UNTRUSTED_CONTEXT_NOTICE,
+  untrustedPromptValue,
+} from "@/features/projects/lib/projectDetailAgentContext";
+import {
+  isAtOrAfterConversationOpener,
+  mergeProjectAgentConversationEvents,
   restoreProjectsAgentConversation,
-  visibleConversationMessages,
+  submitProjectAgentMessage,
 } from "@/features/projects/lib/projectAgentConversation";
 import {
   clearStoredProjectsAgentConversation,
+  type ProjectsConversationOpener,
+  projectsConversationScope,
   readStoredProjectsAgentConversation,
   type StoredProjectsAgentConversation,
   writeStoredProjectsAgentConversation,
 } from "@/features/projects/lib/projectAgentConversationStorage";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { sendChannelMessage } from "@/shared/api/tauri";
+import { sendChannelMessage } from "@/shared/api/tauriMessages";
 import type { Channel } from "@/shared/api/types";
+import {
+  KIND_STREAM_MESSAGE,
+  KIND_STREAM_MESSAGE_V2,
+} from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { ProjectAgentSubmittedContextPill } from "./ProjectAgentSubmittedContextPill";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -56,29 +82,30 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-type AgentCandidate = {
+export type AgentCandidate = {
   pubkey: string;
   name: string;
+  personaId?: string | null;
   /** Managed agents can be auto-started before the prompt is sent. */
   isManaged: boolean;
-  isActive: boolean;
+  isActive: boolean | null;
 };
 
 type ProjectAgentConversation = {
   channel: Channel;
   agent: AgentCandidate;
-  visibleAfter: number;
+  opener: ProjectsConversationOpener;
 };
 
 const MAX_CONTEXT_REPOS = 8;
-const REPO_CONTEXT_MARKER = "Workspace repositories:";
 
 /** Compact machine-readable footer so the agent can scope git queries
  * (repo announcements are addressable by these coordinates). Only sent
- * with the first message of a conversation. */
+ * with the first message of a conversation. Project and repository names
+ * are relay-controlled — each value is neutralized and quoted, and the
+ * block carries the shared untrusted-data framing. */
 function repoContextBlock(projects: readonly Project[]) {
   if (projects.length === 0) return "";
   const repositories = projects.flatMap((project) =>
@@ -92,27 +119,23 @@ function repoContextBlock(projects: readonly Project[]) {
   );
   const listed = repositories
     .slice(0, MAX_CONTEXT_REPOS)
-    .map((repository) => `- ${repository.label} (${repository.repoAddress})`);
+    .map(
+      (repository) =>
+        `- ${untrustedPromptValue(repository.label)} (address: ${untrustedPromptValue(repository.repoAddress, 400)})`,
+    );
   const remaining = repositories.length - listed.length;
-  return ["", "---", REPO_CONTEXT_MARKER, ...listed]
+  return ["", "---", PROJECT_WORKSPACE_CONTEXT_MARKER, ...listed]
     .concat(remaining > 0 ? [`…and ${remaining} more`] : [])
+    .concat([UNTRUSTED_CONTEXT_NOTICE])
     .join("\n");
-}
-
-/** Hides the machine-readable repo footer when rendering the user's own
- * prompt back in the inline conversation. */
-function stripRepoContext(content: string) {
-  const markerIndex = content.indexOf(`---\n${REPO_CONTEXT_MARKER}`);
-  if (markerIndex === -1) return content;
-  return content.slice(0, markerIndex).replace(/\n+$/, "");
 }
 
 function buildSuggestions(projects: readonly Project[]) {
   const firstRepo = projects[0]?.name;
   return [
     {
-      label: "PR review",
-      prompt: "Which pull requests need attention today?",
+      label: "Reviews",
+      prompt: "Which reviews need attention today?",
     },
     {
       label: "Release check",
@@ -121,8 +144,8 @@ function buildSuggestions(projects: readonly Project[]) {
         : "Are we safe to cut a release this week?",
     },
     {
-      label: "Issues",
-      prompt: "Summarize the open issues and flag anything urgent.",
+      label: "Tasks",
+      prompt: "Summarize the open tasks and flag anything urgent.",
     },
     {
       label: "Activity",
@@ -134,7 +157,7 @@ function buildSuggestions(projects: readonly Project[]) {
 }
 
 /** Sorts runnable agents first so the default pick can answer immediately. */
-function useAgentCandidates() {
+export function useAgentCandidates() {
   const identityQuery = useIdentityQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -157,6 +180,7 @@ function useAgentCandidates() {
     const candidates: AgentCandidate[] = managed.map((agent) => ({
       pubkey: normalizePubkey(agent.pubkey),
       name: agent.name,
+      personaId: agent.personaId,
       isManaged: true,
       isActive: isManagedAgentActive(agent),
     }));
@@ -167,12 +191,18 @@ function useAgentCandidates() {
         pubkey,
         name: agent.name,
         isManaged: false,
-        isActive: agent.status !== "offline",
+        isActive:
+          agent.status === "unknown" ? null : agent.status !== "offline",
       });
     }
 
     return candidates.sort((left, right) => {
-      if (left.isActive !== right.isActive) return left.isActive ? -1 : 1;
+      // Unknown is neither offline nor proof that the agent can answer now.
+      const activityRank = (active: boolean | null) =>
+        active === true ? 0 : active === null ? 1 : 2;
+      const activityOrder =
+        activityRank(left.isActive) - activityRank(right.isActive);
+      if (activityOrder) return activityOrder;
       if (left.isManaged !== right.isManaged) return left.isManaged ? -1 : 1;
       return left.name.localeCompare(right.name);
     });
@@ -185,69 +215,167 @@ function useAgentCandidates() {
 }
 
 /** Live message feed for the conversation's backing DM channel, reduced to
- * plain chat rows (kind 9 / 40002 only). */
-function ConversationThread({
+ * plain chat rows (kind 9 / 40002 only). Machine-appended context stays
+ * inspectable beside the user's message, but defaults to a compact disclosure
+ * so the transcript foregrounds what the user actually typed. */
+export function ConversationThread({
   channel,
   agent,
   agentAvatarUrl,
   currentPubkey,
   selfAvatarUrl,
-  visibleAfter,
+  opener,
 }: {
   channel: Channel;
   agent: AgentCandidate;
   agentAvatarUrl: string | null;
   currentPubkey: string | null;
   selfAvatarUrl: string | null;
-  visibleAfter: number;
+  opener: ProjectsConversationOpener;
 }) {
   useChannelSubscription(channel);
   const messagesQuery = useChannelMessagesQuery(channel);
+  const threadRootIds = React.useMemo(
+    () =>
+      (messagesQuery.data ?? [])
+        .filter(
+          (event) =>
+            (event.kind === KIND_STREAM_MESSAGE ||
+              event.kind === KIND_STREAM_MESSAGE_V2) &&
+            isAtOrAfterConversationOpener(event, opener) &&
+            getThreadReference(event.tags).parentId === null,
+        )
+        .map((event) => event.id),
+    [messagesQuery.data, opener],
+  );
+  const threadReplies = useThreadRepliesForRoots(channel, threadRootIds);
+  const toggleReactionMutation = useToggleReactionMutation();
   const agentWorking = useAgentWorking(agent.pubkey, channel.id);
   const bottomRef = React.useRef<HTMLDivElement>(null);
-
-  const messages = React.useMemo(
-    () => visibleConversationMessages(messagesQuery.data ?? [], visibleAfter),
-    [messagesQuery.data, visibleAfter],
+  const normalizedCurrent = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
+  const profiles = React.useMemo(
+    () => ({
+      [normalizePubkey(agent.pubkey)]: {
+        avatarUrl: agentAvatarUrl,
+        displayName: agent.name,
+        isAgent: true,
+        name: agent.name,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+      ...(normalizedCurrent
+        ? {
+            [normalizedCurrent]: {
+              avatarUrl: selfAvatarUrl,
+              displayName: "You",
+              isAgent: false,
+              name: null,
+              nip05Handle: null,
+              ownerPubkey: null,
+            },
+          }
+        : {}),
+    }),
+    [
+      agent.name,
+      agent.pubkey,
+      agentAvatarUrl,
+      normalizedCurrent,
+      selfAvatarUrl,
+    ],
   );
-
+  const conversationMessages = React.useMemo(() => {
+    const events = mergeProjectAgentConversationEvents(
+      messagesQuery.data ?? [],
+      threadReplies.events,
+    );
+    const contexts = new Map<string, string>();
+    const messages = formatTimelineMessages(
+      events,
+      channel,
+      currentPubkey ?? undefined,
+      selfAvatarUrl,
+      profiles,
+    )
+      .filter(
+        (message) =>
+          (message.kind === KIND_STREAM_MESSAGE ||
+            message.kind === KIND_STREAM_MESSAGE_V2) &&
+          isAtOrAfterConversationOpener(
+            {
+              created_at: message.createdAt,
+              id: message.id,
+              tags: message.tags,
+            },
+            opener,
+          ),
+      )
+      .map((message) => {
+        const authorPubkey = message.signerPubkey ?? message.pubkey;
+        if (
+          !normalizedCurrent ||
+          !authorPubkey ||
+          normalizePubkey(authorPubkey) !== normalizedCurrent
+        ) {
+          return message;
+        }
+        const split = splitProjectDetailAgentContext(message.body);
+        if (!split.context) return message;
+        contexts.set(message.id, split.context);
+        return { ...message, body: split.message };
+      });
+    return { contexts, messages };
+  }, [
+    channel,
+    currentPubkey,
+    messagesQuery.data,
+    profiles,
+    selfAvatarUrl,
+    threadReplies.events,
+    opener,
+    normalizedCurrent,
+  ]);
+  const messages = conversationMessages.messages;
+  const renderSubmittedContext = React.useCallback(
+    (message: TimelineMessage) => {
+      const payload = conversationMessages.contexts.get(message.id);
+      return payload ? (
+        <ProjectAgentSubmittedContextPill payload={payload} />
+      ) : null;
+    },
+    [conversationMessages.contexts],
+  );
   const lastMessageId = messages[messages.length - 1]?.id ?? null;
+  const handleToggleReaction = React.useCallback(
+    async (message: TimelineMessage, emoji: string, remove: boolean) => {
+      await toggleReactionMutation.mutateAsync({
+        emoji,
+        eventId: message.id,
+        remove,
+      });
+    },
+    [toggleReactionMutation.mutateAsync],
+  );
   React.useEffect(() => {
     if (!lastMessageId && !agentWorking.working) return;
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [lastMessageId, agentWorking.working]);
 
-  const normalizedCurrent = currentPubkey
-    ? normalizePubkey(currentPubkey)
-    : null;
-
   return (
-    <div className="space-y-5">
-      {messages.map((event) => {
-        const isSelf = normalizePubkey(event.pubkey) === normalizedCurrent;
-        return (
-          <div className="flex gap-3" key={event.localKey ?? event.id}>
-            <UserAvatar
-              accent={!isSelf}
-              avatarUrl={isSelf ? selfAvatarUrl : agentAvatarUrl}
-              className="mt-0.5 shrink-0"
-              displayName={isSelf ? "You" : agent.name}
-              size="sm"
-            />
-            <div className="min-w-0 flex-1 space-y-0.5">
-              <span className="text-xs font-semibold text-muted-foreground">
-                {isSelf ? "You" : agent.name}
-              </span>
-              <Markdown
-                className="text-base text-foreground"
-                content={
-                  isSelf ? stripRepoContext(event.content) : event.content
-                }
-              />
-            </div>
-          </div>
-        );
-      })}
+    <div data-project-agent-channel-id={channel.id}>
+      <MessageThreadTranscript
+        channelId={channel.id}
+        currentPubkey={currentPubkey ?? undefined}
+        messages={messages}
+        onToggleReaction={handleToggleReaction}
+        profiles={profiles}
+        renderAfterMessage={renderSubmittedContext}
+      />
+      {threadReplies.isError ? (
+        <ThreadRepliesErrorCard onRetry={threadReplies.refetch} />
+      ) : null}
       {agentWorking.working ? (
         <div className="flex items-center gap-2 pl-11 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -273,9 +401,7 @@ export function ProjectsAgentPromptPage({
 }) {
   const [prompt, setPrompt] = React.useState("");
   const [storedConversation, setStoredConversation] =
-    React.useState<StoredProjectsAgentConversation | null>(() =>
-      readStoredProjectsAgentConversation(workspaceId),
-    );
+    React.useState<StoredProjectsAgentConversation | null>(null);
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     () => storedConversation?.agentPubkey ?? null,
   );
@@ -298,6 +424,23 @@ export function ProjectsAgentPromptPage({
   const channelsQuery = useChannelsQuery();
   const openDmMutation = useOpenDmMutation();
   const startAgentMutation = useStartManagedAgentMutation();
+  const { activeCommunity } = useCommunities();
+  // Tenant scope for the submit sequence below: captured per render, so the
+  // value the callback closes over is the community that was active when the
+  // user pressed Ask — the backing commands fail closed if it changes while
+  // the callback is suspended.
+  const relayScope = activeCommunity?.relayUrl
+    ? normalizeRelayUrl(activeCommunity.relayUrl)
+    : null;
+  const signerScope = identityQuery.data?.pubkey
+    ? normalizePubkey(identityQuery.data.pubkey)
+    : null;
+  const scopedWorkspaceId = projectsConversationScope(
+    "workspace",
+    relayScope,
+    signerScope,
+    workspaceId ?? "",
+  );
 
   const candidatePubkeys = React.useMemo(
     () => candidates.map((candidate) => candidate.pubkey),
@@ -318,9 +461,15 @@ export function ProjectsAgentPromptPage({
       restoreProjectsAgentConversation({
         candidates,
         channels: channelsQuery.data ?? [],
+        currentPubkey: identityQuery.data?.pubkey ?? null,
         stored: storedConversation,
       }),
-    [candidates, channelsQuery.data, storedConversation],
+    [
+      candidates,
+      channelsQuery.data,
+      identityQuery.data?.pubkey,
+      storedConversation,
+    ],
   );
 
   React.useEffect(() => {
@@ -332,8 +481,7 @@ export function ProjectsAgentPromptPage({
   const selectedAgent =
     conversation?.agent ??
     candidates.find((candidate) => candidate.pubkey === selectedPubkey) ??
-    candidates[0] ??
-    null;
+    pickDefaultProjectsAgent(candidates);
   const richText = useRichTextEditor({
     editable: !isSending,
     onEditLink: (info) => onEditLinkRef.current?.(info),
@@ -351,6 +499,15 @@ export function ProjectsAgentPromptPage({
   onLinkShortcutRef.current = linkEditor.openFromShortcut;
 
   React.useEffect(() => {
+    const stored = readStoredProjectsAgentConversation(scopedWorkspaceId);
+    setStoredConversation(stored);
+    setConversation(null);
+    setSelectedPubkey(stored?.agentPubkey ?? null);
+    setPrompt("");
+    richText.clearContent();
+  }, [richText.clearContent, scopedWorkspaceId]);
+
+  React.useEffect(() => {
     if (!richText.editor) return;
     const frame = window.requestAnimationFrame(richText.focusPreserve);
     return () => window.cancelAnimationFrame(frame);
@@ -360,6 +517,13 @@ export function ProjectsAgentPromptPage({
     () => buildSuggestions(projects),
     [projects],
   );
+  // Computed once so the pre-send preview and the appended opener payload
+  // are byte-identical: the user inspects exactly what will be signed under
+  // their key. Repo context rides only on the conversation opener.
+  const repoContextPayload = React.useMemo(
+    () => repoContextBlock(projects),
+    [projects],
+  );
   const canSubmit = Boolean(prompt.trim() && selectedAgent && !isSending);
 
   const handleSubmit = React.useCallback(async () => {
@@ -367,41 +531,61 @@ export function ProjectsAgentPromptPage({
     if (!trimmed || !selectedAgent || isSending) return;
 
     setIsSending(true);
-    // Cutoff captured before sending: the opening prompt lands at or after
-    // this instant, while everything a reused DM channel already held stays
-    // hidden from the Projects page.
-    const visibleAfter =
-      conversation?.visibleAfter ?? Math.floor(Date.now() / 1_000);
     try {
-      if (selectedAgent.isManaged && !selectedAgent.isActive) {
-        await startAgentMutation.mutateAsync(selectedAgent.pubkey);
-      }
-      const channel =
-        conversation?.channel ??
-        (await openDmMutation.mutateAsync({
-          pubkeys: [selectedAgent.pubkey],
-        }));
       // Repo context rides only on the conversation opener.
       const content = conversation
         ? trimmed
-        : `${trimmed}${repoContextBlock(projects)}`;
-      await sendChannelMessage(channel.id, content, undefined, undefined, [
-        selectedAgent.pubkey,
-      ]);
+        : `${trimmed}${repoContextPayload}`;
+      // The awaits inside suspend across a possible community switch;
+      // `submitProjectAgentMessage` binds every relay side effect to the
+      // scope captured at render (fail closed) and threads follow-ups onto
+      // the opener so a same-second follow-up cannot be hidden by id
+      // ordering.
+      const { channel, sent } = await submitProjectAgentMessage({
+        agent: selectedAgent,
+        conversation,
+        content,
+        mentionPubkeys: [selectedAgent.pubkey],
+        relayScope,
+        signerScope: identityQuery.data?.pubkey ?? null,
+        startAgent: (input) => startAgentMutation.mutateAsync(input),
+        openDm: (input) => openDmMutation.mutateAsync(input),
+        send: (request) =>
+          sendChannelMessage(
+            request.channelId,
+            request.content,
+            request.parentEventId,
+            undefined,
+            request.mentionPubkeys,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            request.expectedRelayUrl,
+            request.expectedSignerPubkey,
+          ),
+      });
       if (!conversation) {
+        // Anchor the conversation to the exact accepted opener event: a bare
+        // timestamp cannot isolate it from unrelated same-second DM history.
+        const opener = {
+          createdAt: sent.createdAt,
+          eventId: sent.eventId,
+        };
         const nextConversation = {
           channel,
           agent: selectedAgent,
-          visibleAfter,
+          opener,
         };
         const stored = {
           agentPubkey: selectedAgent.pubkey,
           channelId: channel.id,
-          visibleAfter,
+          opener,
         };
         setConversation(nextConversation);
         setStoredConversation(stored);
-        writeStoredProjectsAgentConversation(workspaceId, stored);
+        writeStoredProjectsAgentConversation(scopedWorkspaceId, stored);
       }
       setPrompt("");
       richText.clearContent();
@@ -414,27 +598,29 @@ export function ProjectsAgentPromptPage({
     }
   }, [
     conversation,
+    identityQuery.data?.pubkey,
     isSending,
     openDmMutation,
-    projects,
+    relayScope,
+    repoContextPayload,
     richText.clearContent,
     richText.getMarkdown,
     selectedAgent,
     startAgentMutation,
-    workspaceId,
+    scopedWorkspaceId,
   ]);
   submitPromptRef.current = () => {
     void handleSubmit();
   };
 
   const handleClearConversation = React.useCallback(() => {
-    clearStoredProjectsAgentConversation(workspaceId);
+    clearStoredProjectsAgentConversation(scopedWorkspaceId);
     setStoredConversation(null);
     setConversation(null);
     setSelectedPubkey(null);
     setPrompt("");
     richText.clearContent();
-  }, [richText.clearContent, workspaceId]);
+  }, [richText.clearContent, scopedWorkspaceId]);
 
   const promptBox = (
     <>
@@ -491,6 +677,7 @@ export function ProjectsAgentPromptPage({
                         avatarUrl={avatarUrlFor(selectedAgent.pubkey)}
                         className="shrink-0"
                         displayName={selectedAgent.name}
+                        shape="squircle"
                         size="xs"
                       />
                     ) : null}
@@ -517,19 +704,22 @@ export function ProjectsAgentPromptPage({
                           avatarUrl={avatarUrlFor(candidate.pubkey)}
                           className="mr-2 shrink-0"
                           displayName={candidate.name}
+                          shape="squircle"
                           size="xs"
                         />
                         <span className="min-w-0 truncate">
                           {candidate.name}
                         </span>
-                        <span
-                          className={cn(
-                            "ml-2 h-1.5 w-1.5 shrink-0 rounded-full",
-                            candidate.isActive
-                              ? "bg-emerald-500"
-                              : "bg-muted-foreground/40",
-                          )}
-                        />
+                        {candidate.isActive !== null ? (
+                          <span
+                            className={cn(
+                              "ml-2 h-1.5 w-1.5 shrink-0 rounded-full",
+                              candidate.isActive
+                                ? "bg-emerald-500"
+                                : "bg-muted-foreground/40",
+                            )}
+                          />
+                        ) : null}
                       </DropdownMenuRadioItem>
                     ))}
                   </DropdownMenuRadioGroup>
@@ -553,6 +743,14 @@ export function ProjectsAgentPromptPage({
             Ask
           </Button>
         </div>
+        {conversation ? null : (
+          <div className="flex justify-end pt-1">
+            <AgentContextPayloadPreview
+              payload={repoContextPayload}
+              triggerLabel="Context appended to your first message"
+            />
+          </div>
+        )}
       </div>
       {linkEditor.card}
       {linkEditor.dialog}
@@ -582,7 +780,7 @@ export function ProjectsAgentPromptPage({
               channel={conversation.channel}
               currentPubkey={identityQuery.data?.pubkey ?? null}
               selfAvatarUrl={profileQuery.data?.avatarUrl ?? null}
-              visibleAfter={conversation.visibleAfter}
+              opener={conversation.opener}
             />
           </div>
         </div>

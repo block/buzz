@@ -1,19 +1,29 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
+import 'package:http/http.dart' as http;
+import 'package:just_audio/just_audio.dart' as audio;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
+import 'package:buzz/features/channels/voice_note_attachment.dart';
+import 'package:buzz/features/channels/voice_note_waveform.dart';
+import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/emoji/emoji_only.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 Widget _testable(
   Widget child, {
@@ -45,6 +55,171 @@ Widget _testable(
 void _setSurfaceSize(WidgetTester tester, Size size) {
   tester.view.devicePixelRatio = 1.0;
   tester.view.physicalSize = size;
+}
+
+class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
+  VoiceNotePlaybackState _state = const VoiceNotePlaybackState();
+
+  @override
+  VoiceNotePlaybackState get state => _state;
+
+  double speed = 1;
+
+  @override
+  Future<void> loadLocal(
+    String path, {
+    required Duration fallbackDuration,
+  }) async {
+    _state = VoiceNotePlaybackState(duration: fallbackDuration);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required Map<String, String> Function() headers,
+    required Duration fallbackDuration,
+  }) => loadLocal(url, fallbackDuration: fallbackDuration);
+
+  @override
+  Future<void> pause() async {
+    _state = _state.copyWith(isPlaying: false);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    _state = _state.copyWith(position: position);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> setSpeed(double value) async => speed = value;
+
+  @override
+  Future<void> toggle() async {
+    _state = _state.copyWith(isPlaying: !_state.isPlaying);
+    notifyListeners();
+  }
+}
+
+class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  @override
+  VoiceNotePlaybackState get state =>
+      const VoiceNotePlaybackState(isLoading: true, canCancelLoading: true);
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required Map<String, String> Function() headers,
+    required Duration fallbackDuration,
+  }) async {}
+}
+
+class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
+  int toggleCount = 0;
+
+  @override
+  Future<void> toggle() async {
+    toggleCount += 1;
+  }
+}
+
+class _BufferingVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  int toggleCount = 0;
+
+  @override
+  VoiceNotePlaybackState get state => const VoiceNotePlaybackState(
+    duration: Duration(seconds: 3),
+    isPlaying: true,
+    isLoading: true,
+    canCancelLoading: true,
+  );
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required Map<String, String> Function() headers,
+    required Duration fallbackDuration,
+  }) async {}
+
+  @override
+  Future<void> toggle() async {
+    toggleCount += 1;
+  }
+}
+
+class _HeldAudioPlayerBackend implements VoiceNoteAudioPlayerBackend {
+  final positions = const Stream<Duration>.empty();
+  final durations = const Stream<Duration?>.empty();
+  final states = const Stream<audio.PlayerState>.empty();
+  final pathLoad = Completer<Duration?>();
+
+  @override
+  Stream<Duration> get positionStream => positions;
+
+  @override
+  Stream<Duration?> get durationStream => durations;
+
+  @override
+  Stream<audio.PlayerState> get playerStateStream => states;
+
+  @override
+  bool get playing => false;
+
+  @override
+  Future<Duration?> setFilePath(String path) => pathLoad.future;
+
+  @override
+  Future<Duration?> setUrl(String url, {Map<String, String>? headers}) async =>
+      null;
+
+  @override
+  Future<void> play() async {}
+
+  @override
+  Future<void> pause() async {}
+
+  @override
+  Future<void> cancelPendingLoad() async {}
+
+  @override
+  Future<void> seek(Duration position) async {}
+
+  @override
+  Future<void> setSpeed(double speed) async {}
+
+  @override
+  Future<void> dispose() async {}
+}
+
+class _NoopHttpClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    throw UnsupportedError('Local playback must not issue HTTP requests');
+  }
+}
+
+class _RetryableVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  _RetryableVoiceNotePlayer() {
+    _state = const VoiceNotePlaybackState(hasError: true);
+  }
+
+  int toggleCount = 0;
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required Map<String, String> Function() headers,
+    required Duration fallbackDuration,
+  }) async {}
+
+  @override
+  Future<void> toggle() async {
+    toggleCount += 1;
+    _state = _state.copyWith(hasError: false, isPlaying: true);
+    notifyListeners();
+  }
 }
 
 Finder _imagePreview(String imageUrl) {
@@ -171,6 +346,75 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  test('wide voice-note waveforms distribute bars across their full width', () {
+    const width = 320.0;
+    const sampleCount = 48;
+    final layout = voiceNoteWaveformBarLayout(
+      width: width,
+      sampleCount: sampleCount,
+    );
+
+    expect(layout.barWidth, 3);
+    expect(
+      (layout.barWidth * sampleCount) + (layout.gap * (sampleCount - 1)),
+      closeTo(width, 0.001),
+    );
+  });
+
+  testWidgets('voice-note waveform semantics seek within bounded steps', (
+    tester,
+  ) async {
+    final progress = ValueNotifier(0.0);
+    addTearDown(progress.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ValueListenableBuilder<double>(
+          valueListenable: progress,
+          builder: (context, value, _) => VoiceNoteWaveform(
+            samples: const [0.2, 0.8],
+            progress: value,
+            onSeek: (next) => progress.value = next,
+          ),
+        ),
+      ),
+    );
+
+    final semantics = tester.getSemantics(
+      find.bySemanticsLabel('Voice note waveform'),
+    );
+    expect(semantics.value, '0 percent');
+    semantics.owner!.performAction(semantics.id, SemanticsAction.increase);
+    await tester.pump();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Voice note waveform')).value,
+      '10 percent',
+    );
+
+    progress.value = 0.5;
+    await tester.pump();
+    final middle = tester.getSemantics(
+      find.bySemanticsLabel('Voice note waveform'),
+    );
+    middle.owner!.performAction(middle.id, SemanticsAction.decrease);
+    await tester.pump();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Voice note waveform')).value,
+      '40 percent',
+    );
+
+    progress.value = 1;
+    await tester.pump();
+    final end = tester.getSemantics(
+      find.bySemanticsLabel('Voice note waveform'),
+    );
+    end.owner!.performAction(end.id, SemanticsAction.increase);
+    await tester.pump();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Voice note waveform')).value,
+      '100 percent',
+    );
+  });
+
   group('MessageContent', () {
     testWidgets('forwards text alignment to markdown rendering', (
       tester,
@@ -817,6 +1061,410 @@ void main() {
     });
 
     group('media attachments', () {
+      testWidgets('uses the shared Buzz loader while a voice note loads', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/loading-voice-note.mp4';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-loading.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(
+                _LoadingVoiceNotePlayer.new,
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
+        expect(find.byType(CircularProgressIndicator), findsNothing);
+        expect(
+          find.bySemanticsLabel('Cancel voice note loading'),
+          findsOneWidget,
+        );
+        expect(find.bySemanticsLabel('Loading voice note'), findsNothing);
+      });
+
+      testWidgets('routes repeated loading-control taps through toggle', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/cancel-loading-voice-note.mp4';
+        final player = _ToggleTrackingLoadingVoiceNotePlayer();
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-loading.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final control = find.bySemanticsLabel('Cancel voice note loading');
+        final controlSemantics = tester.getSemantics(control);
+        expect(
+          controlSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+          isTrue,
+        );
+        tester.binding.performSemanticsAction(
+          SemanticsActionEvent(
+            type: SemanticsAction.tap,
+            viewId: tester.view.viewId,
+            nodeId: controlSemantics.id,
+          ),
+        );
+        await tester.pump();
+
+        expect(player.toggleCount, 1);
+      });
+
+      testWidgets('active buffering playback keeps its pause action', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/buffering-voice-note.mp4';
+        final player = _BufferingVoiceNotePlayer();
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-buffering.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final control = find.bySemanticsLabel('Pause voice note');
+        expect(control, findsOneWidget);
+        expect(
+          tester
+              .getSemantics(control)
+              .getSemanticsData()
+              .hasAction(SemanticsAction.tap),
+          isTrue,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
+        await tester.pump();
+
+        expect(player.toggleCount, 1);
+      });
+
+      testWidgets(
+        'local preview loading is non-actionable while remote loading cancels',
+        (tester) async {
+          final backend = _HeldAudioPlayerBackend();
+          final player = DeviceVoiceNotePlayerController(
+            coordinator: VoiceNotePlaybackCoordinator(),
+            client: _NoopHttpClient(),
+            player: backend,
+          );
+          addTearDown(() {
+            if (!backend.pathLoad.isCompleted) backend.pathLoad.complete(null);
+          });
+
+          await tester.pumpWidget(
+            _testable(
+              const VoiceNoteAttachment.local(
+                path: '/tmp/local-voice-note.m4a',
+                duration: Duration(seconds: 3),
+                waveform: [],
+              ),
+              overrides: [
+                voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              ],
+            ),
+          );
+          await tester.pump();
+
+          expect(backend.pathLoad.isCompleted, isFalse);
+
+          final control = find.bySemanticsLabel('Loading voice note');
+          final controlSemantics = tester.getSemantics(control);
+          expect(control, findsOneWidget);
+          expect(
+            controlSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+            isFalse,
+          );
+          expect(
+            find.bySemanticsLabel('Cancel voice note loading'),
+            findsNothing,
+          );
+          await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
+          await tester.pump();
+          expect(player.state.canCancelLoading, isFalse);
+          expect(backend.pathLoad.isCompleted, isFalse);
+        },
+      );
+
+      testWidgets('offers an accessible retry after a voice note fails', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/retry-voice-note.mp4';
+        final player = _RetryableVoiceNotePlayer();
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-retry.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('Voice note unavailable'), findsOneWidget);
+        expect(find.byTooltip('Retry voice note'), findsOneWidget);
+        expect(find.bySemanticsLabel('Retry voice note'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('voice-note-retry-icon')),
+          findsOneWidget,
+        );
+
+        await tester.tap(find.byTooltip('Retry voice note'));
+        await tester.pump();
+
+        expect(player.toggleCount, 1);
+        expect(find.byTooltip('Pause voice note'), findsOneWidget);
+        expect(find.text('Voice note unavailable'), findsNothing);
+      });
+
+      testWidgets('renders desktop packaged voice-note links as audio cards', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/desktop-voice-note.mp4';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '[voice-note-desktop.mp4]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-desktop.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(
+                _FakeVoiceNotePlayer.new,
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-attachment:$url')),
+          findsOneWidget,
+        );
+        expect(find.text('voice-note-desktop.mp4'), findsNothing);
+      });
+
+      testWidgets('keeps audio-looking links without imeta as ordinary links', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/not-an-attachment.mp4';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '[recording.mp4]($url)')),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-attachment:$url')),
+          findsNothing,
+        );
+        expect(find.text('recording.mp4'), findsOneWidget);
+      });
+
+      testWidgets('renders an audio imeta attachment as a voice note card', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/voice-note.mp4';
+        final player = _FakeVoiceNotePlayer();
+        final hapticCalls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'HapticFeedback.vibrate') hapticCalls.add(call);
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-test.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-attachment:$url')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('voice-note-play-pause')),
+          findsOneWidget,
+        );
+        final cardFinder = find.byKey(
+          const ValueKey('voice-note-attachment:$url'),
+        );
+        final rateFinder = find.byKey(
+          const ValueKey('voice-note-playback-rate'),
+        );
+        final card = tester.widget<Container>(cardFinder);
+        expect(card.padding, const EdgeInsets.all(Grid.twelve));
+        expect(
+          tester.getTopLeft(find.byType(VoiceNoteWaveform)).dx,
+          tester
+              .getTopLeft(find.byKey(const ValueKey('voice-note-duration')))
+              .dx,
+        );
+        final leadingInset =
+            tester
+                .getTopLeft(find.byKey(const ValueKey('voice-note-play-pause')))
+                .dx -
+            tester.getTopLeft(cardFinder).dx;
+        final trailingInset =
+            tester.getTopRight(cardFinder).dx -
+            tester.getTopRight(rateFinder).dx;
+        expect(leadingInset, Grid.twelve + 1);
+        expect(trailingInset, leadingInset);
+        expect(rateFinder, findsOneWidget);
+        final rateSize = tester.getSize(rateFinder);
+        final ratePadding = tester
+            .widgetList<Padding>(
+              find.descendant(of: rateFinder, matching: find.byType(Padding)),
+            )
+            .singleWhere(
+              (widget) =>
+                  widget.padding ==
+                  const EdgeInsets.symmetric(
+                    horizontal: Grid.xxs,
+                    vertical: Grid.half + Grid.quarter,
+                  ),
+            );
+        expect(
+          ratePadding.padding,
+          const EdgeInsets.symmetric(
+            horizontal: Grid.xxs,
+            vertical: Grid.half + Grid.quarter,
+          ),
+        );
+        final rateValueFinder = find.byKey(
+          const ValueKey('voice-note-playback-rate-value'),
+        );
+        hapticCalls.clear();
+        await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
+        expect(
+          tester
+              .widget<VoiceNoteWaveform>(find.byType(VoiceNoteWaveform))
+              .progress,
+          greaterThan(0),
+        );
+
+        final waveformRect = tester.getRect(find.byType(VoiceNoteWaveform));
+        await tester.dragFrom(
+          Offset(
+            waveformRect.left + waveformRect.width * 0.25,
+            waveformRect.center.dy,
+          ),
+          Offset(waveformRect.width * 0.5, 0),
+        );
+        await tester.pump();
+        expect(player.state.position.inMilliseconds, closeTo(2250, 80));
+
+        expect(tester.widget<Text>(rateValueFinder).data, '1×');
+        hapticCalls.clear();
+        await tester.tap(rateFinder);
+        await tester.pump();
+        expect(tester.widget<Text>(rateValueFinder).data, '1.5×');
+        expect(player.speed, 1.5);
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
+        expect(tester.getSize(rateFinder), rateSize);
+        await tester.tap(rateFinder);
+        await tester.pump();
+        expect(tester.widget<Text>(rateValueFinder).data, '2×');
+        expect(tester.getSize(rateFinder), rateSize);
+        await tester.tap(rateFinder);
+        await tester.pump();
+        expect(tester.widget<Text>(rateValueFinder).data, '.5×');
+        expect(tester.getSize(rateFinder), rateSize);
+      });
+
       testWidgets(
         'renders image markdown as a media preview and opens viewer',
         (tester) async {
@@ -910,6 +1558,66 @@ void main() {
           findsOneWidget,
         );
       });
+
+      testWidgets(
+        'keeps voice notes out of image carousels for audio-only and mixed media',
+        (tester) async {
+          const firstAudio = 'https://example.com/media/voice-note-first.mp4';
+          const secondAudio = 'https://example.com/media/voice-note-second.mp4';
+          const image = 'https://example.com/media/photo.png';
+
+          Widget message(String content, List<List<String>> tags) => _testable(
+            MessageContent(content: content, tags: tags),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(
+                _FakeVoiceNotePlayer.new,
+              ),
+            ],
+          );
+
+          await tester.pumpWidget(
+            message('![audio]($firstAudio)\n![audio]($secondAudio)', const [
+              [
+                'imeta',
+                'url $firstAudio',
+                'm video/mp4',
+                'filename voice-note-first.mp4',
+              ],
+              [
+                'imeta',
+                'url $secondAudio',
+                'm video/mp4',
+                'filename voice-note-second.mp4',
+              ],
+            ]),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('message-media-carousel')),
+            findsNothing,
+          );
+          expect(find.byType(VoiceNoteAttachment), findsNWidgets(2));
+
+          await tester.pumpWidget(
+            message('![image]($image)\n![audio]($firstAudio)', const [
+              ['imeta', 'url $image', 'm image/png'],
+              [
+                'imeta',
+                'url $firstAudio',
+                'm video/mp4',
+                'filename voice-note-first.mp4',
+              ],
+            ]),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('message-media-carousel')),
+            findsNothing,
+          );
+          expect(find.byType(VoiceNoteAttachment), findsOneWidget);
+          expect(_imagePreview(image), findsOneWidget);
+        },
+      );
 
       testWidgets(
         'groups uploaded photos into a carousel and opens the full gallery',

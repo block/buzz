@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
+import { updateChannelLastMessageAt } from "@/features/channels/lib/channelRecency";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
@@ -246,6 +247,13 @@ export function useLiveChannelUpdates(
       event.kind,
       isDmChannel,
     );
+
+    // Recency is presentation state, not notification state. Every recognized
+    // message advances Recent ordering, including self-authored and muted
+    // messages that the notification policy deliberately filters below.
+    if (isUnreadTriggerKind) {
+      updateChannelLastMessageAt(queryClient, channelId, event.created_at);
+    }
 
     // Let the caller observe self-authored trigger events (e.g. to track
     // thread participation) before the author-exclusion guard filters them.

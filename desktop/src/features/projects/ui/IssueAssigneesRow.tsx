@@ -1,4 +1,4 @@
-import { Search, X } from "lucide-react";
+import { Check, Search, UserPlus, Users, X } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -12,6 +12,7 @@ import type { ProjectIssue } from "@/features/projects/projectIssues.mjs";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -25,6 +26,7 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { PROJECT_CONTEXT_ACTION_BUTTON_CLASS } from "./projectContextActionStyles";
 
 function profileForPubkey(pubkey: string, profiles?: UserProfileLookup) {
   return profiles?.[normalizePubkey(pubkey)] ?? null;
@@ -66,7 +68,10 @@ export function IssueAssigneeFacepile({
         const label = labelForPubkey(pubkey, profiles);
         return (
           <span
-            className="inline-flex rounded-full ring-1 ring-background"
+            className={cn(
+              "inline-flex ring-1 ring-background",
+              profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+            )}
             key={pubkey}
             title={`Assigned to ${label}`}
           >
@@ -74,6 +79,7 @@ export function IssueAssigneeFacepile({
               accent={profile?.isAgent === true}
               avatarUrl={profile?.avatarUrl ?? null}
               displayName={label}
+              shape={profile?.isAgent ? "squircle" : "circle"}
               size="xs"
             />
           </span>
@@ -92,17 +98,25 @@ export function IssueAssigneeFacepile({
  */
 export function IssueAssigneesRow({
   canAssignOthers,
+  contextActions = false,
   issue,
   profiles,
   project,
   signAsManagedOwner,
+  showAssignees = true,
+  showSelfAssignmentState = false,
+  testIdPrefix = "project-issue",
   viewerPubkey,
 }: {
   canAssignOthers: boolean;
+  contextActions?: boolean;
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
   project: Project;
   signAsManagedOwner: boolean;
+  showAssignees?: boolean;
+  showSelfAssignmentState?: boolean;
+  testIdPrefix?: string;
   viewerPubkey: string | null;
 }) {
   const [pickerOpen, setPickerOpen] = React.useState(false);
@@ -153,10 +167,10 @@ export function IssueAssigneesRow({
         });
         setPickerOpen(false);
         setAssigneeQuery("");
-        toast.success("Issue assigned.");
+        toast.success("Task assigned.");
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to assign issue.",
+          error instanceof Error ? error.message : "Failed to assign task.",
         );
       } finally {
         assignmentOperationInFlightRef.current = false;
@@ -178,10 +192,10 @@ export function IssueAssigneesRow({
           signerPubkey: operationSigner,
           signAsManagedOwner,
         });
-        toast.success("Issue unassigned.");
+        toast.success("Task unassigned.");
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to unassign issue.",
+          error instanceof Error ? error.message : "Failed to unassign task.",
         );
       } finally {
         assignmentOperationInFlightRef.current = false;
@@ -194,16 +208,24 @@ export function IssueAssigneesRow({
     if (!pickerOpen) setAssigneeQuery("");
   }, [pickerOpen]);
 
-  const canSelfAssign =
-    viewer !== null && !canAssignOthers && !currentAssignees.has(viewer);
+  const canSelfAssign = viewer !== null && !currentAssignees.has(viewer);
+  const isSelfAssigned = viewer !== null && currentAssignees.has(viewer);
 
   if (issue.assignees.length === 0 && !canAssignOthers && !canSelfAssign) {
     return null;
   }
+  const displayedAssignees = showAssignees ? issue.assignees : [];
 
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-      {issue.assignees.map((pubkey) => {
+    <div
+      className={cn(
+        "min-w-0 text-muted-foreground",
+        contextActions
+          ? "grid gap-0.5"
+          : "flex flex-wrap items-center gap-1.5 text-xs",
+      )}
+    >
+      {displayedAssignees.map((pubkey) => {
         const profile = profileForPubkey(pubkey, profiles);
         const label = labelForPubkey(pubkey, profiles);
         const canUnassign =
@@ -214,6 +236,7 @@ export function IssueAssigneesRow({
             accent={profile?.isAgent === true}
             avatarUrl={profile?.avatarUrl ?? null}
             displayName={label}
+            shape={profile?.isAgent ? "squircle" : "circle"}
             size="xs"
           />
         );
@@ -223,8 +246,11 @@ export function IssueAssigneesRow({
               {canUnassign ? (
                 <button
                   aria-label={`Unassign ${label}`}
-                  className="group relative inline-flex rounded-full"
-                  data-testid={`project-issue-unassign-${normalizePubkey(pubkey)}`}
+                  className={cn(
+                    "group relative inline-flex",
+                    profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                  )}
+                  data-testid={`${testIdPrefix}-unassign-${normalizePubkey(pubkey)}`}
                   disabled={unassignMutation.isPending}
                   onClick={() => {
                     void handleUnassign(pubkey, label);
@@ -232,7 +258,12 @@ export function IssueAssigneesRow({
                   type="button"
                 >
                   {avatar}
-                  <span className="absolute inset-0 flex items-center justify-center rounded-full bg-background/80 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                  <span
+                    className={cn(
+                      "absolute inset-0 flex items-center justify-center bg-background/80 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100",
+                      profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                    )}
+                  >
                     <X className="h-3 w-3 text-foreground" />
                   </span>
                 </button>
@@ -248,8 +279,13 @@ export function IssueAssigneesRow({
       })}
       {canSelfAssign && viewer ? (
         <Button
-          className="h-6 px-1 text-xs text-muted-foreground hover:text-foreground"
-          data-testid="project-issue-self-assign"
+          className={cn(
+            contextActions
+              ? "h-5 px-1 text-xs text-muted-foreground hover:text-foreground"
+              : "h-5 px-0 text-xs text-primary hover:bg-transparent hover:text-primary hover:underline",
+            contextActions && PROJECT_CONTEXT_ACTION_BUTTON_CLASS,
+          )}
+          data-testid={`${testIdPrefix}-self-assign`}
           disabled={assignMutation.isPending || unassignMutation.isPending}
           onClick={() => {
             void handleAssign(viewer, labelForPubkey(viewer, profiles));
@@ -258,28 +294,48 @@ export function IssueAssigneesRow({
           type="button"
           variant="ghost"
         >
+          {contextActions ? <UserPlus /> : null}
           Assign to me
+        </Button>
+      ) : null}
+      {showSelfAssignmentState && isSelfAssigned ? (
+        <Button
+          className={cn(
+            "h-5 gap-1 px-1 text-xs text-muted-foreground disabled:opacity-100",
+            contextActions && PROJECT_CONTEXT_ACTION_BUTTON_CLASS,
+          )}
+          disabled
+          size="xs"
+          type="button"
+          variant="ghost"
+        >
+          <Check className="h-3 w-3" />
+          Assigned to me
         </Button>
       ) : null}
       {canAssignOthers ? (
         <Dialog onOpenChange={setPickerOpen} open={pickerOpen}>
           <DialogTrigger asChild>
             <Button
-              className="h-6 px-1 text-xs text-muted-foreground hover:text-foreground"
-              data-testid="project-issue-assign"
+              className={cn(
+                "h-5 px-1 text-xs text-muted-foreground hover:text-foreground",
+                contextActions && PROJECT_CONTEXT_ACTION_BUTTON_CLASS,
+              )}
+              data-testid={`${testIdPrefix}-assign`}
               disabled={assignMutation.isPending || unassignMutation.isPending}
               size="xs"
               type="button"
               variant="ghost"
             >
+              {contextActions ? <Users /> : null}
               Assign
             </Button>
           </DialogTrigger>
           <DialogContent className="max-w-md gap-0 overflow-hidden p-0">
             <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
-              <DialogTitle>Assign issue</DialogTitle>
+              <DialogTitle>Assign task</DialogTitle>
               <DialogDescription>
-                Choose a person or agent to work on this issue.
+                Choose a person or agent to work on this task.
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2 border-b border-border/60 px-6 py-3">
@@ -318,6 +374,7 @@ export function IssueAssigneesRow({
                         accent={candidate.isAgent}
                         avatarUrl={candidate.avatarUrl}
                         displayName={label}
+                        shape={candidate.isAgent ? "squircle" : "circle"}
                         size="xs"
                       />
                       <span className="min-w-0 flex-1">

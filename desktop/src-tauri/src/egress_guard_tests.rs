@@ -109,6 +109,7 @@ async fn boundary_sync_managed_agent_profile_blocks_ncryptsec() {
         &format!("agent {NCRYPTSEC}"),
         None,
         None,
+        None,
     )
     .await
     .unwrap_err();
@@ -276,6 +277,20 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     // Mock-relay route in its in-file tests; production publish goes through
     // the guarded boundary-1 funnel (`submit_signed_event_at_with_keys`).
     ("src/commands/personas/sharing.rs", 1, 0),
+    // Loopback submit relay in `identity_archive.rs`'s in-file regen tests;
+    // production archive/unarchive publish through the guarded boundary-1
+    // funnel via `submit_event`.
+    ("src/commands/identity_archive.rs", 1, 0),
+    // Mock-relay routes in team-sharing tests (accept/reject stub +
+    // recording stub for the delete-then-share gate + gated recording stub for
+    // the two-flush serialization gate + stalling stub for the per-scope
+    // isolation and bounded-stall gates); same pattern as persona sharing
+    // above — production publish goes through the guarded boundary-1 funnel via
+    // the flush loop.
+    ("src/commands/teams/sharing/tests.rs", 4, 0),
+    // Stub-relay route in the tombstone-flush gate tests; production flush
+    // publishes through the guarded boundary-1 funnel.
+    ("src/commands/teams/pending/tests/gate.rs", 1, 0),
 ];
 
 // Needles are assembled at runtime so this scan file itself contains no

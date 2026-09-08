@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 ///
 /// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
 abstract final class EventKind {
+  /// Kind:0 user profile metadata.
+  static const profile = 0;
   static const note = 1;
   static const contactList = 3;
   static const deletion = 5;
@@ -92,6 +94,7 @@ abstract final class EventKind {
     jobCancel,
     jobError,
     huddleStarted,
+    huddleEnded,
   ];
 }
 

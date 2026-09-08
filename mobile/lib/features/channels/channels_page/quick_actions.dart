@@ -7,7 +7,7 @@ const _kMorphCloseCurve = Cubic(0.22, 1, 0.36, 1);
 const double _kMorphOpenBounce = 0.14;
 const double _kMorphCloseBounce = 0.06;
 const double _kMorphClosedSize = 56;
-const double _kMorphOpenHeight = 160;
+const double _kMorphOpenHeight = 216;
 const double _kMorphOpenRadius = 20;
 const double _kMorphSlide = 40;
 const double _kMorphScale = 0.97;
@@ -273,6 +273,13 @@ class _QuickActionsMenu extends StatelessWidget {
             title: 'New direct message',
             key: const Key('quick-action-new-dm-card'),
             onTap: () => onSelected(_QuickAction.newDm),
+          ),
+          const SizedBox(height: Grid.xxs),
+          _QuickActionItem(
+            icon: LucideIcons.compass,
+            title: 'Browse channels',
+            key: const Key('quick-action-browse-channels-card'),
+            onTap: () => onSelected(_QuickAction.browseChannels),
           ),
         ],
       ),

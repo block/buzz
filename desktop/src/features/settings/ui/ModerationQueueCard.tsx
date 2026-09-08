@@ -1,6 +1,9 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ChevronDown, ShieldAlert } from "lucide-react";
 import { useMemo } from "react";
 import { toast } from "sonner";
+
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 
 import {
   useModerationAuditQuery,
@@ -365,6 +368,7 @@ function QueueGroupCard({
 }
 
 function QueueTab() {
+  const queryClient = useQueryClient();
   const reportsQuery = useModerationReportsQuery({ status: "open" });
   const auditQuery = useModerationAuditQuery();
   const resolveMutation = useResolveReportMutation();
@@ -408,6 +412,12 @@ function QueueTab() {
       // report open (retryable, no orphan decision row). Only after the paired
       // 9040/9005/9001 lands do we resolve every open report about this target.
       await enforceResolution(group, action, banMutation.mutateAsync);
+      if (action === "kick" && group.channelId != null) {
+        // The kick writes the roster directly (no member mutation); without
+        // this, the kicked identity stays in the cached roster for the
+        // freshness window.
+        await invalidateChannelMembersRosters(queryClient, [group.channelId]);
+      }
       await Promise.all(
         openReports.map((report) =>
           resolveMutation.mutateAsync({

@@ -244,6 +244,13 @@ async function seedChannelActivity(
     );
   }
 
+  // Thread activity owns the trailing row affordance; mentions additionally
+  // bold the channel name but do not add a numeric badge.
+  await expect(page.getByTestId("channel-general")).toHaveCSS(
+    "font-weight",
+    "700",
+  );
+  await expect(page.getByTestId("channel-unread-general")).toHaveCount(0);
   await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
   if (includeAgent) {
     await expect(page.getByTestId("channel-working-general")).toBeVisible();
@@ -773,10 +780,11 @@ test.describe("channel activity hover preview", () => {
     await rootRow.hover();
     const actionBar = page.getByTestId(`message-action-bar-${root.id}`);
     await expect(actionBar).toBeVisible();
-    await actionBar
-      .getByRole("button", { name: /^React with / })
-      .first()
-      .click();
+    await actionBar.getByRole("button", { name: "Open reactions" }).click();
+    const picker = page.locator("em-emoji-picker");
+    await expect(picker).toBeVisible();
+    await picker.locator("input[type='search']").fill("thumbs up");
+    await picker.getByRole("button", { name: "👍" }).first().click();
     await expect(
       rootRow.getByRole("button", { name: /^Toggle .* reaction$/ }),
     ).toBeVisible();

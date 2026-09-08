@@ -373,7 +373,7 @@ export function HuddleParticipantsControl({
             trigger={
               <button
                 aria-label={`Voice settings for ${participant.displayName}`}
-                className="inline-flex shrink-0 cursor-pointer rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+                className="inline-flex shrink-0 cursor-pointer rounded-[30%] outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-black"
                 data-testid="huddle-agent-voice-menu-trigger"
                 type="button"
               >
@@ -443,7 +443,8 @@ function ParticipantAvatar({
   return (
     <span
       className={cn(
-        "buzz-huddle-speaking-avatar relative z-0 inline-flex shrink-0 rounded-full",
+        "buzz-huddle-speaking-avatar relative z-0 inline-flex shrink-0",
+        participant.isAgent ? "rounded-[30%]" : "rounded-full",
         sizeClass,
       )}
       data-testid="huddle-participant-avatar"
@@ -452,7 +453,8 @@ function ParticipantAvatar({
       <ProfileAvatar
         avatarUrl={participant.avatarUrl}
         label={participant.displayName}
-        className="h-full w-full rounded-full border-2 border-black text-2xs"
+        className="h-full w-full border-2 border-black text-2xs"
+        shape={participant.isAgent ? "squircle" : "circle"}
       />
     </span>
   );

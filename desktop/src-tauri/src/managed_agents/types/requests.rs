@@ -76,6 +76,9 @@ pub fn apply_persona_behavior(
 pub struct CreatePersonaRequest {
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars).
+    #[serde(default)]
+    pub description: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -103,6 +106,10 @@ pub struct UpdatePersonaRequest {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars). The dialog always
+    /// sends the current value, so absent and empty both clear it.
+    #[serde(default)]
+    pub description: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -253,6 +260,16 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. `null` = clear the canonical effort column
+    /// (revert to inherited default). `"value"` = set the column.
+    ///
+    /// When present, persisted inside the locked update/restart transaction
+    /// so that an access-policy-change restart snapshots and launches the new
+    /// effort value rather than the old one. Uses the same
+    /// `apply_picker_effort_level` logic (via `apply_effort_update`) so
+    /// the record-scope alias sweep runs atomically with the column write.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub effort_level: Option<Option<String>>,
 }
 
 #[cfg(test)]
@@ -269,6 +286,7 @@ mod tests {
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            description: None,
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
             avatar_url: None,
@@ -283,6 +301,7 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),

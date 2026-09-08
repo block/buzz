@@ -147,6 +147,11 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
     );
   }
 
+  /// Persists a complete theme-picker selection as one durable snapshot.
+  void setPreference(CommunityThemePreference preference) {
+    _save(preference);
+  }
+
   void _save(CommunityThemePreference preference) {
     if (preference == state) return;
     state = preference;

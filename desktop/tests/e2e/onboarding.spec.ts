@@ -2,8 +2,17 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test, type Page } from "@playwright/test";
 import { nsecEncode } from "nostr-tools/nip19";
 
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  installMockBridge,
+  openChannelBrowser,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 import { expectEmojiMartStylesInstalled } from "../helpers/css";
+import {
+  invokeMockCommand,
+  publishWelcomeTeamPresence,
+  waitForWelcomeTeam,
+} from "../helpers/welcomeTeam";
 import { installFakeCamera } from "../helpers/fakeCamera";
 import {
   E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
@@ -426,6 +435,9 @@ async function expectWelcomeView(page: Page) {
     "Create an agent",
   );
   await expect(page.getByTestId("message-composer")).toBeVisible();
+  // Measure the empty-channel intro before presence releases the live kickoff.
+  // Its message arrival can remount the timeline while bounding boxes are read.
+  await publishWelcomeTeamPresence(page);
   await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(
     "Mention",
@@ -448,8 +460,48 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
     throw new Error("Could not measure the Welcome composer");
   }
 
-  await page.getByTestId("message-input").fill("Thanks @Fizz");
+  // The fixture has a seeded Fizz and this new member's starter Fizz. A
+  // manually typed name cannot choose between them or complete onboarding.
+  const input = page.getByTestId("message-input");
+  const content = "Thanks @Fizz";
+  const sentRecipients = () =>
+    page.evaluate(
+      (content) =>
+        (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
+          .filter((event) => event.content.trim() === content)
+          .map((event) =>
+            event.tags.filter((tag) => tag[0] === "p").map((tag) => tag[1]),
+          ),
+      content,
+    );
+  await input.fill(content);
+  await input.press("Escape");
   await page.getByTestId("send-message").click();
+  await expect(
+    page.getByText("The mention @Fizz is ambiguous.", { exact: false }),
+  ).toBeVisible();
+  await expect(input).toHaveText(content);
+  await expect(banner).toHaveAttribute("data-state", "prompt");
+  expect(await sentRecipients()).toEqual([]);
+
+  const agents = await invokeMockCommand<
+    Array<{ pubkey: string; persona_id: string | null; status: string }>
+  >(page, "list_managed_agents");
+  const sameNameAgents = agents.filter(
+    (agent) => agent.persona_id === "builtin:fizz",
+  );
+  expect(sameNameAgents).toHaveLength(2);
+  // Onboarding starts the new member's starter; the pre-existing mock stays
+  // stopped. This identifies the fixture key, not a production routing rule.
+  const fizz = sameNameAgents.filter((agent) => agent.status === "running");
+  expect(fizz).toHaveLength(1);
+  // Make selection intent explicit; do not remove the colliding fixture or
+  // relax extraction. The resulting event must tag only our starter identity.
+  await input.fill("");
+  await input.fill(content);
+  await page.getByTestId(`mention-suggestion-${fizz[0].pubkey}`).click();
+  await page.getByTestId("send-message").click();
+  await expect.poll(sentRecipients).toEqual([[fizz[0].pubkey]]);
 
   await expect(banner).toHaveAttribute("data-state", "complete");
   await expect(banner).toHaveAttribute("data-tone", "success");
@@ -513,39 +565,6 @@ async function getMockChannels(page: Page) {
     };
     return payload.channels ?? [];
   });
-}
-
-async function invokeMockCommand<T>(
-  page: Page,
-  command: string,
-  payload?: Record<string, unknown>,
-) {
-  return page.evaluate(
-    async ({ command, payload }) => {
-      const bridgeWindow = window as Window & {
-        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
-          command: string,
-          payload?: Record<string, unknown>,
-        ) => Promise<unknown>;
-        __TAURI_INTERNALS__?: {
-          invoke?: (
-            command: string,
-            payload?: Record<string, unknown>,
-          ) => Promise<unknown>;
-        };
-      };
-      const invoke =
-        bridgeWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ ??
-        bridgeWindow.__TAURI_INTERNALS__?.invoke;
-
-      if (!invoke) {
-        throw new Error("Mock invoke bridge is unavailable.");
-      }
-
-      return (await invoke(command, payload)) as T;
-    },
-    { command, payload },
-  );
 }
 
 async function seedCurrentAvatar(page: Page, avatarUrl: string) {
@@ -3211,13 +3230,29 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
   await completeProfileOnboarding(page);
 
   await expectPrivateWelcomeLanding(page);
+  // Runtime start alone cannot satisfy the kickoff's relay-presence wait.
+  const team = await waitForWelcomeTeam(page);
+  const presence = await invokeMockCommand<Record<string, string>>(
+    page,
+    "get_presence",
+    { pubkeys: team.map((agent) => agent.pubkey) },
+  );
+  expect(team.map((agent) => presence[agent.pubkey])).toEqual([
+    "offline",
+    "offline",
+    "offline",
+  ]);
+  await expect(page.getByTestId("message-timeline")).not.toContainText(
+    "Hi Morty QA, I'm Fizz. Welcome to Buzz.",
+  );
+  await publishWelcomeTeamPresence(page);
   // Greeted by the name typed above — the @mention pill also files the opener
   // into the new user's Inbox mentions feed.
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Hi Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Honey and Bumble, introduce yourselves",
+    "Honey and Pollen, introduce yourselves",
   );
 });
 
@@ -3237,6 +3272,7 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
 
   await expectPrivateWelcomeLanding(page);
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+  await publishWelcomeTeamPresence(page);
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Hi Morty QA, I'm Fizz. Welcome to Buzz.",
   );
@@ -3327,6 +3363,7 @@ test("welcome-everywhere banner: X dismiss removes the guidance surface", async 
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
+  await publishWelcomeTeamPresence(page);
 
   const banner = page.getByTestId("welcome-composer-guide-banner");
   const guidanceLayer = page.getByTestId("welcome-composer-guidance-layer");
@@ -3353,6 +3390,7 @@ test("welcome-everywhere banner: dismiss persists after channel re-entry", async
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
+  await publishWelcomeTeamPresence(page);
 
   const banner = page.getByTestId("welcome-composer-guide-banner");
 
@@ -3626,6 +3664,192 @@ test("membership denial can import a different invited key", async ({
     .toBe(TEST_IDENTITIES.alice.pubkey);
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
+});
+
+// Guards the signer-aware community boundary: replacing identity A with
+// identity B on the SAME relay (in-app key import) must rebuild the community
+// query client and re-bucket the draft store, so B never renders A's cached
+// data, never enumerates A's drafts, and never persists drafts into A's
+// bucket. Mutation-proof: removing the signer (pubkey/epoch) from
+// `communityKey` in App.tsx retains A's query client and draft bucket and
+// fails every leg below.
+test("same-relay identity replacement rebuilds the community boundary (A→B→A cache and draft isolation)", async ({
+  page,
+}) => {
+  // Two full boots (denied-A → imported-B, then relaunch-as-A) plus draft
+  // flush polling exceed the default budget.
+  test.slow();
+  const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+  const DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v2";
+  // Mirrors the bridge's DEFAULT_RELAY_WS_URL and useDrafts'
+  // canonicalizeRelayScope (scheme://host, no trailing slash).
+  const relayScope = (process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3000")
+    .replace(/^http/, "ws")
+    .replace(/\/+$/, "");
+  const tylerDraftStoreKey = `${DRAFT_STORE_KEY_PREFIX}:${relayScope}:${TEST_IDENTITIES.tyler.pubkey}`;
+  const aliceDraftStoreKey = `${DRAFT_STORE_KEY_PREFIX}:${relayScope}:${TEST_IDENTITIES.alice.pubkey}`;
+
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      relayRequiresMembership: true,
+      relayRole: null,
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  // Seed a draft in tyler's identity-scoped bucket after boot, as if typed in
+  // an earlier session. Written directly to localStorage (not through the
+  // live store) so it exercises the persisted bucket, not the memory cache.
+  await page.evaluate(
+    ([draftStoreKey, channelId]) => {
+      const now = new Date().toISOString();
+      window.localStorage.setItem(
+        draftStoreKey,
+        JSON.stringify({
+          [channelId]: {
+            content: "tyler private draft",
+            selectionStart: 0,
+            selectionEnd: 0,
+            channelId,
+            createdAt: now,
+            updatedAt: now,
+            pendingImeta: [],
+            spoileredAttachmentUrls: [],
+            status: "active",
+          },
+        }),
+      );
+    },
+    [tylerDraftStoreKey, GENERAL_CHANNEL_ID] as const,
+  );
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("membership-denied")).toBeVisible();
+
+  // Seed identity-unkeyed data into tyler's live community query client and
+  // capture the client instance so its replacement is provable.
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E_QUERY_CLIENT__?: {
+        setQueryData: (key: unknown[], data: unknown) => void;
+      };
+      __BUZZ_E2E_PREVIOUS_QUERY_CLIENT__?: unknown;
+    };
+    const client = testWindow.__BUZZ_E2E_QUERY_CLIENT__;
+    if (!client) {
+      throw new Error("community query client seam is not installed");
+    }
+    // A key no production query uses: real keys (projects/channels) would be
+    // refetched by B's session and mask whether the CACHE was dropped.
+    client.setQueryData(
+      ["e2e-identity-boundary-probe"],
+      [{ id: "tyler-cached-project" }],
+    );
+    testWindow.__BUZZ_E2E_PREVIOUS_QUERY_CLIENT__ = client;
+  });
+
+  // Import alice (B) through the in-app denied-membership key swap.
+  await page.getByTestId("membership-denied-change-key").click();
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("membership-denied-nsec-input").fill(importedNsec);
+  await expect(
+    page.getByTestId("membership-denied-npub-preview"),
+  ).toBeVisible();
+  await page.getByTestId("membership-denied-import-key").click();
+
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expectHomeView(page);
+
+  // Leg 1 — the community boundary was rebuilt for B: a fresh query client
+  // replaced tyler's, and the seeded cache entry did not survive into
+  // alice's session.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const testWindow = window as Window & {
+          __BUZZ_E2E_QUERY_CLIENT__?: {
+            getQueryData: (key: unknown[]) => unknown;
+          };
+          __BUZZ_E2E_PREVIOUS_QUERY_CLIENT__?: unknown;
+        };
+        const client = testWindow.__BUZZ_E2E_QUERY_CLIENT__;
+        if (!client) return "client-missing";
+        if (client === testWindow.__BUZZ_E2E_PREVIOUS_QUERY_CLIENT__) {
+          return "client-retained";
+        }
+        return client.getQueryData(["e2e-identity-boundary-probe"]) ===
+          undefined
+          ? "rebuilt"
+          : "cache-retained";
+      }),
+    )
+    .toBe("rebuilt");
+
+  // Leg 2 — alice opens the channel tyler's seeded draft targets: the
+  // composer must not restore another identity's draft.
+  await page.getByTestId("channel-general").click();
+  const composerInput = page.getByTestId("message-input");
+  await expect(composerInput).toBeVisible();
+  await expect(composerInput).not.toContainText("tyler private draft");
+
+  // A draft typed by alice persists in alice's bucket, never tyler's. Draft
+  // persistence flushes on composer teardown, so switch channels after typing.
+  await composerInput.fill("alice draft after import");
+  await page.getByTestId("channel-random").click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ([aliceKey, tylerKey]) => {
+          const aliceStore = window.localStorage.getItem(aliceKey) ?? "";
+          const tylerStore = window.localStorage.getItem(tylerKey) ?? "";
+          return {
+            aliceHasDraft: aliceStore.includes("alice draft after import"),
+            tylerBucketLeaked: tylerStore.includes("alice draft after import"),
+            tylerDraftIntact: tylerStore.includes("tyler private draft"),
+          };
+        },
+        [aliceDraftStoreKey, tylerDraftStoreKey] as const,
+      ),
+    )
+    .toEqual({
+      aliceHasDraft: true,
+      tylerBucketLeaked: false,
+      tylerDraftIntact: true,
+    });
+
+  // Leg 3 — alice's own draft restores from alice's bucket, and her first
+  // send succeeds. The mock's send handler asserts the frontend-captured
+  // signer against the active identity, so a send that still carried tyler's
+  // cached identity would be rejected and never render.
+  await page.getByTestId("channel-general").click();
+  await expect(composerInput).toContainText("alice draft after import");
+  await composerInput.fill("hello from alice");
+  await composerInput.press("Enter");
+  await expect(page.getByText("hello from alice").first()).toBeVisible();
+  await expect(composerInput).not.toContainText("hello from alice");
+
+  // Leg 4 — A restoration: relaunch as tyler (fully onboarded this time,
+  // open relay) on the same relay. Tyler's bucket must restore tyler's
+  // draft untouched by alice's session, and alice's draft must stay in
+  // alice's bucket. Tyler is not a member of the mock starter channels, so
+  // reach general through the channel browser.
+  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
+  await installMockBridge(page);
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+  await page
+    .getByTestId("browse-channel-general")
+    .getByRole("button", { name: "Join" })
+    .click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(composerInput).toContainText("tyler private draft");
+  await expect(composerInput).not.toContainText("alice draft after import");
 });
 
 test("onboarding relay reconnect — click shows Connected then auto-dismisses", async ({

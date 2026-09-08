@@ -728,6 +728,27 @@ impl BuzzClient {
         self.query_pages(filter, None).await
     }
 
+    /// Query a filter exhaustively up to `max_events`.
+    ///
+    /// One extra event is requested so reaching the bound is reported as
+    /// truncation instead of being mistaken for authoritative absence.
+    pub async fn query_all_bounded(
+        &self,
+        filter: serde_json::Value,
+        max_events: u32,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        let probe_limit = max_events
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("query bound is too large".into()))?;
+        let events = self.query_pages(filter, Some(probe_limit)).await?;
+        if events.len() > max_events as usize {
+            return Err(CliError::Other(format!(
+                "query exceeded the exhaustive {max_events}-event bound; narrow the query or retry"
+            )));
+        }
+        Ok(events)
+    }
+
     /// Sign an event builder verbatim: no NIP-OA auth-tag injection, and none
     /// of [`sign_event`]'s "callers must not add auth tags" enforcement.
     ///
@@ -843,6 +864,47 @@ impl BuzzClient {
                     .with_auth_tag(self.http.get(&url).header("Authorization", auth))
                     .send()
                     .await?;
+                self.handle_response(resp).await
+            }
+        })
+        .await
+    }
+
+    /// POST a JSON body to a relay-relative path with NIP-98 authentication.
+    ///
+    /// Used by `buzz gifs search` and `buzz gifs share` to reach the relay's
+    /// KLIPY proxy endpoints.  Returns the raw response body as a string (may
+    /// be empty for 204 No Content responses).
+    pub async fn post_json_authed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body_bytes = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| CliError::Other(format!("request serialization failed: {e}")))?,
+        );
+        self.with_retry_body(|| {
+            let body_bytes = body_bytes.clone();
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/json")
+                            .body(body_bytes),
+                    )
+                    .send()
+                    .await?;
+                // 204 No Content: return empty string rather than failing on
+                // an empty body that cannot be parsed as JSON.
+                if resp.status() == reqwest::StatusCode::NO_CONTENT {
+                    return Ok(String::new());
+                }
                 self.handle_response(resp).await
             }
         })
@@ -1302,20 +1364,24 @@ fn to_ws_url(http_url: &str) -> String {
         .replace("http://", "ws://")
 }
 
-/// Normalize raw event JSON array into consistent shape.
-/// Each event becomes: {id, pubkey, kind, content, created_at, tags}
+/// Normalize raw event JSON array into the canonical Nostr event shape.
+/// String signatures are preserved; absent or non-string signatures remain absent.
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
     let normalized: Vec<serde_json::Value> = events
         .iter()
         .map(|e| {
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                 "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
                 "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
                 "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
                 "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
+            });
+            if let Some(sig) = e.get("sig").and_then(|v| v.as_str()) {
+                event["sig"] = serde_json::json!(sig);
+            }
+            event
         })
         .collect();
     serde_json::to_string(&normalized).unwrap_or_default()
@@ -2304,9 +2370,41 @@ mod retry_policy_tests {
 mod tests {
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        BuzzClient,
+        normalize_events, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn normalize_events_preserves_the_complete_signed_event_shape() {
+        let signed_event = EventBuilder::new(Kind::TextNote, "signed content")
+            .tags([Tag::parse(["h", "channel-id"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut event = serde_json::to_value(&signed_event).unwrap();
+        event["relay_internal"] = serde_json::json!("excluded");
+
+        let output: Vec<serde_json::Value> =
+            serde_json::from_str(&normalize_events(&[event])).unwrap();
+        let normalized = &output[0];
+        let round_tripped: nostr::Event = serde_json::from_value(normalized.clone()).unwrap();
+
+        assert_eq!(round_tripped, signed_event);
+        round_tripped.verify().unwrap();
+        assert!(normalized.get("sig").is_some());
+        assert!(normalized.get("relay_internal").is_none());
+    }
+
+    #[test]
+    fn normalize_events_omits_missing_or_non_string_signatures() {
+        let output: Vec<serde_json::Value> = serde_json::from_str(&normalize_events(&[
+            serde_json::json!({}),
+            serde_json::json!({"sig": 42}),
+        ]))
+        .unwrap();
+
+        assert!(output[0].get("sig").is_none());
+        assert!(output[1].get("sig").is_none());
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {

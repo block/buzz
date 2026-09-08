@@ -164,6 +164,7 @@ mod tests {
 
     fn sample_agent() -> ManagedAgentRecord {
         ManagedAgentRecord {
+            description: None,
             pubkey: "agentpubkeyhex".to_string(),
             name: "Test Agent".to_string(),
             persona_id: Some("persona-1".to_string()),
@@ -193,6 +194,7 @@ mod tests {
                 config: serde_json::json!({ "api_key": "sk-provider-secret" }),
             },
             backend_agent_id: Some("remote-id".to_string()),
+            provider_policy_pending: false,
             provider_binary_path: Some("/path/to/binary".to_string()),
             team_id: None,
             persona_team_dir: None,
@@ -218,10 +220,12 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            effort_level: None,
         }
     }
 

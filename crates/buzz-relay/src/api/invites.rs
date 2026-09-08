@@ -247,7 +247,11 @@ async fn authenticate(
         })?;
 
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
-    let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
+    let bridge::VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = bridge::verify_bridge_auth_with_options(
         headers,
         "POST",
         &url,
@@ -537,7 +541,7 @@ fn claim_key_rate_limited(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use std::sync::Arc;
     use std::time::Duration;
 

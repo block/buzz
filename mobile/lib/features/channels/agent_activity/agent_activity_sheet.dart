@@ -5,7 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../shared/theme/theme.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
-import '../../profile/user_cache_provider.dart';
+import '../../../shared/profile/user_cache_provider.dart';
 import '../date_formatters.dart';
 import 'observer_models.dart';
 import 'observer_subscription.dart';

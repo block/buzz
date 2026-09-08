@@ -29,6 +29,7 @@ import 'channels_provider.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
+import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
 part 'message_content/token_pill.dart';
@@ -272,6 +273,7 @@ class MessageContent extends HookConsumerWidget {
           ref,
           linkText,
           url,
+          imetaByUrl[url],
           linkStyle,
           style,
           resolvedChannelTap,
@@ -287,7 +289,11 @@ class MessageContent extends HookConsumerWidget {
             agentMentionPubkeys: resolvedAgentMentionPubkeys,
             onMentionTap: onMentionTap,
           ),
-          CustomEmojiMd(customEmoji, size: inlineCustomEmojiSize),
+          CustomEmojiMd(
+            customEmoji,
+            content: finalContent,
+            size: inlineCustomEmojiSize,
+          ),
           _ChannelLinkMd(
             channelNames: resolvedChannelNames,
             onChannelTap: resolvedChannelTap,
@@ -319,6 +325,17 @@ class MessageContent extends HookConsumerWidget {
 
   Widget _buildMedia(BuildContext context, String imageUrl, ImetaEntry? imeta) {
     final mediaKind = classifyMediaUrl(imageUrl, imeta: imeta);
+    if (mediaKind == MessageMediaKind.audio) {
+      return Padding(
+        padding: const EdgeInsets.only(top: Grid.half),
+        child: VoiceNoteAttachment.remote(
+          url: imageUrl,
+          duration: Duration(
+            milliseconds: ((imeta?.duration ?? 0) * 1000).round(),
+          ),
+        ),
+      );
+    }
     if (mediaKind == MessageMediaKind.video) {
       return _MessageVideoPreview(
         url: imageUrl,
@@ -340,6 +357,7 @@ class MessageContent extends HookConsumerWidget {
     WidgetRef ref,
     InlineSpan linkText,
     String url,
+    ImetaEntry? imeta,
     TextStyle linkStyle,
     TextStyle? fallbackStyle,
     void Function(String channelId) resolvedChannelTap,
@@ -354,6 +372,10 @@ class MessageContent extends HookConsumerWidget {
     });
 
     final baseStyle = fallbackStyle ?? linkStyle;
+    if (imeta != null &&
+        classifyMediaUrl(url, imeta: imeta) == MessageMediaKind.audio) {
+      return _buildMedia(context, url, imeta);
+    }
     final uri = Uri.tryParse(url);
     final buzzLink = uri?.scheme == 'buzz'
         ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)

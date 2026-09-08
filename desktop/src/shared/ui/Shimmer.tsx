@@ -16,6 +16,11 @@ export function Shimmer({ children, className }: ShimmerProps) {
       }
     >
       {children}
+      {/* Visual-only highlight copy; the sibling text node above is the sole
+          accessible content. */}
+      <span aria-hidden="true" className="buzz-shimmer-overlay">
+        {children}
+      </span>
     </span>
   );
 }

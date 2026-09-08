@@ -1,9 +1,11 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import {
+  agentConfigSurfaceQueryKey,
   useAcpRuntimesQuery,
   useAgentConfigSurface,
   useBakedBuildEnvKeysQuery,
@@ -25,6 +27,7 @@ import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
+import { EffortPickerField } from "./EffortPickerField";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   ADVANCED_FIELDS_MOTION_TRANSITION,
@@ -39,7 +42,6 @@ import {
   NO_RUNTIME_DROPDOWN_VALUE,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
-  PERSONA_LABEL_OPTIONAL_CLASS,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
@@ -54,6 +56,7 @@ import {
   envVarsEqual,
   isEditAgentProviderSaveValid,
   resolveAgentCommandUpdate,
+  resolveEffortSubmission,
   resolveInheritedRuntimeSubmission,
   resolveRuntimeProviderCapability,
 } from "./personaRuntimeModel";
@@ -73,15 +76,12 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
+import { EditAgentProviderModelFields } from "./EditAgentProviderModelFields";
 import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import {
-  getProviderApiKeyEnvVar,
-  getProviderApiKeyLabel,
-} from "./agentConfigOptions";
+import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -115,6 +115,13 @@ export function AgentInstanceEditDialog({
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
   const startMutation = useStartManagedAgentMutation();
+  const queryClient = useQueryClient();
+  // Spans the COMPLETE Save sequence (locked update + standalone setters).
+  // Every gate must key off this, not updateMutation.isPending alone.
+  const [isSaving, setIsSaving] = React.useState(false);
+  // Surfaces a standalone-setter failure (auto-restart or effort) that React
+  // Query does not track — keeps the dialog open so the user can retry Save.
+  const [setterError, setSetterError] = React.useState<Error | null>(null);
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
@@ -145,6 +152,13 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  // Effort picker is Save-gated: hold the pending selection in dialog state and
+  // embed it in the locked update payload on Save alone (see
+  // resolveEffortSubmission / handleSubmit — PR #4625), never on selection.
+  // `effortTouched` distinguishes "user picked a value" from "showing the
+  // config-surface effective value", so an untouched Save writes nothing.
+  const [effortLevel, setEffortLevel] = React.useState<string | null>(null);
+  const effortTouched = React.useRef(false);
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -194,6 +208,9 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      setEffortLevel(null);
+      effortTouched.current = false;
+      setSetterError(null);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
@@ -267,10 +284,10 @@ export function AgentInstanceEditDialog({
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
   }, [runtimes, originalAgentCommand]);
 
-  // The runtime id active after submit. Inheriting resolves from the LINKED PERSONA's runtime
-  // (that is what runs once the override is cleared, not the current override).
-  // Falls back to dual-match (command path, then id) when no persona or its runtime is unset.
-  // This single prospective id feeds BOTH the block-save gate and submit so they always agree.
+  // The runtime id active after submit — the single prospective id feeding BOTH
+  // the block-save gate and submit so they always agree. Inheriting resolves
+  // from the LINKED PERSONA's runtime (what runs once the override is cleared),
+  // falling back to dual-match (command path, then id) when no persona.
   const prospectiveRuntimeId = React.useMemo(() => {
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
@@ -425,11 +442,10 @@ export function AgentInstanceEditDialog({
     selectedRuntime,
   });
 
-  // D2: derive advancedRequiredEnvKeys for EnvVarsEditor display.
-  // The full requiredEnvKeys/requiredEnvKeyMissing continue driving Save gating.
-  // D2/D3: the top-level API key owns display, while the readiness gate keeps
-  // the complete required-key list. The effective snapshot covers persona
-  // inheritance during an instance inherit transition.
+  // D2/D3: the top-level API key owns display while the readiness gate keeps the
+  // complete required-key list; advancedRequiredEnvKeys drives EnvVarsEditor
+  // display only. The effective snapshot covers persona inheritance during an
+  // instance inherit transition.
   const providerApiKeyEnvVar = getProviderApiKeyEnvVar(effectiveProvider);
   const personaSatisfied =
     providerApiKeyEnvVar != null &&
@@ -507,10 +523,10 @@ export function AgentInstanceEditDialog({
     // Mark that the user has made an explicit runtime choice. The catalog-arrival
     // effect will no longer overwrite selectedRuntimeId after this point.
     runtimeTouched.current = true;
-
     const resolvedRuntimeId = nextRuntimeId || "custom";
     setSelectedRuntimeId(resolvedRuntimeId);
-
+    effortTouched.current = false;
+    setEffortLevel(null);
     const isCustomCommand = resolvedRuntimeId === "custom";
 
     // Only pin the harness when the selection can actually supply a command:
@@ -588,6 +604,10 @@ export function AgentInstanceEditDialog({
   }
 
   function handleOpenChange(next: boolean) {
+    // Reject user-originated dismissals (Escape, overlay, close-X, Cancel) while
+    // a Save is in flight — the in-flight setters must not commit to a closed dialog.
+    // The success path calls onOpenChange(false) directly, bypassing this guard.
+    if (!next && isSaving) return;
     onOpenChange(next);
   }
 
@@ -613,10 +633,12 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
-    !updateMutation.isPending &&
+    !isSaving &&
     !isAvatarUploadPending;
 
   async function handleSubmit() {
+    setIsSaving(true);
+    setSetterError(null);
     try {
       const parsedParallelism = Number.parseInt(parallelism, 10);
       const parsedArgs = agentArgs
@@ -693,11 +715,9 @@ export function AgentInstanceEditDialog({
             : normalizedModel !== (agent.model ?? null)
               ? normalizedModel
               : undefined,
-        // Tri-state provider persistence keyed on providerRuntimeCapability:
-        //   "capable"  → persist: value if changed, omit if unchanged.
-        //   "locked"   → clear: send null if provider was set, else omit.
-        //   "unknown"  → omit always (never send null for a transient state).
-        // llmProviderFieldVisible is for UX visibility only; not used here.
+        // Tri-state provider persistence keyed on providerRuntimeCapability
+        // (see the classification comment above for the capable/locked/unknown
+        // contract). llmProviderFieldVisible is UX visibility only; not used here.
         provider:
           linkedPersona != null
             ? undefined
@@ -727,17 +747,53 @@ export function AgentInstanceEditDialog({
             : undefined,
       };
 
-      const result = await updateMutation.mutateAsync(input);
-      if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
-        // Standalone setter (mirrors start-on-app-launch) — not part of
-        // UpdateManagedAgentInput, so the frozen update shape stays frozen.
-        await setManagedAgentAutoRestart(
-          agent.pubkey,
-          autoRestartOnConfigChange,
-        );
+      // Resolve effort before the update so access-change restarts can
+      // snapshot and launch the NEW effort value atomically.
+      const effortSubmission = resolveEffortSubmission({
+        effortLevel,
+        originalEffortLevel:
+          configSurfaceQuery.data?.normalized.thinkingEffort?.value ?? null,
+        inheritTransition: agentCommandUpdate === "",
+      });
+      // Include effort in the locked update when touched (tri-state: absent =
+      // don't touch; null = clear; string = set). Only when effortSubmission.persist.
+      if (effortTouched.current && effortSubmission.persist) {
+        input.effortLevel = effortSubmission.level;
       }
+
+      const result = await updateMutation.mutateAsync(input);
+
+      // Standalone setters — sequenced after the locked update resolves so the
+      // dialog remains fully gated (isSaving) for the COMPLETE Save transaction.
+      // A failure here surfaces as setterError (retryable) and aborts before
+      // close, keeping the dialog open so the user can retry Save.
+      try {
+        if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
+          // Mirrors start-on-app-launch; not part of UpdateManagedAgentInput so
+          // the frozen update shape stays frozen.
+          await setManagedAgentAutoRestart(
+            agent.pubkey,
+            autoRestartOnConfigChange,
+          );
+        }
+        // Effort disk write happened inside the locked update. Only need to
+        // invalidate the cache here (when effortTouched && effortSubmission.persist).
+        // If effort was not included (!effortSubmission.persist), nothing to do.
+        if (effortTouched.current && effortSubmission.persist) {
+          // Disk write already done; invalidate so the panel tier reflects it.
+          await queryClient.invalidateQueries({
+            queryKey: agentConfigSurfaceQueryKey(agent.pubkey),
+          });
+        }
+      } catch (e) {
+        setSetterError(e instanceof Error ? e : new Error("Failed to save"));
+        return;
+      }
+
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
-      handleOpenChange(false);
+      // Close via onOpenChange directly — handleOpenChange guards against
+      // mid-save dismissal and must not block the intentional post-success close.
+      onOpenChange(false);
       onUpdated?.(result.agent);
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
@@ -763,7 +819,9 @@ export function AgentInstanceEditDialog({
         });
       }
     } catch {
-      // React Query stores the error; keep dialog open and render it inline.
+      // React Query stores the update error; keep dialog open and render it inline.
+    } finally {
+      setIsSaving(false);
     }
   }
 
@@ -846,6 +904,11 @@ export function AgentInstanceEditDialog({
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
+  // Displayed inline when either the locked update or a standalone setter fails.
+  // setterError takes precedence — the update already committed when it fires.
+  const displayError =
+    setterError ??
+    (updateMutation.error instanceof Error ? updateMutation.error : null);
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
@@ -859,7 +922,7 @@ export function AgentInstanceEditDialog({
         footer={
           <div className="flex w-full items-center justify-end gap-2">
             <Button
-              disabled={updateMutation.isPending || isAvatarUploadPending}
+              disabled={isSaving || isAvatarUploadPending}
               onClick={() => handleOpenChange(false)}
               type="button"
               variant="outline"
@@ -872,7 +935,7 @@ export function AgentInstanceEditDialog({
               onClick={() => void handleSubmit()}
               type="button"
             >
-              {updateMutation.isPending ? "Saving..." : "Save changes"}
+              {isSaving ? "Saving..." : "Save changes"}
             </Button>
           </div>
         }
@@ -892,6 +955,7 @@ export function AgentInstanceEditDialog({
             {onEditLinkedPersona ? (
               <Button
                 className="w-full"
+                disabled={isSaving}
                 onClick={() => {
                   handleOpenChange(false);
                   onEditLinkedPersona();
@@ -928,7 +992,7 @@ export function AgentInstanceEditDialog({
                     "h-8 px-0 py-0 leading-6",
                     PERSONA_FIELD_CONTROL_CLASS,
                   )}
-                  disabled={updateMutation.isPending}
+                  disabled={isSaving}
                   id="edit-agent-name"
                   onChange={(event) => setName(event.target.value)}
                   placeholder="Agent name"
@@ -939,7 +1003,7 @@ export function AgentInstanceEditDialog({
             <OwnerOnlyAccessField
               accessLocked={agentAccessOwnerOnly === true}
               allowlist={respondToAllowlist}
-              disabled={updateMutation.isPending}
+              disabled={isSaving}
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
@@ -955,7 +1019,7 @@ export function AgentInstanceEditDialog({
                 Provider
               </label>
               <PersonaDropdownField
-                disabled={updateMutation.isPending}
+                disabled={isSaving}
                 id="edit-agent-runtime"
                 onValueChange={handleRuntimeDropdownChange}
                 options={runtimeDropdownOptions}
@@ -998,7 +1062,7 @@ export function AgentInstanceEditDialog({
                       "h-8 px-0 py-0 leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
                     )}
-                    disabled={updateMutation.isPending}
+                    disabled={isSaving}
                     id="edit-agent-command"
                     onChange={(event) => setAgentCommand(event.target.value)}
                     placeholder="Full path or shell command"
@@ -1007,129 +1071,62 @@ export function AgentInstanceEditDialog({
                 </div>
               </div>
             ) : null}
-            {/* LLM provider */}
-            {llmProviderFieldVisible ? (
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="edit-agent-llm-provider"
-                >
-                  LLM provider
-                  {providerRequired ? (
-                    <span className="ml-1 text-destructive" aria-hidden="true">
-                      *
-                    </span>
-                  ) : (
-                    <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
-                      Optional
-                    </span>
-                  )}
-                </label>
-                <PersonaDropdownField
-                  disabled={updateMutation.isPending}
-                  id="edit-agent-llm-provider"
-                  onValueChange={handleProviderDropdownChange}
-                  options={providerDropdownOptions}
-                  placeholder="Default (auto)"
-                  value={providerSelectValue}
-                />
-                {isCustomProviderEditing ? (
-                  <div
-                    className={cn(
-                      "mt-2 flex min-h-11 items-center px-3",
-                      PERSONA_FIELD_SHELL_CLASS,
-                    )}
-                  >
-                    <Input
-                      aria-label="Custom provider ID"
-                      autoCorrect="off"
-                      className={cn(
-                        "h-8 px-0 py-0 leading-6",
-                        PERSONA_FIELD_CONTROL_CLASS,
-                      )}
-                      disabled={updateMutation.isPending}
-                      id="edit-agent-custom-provider"
-                      onChange={(event) => setProvider(event.target.value)}
-                      placeholder="Custom provider ID"
-                      value={provider}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
+            {/* LLM provider + provider API key + model */}
+            <EditAgentProviderModelFields
+              disabled={isSaving}
+              llmProviderFieldVisible={llmProviderFieldVisible}
+              providerRequired={providerRequired}
+              providerDropdownOptions={providerDropdownOptions}
+              providerSelectValue={providerSelectValue}
+              onProviderDropdownChange={handleProviderDropdownChange}
+              isCustomProviderEditing={isCustomProviderEditing}
+              provider={provider}
+              onProviderChange={setProvider}
+              topLevelSecretEnvVar={topLevelSecretEnvVar}
+              apiKeyIsInherited={apiKeyIsInherited}
+              apiKeyInheritedLabel={apiKeyInheritedLabel}
+              apiKeyIsRequired={apiKeyIsRequired}
+              effectiveProvider={effectiveProvider}
+              apiKeyValue={apiKeyValue}
+              onApiKeyChange={(next) => {
+                setEnvVars((prev) => ({
+                  ...prev,
+                  [topLevelSecretEnvVar as string]: next,
+                }));
+              }}
+              modelRequired={modelRequired}
+              modelDiscoveryLoading={modelDiscoveryLoading}
+              modelDropdownOptions={modelDropdownOptions}
+              modelSelectValue={modelSelectValue}
+              onModelDropdownChange={handleModelDropdownChange}
+              showCustomModelInput={showCustomModelInput}
+              model={model}
+              onModelChange={setModel}
+              modelStatusMessage={modelStatusMessage}
+            />
 
-            {llmProviderFieldVisible && topLevelSecretEnvVar ? (
-              <PersonaProviderApiKeyField
-                disabled={updateMutation.isPending}
-                envVarName={topLevelSecretEnvVar}
-                isInherited={apiKeyIsInherited}
-                inheritedLabel={apiKeyInheritedLabel}
-                isRequired={apiKeyIsRequired}
-                label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
-                onValueChange={(next) => {
-                  setEnvVars((prev) => ({
-                    ...prev,
-                    [topLevelSecretEnvVar]: next,
-                  }));
-                }}
-                value={apiKeyValue}
-              />
-            ) : null}
-
-            {/* Model */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-model"
-              >
-                Model
-                {modelRequired ? (
-                  <span className="ml-1 text-destructive" aria-hidden="true">
-                    *
-                  </span>
-                ) : (
-                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-                )}
-              </label>
-              <PersonaDropdownField
-                disabled={updateMutation.isPending || modelDiscoveryLoading}
-                id="edit-agent-model"
-                onValueChange={handleModelDropdownChange}
-                options={modelDropdownOptions}
-                placeholder="Default model"
-                value={modelSelectValue}
-              />
-              {showCustomModelInput ? (
-                <div
-                  className={cn(
-                    "mt-2 flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    aria-label="Custom model ID"
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={updateMutation.isPending}
-                    id="edit-agent-custom-model"
-                    onChange={(event) => setModel(event.target.value)}
-                    placeholder="Custom model ID"
-                    value={model}
-                  />
-                </div>
-              ) : null}
-              {modelStatusMessage ? (
-                <p className="text-xs text-muted-foreground">
-                  {modelStatusMessage}
-                </p>
-              ) : null}
-            </div>
+            <EffortPickerField
+              agent={agent}
+              config={
+                runtimeTouched.current ? undefined : configSurfaceQuery.data
+              }
+              disabled={isSaving}
+              value={
+                effortTouched.current
+                  ? effortLevel
+                  : (configSurfaceQuery.data?.normalized.thinkingEffort
+                      ?.value ?? null)
+              }
+              onChange={(level) => {
+                effortTouched.current = true;
+                setEffortLevel(level);
+              }}
+            />
 
             <AgentAiDefaultsNotice
-              onEditDefaults={() => setAiDefaultsOpen(true)}
+              onEditDefaults={() => {
+                if (!isSaving) setAiDefaultsOpen(true);
+              }}
               triggerRef={aiDefaultsTriggerRef}
               explicitModel={inheritedSubmission.model ?? ""}
               explicitProvider={inheritedSubmission.provider ?? ""}
@@ -1147,7 +1144,8 @@ export function AgentInstanceEditDialog({
             <div className="space-y-3">
               <button
                 aria-expanded={showAdvancedFields}
-                className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+                disabled={isSaving}
                 onClick={() => setShowAdvancedFields((current) => !current)}
                 type="button"
               >
@@ -1178,7 +1176,7 @@ export function AgentInstanceEditDialog({
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
-                      disabled={updateMutation.isPending}
+                      disabled={isSaving}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
                       hiddenEnvKeys={
@@ -1213,11 +1211,11 @@ export function AgentInstanceEditDialog({
               </AnimatePresence>
             </div>
 
-            {/* Error */}
-            {updateMutation.error instanceof Error ? (
-              <p className="text-sm text-destructive">
-                {updateMutation.error.message}
-              </p>
+            {/* Error — covers both the locked update (React Query) and the
+                standalone setters (setterError); setter error takes precedence
+                since the update already committed when it fires. */}
+            {displayError != null ? (
+              <p className="text-sm text-destructive">{displayError.message}</p>
             ) : null}
           </div>
         </div>

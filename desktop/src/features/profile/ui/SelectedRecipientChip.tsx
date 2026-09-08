@@ -50,7 +50,8 @@ export function SelectedRecipientChip({
       <button
         aria-label={`Remove ${label}`}
         className={cn(
-          "group/remove-recipient relative h-5 w-5 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+          "group/remove-recipient relative h-5 w-5 shrink-0 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+          user.isAgent ? "rounded-[30%]" : "rounded-full",
           poofOnRemove && POOF_TRIGGER_CLASS,
           poofOnRemove && POOF_ORIGIN_CLASS,
           poofOnRemove && POOF_POINTER_ORIGIN_CLASS,
@@ -75,8 +76,14 @@ export function SelectedRecipientChip({
           className="h-5 w-5 text-3xs shadow-none transition-opacity group-hover/remove-recipient:opacity-0 group-focus-visible/remove-recipient:opacity-0"
           iconClassName="h-2.5 w-2.5"
           label={label}
+          shape={user.isAgent ? "squircle" : "circle"}
         />
-        <span className="absolute inset-0 flex items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover/remove-recipient:opacity-100 group-focus-visible/remove-recipient:opacity-100">
+        <span
+          className={cn(
+            "absolute inset-0 flex items-center justify-center bg-foreground text-background opacity-0 transition-opacity group-hover/remove-recipient:opacity-100 group-focus-visible/remove-recipient:opacity-100",
+            user.isAgent ? "rounded-[30%]" : "rounded-full",
+          )}
+        >
           <X aria-hidden="true" className="h-3 w-3" />
         </span>
       </button>

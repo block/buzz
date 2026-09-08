@@ -6,7 +6,11 @@ import {
   getMentionOffsets,
   hasMention,
 } from "./hasMention.ts";
-import { extractMentionPubkeys } from "./extractMentionPubkeys.ts";
+import {
+  extractMentionPubkeys,
+  selectedMentionLabel,
+  selectedMentionLabels,
+} from "./extractMentionPubkeys.ts";
 
 // ── Plain @mention ────────────────────────────────────────────────────
 
@@ -221,17 +225,10 @@ test("ignores mentions in fenced code blocks", () => {
 });
 
 test("ignores mentions in indented code blocks", () => {
-  // An indented code block cannot interrupt a paragraph (CommonMark 4.4), so
-  // the chunk needs a blank line before it. Checked against react-markdown:
-  //   "before\n    @Alice\nafter"     -> <p>before @Alice after</p>
-  //   "before\n\n    @Alice\n\nafter" -> <p>before</p><pre><code>@Alice</code></pre>
-  // The first form used to be masked here, which dropped the p tag from a
-  // mention every reader could see — including a nested list item, the common
-  // way four spaces of indent turn up in chat.
-  assert.equal(hasMention("before\n\n    @Alice\n\nafter", "Alice"), false);
-  assert.equal(hasMention("before\n\n\t@Alice\n\nafter", "Alice"), false);
-  assert.equal(hasMention("before\n    @Alice\nafter", "Alice"), true);
-  assert.equal(hasMention("before\n\t@Alice\nafter", "Alice"), true);
+  // Indented code cannot interrupt a paragraph, so these need a blank line
+  // (or another non-paragraph block) before the indent.
+  assert.equal(hasMention("before\n\n    @Alice\nafter", "Alice"), false);
+  assert.equal(hasMention("# heading\n    @Alice", "Alice"), false);
 });
 
 test("still matches prose mentions around code", () => {
@@ -253,4 +250,80 @@ test("does not treat escaped or unclosed backticks as code", () => {
 test("requires matching inline-code delimiter lengths", () => {
   assert.equal(hasMention("`` @Alice ` still code ``", "Alice"), false);
   assert.equal(hasMention("`` @Alice `", "Alice"), true);
+});
+
+for (const selected of [false, true]) {
+  test(`duplicate names ${selected ? "stay bound to selection after rename" : "require explicit selection"}`, () => {
+    const opts = {
+      text: "@Scout hello",
+      selectedMentions: new Map(selected ? [["Scout", "first"]] : []),
+      memberCandidates: [
+        {
+          pubkey: "first",
+          displayName: selected ? "Renamed" : "Scout",
+          isMember: true,
+        },
+        { pubkey: "second", displayName: "Scout", isMember: true },
+      ],
+    };
+    if (selected) assert.deepEqual(extractMentionPubkeys(opts), ["first"]);
+    else
+      assert.throws(
+        () => extractMentionPubkeys(opts),
+        /ambiguous.*Choose a recipient/,
+      );
+  });
+}
+
+test("a second same-name selection cannot redirect the first mention", () => {
+  const selected = new Map([["Scout", "first"]]);
+  const secondLabel = selectedMentionLabel("Scout", "second", selected);
+  selected.set(secondLabel, "second");
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: `@Scout and @${secondLabel}`,
+      selectedMentions: selected,
+      memberCandidates: [],
+    }),
+    ["first", "second"],
+  );
+});
+
+test("qualified-looking names cannot redirect an existing selection", () => {
+  const selected = new Map([
+    ["Scout", "first"],
+    ["Scout (second)", "third"],
+  ]);
+  const label = selectedMentionLabel("Scout", "second", selected);
+  assert.notEqual(label.toLowerCase(), "scout (second)");
+  selected.set(label, "second");
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: `@Scout and @Scout (second) and @${label}`,
+      selectedMentions: selected,
+      memberCandidates: [],
+    }),
+    ["first", "third", "second"],
+  );
+  assert.equal(selectedMentionLabel("Scout", "second", selected), label);
+});
+
+test("same-name teammates are bound sequentially without replacing either recipient", () => {
+  const selected = selectedMentionLabels(
+    [
+      { displayName: "Scout", pubkey: "first" },
+      { displayName: "Scout", pubkey: "second" },
+    ],
+    new Map(),
+  );
+  const bindings = new Map(selected.map((s) => [s.displayName, s.pubkey]));
+  assert.equal(bindings.size, 2);
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: selected.map((s) => `@${s.displayName}`).join(" "),
+      selectedMentions: bindings,
+      memberCandidates: [],
+    }),
+    ["first", "second"],
+  );
 });

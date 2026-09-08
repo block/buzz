@@ -100,6 +100,7 @@ class ChannelMutesManager {
     );
     _store = ChannelMuteStore(channels: {..._store.channels, channelId: entry});
     _persist();
+    _onChanged();
     markDirty();
   }
 
@@ -111,6 +112,7 @@ class ChannelMutesManager {
     );
     _store = ChannelMuteStore(channels: {..._store.channels, channelId: entry});
     _persist();
+    _onChanged();
     markDirty();
   }
 

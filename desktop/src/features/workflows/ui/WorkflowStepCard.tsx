@@ -1,16 +1,82 @@
-import { Trash2 } from "lucide-react";
+import { ChevronRight, Trash2 } from "lucide-react";
+import { type ReactNode, useState } from "react";
 
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
+import { WorkflowTemplateTextarea } from "./WorkflowTemplateTextarea";
+import { WorkflowDurationField } from "./WorkflowDurationField";
+import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEditor";
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
-import { ACTION_LABELS, ACTION_TYPES } from "./workflowFormTypes";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
-import type {
-  ActionType,
-  StepFormState,
-  TriggerType,
+import {
+  isThreadReplyEligibleTrigger,
+  supportsMessageTextCondition,
+  type StepFormState,
+  type TriggerType,
 } from "./workflowFormTypes";
+
+const DEFAULT_STEP_TIMEOUT_SECONDS = 5 * 60;
+
+type StepSetting = "run-controls" | "details";
+
+function StepSettingAccordion({
+  children,
+  disabled,
+  expanded,
+  label,
+  onToggle,
+  summary,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  expanded: boolean;
+  label: string;
+  onToggle: () => void;
+  summary: string;
+}) {
+  return (
+    <div>
+      <button
+        aria-expanded={expanded}
+        className="flex min-h-12 w-full items-center gap-3 py-3 text-left transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={disabled}
+        onClick={onToggle}
+        type="button"
+      >
+        <span className="min-w-0 flex-1 truncate text-base font-medium">
+          {label}
+        </span>
+        <span className="max-w-40 truncate text-sm text-muted-foreground">
+          {summary}
+        </span>
+        <ChevronRight
+          className={cn(
+            "h-4 w-4 shrink-0 text-muted-foreground/70 transition-transform duration-150 motion-reduce:transition-none",
+            expanded && "rotate-90",
+          )}
+        />
+      </button>
+
+      {expanded ? (
+        <div className="animate-in pb-4 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none">
+          {children}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function runControlsSummary(step: StepFormState): string {
+  const hasCondition = Boolean(step.condition?.trim());
+  const timeout = step.timeoutSecs?.trim();
+  if (hasCondition && timeout) return `Conditional · ${timeout}`;
+  if (hasCondition) return "Conditional";
+  if (timeout) return timeout;
+  return "Default";
+}
 
 function BackendSupportHint({ action }: { action: StepFormState["action"] }) {
   switch (action) {
@@ -44,13 +110,17 @@ function StepConfigFields({
   step,
   prefix,
   disabled,
+  previousSteps,
   triggerType,
+  workflowChannelId,
   onUpdate,
 }: {
   step: StepFormState;
   prefix: string;
   disabled?: boolean;
+  previousSteps: StepFormState[];
   triggerType: TriggerType;
+  workflowChannelId?: string | null;
   onUpdate: (step: StepFormState) => void;
 }) {
   switch (step.action) {
@@ -75,43 +145,64 @@ function StepConfigFields({
         <div className="space-y-2">
           <div className="space-y-1.5">
             <FieldLabel htmlFor={`${prefix}-text`}>Message text</FieldLabel>
-            <Textarea
+            <WorkflowTemplateTextarea
               autoCapitalize="off"
               className="min-h-[60px] resize-y text-xs"
               disabled={disabled}
               id={`${prefix}-text`}
-              onChange={(event) =>
-                onUpdate({ ...step, text: event.target.value })
-              }
+              onValueChange={(text) => onUpdate({ ...step, text })}
               placeholder="e.g. Deployment started by {{trigger.author}}"
+              previousSteps={previousSteps}
+              triggerType={triggerType}
               value={step.text ?? ""}
             />
           </div>
-          <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-channel`}>
-              Channel override (optional)
-            </FieldLabel>
-            <Input
-              autoCapitalize="off"
-              disabled={disabled}
-              id={`${prefix}-channel`}
-              onChange={(event) =>
-                onUpdate({ ...step, channel: event.target.value })
-              }
-              placeholder="Channel UUID"
-              value={step.channel ?? ""}
-            />
+          {workflowChannelId ? (
             <p className="text-xs text-muted-foreground">
-              Leave empty to use the trigger channel. Webhook runs and manual
-              Trigger runs need an explicit channel override.
+              Messages post to the workflow channel selected above.
             </p>
-            {triggerType === "webhook" && !(step.channel ?? "").trim() ? (
-              <p className="text-xs text-amber-700">
-                This step will fail for webhook-triggered runs until a channel
-                override is set.
+          ) : (
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor={`${prefix}-channel`}>
+                Channel override (optional)
+              </FieldLabel>
+              <Input
+                autoCapitalize="off"
+                disabled={disabled}
+                id={`${prefix}-channel`}
+                onChange={(event) =>
+                  onUpdate({ ...step, channel: event.target.value })
+                }
+                placeholder="Channel UUID"
+                value={step.channel ?? ""}
+              />
+              <p className="text-xs text-muted-foreground">
+                Defaults to the channel that triggered the workflow. Webhook and
+                manual triggers require a channel.
               </p>
-            ) : null}
-          </div>
+              {triggerType === "webhook" && !(step.channel ?? "").trim() ? (
+                <p className="text-xs text-amber-700">
+                  This step will fail for webhook-triggered runs until a channel
+                  override is set.
+                </p>
+              ) : null}
+            </div>
+          )}
+          {isThreadReplyEligibleTrigger(triggerType) ? (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                checked={step.replyInThread === true}
+                disabled={disabled}
+                id={`${prefix}-reply-in-thread`}
+                onCheckedChange={(checked) =>
+                  onUpdate({ ...step, replyInThread: checked === true })
+                }
+              />
+              <label className="text-xs" htmlFor={`${prefix}-reply-in-thread`}>
+                Reply to triggering message in thread
+              </label>
+            </div>
+          ) : null}
         </div>
       );
     case "send_dm":
@@ -149,9 +240,9 @@ function StepConfigFields({
       );
     case "call_webhook":
       return (
-        <div className="space-y-3">
+        <div className="space-y-4">
           <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-url`}>URL</FieldLabel>
+            <FieldLabel htmlFor={`${prefix}-url`}>Endpoint URL</FieldLabel>
             <Input
               autoCapitalize="off"
               disabled={disabled}
@@ -169,9 +260,7 @@ function StepConfigFields({
             ) : null}
           </div>
           <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-method`}>
-              Method (optional)
-            </FieldLabel>
+            <FieldLabel htmlFor={`${prefix}-method`}>HTTP method</FieldLabel>
             <FormSelect
               disabled={disabled}
               id={`${prefix}-method`}
@@ -192,7 +281,9 @@ function StepConfigFields({
             stepId={step.id || prefix}
           />
           <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-body`}>Body (optional)</FieldLabel>
+            <FieldLabel htmlFor={`${prefix}-body`}>
+              Request body (optional)
+            </FieldLabel>
             <Textarea
               autoCapitalize="off"
               className="min-h-[60px] resize-y font-mono text-xs"
@@ -295,133 +386,146 @@ function StepConfigFields({
 }
 
 export function WorkflowStepCard({
+  bare = false,
+  showHeader = true,
   index,
   disabled,
   onRemove,
   onUpdate,
   step,
+  previousSteps = [],
   triggerType,
+  workflowChannelId,
 }: {
+  bare?: boolean;
+  showHeader?: boolean;
   index: number;
   disabled?: boolean;
   onRemove: () => void;
   onUpdate: (step: StepFormState) => void;
   step: StepFormState;
+  previousSteps?: StepFormState[];
   triggerType: TriggerType;
+  workflowChannelId?: string | null;
 }) {
   const prefix = `wf-step-${index}`;
+  const [expandedSetting, setExpandedSetting] = useState<StepSetting | null>(
+    null,
+  );
+
+  const toggleSetting = (setting: StepSetting) => {
+    setExpandedSetting((current) => (current === setting ? null : setting));
+  };
 
   return (
-    <div className="space-y-3 rounded-lg border border-border/70 bg-muted/10 p-3">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-muted-foreground">
-          Step {index + 1}
-        </span>
-        <Button
-          aria-label="Remove step"
-          className="h-7 w-7"
-          disabled={disabled}
-          onClick={onRemove}
-          size="icon"
-          type="button"
-          variant="ghost"
-        >
-          <Trash2 className="h-4 w-4 text-muted-foreground" />
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-id`}>Step ID</FieldLabel>
-          <Input
-            autoCapitalize="off"
+    <div
+      className={cn(
+        "space-y-0",
+        !bare && "rounded-lg border border-border/70 bg-muted/10 p-3",
+      )}
+    >
+      {showHeader ? (
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-muted-foreground">
+            Step {index + 1}
+          </span>
+          <Button
+            aria-label="Remove step"
+            className="h-7 w-7"
             disabled={disabled}
-            id={`${prefix}-id`}
-            onChange={(event) => onUpdate({ ...step, id: event.target.value })}
-            placeholder="unique_step_id"
-            value={step.id}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-name`}>
-            Step name (optional)
-          </FieldLabel>
-          <Input
-            autoCapitalize="off"
-            disabled={disabled}
-            id={`${prefix}-name`}
-            onChange={(event) =>
-              onUpdate({ ...step, name: event.target.value })
-            }
-            placeholder="Human-friendly label"
-            value={step.name ?? ""}
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-action`}>Action</FieldLabel>
-          <FormSelect
-            disabled={disabled}
-            id={`${prefix}-action`}
-            onChange={(value) => {
-              const next = { ...step, action: value as ActionType };
-              if (value === "call_webhook" && !next.method) {
-                next.method = "POST";
-              }
-              onUpdate(next);
-            }}
-            value={step.action}
+            onClick={onRemove}
+            size="icon"
+            type="button"
+            variant="ghost"
           >
-            {ACTION_TYPES.map((action) => (
-              <option key={action} value={action}>
-                {ACTION_LABELS[action]}
-              </option>
-            ))}
-          </FormSelect>
+            <Trash2 className="h-4 w-4 text-muted-foreground" />
+          </Button>
         </div>
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-timeout-secs`}>
-            Timeout seconds (optional)
-          </FieldLabel>
-          <Input
-            autoCapitalize="off"
-            disabled={disabled}
-            id={`${prefix}-timeout-secs`}
-            inputMode="numeric"
-            onChange={(event) =>
-              onUpdate({ ...step, timeoutSecs: event.target.value })
-            }
-            placeholder="e.g. 300"
-            value={step.timeoutSecs ?? ""}
-          />
-        </div>
-      </div>
+      ) : null}
 
-      <div className="space-y-1.5">
-        <FieldLabel htmlFor={`${prefix}-condition`}>
-          Run condition (optional)
-        </FieldLabel>
-        <Input
-          autoCapitalize="off"
+      <section className="space-y-4 pb-5">
+        <StepConfigFields
           disabled={disabled}
-          id={`${prefix}-condition`}
-          onChange={(event) =>
-            onUpdate({ ...step, condition: event.target.value })
-          }
-          placeholder='e.g. str_contains(trigger_text, "deploy")'
-          value={step.condition ?? ""}
+          onUpdate={onUpdate}
+          prefix={prefix}
+          previousSteps={previousSteps}
+          step={step}
+          triggerType={triggerType}
+          workflowChannelId={workflowChannelId}
         />
-      </div>
+      </section>
 
-      <StepConfigFields
-        disabled={disabled}
-        onUpdate={onUpdate}
-        prefix={prefix}
-        step={step}
-        triggerType={triggerType}
-      />
+      <section className="divide-y divide-border/50 border-t border-border/50">
+        <StepSettingAccordion
+          disabled={disabled}
+          expanded={expandedSetting === "run-controls"}
+          label="Run controls"
+          onToggle={() => toggleSetting("run-controls")}
+          summary={runControlsSummary(step)}
+        >
+          <div className="space-y-4">
+            {supportsMessageTextCondition(triggerType) ? (
+              <WorkflowMessageTextCondition
+                allowAdvanced={false}
+                disabled={disabled}
+                onChange={(condition) => onUpdate({ ...step, condition })}
+                value={step.condition ?? ""}
+              />
+            ) : null}
+            <WorkflowDurationField
+              disabled={disabled}
+              fallbackSeconds={DEFAULT_STEP_TIMEOUT_SECONDS}
+              id={`${prefix}-timeout-secs`}
+              label="Timeout"
+              onChange={(timeoutSecs) => onUpdate({ ...step, timeoutSecs })}
+              placeholder="5m"
+              value={step.timeoutSecs ?? ""}
+            />
+          </div>
+        </StepSettingAccordion>
+
+        <StepSettingAccordion
+          disabled={disabled}
+          expanded={expandedSetting === "details"}
+          label="Step details"
+          onToggle={() => toggleSetting("details")}
+          summary={step.name?.trim() || step.id}
+        >
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor={`${prefix}-name`}>
+                Name (optional)
+              </FieldLabel>
+              <Input
+                autoCapitalize="off"
+                disabled={disabled}
+                id={`${prefix}-name`}
+                onChange={(event) =>
+                  onUpdate({ ...step, name: event.target.value })
+                }
+                placeholder="e.g. Notify deployment channel"
+                value={step.name ?? ""}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor={`${prefix}-id`}>Step ID</FieldLabel>
+              <Input
+                autoCapitalize="off"
+                disabled={disabled}
+                id={`${prefix}-id`}
+                onChange={(event) =>
+                  onUpdate({ ...step, id: event.target.value })
+                }
+                placeholder="unique_step_id"
+                value={step.id}
+              />
+              <p className="text-xs text-muted-foreground">
+                Used in configuration and run history.
+              </p>
+            </div>
+          </div>
+        </StepSettingAccordion>
+      </section>
     </div>
   );
 }

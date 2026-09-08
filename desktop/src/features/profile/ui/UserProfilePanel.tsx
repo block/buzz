@@ -38,7 +38,7 @@ import {
 } from "@/features/agents/ui/personaDialogState";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIdentityArchive } from "@/features/identity-archive/hooks";
-import { usePresenceQuery } from "@/features/presence/hooks";
+import { useAgentAvailabilityLookup } from "@/features/agents/lib/useAgentAvailability";
 import {
   useContactListQuery,
   useFollowMutation,
@@ -187,18 +187,16 @@ export function UserProfilePanel({
       requestedInstancePubkey &&
       normalizePubkey(pubkey) === normalizePubkey(requestedInstancePubkey),
   );
-
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
-  const { linkedPersonaId, managedAgent, personaInstances } =
+  const { instanceBuckets, linkedPersonaId, managedAgent } =
     useCanonicalManagedAgentProfile({
-      currentPubkey,
       managedAgents: managedAgentsQuery.data,
       personaId: persona?.id,
-      preserveRequestedInstance,
       pubkey,
     });
   const resolvedPersonaFromSource = React.useMemo(() => {
+    if (pubkey && !managedAgent) return undefined;
     const personaId = linkedPersonaId ?? managedAgent?.personaId;
     if (personaId) {
       const refreshedPersona = personasQuery.data?.find(
@@ -208,7 +206,7 @@ export function UserProfilePanel({
         return refreshedPersona;
       }
     }
-    if (persona) {
+    if (!pubkey && persona) {
       return persona;
     }
     if (!managedAgent?.personaId) {
@@ -217,14 +215,15 @@ export function UserProfilePanel({
     return personasQuery.data?.find(
       (candidate) => candidate.id === managedAgent.personaId,
     );
-  }, [linkedPersonaId, managedAgent?.personaId, persona, personasQuery.data]);
+  }, [linkedPersonaId, managedAgent, persona, personasQuery.data, pubkey]);
   const profileIdentityKey =
-    managedAgent?.pubkey ?? pubkey ?? `persona:${persona?.id ?? "unknown"}`;
-  const resolvedPersona = useRetainedPersona(
+    pubkey ?? managedAgent?.pubkey ?? `persona:${persona?.id ?? "unknown"}`;
+  const retainedPersona = useRetainedPersona(
     resolvedPersonaFromSource,
     profileIdentityKey,
   );
-  const effectivePubkey = managedAgent?.pubkey ?? pubkey ?? null;
+  const resolvedPersona = pubkey && !managedAgent ? undefined : retainedPersona;
+  const effectivePubkey = pubkey ?? managedAgent?.pubkey ?? null;
   const pubkeyLower = effectivePubkey?.toLowerCase() ?? "";
 
   const profileQuery = useUserProfileQuery(effectivePubkey ?? undefined);
@@ -252,9 +251,10 @@ export function UserProfilePanel({
     effectivePubkey ? [effectivePubkey] : [],
   );
   const channelsQuery = useChannelsQuery();
-  const presenceQuery = usePresenceQuery(
+  const { query: presenceQuery, getAvailability } = useAgentAvailabilityLookup(
     effectivePubkey ? [effectivePubkey] : [],
   );
+  const presenceStatus = getAvailability(effectivePubkey);
   const userStatusQuery = useUserStatusQuery(
     effectivePubkey ? [effectivePubkey] : [],
   );
@@ -270,9 +270,6 @@ export function UserProfilePanel({
   });
   const ownerPubkey = profile?.ownerPubkey ?? null;
   const ownerProfileQuery = useUserProfileQuery(ownerPubkey ?? undefined);
-  const presenceStatus = pubkeyLower
-    ? presenceQuery.data?.[pubkeyLower]
-    : undefined;
   const userStatus = pubkeyLower
     ? userStatusQuery.data?.[pubkeyLower]
     : undefined;
@@ -331,6 +328,7 @@ export function UserProfilePanel({
   const canOpenAgentLogs =
     isOwner === true && managedAgent?.backend.type === "local";
   const canInstantiateAgent =
+    !pubkey &&
     isOwner === true &&
     resolvedPersona !== undefined &&
     managedAgent === undefined;
@@ -398,22 +396,24 @@ export function UserProfilePanel({
     onClose,
     viewerIsOwner,
   });
-
+  const openResolvedPersonaEditor = React.useCallback(() => {
+    if (!resolvedPersona) return false;
+    setPersonaDialogState(
+      editPersonaDialogState(resolvedPersona, managedAgent),
+    );
+    return true;
+  }, [managedAgent, resolvedPersona]);
   const handleEditAgent = React.useCallback(() => {
-    if (resolvedPersona) {
-      setPersonaDialogState(editPersonaDialogState(resolvedPersona));
-      return;
-    }
+    if (openResolvedPersonaEditor()) return;
     setEditAgentOpen(true);
-  }, [resolvedPersona, setEditAgentOpen]);
-
+  }, [openResolvedPersonaEditor, setEditAgentOpen]);
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({
       channels: channelsQuery.data,
       deleteManagedAgent: deleteAgentMutation.mutateAsync,
       managedAgent,
       managedAgents: managedAgentsQuery.data,
-      presenceLookup: presenceQuery.data,
+      getAvailability,
       relayAgents: relayAgentsQuery.data,
     });
 
@@ -451,6 +451,7 @@ export function UserProfilePanel({
 
   const { handleAgentPrimaryAction, handleAgentRestart } =
     useAgentLifecycleActions({
+      availability: presenceStatus,
       channels: channelsQuery.data,
       managedAgent,
       relayAgents: relayAgentsQuery.data,
@@ -545,10 +546,7 @@ export function UserProfilePanel({
     ],
   );
 
-  const handleEditPersona = React.useCallback(() => {
-    if (!resolvedPersona) return;
-    setPersonaDialogState(editPersonaDialogState(resolvedPersona));
-  }, [resolvedPersona]);
+  const handleEditPersona = openResolvedPersonaEditor;
 
   const handleDuplicatePersona = React.useCallback(() => {
     if (!resolvedPersona) return;
@@ -761,6 +759,7 @@ export function UserProfilePanel({
     {
       agentSettingsMenu,
       effectivePubkey,
+      ownerPubkey: profile?.ownerPubkey,
       logCopyValue: isDiagnosticsLikeView ? managedAgentLogContent : null,
       logSubtitle: logHeaderSubtitle,
       onBack: () => setView("summary"),
@@ -813,7 +812,7 @@ export function UserProfilePanel({
           isFollowing={isFollowing}
           isOwner={viewerIsOwner}
           isSelf={isSelf}
-          instances={personaInstances}
+          instanceBuckets={instanceBuckets}
           activityAgent={activityAgent}
           managedAgent={managedAgent}
           agentInfoFields={agentInfoFields}
@@ -913,7 +912,7 @@ export function UserProfilePanel({
           ? () => {
               setEditAgentOpen(false);
               setEditAgentFocus(undefined);
-              setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+              openResolvedPersonaEditor();
             }
           : undefined
       }

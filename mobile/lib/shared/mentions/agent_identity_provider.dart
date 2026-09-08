@@ -161,10 +161,24 @@ Map<String, String> mentionNamesWithDirectoryLabels({
 String _agentFallbackLabel(String pubkey) =>
     pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey;
 
+/// Readiness and refresh state for a channel's live membership subscription.
+class ChannelMembershipUpdateState {
+  final int version;
+  final bool isReady;
+  final Object? error;
+
+  const ChannelMembershipUpdateState({
+    this.version = 0,
+    this.isReady = false,
+    this.error,
+  });
+}
+
 /// Keeps the role feed alive for consumers that render mentions outside the
 /// channel timeline, such as search results. A membership change refreshes the
 /// shared bot-role lookup below, regardless of which surface owns the channel.
-class _ChannelBotRoleSubscription extends Notifier<int> {
+class _ChannelBotRoleSubscription
+    extends Notifier<ChannelMembershipUpdateState> {
   final String channelId;
   void Function()? _unsubscribe;
   int _subscriptionVersion = 0;
@@ -172,7 +186,7 @@ class _ChannelBotRoleSubscription extends Notifier<int> {
   _ChannelBotRoleSubscription(this.channelId);
 
   @override
-  int build() {
+  ChannelMembershipUpdateState build() {
     final sessionState = ref.watch(relaySessionProvider);
     final subscriptionVersion = ++_subscriptionVersion;
     _clearSubscription();
@@ -181,25 +195,47 @@ class _ChannelBotRoleSubscription extends Notifier<int> {
       _clearSubscription();
     });
 
-    if (sessionState.status != SessionStatus.connected) return 0;
+    if (sessionState.status != SessionStatus.connected) {
+      return const ChannelMembershipUpdateState();
+    }
     Future.microtask(() => _subscribe(channelId, subscriptionVersion));
-    return 0;
+    return const ChannelMembershipUpdateState();
   }
 
   Future<void> _subscribe(String channelId, int subscriptionVersion) async {
     final session = ref.read(relaySessionProvider.notifier);
+    var subscriptionStatus = RelaySubscriptionStatus.retrying;
     try {
-      final unsubscribe = await session.subscribe(
+      final unsubscribe = await session.subscribeWithStatus(
         NostrFilter(
           kinds: const [39002],
           tags: {
-            '#h': [channelId],
+            '#d': [channelId],
           },
         ).copyWithSince(DateTime.now().millisecondsSinceEpoch ~/ 1000),
         (_) {
           if (_isCurrent(subscriptionVersion)) {
-            state++;
+            state = ChannelMembershipUpdateState(
+              version: state.version + 1,
+              isReady: state.isReady,
+            );
           }
+        },
+        onClosed: (message) {
+          if (_isCurrent(subscriptionVersion)) {
+            state = ChannelMembershipUpdateState(
+              version: state.version,
+              error: Exception(message),
+            );
+          }
+        },
+        onStatusChanged: (status) {
+          subscriptionStatus = status;
+          if (!_isCurrent(subscriptionVersion)) return;
+          state = ChannelMembershipUpdateState(
+            version: state.version,
+            isReady: status == RelaySubscriptionStatus.ready,
+          );
         },
       );
       if (!_isCurrent(subscriptionVersion)) {
@@ -207,8 +243,16 @@ class _ChannelBotRoleSubscription extends Notifier<int> {
         return;
       }
       _unsubscribe = unsubscribe;
+      state = ChannelMembershipUpdateState(
+        version: state.version,
+        isReady: subscriptionStatus == RelaySubscriptionStatus.ready,
+      );
     } catch (error) {
       if (_isCurrent(subscriptionVersion)) {
+        state = ChannelMembershipUpdateState(
+          version: state.version,
+          error: error,
+        );
         debugPrint(
           '[ChannelBotRoleSubscription] failed for $channelId: $error',
         );
@@ -229,14 +273,18 @@ class _ChannelBotRoleSubscription extends Notifier<int> {
 /// changes. Channel-member and agent-role views share this source so remote
 /// membership updates refresh both snapshots together.
 final channelMembershipUpdateProvider = NotifierProvider.autoDispose
-    .family<_ChannelBotRoleSubscription, int, String>(
+    .family<_ChannelBotRoleSubscription, ChannelMembershipUpdateState, String>(
       _ChannelBotRoleSubscription.new,
     );
 
 /// Bot pubkeys currently assigned a channel bot role.
 final channelBotPubkeysProvider = FutureProvider.autoDispose
     .family<Set<String>, String>((ref, channelId) async {
-      ref.watch(channelMembershipUpdateProvider(channelId));
+      ref.watch(
+        channelMembershipUpdateProvider(
+          channelId,
+        ).select((update) => update.version),
+      );
       final sessionState = ref.watch(relaySessionProvider);
       if (sessionState.status != SessionStatus.connected) return const {};
       final session = ref.read(relaySessionProvider.notifier);

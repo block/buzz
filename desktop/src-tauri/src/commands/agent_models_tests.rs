@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
+    use crate::managed_agents::RespondTo;
+
+    let allowlist_a = vec!["a".repeat(64)];
+    let allowlist_b = vec!["b".repeat(64)];
+
+    assert!(managed_agent_access_policy_changed(
+        RespondTo::Anyone,
+        &[],
+        RespondTo::OwnerOnly,
+        &[],
+        false,
+    ));
+    assert!(managed_agent_access_policy_changed(
+        RespondTo::Allowlist,
+        &allowlist_a,
+        RespondTo::Allowlist,
+        &allowlist_b,
+        false,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::OwnerOnly,
+        &allowlist_a,
+        RespondTo::OwnerOnly,
+        &allowlist_b,
+        false,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::Anyone,
+        &[],
+        RespondTo::OwnerOnly,
+        &[],
+        true,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::Allowlist,
+        &allowlist_a,
+        RespondTo::Allowlist,
+        &allowlist_b,
+        true,
+    ));
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {
@@ -262,11 +306,15 @@ fn effective_discovery_provider_recovers_baked_provider_when_record_has_none() {
     }
 }
 
+/// A provider env-var name no environment sets, so this test does not depend on
+/// what the developer happens to have exported (e.g. `BUZZ_AGENT_PROVIDER`).
+const UNSET_PROVIDER_VAR: &str = "BUZZ_TEST_UNSET_DISCOVERY_PROVIDER";
+
 #[test]
 fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
     let env = BTreeMap::new();
     assert_eq!(
-        effective_discovery_provider(None, Some("BUZZ_AGENT_PROVIDER"), &env).as_deref(),
+        effective_discovery_provider(None, Some(UNSET_PROVIDER_VAR), &env).as_deref(),
         None
     );
     // A runtime that takes no provider env var has nothing to recover from.
@@ -274,10 +322,7 @@ fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
         effective_discovery_provider(
             None,
             None,
-            &BTreeMap::from([(
-                "BUZZ_AGENT_PROVIDER".to_string(),
-                "databricks_v2".to_string()
-            )])
+            &BTreeMap::from([(UNSET_PROVIDER_VAR.to_string(), "databricks_v2".to_string())])
         )
         .as_deref(),
         None
@@ -383,28 +428,20 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
     )
     .expect("sample managed agent record");
 
-    let persona = crate::managed_agents::AgentDefinition {
-        id: "persona-1".to_string(),
-        display_name: "Persona".to_string(),
-        avatar_url: None,
-        system_prompt: "You are a persona.".to_string(),
-        runtime: Some("goose".to_string()),
-        model: Some("persona-model".to_string()),
-        provider: Some("anthropic".to_string()),
-        name_pool: Vec::new(),
-        is_builtin: false,
-        is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        env_vars: BTreeMap::new(),
-        respond_to: None,
-        respond_to_allowlist: Vec::new(),
-        parallelism: None,
-        created_at: "".to_string(),
-        updated_at: "".to_string(),
-    };
+    let persona: crate::managed_agents::AgentDefinition = serde_json::from_str(
+        r#"{
+            "id": "persona-1",
+            "display_name": "Persona",
+            "system_prompt": "You are a persona.",
+            "runtime": "goose",
+            "model": "persona-model",
+            "provider": "anthropic",
+            "is_active": true,
+            "created_at": "",
+            "updated_at": ""
+        }"#,
+    )
+    .expect("sample persona");
 
     // agent_model_discovery_config is the single helper get_agent_models
     // consumes — the stale record bytes must lose to the persona's current
@@ -431,11 +468,46 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
 
 // ---------------------------------------------------------------------------
 // Databricks provider detection
-// ---------------------------------------------------------------------------
-//
+
+#[test]
+fn merged_filter_value_overrides_inherited_process_value_even_when_blank() {
+    let env = BTreeMap::from([("DATABRICKS_MODEL_FILTER".to_string(), "   ".to_string())]);
+    assert_eq!(
+        env_value_or_process_if_absent(&env, "DATABRICKS_MODEL_FILTER"),
+        Some(String::new())
+    );
+}
+
+#[test]
+fn absent_filter_value_uses_process_value_when_available() {
+    const TEST_FILTER_ENV: &str = "BUZZ_TEST_DATABRICKS_MODEL_FILTER";
+    let original = std::env::var(TEST_FILTER_ENV).ok();
+    std::env::set_var(TEST_FILTER_ENV, "process-*");
+    let value = env_value_or_process_if_absent(&BTreeMap::new(), TEST_FILTER_ENV);
+    match original {
+        Some(value) => std::env::set_var(TEST_FILTER_ENV, value),
+        None => std::env::remove_var(TEST_FILTER_ENV),
+    }
+    assert_eq!(value.as_deref(), Some("process-*"));
+}
+
+#[test]
+fn databricks_filtered_empty_response_is_authoritative() {
+    let filter = buzz_agent_pkg::config::DatabricksModelFilter::parse(Some("allowed-*")).unwrap();
+    let response = databricks_models_response(
+        "databricks_v2",
+        Vec::new(),
+        Some("configured".into()),
+        filter.as_ref(),
+    )
+    .expect("active filter permits an empty authoritative catalog");
+    assert!(response.models.is_empty());
+    assert!(!response.supports_switching);
+    assert_eq!(response.selected_model.as_deref(), Some("configured"));
+}
+
 // Parse/filter/pagination tests live in crates/buzz-agent/src/catalog.rs
 // (they moved there with the Option C refactor).
-
 // ---------------------------------------------------------------------------
 // Dead-knob guards: mcp_command and turn_timeout_seconds
 // ---------------------------------------------------------------------------

@@ -1,5 +1,8 @@
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import {
+  isChannelReferenceOpenable,
+  useChannelReference,
+} from "@/features/channels/openChannelDirectory";
 
 export function ProjectOriginReference({
   agentName,
@@ -9,21 +12,19 @@ export function ProjectOriginReference({
   channelId?: string | null;
 }) {
   const { goChannel } = useAppNavigation();
-  const channelsQuery = useChannelsQuery({ enabled: Boolean(channelId) });
-  const channel = channelsQuery.data?.find(
-    (candidate) => candidate.id === channelId,
-  );
+  const channel = useChannelReference(channelId);
 
   if (channelId) {
+    const isOpenable = isChannelReferenceOpenable(channel);
     return (
       <span
         className="inline-flex max-w-full min-w-0 items-center gap-1"
         title={
-          channel
+          isOpenable
             ? "Origin is claimed by the event author and is not relay-verified."
-            : // Open channels always resolve by name (the relay serves their
-              // metadata to every community member), so an unresolved id means
-              // a private, deleted, or otherwise inaccessible channel.
+            : // Resolved via a bounded per-id lookup ({@link useChannelReference}),
+              // so an unresolved id is a private, deleted, or otherwise
+              // inaccessible channel — a non-member open channel still names it.
               `Origin channel ${channelId} is not visible to you. Origin is claimed by the event author and is not relay-verified.`
         }
       >
@@ -33,7 +34,7 @@ export function ProjectOriginReference({
         >
           started from
         </span>
-        {channel ? (
+        {isOpenable ? (
           <button
             aria-label={`Open author-claimed origin channel #${channel.name}`}
             className="min-w-0 truncate font-medium text-foreground underline-offset-2 hover:underline"

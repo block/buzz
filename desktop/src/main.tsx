@@ -3,7 +3,8 @@ import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
 import { RootErrorBoundary } from "@/app/RootErrorBoundary";
 import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDialog";
-import "@fontsource-variable/inter/wght.css";
+import "@fontsource-variable/inter/opsz.css";
+import "@fontsource-variable/inter/opsz-italic.css";
 import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/700.css";
 import "@/shared/styles/globals.css";
@@ -19,6 +20,8 @@ import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
+import { initializeConversationDensityPreference } from "@/shared/lib/conversationDensityPreference";
+import { initializeFontSizePreference } from "@/shared/lib/fontSizePreference";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -86,7 +89,7 @@ function renderApp() {
             enabled={huddleWindowChannelId() === null}
           >
             <ThemeProvider defaultTheme="buzz">
-              <TooltipProvider delayDuration={300}>
+              <TooltipProvider>
                 <EmojiBurstProvider>
                   <PoofBurstProvider>
                     <UpdaterProvider>
@@ -123,6 +126,8 @@ async function bootstrap() {
   resetDevWebviewStateFromUrl();
   configureDevE2eBridgeFromUrl();
   recoverLocalStorageQuotaOnStartup();
+  initializeConversationDensityPreference();
+  initializeFontSizePreference();
   startLocalStorageSweep();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();
