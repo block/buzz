@@ -20,6 +20,7 @@ Use this template:
 ```yaml
 ---
 buzz_schema: channel-backed-task/v1
+experiment: "https://github.com/block/buzz/blob/jtennant/task-channel-experiment/docs/experiments/channel-backed-tasks.md"
 task:
   title: "<task title>"
   description: "<task description>"
