@@ -193,7 +193,7 @@ test("copy expands compact key text but preserves the exact label and identity",
   const flavors = copyRenderedBody(
     `<span data-mention="" data-mention-pubkey="${JOHN_SMITH_PUBKEY}" ` +
       `data-mention-label="${label}" class="mention-chip">` +
-      '<span class="inline-chip-leading-fragment">Scout</span> (7c7c7c7c…7c7c) 2</span>',
+      '<span class="inline-chip-leading-fragment">Scout</span> (npub1037…08vj) 2</span>',
   );
   assert.ok(flavors);
   assert.ok(flavors.html.includes(`@${label}`));
@@ -201,4 +201,20 @@ test("copy expands compact key text but preserves the exact label and identity",
     flavors.html.includes(`data-mention-pubkey="${JOHN_SMITH_PUBKEY}"`),
   );
   assert.ok(!flavors.html.includes("…"));
+});
+
+test("copy expands a legacy hex-compact chip to its exact identity", () => {
+  // A chip rendered before keys displayed as npub carries the hex compact in
+  // its text; copying it whole must still expand to the declared identity.
+  const label = `Scout (${JOHN_SMITH_PUBKEY}) 2`;
+  const flavors = copyRenderedBody(
+    `<span data-mention="" data-mention-pubkey="${JOHN_SMITH_PUBKEY}" ` +
+      `data-mention-label="${label}" class="mention-chip">` +
+      '<span class="inline-chip-leading-fragment">Scout</span> (7c7c7c7c…7c7c) 2</span>',
+  );
+  assert.ok(flavors);
+  assert.ok(flavors.html.includes(`@${label}`));
+  assert.ok(
+    flavors.html.includes(`data-mention-pubkey="${JOHN_SMITH_PUBKEY}"`),
+  );
 });

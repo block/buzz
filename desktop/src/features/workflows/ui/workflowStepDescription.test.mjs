@@ -93,6 +93,67 @@ test("falls back to the action label until a step is configured", () => {
   );
 });
 
+test("key destinations render as the compact npub; roles and templates stay plain", () => {
+  const hexKey = "deadbeef".repeat(8);
+  // npubEncode(hexKey), pinned so a formatter regression cannot pass by
+  // re-deriving the expectation from the code under test.
+  const npubKey =
+    "npub1m6kmam774klwlh4dhmhaatd7al02m0h0m6kmam774klwlh4dhmhslezuz0";
+  const brokenNpub =
+    "npub1m6kmam774klwlh4dhmhaatd7al02m0h0m6kmam774klwlh4dhmhslezuzy";
+
+  assert.equal(
+    workflowStepDescription({
+      id: "dm",
+      action: "send_dm",
+      text: "Build finished",
+      to: hexKey,
+    }),
+    "“Build finished” to npub1m6k…zuz0",
+  );
+  // npub-typed form values (normalized on load) compact identically.
+  assert.equal(
+    workflowStepDescription({
+      id: "dm",
+      action: "send_dm",
+      text: "Build finished",
+      to: npubKey,
+    }),
+    "“Build finished” to npub1m6k…zuz0",
+  );
+  // Hex casing is not identity: uppercase still renders the same key.
+  assert.equal(
+    workflowStepDescription({
+      id: "approval",
+      action: "request_approval",
+      message: "Ship the release?",
+      from: hexKey.toUpperCase(),
+    }),
+    "“Ship the release?” from npub1m6k…zuz0",
+  );
+  // Freeform roles and templates stay ordinary compacted text.
+  assert.equal(
+    workflowStepDescription({
+      id: "dm",
+      action: "send_dm",
+      text: "Build finished",
+      to: "team-on-call",
+    }),
+    "“Build finished” to team-on-call",
+  );
+  // An npub-shaped string with a broken checksum renders the neutral label,
+  // never the raw text as if it were a role.
+  assert.equal(
+    workflowStepDescription({
+      id: "dm",
+      action: "send_dm",
+      text: "Build finished",
+      to: brokenNpub,
+    }),
+    "“Build finished” to Unavailable",
+  );
+});
+
 test("can omit a custom step name when composing an index label", () => {
   assert.equal(
     workflowStepDescription(

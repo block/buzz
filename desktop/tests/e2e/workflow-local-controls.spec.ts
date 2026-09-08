@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
+import { truncateNpub } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
@@ -640,11 +641,11 @@ test("round-trips manual author and reaction message IDs through save and reopen
   });
   await authorSearch.fill(author);
   await expect(
-    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+    dialog.getByRole("option", { name: truncateNpub(author) }),
   ).toBeVisible();
   await authorSearch.press("Enter");
   await expect(
-    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+    dialog.getByRole("option", { name: truncateNpub(author) }),
   ).toHaveAttribute("aria-selected", "true");
   await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
   await dialog.getByRole("tab", { name: "YAML" }).click();
@@ -663,7 +664,7 @@ test("round-trips manual author and reaction message IDs through save and reopen
   });
   await correctedAuthorSearch.fill(author);
   await expect(
-    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+    dialog.getByRole("option", { name: truncateNpub(author) }),
   ).toBeVisible();
   await correctedAuthorSearch.press("Enter");
   await dialog
@@ -697,7 +698,7 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await openTriggerInspector(reopened);
   await reopened.getByText("Author", { exact: true }).locator("..").click();
   await expect(
-    reopened.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+    reopened.getByRole("option", { name: truncateNpub(author) }),
   ).toHaveAttribute("aria-selected", "true");
   await reopened.getByText("Message", { exact: true }).locator("..").click();
   await expect(
@@ -738,7 +739,7 @@ test("toggles selected author and message filters while preserving sibling condi
     .locator("..");
   await authorField.getByText("Author", { exact: true }).locator("..").click();
   const authorOption = dialog.getByRole("option", {
-    name: new RegExp(author.slice(0, 8)),
+    name: truncateNpub(author),
   });
   await expect(authorOption).toHaveAttribute("aria-selected", "true");
   await expect(
@@ -751,7 +752,7 @@ test("toggles selected author and message filters while preserving sibling condi
   });
   await authorSearch.fill(replacementAuthor);
   const replacementAuthorOption = dialog.getByRole("option", {
-    name: new RegExp(replacementAuthor.slice(0, 8)),
+    name: truncateNpub(replacementAuthor),
   });
   await expect(replacementAuthorOption).toBeVisible();
   await authorSearch.press("Enter");

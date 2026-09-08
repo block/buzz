@@ -1,5 +1,5 @@
 import type { ChannelMember } from "@/shared/api/types";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 export const roleOrder: Record<ChannelMember["role"], number> = {
   owner: 0,
@@ -17,7 +17,7 @@ export function formatMemberName(
     return "You";
   }
 
-  return member.displayName ?? truncatePubkey(member.pubkey);
+  return member.displayName ?? truncateNpub(member.pubkey);
 }
 
 export function compareMembersByRole(

@@ -13,7 +13,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { useNow } from "@/shared/lib/useNow";
 import { Markdown } from "@/shared/ui/markdown";
 import {
@@ -215,7 +215,7 @@ function WorkingAgentRows({
     const name =
       profile?.displayName?.trim() ||
       alignedAgentNames?.[index] ||
-      `Agent ${truncatePubkey(pubkey)}`;
+      `Agent ${truncateNpub(pubkey)}`;
     return (
       <WorkingAgentRow
         avatarUrl={profile?.avatarUrl ?? null}

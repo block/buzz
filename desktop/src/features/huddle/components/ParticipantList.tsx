@@ -11,7 +11,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { VoiceRegistryEntry } from "@/features/settings/ui/voiceSettingsLogic";
 import { invokeTauri } from "@/shared/api/tauri";
 import { cn } from "@/shared/lib/cn";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -113,7 +113,7 @@ function buildParticipantIdentities({
     const displayName =
       profile?.displayName?.trim() ||
       agent?.name?.trim() ||
-      `${isAgent ? "Agent" : "Participant"} ${truncatePubkey(pubkey)}`;
+      `${isAgent ? "Agent" : "Participant"} ${truncateNpub(pubkey)}`;
     const speakerLevel =
       normalizedSpeakerLevels.get(normalizedPubkey) ??
       (activeSpeakerSet.has(normalizedPubkey) ? 0.55 : 0);

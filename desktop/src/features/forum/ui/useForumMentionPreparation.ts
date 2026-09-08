@@ -4,7 +4,7 @@ import { PRIVATE_CHANNEL_ADD_DENIED_MESSAGE } from "@/features/channels/lib/chan
 import { useCanAddChannelMembers } from "@/features/channels/useCanAddChannelMembers";
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type { ChannelType } from "@/shared/api/types";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 type PendingInvite = {
   channelId: string;
@@ -176,7 +176,7 @@ export function useForumMentionPreparation(
       isInvitePending: isInviting,
       names: (pending?.nonMemberPubkeys ?? []).map(
         (pubkey) =>
-          mentions.getMentionDisplayName(pubkey) ?? truncatePubkey(pubkey),
+          mentions.getMentionDisplayName(pubkey) ?? truncateNpub(pubkey),
       ),
       onDismiss: dismiss,
       onInvite: () => void invite(),

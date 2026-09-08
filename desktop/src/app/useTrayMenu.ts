@@ -10,7 +10,7 @@ import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { useNow } from "@/shared/lib/useNow";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import type { Channel } from "@/shared/api/types";
@@ -72,7 +72,7 @@ export function useTrayMenu({
           activityId: `${channelTurn.channelId}:${normalizePubkey(pubkey)}`,
           agentName:
             agentNames.get(normalizePubkey(pubkey)) ??
-            `Agent ${truncatePubkey(pubkey)}`,
+            `Agent ${truncateNpub(pubkey)}`,
           channelId: channelTurn.channelId,
           channelName:
             channelNames.get(channelTurn.channelId) ?? "Unknown channel",
