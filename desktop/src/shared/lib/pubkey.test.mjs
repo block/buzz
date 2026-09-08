@@ -78,6 +78,10 @@ test("canonicalNpub returns the full npub for valid identities only", () => {
   assert.equal(canonicalNpub(""), null);
   assert.equal(canonicalNpub("deadbeef"), null);
   assert.equal(canonicalNpub(`${HEX.slice(0, 63)}`), null);
+  // Checksum-valid short npubs are degenerate payloads too (8-char and
+  // empty) — `npubEncode` would happily re-encode them, so never bind them.
+  assert.equal(canonicalNpub("npub1m6kmamcvty5gd"), null);
+  assert.equal(canonicalNpub("npub106246s"), null);
   // Corrupted checksum never binds as the identity it resembles.
   assert.equal(canonicalNpub(`${HEX_NPUB.slice(0, -2)}qq`), null);
 });

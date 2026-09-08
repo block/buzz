@@ -2,13 +2,13 @@
  * Widget-boundary coverage for the shared <PubKey> identity gate.
  *
  * Codec vectors and the exact compact/neutral strings live in
- * ../lib/pubkey.test.mjs; real clipboard contents and the npub-only verify
- * popover are exercised end-to-end (tests/e2e/profile.spec.ts copies the
- * canonical npub; pubkey-display-screenshots.spec.ts mounts this widget).
- * This slim local suite pins only the widget wiring those harnesses cannot:
- * the rendered text per variant, and that an unencodable identity — including
- * a degenerate-length hex whose npubEncode output carries a valid checksum —
- * renders the neutral label with no copy affordance, never a fake npub.
+ * ../lib/pubkey.test.mjs. This suite pins what static rendering shows: the
+ * rendered text per variant, and that an unencodable identity — including
+ * degenerate-length hex and short-payload npubs whose npubEncode outputs
+ * carry valid checksums — renders the neutral label with no copy affordance,
+ * never a fake npub. Static rendering does not exercise the clipboard
+ * write behind the copy affordance or the popover the widget can open;
+ * those interactions are outside this suite's scope.
  */
 import assert from "node:assert/strict";
 import { after, afterEach, before, test } from "node:test";
@@ -93,8 +93,16 @@ test("full PubKey renders the complete npub with a copy affordance", async () =>
 
 test("unencodable keys render Unavailable with no copy affordance", async () => {
   // "zz" cannot decode; "deadbeef" is a degenerate-length hex that npubEncode
-  // would happily turn into a checksum-valid fake npub — refuse both.
-  for (const pubkey of ["zz", "deadbeef"]) {
+  // would happily turn into a checksum-valid fake npub; npub1m6kmamcvty5gd
+  // and npub106246s decode fine but are checksum-valid short-payload npubs
+  // (8-char and empty identity payloads). All four would masquerade as
+  // displayable identities — the gate refuses every one.
+  for (const pubkey of [
+    "zz",
+    "deadbeef",
+    "npub1m6kmamcvty5gd",
+    "npub106246s",
+  ]) {
     for (const variant of [undefined, "full"]) {
       const view = await renderPubKey({ pubkey, variant });
       const label = `${pubkey} ${variant ?? "compact"}`;

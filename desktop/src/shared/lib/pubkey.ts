@@ -43,11 +43,14 @@ export function truncatePubkey(pubkey: string): string {
  * only — `npubEncode` happily encodes short/degenerate payloads (even `""`),
  * which are not displayable identities.
  *
- * Bech32 casings mirror the parser (`parsePubkeyInput`): an all-uppercase
- * `NPUB1…` is valid and returns the canonical lowercase npub, while a
- * mixed-case npub is invalid Bech32 and returns null — `decode` enforces
- * the all-lower/all-upper rule, and the prefix gate below accepts both
- * valid casings in agreement with the parser.
+ * Bech32 casing is strict on the input as written: a lowercase `npub1…`
+ * or an all-uppercase `NPUB1…` (both valid Bech32) returns the canonical
+ * lowercase npub, while a mixed-case npub is invalid Bech32 and returns
+ * null — `decode` enforces the all-lower/all-upper rule. This is
+ * intentionally stricter than the parser (`parsePubkeyInput`), which
+ * normalizes user input before decoding and so also accepts mixed-case
+ * npubs; the two agree that the payload must be a 64-hex identity key and
+ * that both valid casings above are acceptable input.
  */
 export function canonicalNpub(pubkey: string): string | null {
   const trimmed = pubkey.trim();

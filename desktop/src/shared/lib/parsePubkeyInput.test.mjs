@@ -19,6 +19,16 @@ describe("parsePubkeyInput", () => {
     assert.equal(parsePubkeyInput(NPUB), HEX);
   });
 
+  it("normalizes a mixed-case npub to its canonical hex", () => {
+    // Preexisting behavior: user input is lowercased before decoding, so a
+    // mixed-case npub — invalid Bech32 as written — still resolves to the
+    // identity. canonicalNpub is the strict counterpart (see ../lib/pubkey.ts).
+    assert.equal(
+      parsePubkeyInput(`${NPUB.slice(0, 10)}${NPUB.slice(10).toUpperCase()}`),
+      HEX,
+    );
+  });
+
   it("tolerates surrounding whitespace from copy-paste", () => {
     assert.equal(parsePubkeyInput(`  ${NPUB}\n`), HEX);
     assert.equal(parsePubkeyInput(` ${HEX} `), HEX);
